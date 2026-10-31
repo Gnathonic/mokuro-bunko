@@ -23,18 +23,6 @@ const PASSWORD = 'rig-owner-3';
 
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
 
-/**
- * PENDING a reader fix, OneDrive only: the direct reader's positions push goes out
- * before it reads the cloud's copy (its OneDrive cache, rebuilt whole by a listing begun
- * before the push, has no `positions.json`: onedrive-cache.ts `fetch`, read by
- * positions-sync.ts `runSync`), so the owner's entry is lost. On that one outcome the
- * spec still runs every other check and then reports itself skipped with this; any other
- * outcome fails as before. Drop this when the reader's fix is in interop/reader.ref.
- */
-const LOST_POSITIONS_PENDING = {
-    microsoft: "the reader's OneDrive positions push overwrites the cloud's copy unread (owner's entry lost)",
-};
-
 /** The reader-root files that are an account's own (bunko-core reader_tree.rs). */
 const PER_USER_FILES = ['volume-data.json', 'profiles.json', 'goals.json', 'positions.json'];
 const ownTree = (rel) => PER_USER_FILES.includes(rel) || rel.startsWith('history/');
@@ -181,8 +169,6 @@ test("the cloud-root owner's history, positions and correction are the cloud's",
     // Read per request: the next one is the owner's.
     await server.setReaders(before.serve_readers, owner.username);
     let owned = null;
-    // The direct reader's merge as seen, when it lost the owner's entry where that is pending.
-    let lostPositions = null;
     try {
         const seeded = await seedSentinel(rig, expect, tag, own);
         await connect(reader, rig);
@@ -301,36 +287,25 @@ test("the cloud-root owner's history, positions and correction are the cloud's",
         await pageShown(reader);
         expect(await reader.setPage(id, 4)).toMatchObject({ page: 4 });
         await reader.showSeries(series);
-        const merge = async () => {
-            const positions = (await cloudJson(rig, 'positions.json'))?.positions;
-            return {
-                direct: positions?.[id]?.[1] ?? null,
-                owner: positions?.[ownId]?.[1] ?? null,
-                ownerDevice: (await reader.historyStatus()).devices.includes(ownerDevice),
-            };
-        };
-        try {
-            await expect
-                .poll(
-                    async () => {
-                        expect(await reader.sync()).toEqual(OK);
-                        await reader.idle();
-                        return merge();
-                    },
-                    { message: "the direct reader's merge of the owner's files", timeout: 120_000, intervals: [1000, 2000, 5000] },
-                )
-                .toEqual({ direct: 4, owner: 3, ownerDevice: true });
-        } catch (e) {
-            // Anything but the pending outcome, a failed read of it included, is the poll's failure.
-            const got = LOST_POSITIONS_PENDING[rig.provider] ? await merge().catch(() => null) : null;
-            if (!(got?.direct === 4 && got.owner === null)) throw e;
-            lostPositions = got;
-        }
+        await expect
+            .poll(
+                async () => {
+                    expect(await reader.sync()).toEqual(OK);
+                    await reader.idle();
+                    const positions = (await cloudJson(rig, 'positions.json'))?.positions;
+                    return {
+                        direct: positions?.[id]?.[1] ?? null,
+                        owner: positions?.[ownId]?.[1] ?? null,
+                        ownerDevice: (await reader.historyStatus()).devices.includes(ownerDevice),
+                    };
+                },
+                { message: "the direct reader's merge of the owner's files", timeout: 120_000, intervals: [1000, 2000, 5000] },
+            )
+            .toEqual({ direct: 4, owner: 3, ownerDevice: true });
         // One more sync, to the end: nothing of the owner's goes on a later one either.
         expect(await reader.sync()).toEqual(OK);
         await reader.idle();
-        if (!lostPositions)
-            expect((await cloudJson(rig, 'positions.json'))?.positions?.[ownId]?.[1], "the owner's position").toBe(3);
+        expect((await cloudJson(rig, 'positions.json'))?.positions?.[ownId]?.[1], "the owner's position").toBe(3);
         expect(sha256(await cloudBytes(rig, ownerMonth.path) ?? Buffer.alloc(0)), `the owner's ${ownerMonth.path}`).toBe(
             sha256(ownerMonthBytes),
         );
@@ -355,9 +330,4 @@ test("the cloud-root owner's history, positions and correction are the cloud's",
             await server.setReaders(before.serve_readers, before.progress_user ?? null);
         }
     }
-    // Every other check ran (and the cloud is back); a soft failure still fails the spec.
-    test.skip(
-        lostPositions !== null && test.info().errors.length === 0,
-        `pending a reader fix on ${rig.provider}: ${LOST_POSITIONS_PENDING[rig.provider]}; got ${JSON.stringify(lostPositions)}`,
-    );
 });

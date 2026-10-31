@@ -722,22 +722,22 @@ out a debounce and decide at its end whether to write.
   direct reader wrote no `Vol 1.edit.mokuro`). The spec has no clobbering step of its
   own: once, by hand, a temporary change that wrote `positions.json` without the
   owner's entry before the direct reader's sync made it fail (`owner: null`), and was
-  reverted. PENDING on OneDrive (`LOST_POSITIONS_PENDING`): the reader there pushes
-  `positions.json` before it reads the cloud's copy (its cache, rebuilt whole by a
-  listing begun before the push, lacks the file), so the owner's entry is lost; on
-  exactly that outcome the spec runs every other check and reports itself skipped,
-  until the reader's fix is in `interop/reader.ref`. The correction goes on a series the
-  spec seeds itself, and whatever happens it leaves the cloud as it found it (the rig
-  runs one spec after another with no reset, and `shared/edits` reads `Rig Series/Vol
-  1.edit.mokuro`): the reader signs out, the admin removes the series and the other
-  account its overlay, the owner writes the four root files and the history back
-  through Bunko as they were (removing what was not there), and the spec fails unless
-  the cloud then holds what it held before. Bunko answers a DELETE from its index, so a
-  404 for a file the cloud still holds (one Bunko has not listed: a write it has yet to
-  list, or a listing gone stale) is asked again, up to 60 s for the whole restore
-  (`cloud-restore.mjs`). One Bunko took 10 s or more to list (no lag, at a 2 s poll), or
-  one that outlasts the wait, is annotated `restore-unseen` (the scenario's `notes` in
-  the results); one that outlasts it is also left to that last check.
+  reverted. On OneDrive it caught a reader race: a listing begun before the reader's
+  `positions.json` push swapped in a cache without the file, so the push went out
+  unread and lost the owner's entry. The reader now replays writes made during a
+  listing onto it, and the spec fails on that outcome like any other. The correction
+  goes on a series the spec seeds itself, and whatever happens it leaves the cloud as
+  it found it (the rig runs one spec after another with no reset, and `shared/edits`
+  reads `Rig Series/Vol 1.edit.mokuro`): the reader signs out, the admin removes the
+  series and the other account its overlay, the owner writes the four root files and
+  the history back through Bunko as they were (removing what was not there), and the
+  spec fails unless the cloud then holds what it held before. Bunko answers a DELETE
+  from its index, so a 404 for a file the cloud still holds (one Bunko has not listed:
+  a write it has yet to list, or a listing gone stale) is asked again, up to 60 s for
+  the whole restore (`cloud-restore.mjs`). One Bunko took 10 s or more to list (no
+  lag, at a 2 s poll), or one that outlasts the wait, is annotated `restore-unseen`
+  (the scenario's `notes` in the results); one that outlasts it is also left to that
+  last check.
 
 **As built (I3, scenarios S4 and S6).**
 - From `rename-ocr.mjs`; each scenario uploads series of its own through the reader
