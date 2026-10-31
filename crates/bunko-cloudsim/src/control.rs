@@ -203,11 +203,13 @@ async fn tree(State(sim): State<SimState>, Query(q): Query<HashMap<String, Strin
         return ctl_err(format!("provider {p:?}: google, microsoft or mega")).into_response();
     };
     let account = q.get("account").map(String::as_str).unwrap_or("default");
-    let trashed = matches!(
-        q.get("include_trashed").map(String::as_str),
-        Some("1" | "true")
-    );
-    Json(sim.tree(p, account, trashed)).into_response()
+    let flag = |k: &str| matches!(q.get(k).map(String::as_str), Some("1" | "true"));
+    let mut rows = sim.tree(p, account, flag("include_trashed"));
+    if flag("include_deleted") {
+        rows.extend(sim.deleted(p, account));
+        rows.sort_by(|a, b| a.id.cmp(&b.id));
+    }
+    Json(rows).into_response()
 }
 
 /// One file's bytes as the provider stores them, by its `/_sim/tree` id: what a test

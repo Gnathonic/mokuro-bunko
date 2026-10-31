@@ -100,6 +100,12 @@ pub struct NodeInfo {
     /// Sent to the trash itself (Drive's `explicitlyTrashed`; MEGA: directly in the
     /// rubbish bin; OneDrive: deleted itself), not only under a trashed folder.
     pub explicitly_trashed: bool,
+    /// Deleted for good (Drive's `files.delete`, MEGA's `d`): gone from the account,
+    /// listed as it last was only with `include_deleted=1`, and `trashed` too, so a
+    /// filter that skips the trash skips it. OneDrive keeps such an item as a deleted
+    /// (trashed) row, never this.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub deleted: bool,
 }
 
 impl NodeInfo {
@@ -341,6 +347,16 @@ impl SimState {
             Provider::Mega => mega::tree(&self.mega(account)),
         };
         NodeInfo::sorted(rows, include_trashed)
+    }
+
+    /// The nodes deleted for good (Drive, MEGA), as they last were, by id.
+    pub fn deleted(&self, p: Provider, account: &str) -> Vec<NodeInfo> {
+        let rows = match p {
+            Provider::Google => self.drive(account).lock().deleted.clone(),
+            Provider::Microsoft => Vec::new(),
+            Provider::Mega => mega::deleted(&self.mega(account)),
+        };
+        NodeInfo::sorted(rows, true)
     }
 
     /// The bytes of the file `id` as the provider stores them (MEGA's decrypted);
@@ -628,6 +644,10 @@ impl CloudSim {
 
     pub fn tree(&self, provider: Provider, account: &str, include_trashed: bool) -> Vec<NodeInfo> {
         self.state.tree(provider, account, include_trashed)
+    }
+
+    pub fn deleted(&self, provider: Provider, account: &str) -> Vec<NodeInfo> {
+        self.state.deleted(provider, account)
     }
 
     pub fn log(&self) -> Vec<LogEntry> {

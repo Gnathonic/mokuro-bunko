@@ -33,6 +33,7 @@ import {
     topFolder,
     topRoots,
     tree,
+    treeEver,
     under,
     volumeData,
     volumeId,
@@ -210,8 +211,9 @@ test('S1: Bunko merges duplicate roots under its lease into the older top-level 
         rows = await tree(rig);
         // After the merge every write (the reader's and Bunko's) went into B, but for
         // what Bunko compiles for the nested root's own series.
-        const inNested = (r) => under(rows, r.id, seed.nested);
-        expect(writesOutside(rows, seed.rootB, mergedAt, inNested)).toEqual([]);
+        const ever = await treeEver(rig);
+        const inNested = (r) => under(ever, r.id, seed.nested);
+        expect(writesOutside(ever, seed.rootB, mergedAt, inNested)).toEqual([]);
         // ...and nothing went back into what the merge trashed.
         expect(mergeProblems(rows, seed.rootB, merged)).toEqual([]);
         expect(nestedChanges(rows, seed, nestedBefore)).toEqual([]);
@@ -261,7 +263,12 @@ test('S1: Bunko merges duplicate roots under its lease into the older top-level 
             merged.push(rootD);
             expect(mergeProblems(rows, seed.rootB, merged)).toEqual([]);
             expect(filesBelow(rows, seed.rootB).get(`${series}/Vol 1.cbz`)?.id).toBe(d.get(`${series}/Vol 1.cbz`));
-            expect(writesOutside(rows, seed.rootB, raceStart, (r) => under(rows, r.id, seed.nested))).toEqual([]);
+            // What D was seeded with is no write: made in raceStart's second, it reads as
+            // one, and the reader deletes its merged-away volume-data.json for good.
+            const ever = await treeEver(rig);
+            const seeded = new Set(d.values());
+            const allowed = (r) => seeded.has(r.id) || under(ever, r.id, seed.nested);
+            expect(writesOutside(ever, seed.rootB, raceStart, allowed)).toEqual([]);
         }
         expect(got503).toEqual([]);
     } finally {
@@ -354,8 +361,9 @@ test('S9 end: the reader merges the roots while Bunko is down; Bunko restarts wi
         expect(mergeProblems(rows, rootC, [rootB])).toEqual([]);
         // The nested root (S1's) gets only what Bunko compiles for its series.
         const nested = rows.filter((r) => r.folder && !r.trashed && r.name === LIBRARY_FOLDER && r.id !== rootC);
-        const inNested = (r) => nested.some((n) => under(rows, r.id, n.id));
-        expect(writesOutside(rows, rootC, startedAt, inNested)).toEqual([]);
+        const ever = await treeEver(rig);
+        const inNested = (r) => nested.some((n) => under(ever, r.id, n.id));
+        expect(writesOutside(ever, rootC, startedAt, inNested)).toEqual([]);
     } finally {
         expectNeverSuspect(await storage.stop());
     }

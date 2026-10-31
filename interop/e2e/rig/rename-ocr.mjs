@@ -101,7 +101,8 @@ export function librarySide(rig, inCloud) {
     const onDisk = !inCloud ? disk : rig.provider === 'rclone' ? rcloneDisk : null;
     // Bunko sweeps a numbered sidecar it can prove is its own off the disk: every name
     // the disk had while the spec ran is watched for, not just read at the end.
-    // cloudsim keeps every node, trashed ones included, so it needs no watch.
+    // cloudsim needs no watch: it lists trashed nodes, and (`include_deleted`) the ones
+    // Drive and MEGA deleted for good, as Bunko deletes its own proven files.
     const seen = new Set();
     let watcher = null;
     return {
@@ -123,14 +124,14 @@ export function librarySide(rig, inCloud) {
         },
         /**
          * The name of every file the library has held: on a disk (Bunko's, rclone's),
-         * what is there now and what it had while watched; in cloudsim, every node it
-         * ever kept, the trashed ones too.
+         * what is there now and what it had while watched; in cloudsim, every node the
+         * account held, the trashed and the deleted ones too.
          */
         async everNames() {
             if (onDisk) return [...new Set([...filesBelow(onDisk).map((r) => r.split('/').pop()), ...seen])];
             const rows = await rig.sim(
                 'GET',
-                `tree?provider=${rig.provider}&account=${encodeURIComponent(rig.simAccount)}&include_trashed=1`,
+                `tree?provider=${rig.provider}&account=${encodeURIComponent(rig.simAccount)}&include_trashed=1&include_deleted=1`,
             );
             return rows.filter((r) => !r.folder).map((r) => r.name);
         },

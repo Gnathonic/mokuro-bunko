@@ -22,6 +22,7 @@ import {
     skipWithoutDuplicates,
     topRoots,
     tree,
+    treeEver,
     volumeData,
     volumeId,
     writesOutside,
@@ -116,7 +117,7 @@ test('S9: the reader alone merges duplicate roots into the older top-level root'
     await reader.idle();
     await reader.settleSeriesWrites();
     rows = await tree(rig);
-    expect(writesOutside(rows, seed.rootB, mergedAt)).toEqual([]);
+    expect(writesOutside(await treeEver(rig), seed.rootB, mergedAt)).toEqual([]);
     expect(mergeProblems(rows, seed.rootB, [rootA, seed.a.get('S1 Dup')])).toEqual([]);
     expect(nestedState(rows, seed)).toEqual(nestedBefore);
 });

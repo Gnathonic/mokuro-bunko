@@ -90,6 +90,8 @@ pub struct DriveState {
     /// `default` account only).
     pub valid_token: String,
     pub faults: Vec<Fault>,
+    /// Files and folders deleted for good (`files.delete`), as they last were.
+    pub deleted: Vec<NodeInfo>,
     pub requests: Vec<Req>,
     /// Fail this (1-based) chunk PUT after taking half its bytes.
     pub interrupt_chunk: Option<usize>,
@@ -144,6 +146,7 @@ impl Default for DriveState {
             sessions: HashMap::new(),
             valid_token: "tok".into(),
             faults: Vec::new(),
+            deleted: Vec::new(),
             requests: Vec::new(),
             interrupt_chunk: None,
             down_after_interrupt: false,
@@ -277,6 +280,14 @@ impl DriveState {
         for k in kids {
             self.delete(&k);
         }
+        if let Some(f) = self.files.get(id) {
+            let gone = NodeInfo {
+                trashed: true,
+                deleted: true,
+                ..self.info(id, f)
+            };
+            self.deleted.push(gone);
+        }
         self.files.remove(id);
         self.log.push(id.to_string());
     }
@@ -394,24 +405,24 @@ impl DriveState {
 
     /// Every file and folder, trashed ones included.
     pub fn tree(&self) -> Vec<NodeInfo> {
-        self.files
-            .iter()
-            .map(|(id, f)| {
-                let folder = f.mime == FOLDER;
-                NodeInfo {
-                    id: id.clone(),
-                    parent_id: f.parents.first().cloned().unwrap_or_default(),
-                    name: f.name.clone(),
-                    folder,
-                    size: if folder { 0 } else { f.data.len() as u64 },
-                    sha256: (!folder).then(|| hex_sha256(&f.data)),
-                    created: rfc3339(f.created),
-                    modified: rfc3339(f.modified),
-                    trashed: self.trashed(id),
-                    explicitly_trashed: f.trashed,
-                }
-            })
-            .collect()
+        self.files.iter().map(|(id, f)| self.info(id, f)).collect()
+    }
+
+    fn info(&self, id: &str, f: &MFile) -> NodeInfo {
+        let folder = f.mime == FOLDER;
+        NodeInfo {
+            id: id.to_string(),
+            parent_id: f.parents.first().cloned().unwrap_or_default(),
+            name: f.name.clone(),
+            folder,
+            size: if folder { 0 } else { f.data.len() as u64 },
+            sha256: (!folder).then(|| hex_sha256(&f.data)),
+            created: rfc3339(f.created),
+            modified: rfc3339(f.modified),
+            trashed: self.trashed(id),
+            explicitly_trashed: f.trashed,
+            deleted: false,
+        }
     }
 
     /// The first fault matching this request, used up by one.

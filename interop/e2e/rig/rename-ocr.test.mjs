@@ -46,3 +46,27 @@ for (const [provider, inCloud, root] of [
         }
     });
 }
+
+for (const provider of ['google', 'mega']) {
+    test(`on ${provider}, a sidecar Bunko wrote and deleted for good is still among the names`, async () => {
+        // Drive and MEGA keep no node Bunko deleted for good (its own proven files):
+        // only cloudsim's `include_deleted` rows still name it.
+        const asked = [];
+        const rows = [
+            { id: 'a', name: 'Vol 2 renamed.mokuro', folder: false, trashed: false },
+            { id: 'b', name: 'Vol 2 renamed_1.mokuro', folder: false, trashed: true, deleted: true },
+        ];
+        const rig = {
+            workdir: tmpdir(),
+            provider,
+            simAccount: 'acct',
+            sim: async (method, query) => {
+                asked.push(`${method} ${query}`);
+                return /[?&]include_deleted=1(&|$)/.test(query) ? rows : rows.filter((r) => !r.deleted);
+            },
+        };
+        const names = await librarySide(rig, true).everNames();
+        assert.deepEqual(names.sort(), ['Vol 2 renamed.mokuro', 'Vol 2 renamed_1.mokuro']);
+        assert.equal(asked.length, 1);
+    });
+}

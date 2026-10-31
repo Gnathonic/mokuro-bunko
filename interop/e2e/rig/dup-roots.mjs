@@ -21,9 +21,20 @@ export function skipWithoutDuplicates(test, rig) {
     test.skip(!['google', 'mega'].includes(rig.provider), `${rig.provider} holds no two folders of one name`);
 }
 
-/** Every node cloudsim has had, trashed ones included. */
+/** Every node cloudsim has, trashed ones included. */
 export const tree = (rig) =>
     rig.sim('GET', `tree?provider=${rig.provider}&account=${encodeURIComponent(rig.simAccount)}&include_trashed=1`);
+
+/**
+ * Every node the account ever held: `tree`, plus what Drive and MEGA deleted for good
+ * (`deleted`, also `trashed`), so a file written and then deleted still counts as a
+ * write (`writesOutside`).
+ */
+export const treeEver = (rig) =>
+    rig.sim(
+        'GET',
+        `tree?provider=${rig.provider}&account=${encodeURIComponent(rig.simAccount)}&include_trashed=1&include_deleted=1`,
+    );
 
 /** `/_sim/node` for the suite's account; answers the new node's id. */
 async function node(rig, body) {
@@ -258,7 +269,8 @@ export function mergeProblems(rows, canonical, folders) {
  * Every file written (or made) at or after `since` (ms) lies below `canonical`, or is
  * one of `allowed(row)`: answers the rows that do not. Trashed files count too: a write
  * into a merged-away root (its pre-merge id kept as a write root) lands in the trash
- * with it, and a merge's trashing moves no write time. `since` is taken to its whole
+ * with it, and a merge's trashing moves no write time. Pass `treeEver` rows, so a file
+ * deleted for good since still counts. `since` is taken to its whole
  * second, as MEGA stamps a node: a write in the same second still reads as after it.
  */
 export function writesOutside(rows, canonical, since, allowed = () => false) {

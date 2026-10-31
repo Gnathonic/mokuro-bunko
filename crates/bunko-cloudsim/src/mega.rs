@@ -132,6 +132,33 @@ pub fn tree(m: &MegaHandle) -> Vec<NodeInfo> {
                 modified: at,
                 trashed: trashed(h),
                 explicitly_trashed: n.parent == RUBBISH,
+                deleted: false,
+            }
+        })
+        .collect()
+}
+
+/// The nodes deleted for good (`d`), as they last were.
+pub fn deleted(m: &MegaHandle) -> Vec<NodeInfo> {
+    m.deleted_nodes()
+        .into_iter()
+        .filter(|(_, _, n)| n.kind <= 1)
+        .map(|(h, name, n)| {
+            let folder = n.kind == 1;
+            let at = rfc3339(n.ts * 1000);
+            NodeInfo {
+                id: h,
+                parent_id: n.parent.clone(),
+                name,
+                folder,
+                size: if folder { 0 } else { n.size },
+                // The plaintext went with the node.
+                sha256: None,
+                created: at.clone(),
+                modified: at,
+                trashed: true,
+                explicitly_trashed: false,
+                deleted: true,
             }
         })
         .collect()

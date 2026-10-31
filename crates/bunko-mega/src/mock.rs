@@ -98,6 +98,9 @@ struct St {
     sessions: HashMap<String, [u8; 16]>,
     account: Option<Account>,
     nodes: BTreeMap<String, MNode>,
+    /// Nodes deleted for good (`d`), as they last were: a test can still tell what
+    /// the account once held.
+    deleted: BTreeMap<String, MNode>,
     /// Data keys of the files this mock created itself (for `content`).
     log: Vec<Value>,
     floor: usize,
@@ -482,7 +485,9 @@ impl St {
             return json!(-9);
         }
         for h in self.subtree(n) {
-            self.nodes.remove(&h);
+            if let Some(gone) = self.nodes.remove(&h) {
+                self.deleted.insert(h, gone);
+            }
         }
         let mut d = json!({"a": "d", "n": n, "ou": USER});
         if let Some(i) = idem {
@@ -935,6 +940,7 @@ impl St {
             sid: b64(&sid),
             account: None,
             nodes,
+            deleted: BTreeMap::new(),
             log: Vec::new(),
             floor: 0,
             next: 0,
@@ -1159,6 +1165,22 @@ impl MockMega {
         st.nodes
             .iter()
             .map(|(h, n)| (h.clone(), n.clone()))
+            .collect()
+    }
+
+    /// Every node deleted for good (not to the rubbish bin), with its decrypted name,
+    /// as it last was.
+    pub fn deleted_nodes(&self) -> Vec<(String, String, MNode)> {
+        let st = self.lock();
+        st.deleted
+            .iter()
+            .map(|(h, n)| {
+                let key = st.unwrap(n);
+                let name = NodeAttributes::decrypt_b64(key.aes(), &n.attr)
+                    .map(|a| a.name)
+                    .unwrap_or_default();
+                (h.clone(), name, n.clone())
+            })
             .collect()
     }
 

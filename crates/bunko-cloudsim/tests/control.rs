@@ -846,6 +846,57 @@ async fn trashed_nodes_show_only_in_the_full_tree() {
     }
 }
 
+/// A node deleted for good (Drive's `files.delete`, MEGA's `d`) leaves the account, but
+/// `include_deleted=1` still lists it as it last was (`deleted`, and `trashed` so a
+/// filter that skips the trash skips it): a test can tell every name the account held,
+/// even one a client wrote and then deleted.
+#[tokio::test]
+async fn nodes_deleted_for_good_show_only_with_include_deleted() {
+    let sim = bunko_cloudsim::start().await;
+    for p in ["google", "mega"] {
+        let series = node_id(
+            &sim.base,
+            json!({"provider": p, "parent_path": "mokuro-reader", "name": "S", "folder": true}),
+        )
+        .await;
+        let vol = node_id(
+            &sim.base,
+            json!({"provider": p, "parent_path": "/mokuro-reader/S/", "name": "v_1.mokuro",
+                   "content_base64": b64(b"v")}),
+        )
+        .await;
+        match p {
+            "google" => {
+                let t = token(&sim.base, p, "default").await;
+                let r = http()
+                    .delete(format!("{}/drive/v3/files/{series}", sim.drive_api_base()))
+                    .bearer_auth(&t)
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(r.status(), 204);
+            }
+            _ => sim.mega("default").delete(&series),
+        }
+        let full = get(&sim.base, &format!("tree?provider={p}&include_trashed=1")).await;
+        assert_eq!(full.as_array().unwrap().len(), 1, "{p}: {full}");
+        assert!(full[0].get("deleted").is_none(), "{p}: {full}");
+        let ever = get(
+            &sim.base,
+            &format!("tree?provider={p}&include_trashed=1&include_deleted=1"),
+        )
+        .await;
+        assert_eq!(ever.as_array().unwrap().len(), 3, "{p}: {ever}");
+        assert_eq!(row(&ever, &vol)["name"], "v_1.mokuro", "{p}");
+        assert_eq!(row(&ever, &vol)["parent_id"], series.as_str(), "{p}");
+        for id in [&series, &vol] {
+            assert_eq!(row(&ever, id)["deleted"], true, "{p}");
+            assert_eq!(row(&ever, id)["trashed"], true, "{p}");
+        }
+        sim.reset();
+    }
+}
+
 /// Graph refuses a second child of the same (case-folded) name, as the real one does.
 #[tokio::test]
 async fn microsoft_refuses_a_duplicate_name() {

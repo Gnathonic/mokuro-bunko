@@ -202,9 +202,11 @@ does.
   times, so a scenario can stage the duplicate folders and old files path seeding
   cannot; OneDrive answers a duplicate name 409 `nameAlreadyExists` as Graph does;
   MEGA's one `ts` takes the modified time) and `GET tree?provider=&account=
-  &include_trashed=1` (`[{id, parent_id, name, folder, size, sha256, created, modified,
-  trashed}]`, trashed meaning in the trash or under a trashed folder, listed only on
-  request), neither in the request log; `POST fault {provider,
+  &include_trashed=1&include_deleted=1` (`[{id, parent_id, name, folder, size, sha256,
+  created, modified, trashed}]`, trashed meaning in the trash or under a trashed folder,
+  listed only on request; `include_deleted` adds what Drive and MEGA deleted for good,
+  as it last was, marked `deleted`, so S6's `everNames` and S1/S9's `writesOutside`
+  still see a file Bunko wrote and then deleted), neither in the request log; `POST fault {provider,
   account, method?, path_has, status, reason, retry_after?, times?}` (Drive and Graph;
   MEGA's error codes are knobs); `POST knobs {provider, account, <knob>: value}`;
   `GET`/`DELETE log` (`[{seq, provider, account, method, path, class, units, bytes_in,

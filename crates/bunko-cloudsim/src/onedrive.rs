@@ -462,6 +462,7 @@ impl OneDriveState {
                 // A folder's delete marks everything under it deleted too.
                 explicitly_trashed: f.deleted
                     && !f.parent.as_deref().is_some_and(|p| self.under_deleted(p)),
+                deleted: false,
             })
             .collect()
     }
