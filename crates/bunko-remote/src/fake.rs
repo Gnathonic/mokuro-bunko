@@ -127,6 +127,7 @@ struct State {
     latency: Duration,
     throttle_until: Option<Instant>,
     reorder: bool,
+    reverse_lists: bool,
     duplicate: bool,
     page_size: usize,
     quota: Option<u64>,
@@ -339,6 +340,11 @@ impl FakeBackend {
     /// Deliver each page's items in reverse order.
     pub fn reorder_changes(&self, on: bool) {
         self.state.lock().reorder = on;
+    }
+
+    /// List every folder's children in reverse order (an unordered `files.list`).
+    pub fn reverse_listings(&self, on: bool) {
+        self.state.lock().reverse_lists = on;
     }
 
     /// Deliver each change item twice.
@@ -1329,10 +1335,15 @@ impl Backend for FakeBackend {
         let nodes: Vec<RNode> = {
             let st = self.state.lock();
             st.live_dir(dir)?;
-            st.live_children(dir)
+            let mut v: Vec<RNode> = st
+                .live_children(dir)
                 .iter()
                 .map(|c| st.rnode(&self.profile, c))
-                .collect()
+                .collect();
+            if st.reverse_lists {
+                v.reverse();
+            }
+            v
         };
         nodes.into_iter().for_each(sink);
         Ok(())

@@ -61,7 +61,8 @@
 //!   and a provider that allows duplicate names. A folder merged
 //!   [`DEDUP_RECREATE_LIMIT`] times in a day is left alone (`dup-recreated`). A group
 //!   that moved and trashed nothing waits for a change in its scope (any origin), and
-//!   a re-plan identical to its plan journals nothing (`Plan::fingerprint`).
+//!   a re-plan identical to its plan, in any listing order, journals nothing
+//!   (`Plan::fingerprint`).
 //! - **Plan:** per other member, fresh listings of it and the canonical one. An item
 //!   with no counterpart moves in; a folder, or a keep-both file
 //!   ([`crate::names::dedup_keeps_both`]), moves in beside its name; of two files the
@@ -623,25 +624,52 @@ impl Plan {
     }
 
     /// What the plan would do, as one string: the same steps on the same versions, and
-    /// the same blocks, give the same fingerprint.
+    /// the same blocks, give the same fingerprint, in whatever order the listings that
+    /// planned them came back (Drive's `files.list` order is unspecified). Each step
+    /// counts with its phase, so a trash before the moves is not one after them.
     fn fingerprint(&self) -> String {
-        let mut h = Sha256::new();
-        for p in self.ordered() {
-            h.update(
+        let phases: [(&str, &[Planned]); 6] = [
+            ("layer", &self.layers),
+            ("pre_trash", &self.pre_trash),
+            ("step", &self.steps),
+            ("submit", &self.submits),
+            ("l_trash", &self.l_trash),
+            ("finish", &self.finishes),
+        ];
+        let mut lines: Vec<String> = phases
+            .iter()
+            .flat_map(|(phase, steps)| {
+                steps.iter().map(move |p| {
+                    format!(
+                        "{phase}\0{:?}\0{}\0{:?}\0{:?}\0{}\0{:?}",
+                        p.kind,
+                        p.pid,
+                        p.cver,
+                        p.src.as_ref().map(ToString::to_string),
+                        p.dest,
+                        p.parent_pid
+                    )
+                })
+            })
+            .chain(self.blocks.iter().map(|b| {
+                let sorted = |v: &[RelPath]| {
+                    let mut v: Vec<String> = v.iter().map(ToString::to_string).collect();
+                    v.sort_unstable();
+                    v
+                };
                 format!(
-                    "{:?}\0{}\0{:?}\0{:?}\0{}\0{:?}\n",
-                    p.kind,
-                    p.pid,
-                    p.cver,
-                    p.src.as_ref().map(ToString::to_string),
-                    p.dest,
-                    p.parent_pid
+                    "block\0{:?}\0{:?}\0{}",
+                    sorted(&b.this),
+                    sorted(&b.that),
+                    b.detail
                 )
-                .as_bytes(),
-            );
-        }
-        for b in &self.blocks {
-            h.update(format!("block\0{:?}\0{:?}\0{}\n", b.this, b.that, b.detail).as_bytes());
+            }))
+            .collect();
+        lines.sort_unstable();
+        let mut h = Sha256::new();
+        for l in &lines {
+            h.update(l.as_bytes());
+            h.update(b"\n");
         }
         h.update([u8::from(self.empty_loser)]);
         hex::encode(h.finalize())
