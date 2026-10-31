@@ -112,15 +112,21 @@ pub(super) async fn create_user(s: &AdminState, req: &ApiRequest) -> Response {
         Ok(r) => r,
         Err(e) => return db_error(e),
     };
-    // A deleted account keeps its name: this page brings it back (Restore on its row).
+    // A deleted account keeps its name, whatever case a new one is typed in (names are
+    // unique ignoring ASCII case): this page brings it back (Restore on its row).
     let db = s.db();
     let u = username.clone();
-    match blocking(move || db.get_user(&u)).await {
+    match blocking(move || db.get_user_ignoring_case(&u)).await {
         Ok(Ok(Some(user))) if user.status == bunko_db::UserStatus::Deleted => {
+            let account = if user.username == username {
+                "a deleted account".to_string()
+            } else {
+                format!("the deleted account '{}'", user.username)
+            };
             return error(
                 409,
                 format!(
-                    "Username '{username}' belongs to a deleted account: bring it back with Restore on its row"
+                    "Username '{username}' belongs to {account}: bring it back with Restore on its row"
                 ),
             );
         }

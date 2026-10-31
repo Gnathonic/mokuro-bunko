@@ -355,6 +355,16 @@ impl Database {
         self.read(|conn| Ok(same_name(conn, username)?.is_some()))
     }
 
+    /// The account holding this name ignoring ASCII case (an exact match first), whatever
+    /// its status: the account that keeps a new account from taking `username`
+    /// ([`insert_user`]). Its `username` is the name as stored.
+    pub fn get_user_ignoring_case(&self, username: &str) -> Result<Option<User>> {
+        match self.read(|conn| same_name(conn, username))? {
+            Some((stored, _)) => self.get_user(&stored),
+            None => Ok(None),
+        }
+    }
+
     /// Any account by name, whatever its status.
     pub fn get_user(&self, username: &str) -> Result<Option<User>> {
         let raw = self.read(|conn| {
@@ -735,6 +745,9 @@ mod tests {
         assert!(matches!(dup, DbError::Conflict(_)));
         assert_eq!(dup.to_string(), "Username 'ALICE' already exists");
         assert!(db.get_user("ALICE").unwrap().is_none());
+        let held = db.get_user_ignoring_case("ALICE").unwrap().unwrap();
+        assert_eq!(held.username, "alice");
+        assert!(db.get_user_ignoring_case("bob").unwrap().is_none());
         db.delete_user("alice").unwrap();
         let gone = mk("alice", "password123").unwrap_err();
         assert!(matches!(gone, DbError::Invalid(_)));
