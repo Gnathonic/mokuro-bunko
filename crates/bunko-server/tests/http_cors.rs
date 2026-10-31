@@ -360,3 +360,67 @@ async fn an_options_request_that_is_not_a_preflight_reaches_webdav() {
         );
     }
 }
+
+/// A 503 tells the reader when to come back (`Retry-After`: the lease fence, a file that
+/// changed behind the index, a throttled store). The reader runs on another origin and
+/// `Retry-After` is not safelisted, so unless it is exposed the reader's page never sees
+/// it and cannot honour it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_503_from_another_origin_exposes_its_retry_after() {
+    use bunko_core::config::LibraryBackend;
+    use bunko_remote::BErr;
+    use bunko_remote::fake::{FakeBackend, FakeOp};
+    use std::time::Duration;
+
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("storage");
+    let fake = std::sync::Arc::new(FakeBackend::drive_like());
+    fake.reader_put("mokuro-reader/Series/Vol.cbz", b"archive bytes");
+    bunko_server::storage::testing::register(&base, fake.clone());
+    let mut config = Config::default();
+    config.storage.base_path = base;
+    config.storage.library.backend = LibraryBackend::GDrive;
+    config.catalog.enabled = true;
+    config.catalog.enrich_community = false;
+    config.cors.enabled = true;
+    let opts = ServeOptions::default();
+    let services = Services::new(config, None, &opts).unwrap();
+    services
+        .db
+        .create_user(
+            "reader",
+            "pass1234",
+            Role::Registered,
+            UserStatus::Active,
+            "",
+        )
+        .unwrap();
+    let storage = services.storage.clone().expect("a cloud library");
+    let steady = tokio::task::spawn_blocking(move || storage.wait_steady(Duration::from_secs(20)))
+        .await
+        .unwrap();
+    assert!(steady, "the first sync finishes");
+    let env = Env {
+        _dir: dir,
+        app: assemble(&services, &opts),
+        _services: services,
+    };
+
+    fake.fail_next(FakeOp::Read, BErr::Throttled(Some(Duration::from_secs(7))));
+    let auth = basic("reader");
+    let (status, h) = env
+        .send(
+            "GET",
+            "/mokuro-reader/Series/Vol.cbz",
+            &[("origin", READER), ("authorization", &auth)],
+        )
+        .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{h:?}");
+    assert_eq!(header(&h, "retry-after"), "7");
+    assert_eq!(header(&h, "access-control-allow-origin"), READER);
+    let exposed = list(&h, "access-control-expose-headers");
+    assert!(
+        exposed.contains(&"retry-after".to_string()),
+        "retry-after not in {exposed:?}"
+    );
+}
