@@ -15,6 +15,8 @@ pub struct DbAuthBackend {
     logins: LoginCache,
     /// Series folder adoption was seen done (it never goes back to pending).
     adopted: std::sync::atomic::AtomicBool,
+    /// Additions are not held for adoption in this process ([`Self::adoption_waiver`]).
+    adoption_waived: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Verified Basic credentials, keyed by a salted SHA-256 of `username \0 password` (the
@@ -58,7 +60,16 @@ impl DbAuthBackend {
             layout,
             logins: LoginCache::new(),
             adopted: std::sync::atomic::AtomicBool::new(false),
+            adoption_waived: Default::default(),
         }
+    }
+
+    /// Set, it stops holding uploaders' additions while series folder adoption is still
+    /// pending, which stays pending: for a cloud library whose store does not run in
+    /// this process (F4), so has no listing to adopt from, and whose folders no
+    /// addition can reach until a later start adopts them.
+    pub fn adoption_waiver(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        self.adoption_waived.clone()
     }
 }
 
@@ -178,8 +189,8 @@ impl AuthBackend for DbAuthBackend {
             .then_some(owner)
     }
 
-    fn governing_archives(&self, virtual_path: &str) -> Vec<String> {
-        governing_archives(&self.layout, virtual_path)
+    fn library_listing(&self, virtual_path: &str) -> Option<Vec<String>> {
+        library_listing(&self.layout, virtual_path)
     }
 
     fn volume_uploader(&self, rel: &str) -> Option<String> {
@@ -196,7 +207,7 @@ impl AuthBackend for DbAuthBackend {
 
     fn ownership_pending(&self) -> bool {
         use std::sync::atomic::Ordering;
-        if self.adopted.load(Ordering::Relaxed) {
+        if self.adopted.load(Ordering::Relaxed) || self.adoption_waived.load(Ordering::Relaxed) {
             return false;
         }
         match self.db.series_folder_adoption_pending() {
@@ -213,27 +224,41 @@ impl AuthBackend for DbAuthBackend {
     }
 }
 
-/// See [`AuthBackend::governing_archives`]: rule v1's listing of the file's library
-/// folder (files only), the archives as library-relative keys.
-fn governing_archives(layout: &StorageLayout, virtual_path: &str) -> Vec<String> {
+/// See [`AuthBackend::library_listing`]: the files of the library folder that holds
+/// the path, as rule v1 lists them (no folders); empty when that folder is not there
+/// (a PUT into it answers 409 later), `None` when it cannot be read.
+fn library_listing(layout: &StorageLayout, virtual_path: &str) -> Option<Vec<String>> {
     let Some(rel) = paths::library_rel(virtual_path) else {
-        return Vec::new();
+        return Some(Vec::new());
     };
-    let (dir, name) = rel.rsplit_once('/').unwrap_or(("", rel.as_str()));
-    let Some(names) = bunko_library::sidecar::list_names(&layout.library().join(dir)) else {
-        return Vec::new();
+    let dir = rel.rsplit_once('/').map_or("", |(dir, _)| dir);
+    let entries = match bunko_store::fs::read_dir(layout.library().join(dir)) {
+        Ok(entries) => entries,
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Some(Vec::new());
+        }
+        Err(e) => {
+            warn!("library listing of {dir:?} failed: {e}");
+            return None;
+        }
     };
-    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
-    sidecar_names::governing_archives(name, &refs)
-        .into_iter()
-        .map(|archive| {
-            if dir.is_empty() {
-                archive.to_string()
-            } else {
-                format!("{dir}/{archive}")
-            }
-        })
-        .collect()
+    let mut names = Vec::new();
+    for entry in entries {
+        let entry = entry.ok()?;
+        if entry.file_type().ok()?.is_dir() {
+            continue;
+        }
+        if let Ok(name) = entry.file_name().into_string() {
+            names.push(name);
+        }
+    }
+    names.sort();
+    Some(names)
 }
 
 /// See [`AuthBackend::is_volume_primary`]: rule v1 against the library folder's listing.
@@ -298,7 +323,7 @@ mod tests {
     }
 
     #[test]
-    fn the_listing_names_a_files_governing_archives() {
+    fn the_listing_is_the_files_of_the_paths_folder() {
         let dir = tempfile::tempdir().unwrap();
         let layout = StorageLayout::new(dir.path());
         let series = layout.library().join("S");
@@ -307,19 +332,44 @@ mod tests {
             bunko_store::fs::write(series.join(name), b"x").unwrap();
         }
         bunko_store::fs::write(layout.library().join("loose.cbz"), b"x").unwrap();
-        let gov = |p: &str| governing_archives(&layout, p);
-        assert_eq!(gov("/mokuro-reader/S/V.curated.mokuro"), ["S/V.cbz"]);
-        assert_eq!(gov("/mokuro-reader//S/./V.curated.cbz"), ["S/V.cbz"]);
-        assert_eq!(gov("/mokuro-reader/S/W.webp"), ["S/W.cbz"]);
-        assert_eq!(gov("/mokuro-reader/loose.mokuro"), ["loose.cbz"]);
-        // A folder named like an archive governs nothing (rule 2).
-        assert_eq!(
-            gov("/mokuro-reader/S/V.edit.cbz/x.cbz"),
-            Vec::<String>::new()
+        let list = |p: &str| library_listing(&layout, p);
+        let s = Some(vec![
+            "V.cbz".to_string(),
+            "V.curated.cbz".into(),
+            "W.cbz".into(),
+        ]);
+        assert_eq!(list("/mokuro-reader/S/V.curated.mokuro"), s);
+        assert_eq!(list("/mokuro-reader//S/./X.cbz"), s);
+        assert!(
+            list("/mokuro-reader/loose.mokuro")
+                .unwrap()
+                .contains(&"loose.cbz".to_string())
         );
-        assert!(gov("/mokuro-reader/S/X.cbz").is_empty());
-        assert!(gov("/mokuro-reader/T/V.mokuro").is_empty());
-        assert!(gov("/mokuro-reader/goals.json").is_empty());
+        // A folder named like an archive is no file (rule 2), and lists nothing.
+        assert_eq!(list("/mokuro-reader/S/V.edit.cbz/x.cbz"), Some(vec![]));
+        // A folder that is not there, or is a file, lists nothing.
+        assert_eq!(list("/mokuro-reader/T/V.mokuro"), Some(vec![]));
+        assert_eq!(list("/mokuro-reader/S/V.cbz/x.mokuro"), Some(vec![]));
+        assert_eq!(list("/mokuro-reader/goals.json.x/y"), Some(vec![]));
+    }
+
+    /// A folder that cannot be read is no folder that governs nothing (OWN-8).
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_folder_has_no_listing() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let layout = StorageLayout::new(dir.path());
+        let series = layout.library().join("S");
+        bunko_store::fs::create_dir_all(&series).unwrap();
+        bunko_store::fs::write(series.join("V.cbz"), b"x").unwrap();
+        std::fs::set_permissions(&series, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let readable = bunko_store::fs::read_dir(&series).is_ok(); // root reads anything
+        let listed = library_listing(&layout, "/mokuro-reader/S/V.curated.cbz");
+        std::fs::set_permissions(&series, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if !readable {
+            assert_eq!(listed, None);
+        }
     }
 
     #[test]
@@ -336,6 +386,23 @@ mod tests {
         assert_eq!(backend.series_owner("Gone"), None);
         assert_eq!(backend.series_owner("Nothing"), None);
         assert!(!backend.ownership_pending());
+    }
+
+    /// F4: a waived adoption holds nothing back, and stays pending for a later start.
+    #[test]
+    fn a_waived_adoption_holds_no_addition() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = StorageLayout::new(dir.path());
+        let db = Arc::new(Database::open(dir.path().join("mokuro.db")).unwrap());
+        db.with_writer_connection(|c| c.execute("DELETE FROM series_folder_adoption", []))
+            .unwrap();
+        let backend = DbAuthBackend::new(db.clone(), layout);
+        assert!(backend.ownership_pending());
+        backend
+            .adoption_waiver()
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(!backend.ownership_pending());
+        assert!(db.series_folder_adoption_pending().unwrap());
     }
 
     #[test]

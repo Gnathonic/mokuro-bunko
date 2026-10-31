@@ -142,3 +142,100 @@ fn a_database_tracking_nothing_is_adopted_at_once() {
     assert!(!db.series_folder_adoption_pending().unwrap());
     assert_eq!(adopt_series_folder_owners(&db, dir.path()), None);
 }
+
+/// Only what is there counts (F3, OWN-7): a row whose archive is gone vouches for
+/// nothing, and a folder holding what adoption cannot see into gets no owner.
+#[test]
+fn only_listed_volumes_count_and_hidden_ones_count_against() {
+    let lib = Lib::new();
+    // Every archive removed outside WebDAV: an empty folder, no owner.
+    std::fs::create_dir_all(lib.root.join("Gone")).unwrap();
+    lib.db
+        .record_volume_upload("Gone/Vol 1.cbz", "alice")
+        .unwrap();
+    // A stale row of another account does not make a folder mixed.
+    lib.upload("Solo/Vol 1.cbz", "alice");
+    lib.db
+        .record_volume_upload("Solo/Vol 9.cbz", "bob")
+        .unwrap();
+    // A hidden folder or archive is not seen into: it counts as untracked.
+    lib.upload("Hidden/Vol 1.cbz", "alice");
+    lib.file("Hidden/.extras/Vol 2.cbz");
+    lib.upload("Dotted/Vol 1.cbz", "alice");
+    lib.file("Dotted/.Vol 2.cbz");
+    // Bunko's own staging file and a hidden non-archive are no volumes.
+    lib.upload("Staging/Vol 1.cbz", "alice");
+    lib.file("Staging/.Vol 2.cbz.upload-abc.tmp");
+    lib.file("Staging/.DS_Store");
+    assert_eq!(
+        lib.adopt(),
+        Some(FolderAdoption {
+            owned: 2,
+            unowned: 3
+        })
+    );
+    assert_eq!(lib.owner("Solo").as_deref(), Some("alice"));
+    assert_eq!(lib.owner("Staging").as_deref(), Some("alice"));
+    for folder in ["Gone", "Hidden", "Dotted"] {
+        assert_eq!(lib.owner(folder), None, "{folder}");
+    }
+}
+
+/// A name that is not UTF-8 is not seen into either (OWN-7).
+#[cfg(target_os = "linux")]
+#[test]
+fn a_name_adoption_cannot_read_counts_against() {
+    use std::os::unix::ffi::OsStrExt;
+    let lib = Lib::new();
+    lib.upload("Odd/Vol 1.cbz", "alice");
+    let odd = std::ffi::OsStr::from_bytes(b"Vol \xff.cbz");
+    std::fs::write(lib.root.join("Odd").join(odd), b"x").unwrap();
+    assert_eq!(
+        lib.adopt(),
+        Some(FolderAdoption {
+            owned: 0,
+            unowned: 1
+        })
+    );
+    assert_eq!(lib.owner("Odd"), None);
+}
+
+/// A first try that cannot adopt is tried again in the same process (F4): until it is
+/// done, uploaders' additions wait, so they must not wait for a restart.
+#[tokio::test]
+async fn adoption_that_cannot_be_done_now_is_tried_again() {
+    use std::sync::Arc;
+    use std::time::Duration;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("library");
+    let db =
+        Arc::new(Database::open_with(dir.path().join("mokuro.db"), &DbOptions::default()).unwrap());
+    db.with_writer_connection(|c| c.execute("DELETE FROM series_folder_adoption", []))
+        .unwrap();
+    db.record_volume_upload("Solo/Vol 1.cbz", "alice").unwrap();
+    let stop = tokio_util::sync::CancellationToken::new();
+    let task = tokio::spawn(
+        bunko_server::library::adopt_series_folder_owners_until_done(
+            db.clone(),
+            root.clone(),
+            Duration::from_millis(20),
+            stop.clone(),
+        ),
+    );
+    // The root cannot be listed yet: still pending, still trying.
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    assert!(!task.is_finished());
+    assert!(db.series_folder_adoption_pending().unwrap());
+    std::fs::create_dir_all(root.join("Solo")).unwrap();
+    std::fs::write(root.join("Solo/Vol 1.cbz"), b"x").unwrap();
+    tokio::time::timeout(Duration::from_secs(10), task)
+        .await
+        .expect("adopted once the root can be listed")
+        .unwrap();
+    assert!(!db.series_folder_adoption_pending().unwrap());
+    assert_eq!(
+        db.series_folder_owner("Solo").unwrap().as_deref(),
+        Some("alice")
+    );
+    stop.cancel();
+}

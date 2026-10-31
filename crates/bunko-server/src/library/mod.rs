@@ -46,7 +46,9 @@ mod watcher;
 pub use adopt::{CorrectionSweep, adopt_unowned_corrections};
 pub use catalog::{catalog_middleware, router};
 pub use community::{CommunityFetcher, CommunitySettings, normalize_anilist, normalize_jikan};
-pub use owners::{FolderAdoption, adopt_series_folder_owners};
+pub use owners::{
+    FolderAdoption, adopt_series_folder_owners, adopt_series_folder_owners_until_done,
+};
 pub use runtime::{LibraryHooks, LibraryRuntime, RuntimeDeps};
 pub use series_put::{is_series_put, series_put};
 pub use store::DbMetadataStore;

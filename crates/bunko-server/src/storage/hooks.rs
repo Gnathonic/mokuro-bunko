@@ -226,14 +226,8 @@ impl CloudHooks for ServerCloudHooks {
         if is_dir {
             // bunko-dav `move_folder`: ownership per volume, then the prefixes.
             let volumes = cbz_under(to);
-            match (old.as_deref(), new.as_deref()) {
-                (Some(old), Some(new)) => {
-                    crate::library::owners::folder_moved(&self.db, &self.root, old, new)
-                }
-                (Some(old), None) => {
-                    crate::library::owners::folder_removed(&self.db, &self.root, old)
-                }
-                _ => {}
+            if let (Some(old), None) = (old.as_deref(), new.as_deref()) {
+                crate::library::owners::folder_removed(&self.db, &self.root, old);
             }
             if let (Some(old), Some(new)) = (old.as_deref(), new.as_deref()) {
                 for cbz in &volumes {
@@ -250,6 +244,9 @@ impl CloudHooks for ServerCloudHooks {
                 }
                 self.dav.rename_ocr_sidecars_under_prefix(old, new);
                 self.dav.rename_volume_uuids_under_prefix(old, new);
+                // After the upload records: a folder joining a series is judged by
+                // the uploaders of what it holds (OWN-5).
+                crate::library::owners::folder_moved(&self.db, &self.root, old, new);
                 if let Some(o) = &self.overlays {
                     o.rename_prefix(old, new);
                 }

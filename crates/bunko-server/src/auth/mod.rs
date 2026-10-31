@@ -84,10 +84,13 @@ pub trait AuthBackend: Send + Sync {
     fn series_owner(&self, _series: &str) -> Option<String> {
         None
     }
-    /// The listed archives (library-relative, `S/V.cbz`) that govern a library file
-    /// (`bunko_core::sidecar_names::governing_archives`, from its folder's listing).
-    fn governing_archives(&self, _virtual_path: &str) -> Vec<String> {
-        Vec::new()
+    /// The FILE names (no folders: rule 2) listed in the library folder that holds a
+    /// library path: what the owner rules read rule v1 from
+    /// (`bunko_core::sidecar_names::governing_archives`). Empty when that folder is not
+    /// there; `None` when it cannot be read, which no rule reads as "nothing governs it"
+    /// (OWN-8).
+    fn library_listing(&self, _virtual_path: &str) -> Option<Vec<String>> {
+        Some(Vec::new())
     }
     /// Who uploaded the library archive `rel` (library-relative).
     fn volume_uploader(&self, _rel: &str) -> Option<String> {
@@ -344,6 +347,10 @@ const VOLUME_OWNED: &str =
     "Permission denied: this file belongs to a volume this account did not upload";
 const VOLUME_OWNED_DETAIL: &str = "This file belongs to a volume this account did not upload.";
 
+/// A new archive named as a reserved layer of the volume beside it (OWN-2).
+const LAYER_NAME: &str = "Permission denied: this name is kept for a layer of the volume beside it";
+const LAYER_NAME_DETAIL: &str = "This name is kept for a layer of the volume beside it.";
+
 /// Two names of one account: account names are unique ignoring ASCII case.
 fn same_account(a: &str, b: &str) -> bool {
     a.eq_ignore_ascii_case(b)
@@ -372,6 +379,61 @@ fn controls(path: &str, user: &str, governors: &[String], backend: &dyn AuthBack
                     .volume_uploader(archive)
                     .is_some_and(|u| same_account(&u, user))
             }))
+}
+
+/// A library path's folder listing, read once per decision.
+struct Listing {
+    /// The folder's library rel (`""` at the library root).
+    dir: String,
+    /// The path's own name.
+    name: String,
+    names: Vec<String>,
+}
+
+impl Listing {
+    /// `Err` (503) when the folder cannot be read (OWN-8).
+    fn of(path: &str, backend: &dyn AuthBackend) -> Result<Listing, Denied> {
+        let rel = paths::library_rel(path).unwrap_or_default();
+        let (dir, name) = rel.rsplit_once('/').unwrap_or(("", rel.as_str()));
+        let names = backend.library_listing(path).ok_or_else(|| Denied {
+            retry_after: Some(10),
+            ..Denied::new(
+                503,
+                "The server could not read this folder; try again shortly.",
+            )
+        })?;
+        Ok(Listing {
+            dir: dir.to_string(),
+            name: name.to_string(),
+            names,
+        })
+    }
+
+    fn refs(&self) -> Vec<&str> {
+        self.names.iter().map(String::as_str).collect()
+    }
+
+    fn rel(&self, name: &str) -> String {
+        if self.dir.is_empty() {
+            name.to_string()
+        } else {
+            format!("{}/{name}", self.dir)
+        }
+    }
+
+    /// The archives (library rels) that govern the path, listed or new.
+    fn governors(&self) -> Vec<String> {
+        sidecar_names::governing_archives(&self.name, &self.refs())
+            .into_iter()
+            .map(|a| self.rel(a))
+            .collect()
+    }
+
+    /// The path, a new archive, would turn a reserved layer of a listed volume into its
+    /// own primary (OWN-2).
+    fn hides_reserved_layer(&self) -> bool {
+        sidecar_names::hides_reserved_layer(&self.name, &self.refs())
+    }
 }
 
 /// An addition while the existing folders wait for their owners (C5).
@@ -526,12 +588,15 @@ fn decide(
                 }
                 // A folder named after a volume is no archive (rule 2), but only the
                 // series owner makes one (C2, C3).
-                if !backend.governing_archives(path).is_empty()
+                if !Listing::of(path, backend)?.governors().is_empty()
                     && !folder_owner_of(path, false, backend)
                         .is_some_and(|o| same_account(&o, user))
                 {
                     return Err(Denied::new(403, VOLUME_OWNED).with_detail(VOLUME_OWNED_DETAIL));
                 }
+                // Asked again where the folder is made (OWN-6): its parent may have
+                // become another account's, or gone, in between.
+                *grant = Grant::Owner;
                 Ok(())
             } else {
                 Err(Denied::new(
@@ -554,7 +619,12 @@ fn decide(
                 let allowed = if backend.is_library_folder(path) {
                     folder_owner_of(path, true, backend).is_some_and(|o| same_account(&o, user))
                 } else {
-                    controls(path, user, &backend.governing_archives(path), backend)
+                    controls(
+                        path,
+                        user,
+                        &Listing::of(path, backend)?.governors(),
+                        backend,
+                    )
                 };
                 if allowed {
                     *grant = Grant::Owner;
@@ -687,7 +757,12 @@ fn authorize_curated(
         {
             return Err(Denied::new(403, SERIES_OWNED).with_detail(SERIES_OWNED_DETAIL));
         }
-        if controls(path, user, &backend.governing_archives(path), backend) {
+        if controls(
+            path,
+            user,
+            &Listing::of(path, backend)?.governors(),
+            backend,
+        ) {
             return Ok(Grant::Owner);
         }
     }
@@ -742,7 +817,8 @@ fn authorize_put(
         // that volume (S2); a new volume in a shared series is anyone's to add.
         let user = id.username().unwrap_or_default();
         let path = &normalized_library_path(path).unwrap_or_else(|| path.to_string());
-        let governors = backend.governing_archives(path);
+        let listing = Listing::of(path, backend)?;
+        let governors = listing.governors();
         if backend.physical_exists(path, id.caller()) {
             if !controls(path, user, &governors, backend) {
                 return Err(Denied::new(
@@ -759,6 +835,11 @@ fn authorize_put(
             }
             if !governors.is_empty() && !controls(path, user, &governors, backend) {
                 return Err(Denied::new(403, VOLUME_OWNED).with_detail(VOLUME_OWNED_DETAIL));
+            }
+            // Even its controller makes no `V.edit.cbz` beside `V.cbz`: it would turn
+            // every account's correction of V into a shared primary (OWN-2).
+            if listing.hides_reserved_layer() {
+                return Err(Denied::new(403, LAYER_NAME).with_detail(LAYER_NAME_DETAIL));
             }
         }
         *grant = Grant::Owner;
@@ -796,12 +877,14 @@ mod tests {
         fn series_owner(&self, s: &str) -> Option<String> {
             (s == "Mine").then(|| "u".into())
         }
-        /// Every archive is its own volume.
-        fn governing_archives(&self, p: &str) -> Vec<String> {
-            paths::library_rel(p)
-                .filter(|r| r.ends_with(".cbz"))
-                .into_iter()
-                .collect()
+        /// Every archive is its own volume, alone in its folder.
+        fn library_listing(&self, p: &str) -> Option<Vec<String>> {
+            let rel = paths::library_rel(p).filter(|r| r.ends_with(".cbz"));
+            Some(
+                rel.map(|r| r.rsplit('/').next().unwrap_or_default().to_string())
+                    .into_iter()
+                    .collect(),
+            )
         }
         fn volume_uploader(&self, rel: &str) -> Option<String> {
             rel.ends_with("mine.cbz").then(|| "u".into())
@@ -1282,6 +1365,7 @@ mod tests {
         uploads: Vec<(String, String)>,
         records: Vec<(String, String)>,
         pending: bool,
+        unreadable: bool,
     }
 
     impl Owners {
@@ -1366,20 +1450,14 @@ mod tests {
                 .filter(|_| live)
                 .map(|(_, u)| u.clone())
         }
-        fn governing_archives(&self, p: &str) -> Vec<String> {
-            let Some((dir, name)) = Self::split(p) else {
-                return Vec::new();
+        fn library_listing(&self, p: &str) -> Option<Vec<String>> {
+            if self.unreadable {
+                return None;
+            }
+            let Some((dir, _)) = Self::split(p) else {
+                return Some(Vec::new());
             };
-            sidecar_names::governing_archives(&name, &self.names_in(&dir))
-                .into_iter()
-                .map(|a| {
-                    if dir.is_empty() {
-                        a.to_string()
-                    } else {
-                        format!("{dir}/{a}")
-                    }
-                })
-                .collect()
+            Some(self.names_in(&dir).into_iter().map(String::from).collect())
         }
         fn volume_uploader(&self, rel: &str) -> Option<String> {
             self.uploads
@@ -1419,6 +1497,7 @@ mod tests {
 
     const SERIES: Option<&str> = Some(SERIES_OWNED_DETAIL);
     const VOLUME: Option<&str> = Some(VOLUME_OWNED_DETAIL);
+    const LAYER: Option<&str> = Some(LAYER_NAME_DETAIL);
 
     /// The finding (authz-dotted-primary) in both upload orders: an archive nested
     /// under another account's volume is that volume's, so the account that is not its
@@ -1446,11 +1525,14 @@ mod tests {
                 Err((403, VOLUME)),
                 "{name}"
             );
-            assert_eq!(
-                decide_as(&lib, "PUT", &path, &alice),
-                Ok(Grant::Owner),
-                "{name}"
-            );
+            // Its controller may add V's own files, but no archive that would hide a
+            // layer of V (OWN-2).
+            let want = if name.to_ascii_lowercase().ends_with(".cbz") {
+                Err((403, LAYER))
+            } else {
+                Ok(Grant::Owner)
+            };
+            assert_eq!(decide_as(&lib, "PUT", &path, &alice), want, "{name}");
         }
         // V's curated layer: its uploader's to publish.
         let curated = "/mokuro-reader/S/V.curated.mokuro";
@@ -1480,6 +1562,139 @@ mod tests {
         assert_eq!(
             decide_as(&lib, "PUT", "/mokuro-reader/S/V.curated.mokuro", &mallory),
             Ok(Grant::Owner)
+        );
+    }
+
+    /// OWN-1: a newcomer's shorter archive takes no control of a volume listed under
+    /// its name. Mallory may add `Berserk.cbz` beside alice's `Berserk.v01.cbz` (a new
+    /// volume), and nothing of alice's becomes mallory's.
+    #[test]
+    fn a_new_archive_captures_no_other_accounts_volume() {
+        let alice = as_user("alice", Role::Uploader);
+        let mallory = as_user("mallory", Role::Uploader);
+        let lib = Owners::default()
+            .upload("S/Berserk.v01.cbz", "alice")
+            .file("S/Berserk.v01.mokuro")
+            .upload("S/Berserk.cbz", "mallory");
+        for (method, name) in [
+            ("DELETE", "Berserk.v01.cbz"),
+            ("PUT", "Berserk.v01.cbz"),
+            ("PUT", "Berserk.v01.mokuro"),
+            ("DELETE", "Berserk.v01.mokuro"),
+            ("PUT", "Berserk.v01.curated.mokuro"),
+            ("PUT", "Berserk.v01.webp"),
+        ] {
+            let path = format!("/mokuro-reader/S/{name}");
+            assert!(
+                matches!(decide_as(&lib, method, &path, &mallory), Err((403, _))),
+                "{method} {name}"
+            );
+            assert_eq!(
+                decide_as(&lib, method, &path, &alice),
+                Ok(Grant::Owner),
+                "{method} {name}"
+            );
+        }
+        // Mallory's own volume, and a new one under it, are mallory's.
+        for name in ["Berserk.mokuro", "Berserk.v02.cbz"] {
+            let path = format!("/mokuro-reader/S/{name}");
+            assert_eq!(decide_as(&lib, "PUT", &path, &mallory), Ok(Grant::Owner));
+            assert_eq!(decide_as(&lib, "PUT", &path, &alice), Err((403, VOLUME)));
+        }
+        // A hijack name goes to the volume whose layer it hides, in either order.
+        let lib = Owners::default()
+            .upload("S/Berserk.curated.cbz", "alice")
+            .upload("S/Berserk.cbz", "mallory");
+        assert_eq!(
+            decide_as(
+                &lib,
+                "DELETE",
+                "/mokuro-reader/S/Berserk.curated.cbz",
+                &mallory
+            ),
+            Ok(Grant::Owner)
+        );
+        assert!(matches!(
+            decide_as(
+                &lib,
+                "DELETE",
+                "/mokuro-reader/S/Berserk.curated.cbz",
+                &alice
+            ),
+            Err((403, _))
+        ));
+    }
+
+    /// OWN-2: not even V's controller makes an archive whose primary would be a reserved
+    /// layer of V; every account keeps its own correction of V.
+    #[test]
+    fn no_archive_hides_a_reserved_layer_of_a_listed_volume() {
+        let alice = as_user("alice", Role::Uploader);
+        let bob = as_user("bob", Role::Uploader);
+        let lib = Owners::default()
+            .upload("S/V.cbz", "alice")
+            .owned("S", "alice");
+        for name in [
+            "V.edit.cbz",
+            "V.edit-2.cbz",
+            "V.Curated.cbz",
+            "V.pre-upgrade.cbz",
+            "V.previous-ocr.cbz",
+        ] {
+            let path = format!("/mokuro-reader/S/{name}");
+            assert_eq!(
+                decide_as(&lib, "PUT", &path, &alice),
+                Err((403, LAYER)),
+                "{name}"
+            );
+        }
+        // A hand-made id is V's controller's to nest; beside no V, anyone's.
+        assert_eq!(
+            decide_as(&lib, "PUT", "/mokuro-reader/S/V.hayai.cbz", &alice),
+            Ok(Grant::Owner)
+        );
+        let alone = Owners::default().folder("T");
+        assert_eq!(
+            decide_as(&alone, "PUT", "/mokuro-reader/T/V.edit.cbz", &bob),
+            Ok(Grant::Owner)
+        );
+        // Bob's correction of V is still his own.
+        assert_eq!(
+            decide_as(&lib, "PUT", "/mokuro-reader/S/V.edit.mokuro", &bob),
+            Ok(Grant::Personal)
+        );
+    }
+
+    /// OWN-8: a folder that cannot be listed governs nothing only as far as the rules
+    /// know: an uploader's write waits (503), it is never let through.
+    #[test]
+    fn an_unreadable_folder_holds_an_uploaders_write() {
+        let alice = as_user("alice", Role::Uploader);
+        let lib = Owners {
+            unreadable: true,
+            ..Owners::default().upload("S/V.cbz", "alice")
+        };
+        for (method, path) in [
+            ("PUT", "/mokuro-reader/S/V.curated.cbz"),
+            ("PUT", "/mokuro-reader/S/V.cbz"),
+            ("DELETE", "/mokuro-reader/S/V.cbz"),
+            ("MKCOL", "/mokuro-reader/S/V.x.cbz"),
+            ("PUT", "/mokuro-reader/S/V.curated.mokuro"),
+        ] {
+            assert_eq!(
+                decide_as(&lib, method, path, &alice),
+                Err((503, None)),
+                "{method} {path}"
+            );
+        }
+        let m = Method::PUT;
+        let d = authorize(&m, "/mokuro-reader/S/W.cbz", None, &alice, OPEN, &lib).unwrap_err();
+        assert_eq!(d.retry_after, Some(10));
+        // An editor needs no listing.
+        let editor = as_user("ed", Role::Editor);
+        assert_eq!(
+            decide_as(&lib, "PUT", "/mokuro-reader/S/W.cbz", &editor),
+            Ok(Grant::Table)
         );
     }
 
@@ -1638,7 +1853,7 @@ mod tests {
         }
         assert_eq!(
             decide_as(&lib, "MKCOL", "/mokuro-reader/Alice/New", &alice),
-            Ok(Grant::Table)
+            Ok(Grant::Owner)
         );
         // Bob deletes neither the folder nor what is not his.
         for path in [
@@ -1678,7 +1893,7 @@ mod tests {
         let gone = Owners::default().owned("Gone", "alice");
         assert_eq!(
             decide_as(&gone, "MKCOL", "/mokuro-reader/Gone", &bob),
-            Ok(Grant::Table)
+            Ok(Grant::Owner)
         );
     }
 
@@ -1714,7 +1929,7 @@ mod tests {
         );
         assert_eq!(
             decide_as(&lib, "MKCOL", "/mokuro-reader/S/Extras", &bob),
-            Ok(Grant::Table)
+            Ok(Grant::Owner)
         );
         let owned = Owners {
             records: vec![("S".into(), "bob".into())],
@@ -1901,6 +2116,8 @@ mod tests {
             SERIES_OWNED_DETAIL,
             VOLUME_OWNED,
             VOLUME_OWNED_DETAIL,
+            LAYER_NAME,
+            LAYER_NAME_DETAIL,
         ] {
             assert!(
                 !text.contains("401") && !text.contains("Unauthorized"),

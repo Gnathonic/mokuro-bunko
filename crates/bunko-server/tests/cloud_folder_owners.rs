@@ -180,3 +180,57 @@ async fn two_mkcols_at_once_make_one_owner() {
         .collect();
     assert_eq!(folders.len(), 1, "{folders:?}");
 }
+
+/// Startup adoption reads a cloud library through its store (F5): once the store is in
+/// sync, a folder of one uploader becomes its, a mixed one stays shared, and adoption is
+/// recorded as done.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cloud_library_is_adopted_once_in_sync() {
+    let fake = Arc::new(FakeBackend::drive_like());
+    for rel in [
+        "Solo/Vol 1.cbz",
+        "Solo/Vol 2.cbz",
+        "Solo/Vol 1.mokuro",
+        "Mixed/Vol 1.cbz",
+        "Mixed/Vol 2.cbz",
+        "Untracked/Vol 1.cbz",
+        "Untracked/Vol 2.cbz",
+    ] {
+        fake.reader_put(&format!("{ROOT}/{rel}"), b"x");
+    }
+    let e = env(fake.clone()).await;
+    let db = e.services.db.clone();
+    // A database from before 0.8: tracked uploads, adoption pending.
+    db.with_writer_connection(|c| c.execute("DELETE FROM series_folder_adoption", []))
+        .unwrap();
+    for (rel, user) in [
+        ("Solo/Vol 1.cbz", "alice"),
+        ("Solo/Vol 2.cbz", "alice"),
+        ("Mixed/Vol 1.cbz", "alice"),
+        ("Mixed/Vol 2.cbz", "bob"),
+        ("Untracked/Vol 1.cbz", "alice"),
+    ] {
+        db.record_volume_upload(rel, user).unwrap();
+    }
+    let storage = e.services.storage.clone().expect("a cloud library");
+    let steady = tokio::task::spawn_blocking(move || storage.wait_steady(Duration::from_secs(20)))
+        .await
+        .unwrap();
+    assert!(steady);
+    let stop = tokio_util::sync::CancellationToken::new();
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        bunko_server::library::adopt_series_folder_owners_until_done(
+            db.clone(),
+            e.library(),
+            Duration::from_millis(50),
+            stop.clone(),
+        ),
+    )
+    .await
+    .expect("adopted");
+    assert!(!db.series_folder_adoption_pending().unwrap());
+    assert_eq!(e.owner("Solo").as_deref(), Some("alice"));
+    assert_eq!(e.owner("Mixed"), None);
+    assert_eq!(e.owner("Untracked"), None);
+}

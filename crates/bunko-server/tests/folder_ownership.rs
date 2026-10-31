@@ -473,3 +473,95 @@ async fn additions_wait_until_the_existing_series_have_owners() {
         .await;
     assert_eq!(r.status, 403, "{}", r.text());
 }
+
+/// What review found past the finding: a later, shorter archive takes nobody's volume
+/// (OWN-1); not even a volume's own uploader makes an archive that hides one of its
+/// reserved layers (OWN-2); a nested id folds like a stem, NFC first (F1).
+#[tokio::test]
+async fn no_archive_name_takes_another_volume_or_hides_a_layer() {
+    let env = Env::new();
+    std::fs::create_dir_all(env.lib("S")).unwrap();
+    let r = env
+        .put("alice", "/mokuro-reader/S/Berserk.v01.cbz", cbz(2))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.text());
+    let r = env.put("bob", "/mokuro-reader/S/Berserk.cbz", cbz(1)).await;
+    assert_eq!(r.status, 201, "a new volume: {}", r.text());
+    let r = env.delete("bob", "/mokuro-reader/S/Berserk.v01.cbz").await;
+    assert_eq!(r.status, 403, "{}", r.text());
+    assert!(env.lib("S/Berserk.v01.cbz").exists());
+    for path in [
+        "/mokuro-reader/S/Berserk.v01.mokuro",
+        "/mokuro-reader/S/Berserk.v01.curated.mokuro",
+    ] {
+        let r = env.put("bob", path, br#"{"pages":[]}"#.to_vec()).await;
+        assert_eq!(r.status, 403, "{path}: {}", r.text());
+    }
+
+    // A Kelvin sign is a `k`: `V.<KELVIN>anji.cbz` is V's, not a volume of its own.
+    let r = env.put("alice", "/mokuro-reader/S/V.cbz", cbz(2)).await;
+    assert_eq!(r.status, 201, "{}", r.text());
+    let r = env
+        .put("bob", "/mokuro-reader/S/V.%E2%84%AAanji.cbz", cbz(1))
+        .await;
+    assert_eq!(r.status, 403, "{}", r.text());
+
+    // Alice may not hide a correction of her own volume, and bob's stays his.
+    let r = env
+        .put("alice", "/mokuro-reader/S/V.edit.cbz", cbz(1))
+        .await;
+    assert_eq!(r.status, 403, "{}", r.text());
+    assert_eq!(
+        r.json()["detail"],
+        "This name is kept for a layer of the volume beside it."
+    );
+    assert!(!env.lib("S/V.edit.cbz").exists());
+    let r = env
+        .put(
+            "bob",
+            "/mokuro-reader/S/V.edit.mokuro",
+            br#"{"pages":[]}"#.to_vec(),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.text());
+    assert!(env.storage.join("users/bob/edits/S/V.edit.mokuro").exists());
+}
+
+/// S1's merge rule for an editor's MOVE onto another spelling of a series (OWN-5): it
+/// keeps its owner when what joined it was the owner's (or nobody's volumes), and
+/// loses it when another account's volume joined. (A case-only spelling is the same
+/// folder to WebDAV, an overwrite; whitespace is not.)
+#[tokio::test]
+async fn a_folder_joining_a_series_keeps_its_owner_only_when_it_agrees() {
+    let env = Env::new();
+    assert_eq!(
+        env.mkcol("alice", "/mokuro-reader/Two Words").await.status,
+        201
+    );
+    std::fs::create_dir_all(env.lib("Empty")).unwrap();
+    let r = env
+        .mv(
+            "editor",
+            "/mokuro-reader/Empty",
+            "/mokuro-reader/Two  Words",
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.text());
+    assert!(env.lib("Two Words").is_dir() && env.lib("Two  Words").is_dir());
+    assert_eq!(env.owner("Two Words").as_deref(), Some("alice"));
+
+    std::fs::create_dir_all(env.lib("Bobs")).unwrap();
+    let r = env
+        .put("bob", "/mokuro-reader/Bobs/Vol 1.cbz", cbz(1))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.text());
+    let r = env
+        .mv(
+            "editor",
+            "/mokuro-reader/Bobs",
+            "/mokuro-reader/Two   Words",
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.text());
+    assert_eq!(env.owner("Two Words"), None);
+}

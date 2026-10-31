@@ -49,6 +49,19 @@ fn put(conn: &Connection, key: &str, folder: &str, user: &str) -> Result<()> {
     Ok(())
 }
 
+/// Does a part joining a series owned by `existing` agree on its owner? Its own record
+/// decides; without one, the uploaders of its tracked volumes must all be that owner
+/// (none at all agrees). A series with no owner stays without one.
+fn joined_part_agrees(existing: Option<&str>, moving: Option<&str>, uploaders: &[String]) -> bool {
+    let Some(existing) = existing else {
+        return false;
+    };
+    match moving {
+        Some(m) => m.eq_ignore_ascii_case(existing),
+        None => uploaders.iter().all(|u| u.eq_ignore_ascii_case(existing)),
+    }
+}
+
 fn forget(conn: &Connection, key: &str) -> Result<bool> {
     Ok(conn.execute(
         "DELETE FROM series_folder_owners WHERE series_key = ?",
@@ -84,15 +97,17 @@ impl Database {
     /// A folder was renamed from `old` to `new`. The same series (a case-only rename)
     /// keeps its record under the new spelling. Otherwise the record moves to `new`'s
     /// series, except when `new` joins a folder of that series already listed
-    /// (`new_joins_existing`): the joined folder keeps an owner only when both had the
-    /// same one. `old`'s record stays when another spelling of it is still listed
+    /// (`joins`: the uploaders of the tracked volumes the moved folder holds): the
+    /// joined series keeps its owner only when the moved part was that account's too,
+    /// by its record, or, having none, by all of its tracked volumes (S1's merge rule,
+    /// OWN-5). `old`'s record stays when another spelling of it is still listed
     /// (`old_lives_on`).
     pub fn move_series_folder_owner(
         &self,
         old: &str,
         new: &str,
         old_lives_on: bool,
-        new_joins_existing: bool,
+        joins: Option<&[String]>,
     ) -> Result<()> {
         let (Some(old_key), Some(new_key)) = (key_of(old), key_of(new)) else {
             return Ok(());
@@ -108,19 +123,36 @@ impl Database {
                 }
                 return Ok(());
             }
-            let existing = owner_at(conn, &new_key)?;
-            match (moving.as_deref(), new_joins_existing) {
-                (Some(m), true)
-                    if existing
-                        .as_deref()
-                        .is_some_and(|e| e.eq_ignore_ascii_case(m)) => {}
-                (_, true) | (None, false) => {
+            match (moving.as_deref(), joins) {
+                (moving, Some(uploaders)) => {
+                    let existing = owner_at(conn, &new_key)?;
+                    if !joined_part_agrees(existing.as_deref(), moving, uploaders) {
+                        forget(conn, &new_key)?;
+                    }
+                }
+                (None, None) => {
                     forget(conn, &new_key)?;
                 }
-                (Some(m), false) => put(conn, &new_key, new, m)?,
+                (Some(m), None) => put(conn, &new_key, new, m)?,
             }
             if !old_lives_on {
                 forget(conn, &old_key)?;
+            }
+            Ok(())
+        })
+    }
+
+    /// A folder with no record of its own (one moved up from deeper in the library)
+    /// joined the listed series `new`, holding tracked volumes of `uploaders`: the
+    /// series keeps its owner only when they are all that owner's (OWN-5).
+    pub fn series_folder_joined(&self, new: &str, uploaders: &[String]) -> Result<()> {
+        let Some(key) = key_of(new) else {
+            return Ok(());
+        };
+        self.write(|conn| {
+            let existing = owner_at(conn, &key)?;
+            if !joined_part_agrees(existing.as_deref(), None, uploaders) {
+                forget(conn, &key)?;
             }
             Ok(())
         })
@@ -284,37 +316,69 @@ mod tests {
         let owner = |f: &str| db.series_folder_owner(f).unwrap();
         // A case-only rename keeps the record under the new spelling.
         db.record_series_folder_owner("Kingdom", "alice").unwrap();
-        db.move_series_folder_owner("Kingdom", "KINGDOM", false, false)
+        db.move_series_folder_owner("Kingdom", "KINGDOM", false, None)
             .unwrap();
         let rows = db.list_series_folder_owners().unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].folder_name, "KINGDOM");
         // Another series: the record moves.
-        db.move_series_folder_owner("KINGDOM", "Kingdom (2006)", false, false)
+        db.move_series_folder_owner("KINGDOM", "Kingdom (2006)", false, None)
             .unwrap();
         assert_eq!(owner("Kingdom"), None);
         assert_eq!(owner("kingdom (2006)").as_deref(), Some("alice"));
         // A spelling of the old series still listed keeps its record.
         db.record_series_folder_owner("One", "bob").unwrap();
-        db.move_series_folder_owner("one", "Two", true, false)
+        db.move_series_folder_owner("one", "Two", true, None)
             .unwrap();
         assert_eq!(owner("One").as_deref(), Some("bob"));
         assert_eq!(owner("Two").as_deref(), Some("bob"));
         // Joining an existing folder: an owner only when both had the same one.
         db.record_series_folder_owner("Three", "BOB").unwrap();
-        db.move_series_folder_owner("Two", "three", false, true)
+        db.move_series_folder_owner("Two", "three", false, Some(&[]))
             .unwrap();
         assert_eq!(owner("Three").as_deref(), Some("BOB"));
         assert_eq!(owner("Two"), None);
         db.record_series_folder_owner("Four", "carol").unwrap();
-        db.move_series_folder_owner("Three", "Four", false, true)
+        db.move_series_folder_owner("Three", "Four", false, Some(&[]))
             .unwrap();
         assert_eq!(owner("Four"), None, "two owners: none");
         // An unowned folder moved over a stale record of its new name clears it.
         db.record_series_folder_owner("Five", "carol").unwrap();
-        db.move_series_folder_owner("Unowned", "Five", false, false)
+        db.move_series_folder_owner("Unowned", "Five", false, None)
             .unwrap();
         assert_eq!(owner("Five"), None);
+    }
+
+    /// S1's merge rule for a folder that joins a listed series (OWN-5): the series
+    /// keeps its owner only when the moved part was that account's, by its record or,
+    /// having none, by every tracked volume it holds.
+    #[test]
+    fn a_joining_folder_keeps_an_owner_only_when_it_agrees() {
+        let (_dir, db) = temp_db();
+        let owner = |f: &str| db.series_folder_owner(f).unwrap();
+        let users = |u: &[&str]| u.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // No record, nothing tracked (an empty folder): the owner stays.
+        db.record_series_folder_owner("Six", "alice").unwrap();
+        db.move_series_folder_owner("Loose", "six", false, Some(&[]))
+            .unwrap();
+        assert_eq!(owner("Six").as_deref(), Some("alice"));
+        // No record, only the owner's volumes: it stays.
+        db.move_series_folder_owner("Loose", "six", false, Some(&users(&["ALICE"])))
+            .unwrap();
+        assert_eq!(owner("Six").as_deref(), Some("alice"));
+        // Another account's volume in it: none.
+        db.move_series_folder_owner("Loose", "six", false, Some(&users(&["alice", "bob"])))
+            .unwrap();
+        assert_eq!(owner("Six"), None);
+        // Moved up from deeper in the library.
+        db.record_series_folder_owner("Seven", "alice").unwrap();
+        db.series_folder_joined("seven", &users(&["alice"]))
+            .unwrap();
+        assert_eq!(owner("Seven").as_deref(), Some("alice"));
+        db.series_folder_joined("seven", &[]).unwrap();
+        assert_eq!(owner("Seven").as_deref(), Some("alice"));
+        db.series_folder_joined("seven", &users(&["bob"])).unwrap();
+        assert_eq!(owner("Seven"), None);
     }
 
     #[test]

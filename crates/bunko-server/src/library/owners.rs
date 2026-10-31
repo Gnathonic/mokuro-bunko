@@ -20,12 +20,15 @@
 //! Bunko's own writes (the processor, the compiler, covers, keepsakes, the inbox, a
 //! duplicate merge) never call these: they assign no owner.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::path::Path;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
 
 use bunko_core::reader_tree;
 use bunko_core::sidecar_names::{ARCHIVE_EXTENSIONS, strip_suffix_ci};
 use bunko_db::{Database, fold_series_title_key};
+use tokio_util::sync::CancellationToken;
 
 /// What one startup adoption did.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -125,23 +128,49 @@ pub fn folder_removed(db: &Database, library: &Path, rel: &str) {
     log("forget", db.forget_series_folder_owner(folder));
 }
 
-/// The library folder `old` is now `new` (both library rels). Blocking.
+/// The uploaders of the tracked volumes under the library folder `rel`.
+fn uploaders_under(db: &Database, rel: &str) -> Vec<String> {
+    let prefix = format!("{}/", rel.trim_matches('/'));
+    match db.tracked_volume_uploaders() {
+        Ok(rows) => rows
+            .into_iter()
+            .filter(|(key, _)| key.starts_with(&prefix))
+            .map(|(_, user)| user)
+            .collect(),
+        Err(e) => {
+            tracing::warn!("[LIBRARY] series folder owner: tracked volumes: {e}");
+            // Unknown: as if another account's, so a joined series keeps no owner.
+            vec![String::new()]
+        }
+    }
+}
+
+/// The library folder `old` is now `new` (both library rels), its volumes' upload
+/// records already moved with it. Joining a series still listed under another
+/// spelling, it keeps that series' owner only when it was that account's too (S1,
+/// OWN-5). Blocking.
 pub fn folder_moved(db: &Database, library: &Path, old: &str, new: &str) {
     match (top_level(old), top_level(new)) {
         (Some(old), Some(new)) => {
             let others = [old, new];
             let old_lives_on = variant_listed(library, &fold_series_title_key(old), &others);
-            let joins = variant_listed(library, &fold_series_title_key(new), &others);
+            let joins = variant_listed(library, &fold_series_title_key(new), &others)
+                .then(|| uploaders_under(db, new));
             log(
                 "move",
-                db.move_series_folder_owner(old, new, old_lives_on, joins),
+                db.move_series_folder_owner(old, new, old_lives_on, joins.as_deref()),
             );
         }
         (Some(old), None) => folder_removed(db, library, old),
-        // A folder moved up to the top: a record its new name kept from a folder that
-        // is gone does not make it anyone's.
         (None, Some(new)) => {
-            if !variant_listed(library, &fold_series_title_key(new), &[new]) {
+            if variant_listed(library, &fold_series_title_key(new), &[new]) {
+                log(
+                    "join",
+                    db.series_folder_joined(new, &uploaders_under(db, new)),
+                );
+            } else {
+                // A record its new name kept from a folder that is gone does not make
+                // it anyone's.
                 log("forget", db.forget_series_folder_owner(new));
             }
         }
@@ -149,32 +178,66 @@ pub fn folder_moved(db: &Database, library: &Path, old: &str, new: &str) {
     }
 }
 
-/// Every archive below `dir`, as library rels (`<folder>/.../<name>`). Blocking.
-fn archives_under(library: &Path, folder: &str) -> Vec<String> {
-    let mut out = Vec::new();
+/// What a series folder holds, for adoption.
+#[derive(Default)]
+struct Contents {
+    /// Every archive below it, as library rels (`<folder>/.../<name>`).
+    archives: Vec<String>,
+    /// It holds something adoption cannot vouch for: a name that is not UTF-8, or a
+    /// dot-named archive or folder (OWN-7). Bunko's own staging names are skipped.
+    opaque: bool,
+}
+
+/// The staging files of in-flight uploads (`.<name>.upload-<random>.tmp`,
+/// `bunko_dav::paths::is_staging_name`).
+fn is_staging_name(name: &str) -> bool {
+    name.starts_with('.') && name.ends_with(".tmp") && name.contains(".upload-")
+}
+
+fn is_archive_name(name: &str) -> bool {
+    ARCHIVE_EXTENSIONS
+        .iter()
+        .any(|ext| strip_suffix_ci(name, ext).is_some())
+}
+
+/// The [`Contents`] of a series folder, walked through the store. Blocking.
+fn contents_of(library: &Path, folder: &str) -> Contents {
+    let mut out = Contents::default();
     let mut stack = vec![folder.to_string()];
     while let Some(rel) = stack.pop() {
         let Ok(entries) = bunko_store::fs::read_dir(library.join(&rel)) else {
+            out.opaque = true;
             continue;
         };
-        for e in entries.flatten() {
-            let Ok(name) = e.file_name().into_string() else {
+        for e in entries {
+            let Ok(e) = e else {
+                out.opaque = true;
                 continue;
             };
+            let Ok(name) = e.file_name().into_string() else {
+                out.opaque = true;
+                continue;
+            };
+            if is_staging_name(&name) {
+                continue;
+            }
+            let is_dir = match e.file_type() {
+                Ok(t) => t.is_dir(),
+                Err(_) => {
+                    out.opaque = true;
+                    continue;
+                }
+            };
             if name.starts_with('.') {
+                // A hidden file that is no archive (`.DS_Store`) holds no volume.
+                out.opaque |= is_dir || is_archive_name(&name);
                 continue;
             }
             let child = format!("{rel}/{name}");
-            match e.file_type() {
-                Ok(t) if t.is_dir() => stack.push(child),
-                Ok(_)
-                    if ARCHIVE_EXTENSIONS
-                        .iter()
-                        .any(|ext| strip_suffix_ci(&name, ext).is_some()) =>
-                {
-                    out.push(child)
-                }
-                _ => {}
+            if is_dir {
+                stack.push(child);
+            } else if is_archive_name(&name) {
+                out.archives.push(child);
             }
         }
     }
@@ -206,25 +269,16 @@ pub fn adopt_series_folder_owners(db: &Database, library: &Path) -> Option<Folde
             return None;
         }
     };
-    let tracked_keys: HashSet<&str> = tracked.iter().map(|(k, _)| k.as_str()).collect();
-    // Per series key: the uploaders (ignoring case, first spelling kept) and the
-    // folder spellings that hold a tracked volume.
-    let mut uploaders: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
-    let mut holding: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for (key, user) in &tracked {
-        let Some((folder, _)) = key.split_once('/') else {
-            continue;
-        };
-        let series = fold_series_title_key(folder);
-        uploaders
-            .entry(series.clone())
-            .or_default()
-            .entry(user.to_ascii_lowercase())
-            .or_insert_with(|| user.clone());
-        holding
-            .entry(series)
-            .or_default()
-            .insert(folder.to_string());
+    // Only rows whose archive is listed count (F3): a row left by a volume removed
+    // outside WebDAV neither gives an empty folder away nor makes a folder mixed.
+    let uploader_of: HashMap<&str, &str> = tracked
+        .iter()
+        .map(|(k, u)| (k.as_str(), u.as_str()))
+        .collect();
+    // An account's name as its first tracked row spells it.
+    let mut spelled: HashMap<String, &str> = HashMap::new();
+    for (_, user) in &tracked {
+        spelled.entry(user.to_ascii_lowercase()).or_insert(user);
     }
     let mut by_key: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for name in folders {
@@ -235,24 +289,31 @@ pub fn adopt_series_folder_owners(db: &Database, library: &Path) -> Option<Folde
     }
     let mut owners: Vec<(String, String)> = Vec::new();
     let mut unowned = 0;
-    for (key, names) in &by_key {
-        let only = uploaders
-            .get(key)
-            .filter(|u| u.len() == 1)
-            .and_then(|u| u.values().next());
-        let spelling = holding
-            .get(key)
-            .and_then(|held| names.iter().filter(|n| held.contains(*n)).min());
-        let all_tracked = || {
-            names.iter().all(|n| {
-                archives_under(library, n)
-                    .iter()
-                    .all(|a| tracked_keys.contains(a.as_str()))
-            })
-        };
-        match (only, spelling) {
-            (Some(user), Some(folder)) if all_tracked() => {
-                owners.push((folder.clone(), user.clone()));
+    for names in by_key.values() {
+        // The uploaders (ignoring case, first spelling kept), the spellings holding a
+        // tracked volume, and whether anything in them is not a tracked volume.
+        let mut uploaders: BTreeMap<String, &str> = BTreeMap::new();
+        let mut holding: BTreeSet<&str> = BTreeSet::new();
+        let mut all_tracked = true;
+        for name in names {
+            let contents = contents_of(library, name);
+            all_tracked &= !contents.opaque;
+            for archive in &contents.archives {
+                match uploader_of.get(archive.as_str()) {
+                    Some(user) => {
+                        let lower = user.to_ascii_lowercase();
+                        let user = spelled.get(&lower).copied().unwrap_or(user);
+                        uploaders.entry(lower).or_insert(user);
+                        holding.insert(name.as_str());
+                    }
+                    None => all_tracked = false,
+                }
+            }
+        }
+        match (uploaders.len(), holding.first()) {
+            (1, Some(folder)) if all_tracked => {
+                let user = uploaders.values().next().copied().unwrap_or_default();
+                owners.push((folder.to_string(), user.to_string()));
             }
             _ => unowned += 1,
         }
@@ -267,6 +328,35 @@ pub fn adopt_series_folder_owners(db: &Database, library: &Path) -> Option<Folde
         Err(e) => {
             tracing::warn!("[LIBRARY] series folder adoption: {e}");
             None
+        }
+    }
+}
+
+/// [`adopt_series_folder_owners`], tried again `every` while it cannot be done (the
+/// root cannot be listed, the database failed): until it is, uploaders' additions wait
+/// (auth answers 503), so a failed first try must not hold them for the life of the
+/// process (F4). Returns once adoption is done, or on `stop`.
+pub async fn adopt_series_folder_owners_until_done(
+    db: Arc<Database>,
+    library: PathBuf,
+    every: Duration,
+    stop: CancellationToken,
+) {
+    loop {
+        let (d, lib) = (db.clone(), library.clone());
+        let done = tokio::task::spawn_blocking(move || {
+            adopt_series_folder_owners(&d, &lib);
+            d.series_folder_adoption_pending()
+                .is_ok_and(|pending| !pending)
+        })
+        .await
+        .unwrap_or(false);
+        if done {
+            return;
+        }
+        tokio::select! {
+            _ = stop.cancelled() => return,
+            _ = tokio::time::sleep(every) => {}
         }
     }
 }
