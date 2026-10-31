@@ -306,7 +306,7 @@ needed on either side):
 |---|---|---|---|
 | S1 duplicate roots under a lease | `shared/dup-roots-lease` | `shared`; google, mega | `dedup` |
 | S2 edit layers across accounts, following a rename and a delete | `dav/`, `bridge/edit-layers-accounts` | `dav`; `bridge` on every cloud | `edit-layers-personal`, `edit-layers-curated` |
-| S3 history and positions across accounts | `dav/`, `bridge/`, `shared/history-accounts` | `dav`; `bridge` and `shared` on every cloud | `history`, `positions` |
+| S3 history and positions across accounts | `dav/`, `bridge/`, `shared/history-accounts`, `shared/cloud-owner` | `dav`; `bridge` and `shared` on every cloud | `history`, `positions` |
 | S4 a rename keeps provenance (no new queue entry over two walks) | `dav/`, `shared/rename-provenance` | `dav`; `shared` on every cloud | `provenance` |
 | S5 case-variant merge | `shared/case-merge` | `shared`; google, mega, rclone | `case-merge-rename` |
 | S6 a rename during OCR (no `_1` files) | `dav/`, `shared/rename-during-ocr` | `dav`; `shared` on every cloud | none |
@@ -511,7 +511,7 @@ to the server on the cloud (Basic, then its token) as an account each spec makes
 (`interop/e2e/rig/bridge/bridge.mjs`); on cloudsim the cloud account is held to what
 Bunko's driver must send (`strict_bunko`), since only Bunko talks to it. Nobody owns
 this cloud's root (`progress_user` unset), so an account's own files and edits stay on
-Bunko's disk.
+Bunko's disk. The owner case runs in `shared/cloud-owner` (below).
 - `bridge/library`: a volume opened is downloaded through Bunko and a page of it
   decodes; the archive Bunko serves hashes as the cloud's copy does, and the page never
   sent a request to the cloud's origins. An editor's edit goes up to Bunko as its
@@ -697,6 +697,13 @@ out a debounce and decide at its end whether to write.
   After the seeded series is in Bunko's and the cloud's `catalog.json`, neither names
   `history`, the queue file names neither it nor the device, and no `series.json`
   appears in the history.
+- `shared/cloud-owner` (S3 with a cloud-root owner, `shared` on every cloud): the
+  Readers setting names an account `progress_user` (`PUT /_admin/api/storage/readers`,
+  restored after). The direct reader syncs its history and `positions.json`; the owner
+  reads that month file (the cloud's bytes) and that page through WebDAV, and its
+  `positions.json` PUT and `<Vol>.edit.mokuro` PUT land in the cloud. Another account
+  reads 404 and no `positions.json`, and its own correction at the same path is its
+  own while the cloud keeps the owner's, once.
 
 **As built (I3, scenarios S4 and S6).**
 - From `rename-ocr.mjs`; each scenario uploads series of its own through the reader

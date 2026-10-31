@@ -89,6 +89,18 @@ export function bunko(rig) {
             if (!r.ok) throw new Error(`disconnecting the library: ${r.status} ${await r.text()}`);
             return r.json();
         },
+        /**
+         * The Readers setting (`PUT /_admin/api/storage/readers`): whether readers are
+         * served, and whose files the cloud root's own are (`progress_user`, or null).
+         */
+        async setReaders(serve_readers, progress_user) {
+            const r = await request('PUT', '/_admin/api/storage/readers', {
+                auth: basic(admin.username, admin.password),
+                body: { serve_readers, progress_user },
+            });
+            if (!r.ok) throw new Error(`the Readers setting: ${r.status} ${await r.text()}`);
+            return r.json();
+        },
         /** A file's bytes as `auth` reads them (status, bytes); 404 is an answer, not an error. */
         async bytes(path, auth) {
             const r = await request('GET', path, { auth });
