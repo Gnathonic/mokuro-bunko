@@ -82,12 +82,19 @@ pub fn split_layer_sidecar(file_name: &str) -> Option<(&str, &str)> {
     Some((&middle[..cut], layer))
 }
 
-/// The names in `directory` (`None` when it cannot be listed), sorted: what a
-/// [`sidecar_names::Folder`] is built from.
+/// The names of the FILES in `directory` (`None` when it cannot be listed), sorted:
+/// what a [`sidecar_names::Folder`] is built from. A folder is never an archive nor a
+/// sidecar (rule 2), whatever it is named.
 pub fn list_names(directory: &Path) -> Option<Vec<String>> {
     let mut names: Vec<String> = fs::read_dir(directory)
         .ok()?
-        .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                return None;
+            }
+            entry.file_name().into_string().ok()
+        })
         .collect();
     names.sort();
     Some(names)
@@ -454,7 +461,10 @@ mod tests {
             d,
             &["V.cbz", "v.MOKURO", "v.gcv.mokuro.gz", "W.cbz", "W.mokuro"],
         );
+        // A folder named like an archive is none (rule 2).
+        fs::create_dir(d.join("v.cbz")).unwrap();
         let names = list_names(d).unwrap();
+        assert!(!names.iter().any(|n| n == "v.cbz"));
         let names: Vec<&str> = names.iter().map(String::as_str).collect();
         let folder = sidecar_names::Folder::new(&names);
         assert_eq!(

@@ -12,7 +12,7 @@ use serde_json::json;
 
 use super::{
     Effects, Req, audit, blocking, check_dav_locks, eval_if, file_audit_target,
-    folder_audit_target, forget_ocr_records, is_cbz, is_virtual_root, lookup,
+    folder_audit_target, forget_ocr_records, is_cbz, is_virtual_root, lookup, ownership_holds,
     personal_audit_target, personal_grant_holds, primary_leaving, write_lock_conflict,
 };
 use crate::paths::{self, PathClass};
@@ -57,6 +57,7 @@ pub(crate) async fn delete(inner: &Arc<Inner>, req: &Req) -> DavResult<Resp> {
     }
     let (inner2, req2) = (inner.clone(), req.clone());
     blocking(move || {
+        ownership_holds(&req2)?;
         let mut effects = Effects::default();
         delete_resource(&inner2, &req2, &res, &mut effects)?;
         inner2.locks.remove_tree(&key);
@@ -98,6 +99,7 @@ fn delete_resource(
                 req.ctx.hooks.forget_volume_uploads_under_prefix(&rel);
                 req.ctx.hooks.forget_ocr_sidecars_under_prefix(&rel);
                 req.ctx.hooks.forget_volume_uuids_under_prefix(&rel);
+                req.ctx.hooks.series_folder_removed(&rel);
                 inner.overlays().forget_prefix(&rel);
             }
             effects.note_removed(inner, phys);
@@ -210,6 +212,9 @@ pub(crate) async fn mkcol(inner: &Arc<Inner>, req: &Req) -> DavResult<Resp> {
         return Err(DavError::new(StatusCode::FORBIDDEN, "Forbidden"));
     }
     let (inner2, req2) = (inner.clone(), req.clone());
+    // A series folder (a top-level library folder) is owned by the request that
+    // created it (0.8).
+    let series_folder = matches!(parent, Resource::Virtual { .. });
     blocking(move || {
         let Some((dir, kind)) = inner2
             .roots
@@ -218,9 +223,13 @@ pub(crate) async fn mkcol(inner: &Arc<Inner>, req: &Req) -> DavResult<Resp> {
         else {
             return Err(DavError::new(StatusCode::FORBIDDEN, "Forbidden"));
         };
-        // Also creates `users/<u>/` on an account's first use; a concurrent MKCOL of the
-        // same collection is not an error.
-        fs::create_dir_all(&dir)?;
+        if series_folder && kind == FileKind::Library {
+            create_series_folder(&inner2, &req2, &dir)?;
+        } else {
+            // Also creates `users/<u>/` on an account's first use; a concurrent MKCOL of
+            // the same collection is not an error.
+            fs::create_dir_all(&dir)?;
+        }
         let member = paths::join_uri(parent.path(), &name);
         let target = match kind {
             FileKind::Progress => ("progress", paths::normalize(&member)),
@@ -236,6 +245,30 @@ pub(crate) async fn mkcol(inner: &Arc<Inner>, req: &Req) -> DavResult<Resp> {
     })
     .await??;
     Ok(response::status_page(StatusCode::CREATED, ""))
+}
+
+/// One series folder MKCOL at a time, from its create to its owner record: a store
+/// whose create is a lookup and then a make (a cloud index) would otherwise let two
+/// concurrent requests both create it, and the later one take it.
+static SERIES_FOLDER_CREATE: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+/// MKCOL of a top-level library folder. The request that creates it tells the hooks who
+/// did; one that finds it there already (a concurrent MKCOL) is not an error and owns
+/// nothing. Blocking.
+fn create_series_folder(inner: &Inner, req: &Req, dir: &Path) -> DavResult<()> {
+    let _one = SERIES_FOLDER_CREATE.lock();
+    let created = match fs::create_dir(dir) {
+        Ok(()) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => false,
+        Err(e) => return Err(e.into()),
+    };
+    if created
+        && let (Some(rel), Some(actor)) = (inner.roots.library_rel(dir), req.username())
+        && !rel.is_empty()
+    {
+        req.ctx.hooks.series_folder_created(&rel, actor);
+    }
+    Ok(())
 }
 
 /// The `Destination` header as a decoded path (WsgiDAV rules; spec §8.3.7).
@@ -798,11 +831,13 @@ fn move_folder(
             req.ctx
                 .hooks
                 .rename_volume_uuids_under_prefix(old_prefix, new_prefix);
+            req.ctx.hooks.series_folder_moved(old_prefix, new_prefix);
             inner.overlays().rename_prefix(old_prefix, new_prefix);
         }
         (Some(old_prefix), None) => {
             req.ctx.hooks.forget_ocr_sidecars_under_prefix(old_prefix);
             req.ctx.hooks.forget_volume_uuids_under_prefix(old_prefix);
+            req.ctx.hooks.series_folder_removed(old_prefix);
             inner.overlays().forget_prefix(old_prefix);
         }
         _ => {}

@@ -33,14 +33,16 @@ pub(crate) fn personal_name(name: &str) -> Option<(&str, &str, bool)> {
         .filter(|(_, id, _)| sidecar_names::layer_class(id) == LayerClass::Personal)
 }
 
-/// The names in a library folder (through the store: an index read on a cloud
-/// library), staging files left out. Blocking.
+/// The names of a library folder's FILES (through the store: an index read on a cloud
+/// library), staging files left out. A folder is never an archive nor a sidecar (rule
+/// 2): a directory named `V.edit.cbz` makes no `V.edit.mokuro` a primary. Blocking.
 pub(crate) fn names_in(dir: &Path) -> Vec<String> {
     let Ok(entries) = fs::read_dir(dir) else {
         return Vec::new();
     };
     entries
         .flatten()
+        .filter(|e| !e.file_type().is_ok_and(|t| t.is_dir()))
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .filter(|n| !paths::is_staging_name(n))
         .collect()
@@ -288,25 +290,33 @@ impl PersonalOverlays {
         let mut out = Vec::new();
         let mut todo = vec![String::new()];
         while let Some(rel) = todo.pop() {
-            let names = names_in(&self.library.join(&rel));
+            let dir = self.library.join(&rel);
+            let names = names_in(&dir);
             let stems = stems_of(&names);
-            for name in &names {
-                let child = if rel.is_empty() {
-                    name.clone()
+            let child_of = |name: &str| {
+                if rel.is_empty() {
+                    name.to_string()
                 } else {
                     format!("{rel}/{name}")
-                };
+                }
+            };
+            for entry in fs::read_dir(&dir).into_iter().flatten().flatten() {
+                if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+                    continue;
+                }
+                let child = child_of(&entry.file_name().to_string_lossy());
                 let path = self.library.join(&child);
-                if fs::is_dir(&path) {
-                    // The cloud-root owner's own tree holds no volume, and a symlinked
-                    // folder is not walked (the index's scan does not either; a link up
-                    // the tree would loop).
-                    let linked =
-                        fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink());
-                    if !linked && !reader_tree::is_per_user_rel(&child) {
-                        todo.push(child);
-                    }
-                } else if personal_name(name).is_some()
+                // The cloud-root owner's own tree holds no volume, and a symlinked
+                // folder is not walked (the index's scan does not either; a link up
+                // the tree would loop).
+                let linked = fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink());
+                if !linked && !reader_tree::is_per_user_rel(&child) {
+                    todo.push(child);
+                }
+            }
+            for name in &names {
+                let child = child_of(name);
+                if personal_name(name).is_some()
                     && !matches!(
                         sidecar_names::classify(name, &stems),
                         SidecarClass::Primary { .. }

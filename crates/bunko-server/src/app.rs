@@ -482,6 +482,7 @@ pub fn dav_handler(
                 role: ctx.identity.role(),
                 owns_cloud_root,
                 personal_only,
+                ownership_recheck: None,
                 nginx_accel,
                 client_ip: Some(ctx.client_ip.clone()),
                 hooks,

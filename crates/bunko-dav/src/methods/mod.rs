@@ -197,6 +197,18 @@ pub(crate) fn personal_grant_holds(req: &Req, kind: Option<FileKind>) -> DavResu
     Ok(())
 }
 
+/// A write auth admitted by a series owner rule ([`DavContext::ownership_recheck`]) is
+/// decided again where it lands: refused (403, the fresh refusal) when it no longer
+/// would be. Blocking.
+pub(crate) fn ownership_holds(req: &Req) -> DavResult<()> {
+    match &req.ctx.ownership_recheck {
+        Some(recheck) => {
+            recheck().map_err(|refusal| DavError::new(StatusCode::FORBIDDEN, refusal.message))
+        }
+        None => Ok(()),
+    }
+}
+
 /// HTTP conditionals and the DAV `If:` header against an existing resource (WsgiDAV
 /// `_evaluate_if_headers`).
 pub(crate) fn eval_if(inner: &Inner, req: &Req, res: &Resource) -> DavResult<()> {
