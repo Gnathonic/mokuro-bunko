@@ -13,7 +13,7 @@ use axum::response::Response;
 use http::{HeaderMap, HeaderValue, Method, StatusCode};
 
 pub const EXPOSE_HEADERS: &str = "Allow, Content-Length, Content-Type, DAV, ETag, Last-Modified, Location, Lock-Token, \
-WWW-Authenticate, X-Mokuro-Manifest, X-Mokuro-Recheck-After, X-Mokuro-Upload, X-Mokuro-Size, X-Mokuro-Put, \
+Retry-After, WWW-Authenticate, X-Mokuro-Manifest, X-Mokuro-Recheck-After, X-Mokuro-Upload, X-Mokuro-Size, X-Mokuro-Put, \
 X-Mokuro-Digest-Verified";
 pub const ALLOW_METHODS: &str =
     "GET, HEAD, POST, PUT, DELETE, OPTIONS, PROPFIND, PROPPATCH, MKCOL, COPY, MOVE, LOCK, UNLOCK";
