@@ -713,8 +713,14 @@ out a debounce and decide at its end whether to write.
   Last the direct reader turns a page and syncs: `positions.json` holds its new page
   and the owner's, it lists the owner's device, and the owner's month file and
   correction are in the cloud byte for byte as the owner's reader left them (the
-  direct reader wrote no `Vol 1.edit.mokuro`). A writer that drops the owner's entry
-  fails it (checked by clobbering `positions.json` before the direct reader's sync). The correction goes on a series the
+  direct reader wrote no `Vol 1.edit.mokuro`). The spec has no clobbering step of its
+  own: once, by hand, a temporary change that wrote `positions.json` without the
+  owner's entry before the direct reader's sync made it fail (`owner: null`), and was
+  reverted. PENDING on OneDrive (`LOST_POSITIONS_PENDING`): the reader there pushes
+  `positions.json` before it reads the cloud's copy (its cache, rebuilt whole by a
+  listing begun before the push, lacks the file), so the owner's entry is lost; on
+  exactly that outcome the spec runs every other check and reports itself skipped,
+  until the reader's fix is in `interop/reader.ref`. The correction goes on a series the
   spec seeds itself, and whatever happens it leaves the cloud as it found it (the rig
   runs one spec after another with no reset, and `shared/edits` reads `Rig Series/Vol
   1.edit.mokuro`): the reader signs out, the admin removes the series and the other
