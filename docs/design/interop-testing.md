@@ -730,7 +730,10 @@ out a debounce and decide at its end whether to write.
   1.edit.mokuro`): the reader signs out, the admin removes the series and the other
   account its overlay, the owner writes the four root files and the history back
   through Bunko as they were (removing what was not there), and the spec fails unless
-  the cloud then holds what it held before.
+  the cloud then holds what it held before. Bunko answers a DELETE from its index, so a
+  404 for a file the cloud still holds (the direct reader's write, not listed yet) is
+  asked again, up to 60 s for the whole restore (`cloud-restore.mjs`); one that outlasts
+  that is annotated `restore-unseen` and left to that last check.
 
 **As built (I3, scenarios S4 and S6).**
 - From `rename-ocr.mjs`; each scenario uploads series of its own through the reader

@@ -13,6 +13,7 @@ import { createHash } from 'node:crypto';
 import { test, expect } from '../fixtures.mjs';
 import { basic, bunko, davPath } from '../bunko.mjs';
 import { cloudFiles } from '../cloud-direct.mjs';
+import { cloudDeleter } from '../cloud-restore.mjs';
 import { monthFile, positionsOf, seedSentinel } from '../history-accounts.mjs';
 import { bunkoSeenAlive, cloudBytes, cloudJson, connect, recordReaderWrites, volumeNamed } from './shared.mjs';
 
@@ -69,6 +70,9 @@ async function settled(call) {
     }
 }
 
+/** How long a restore waits for Bunko to list files the cloud holds (cloud-restore.mjs). */
+const UNSEEN_WAIT_MS = 60_000;
+
 /**
  * Put the cloud back as the spec found it (`found`, ownTreeNow's): the other account's
  * overlay and the spec's series removed (the admin), the owner's tree written back
@@ -77,6 +81,26 @@ async function settled(call) {
 async function restoreCloud(rig, { found, own, owner, other, admin }) {
     const server = bunko(rig);
     const del = (path, auth) => settled(async () => (await server.request('DELETE', path, { auth })).status);
+    // The cloud's file at `segments` (with `folder`, the folder and all below it).
+    const deleter = cloudDeleter({
+        del: ({ segments, folder, auth }) => del(davPath(...segments) + (folder ? '/' : ''), auth),
+        holds: async ({ segments, folder }) => {
+            const rel = segments.join('/');
+            return (await cloudFiles(rig)).some((f) => (folder ? f.path.startsWith(`${rel}/`) : f.path === rel));
+        },
+        waitMs: UNSEEN_WAIT_MS,
+    });
+    const delCloud = async (segments, auth, { folder = false } = {}) => {
+        const { status, unseenMs } = await deleter({ segments, folder, auth });
+        if (unseenMs !== null) {
+            const what = segments.join('/') + (folder ? '/' : '');
+            test.info().annotations.push({
+                type: 'restore-unseen',
+                description: `${what}: Bunko answered 404 for ${Math.round(unseenMs / 1000)} s while the cloud held it`,
+            });
+        }
+        return status;
+    };
     const problems = [];
     const step = async (what, call, ok) => {
         try {
@@ -87,7 +111,7 @@ async function restoreCloud(rig, { found, own, owner, other, admin }) {
         }
     };
     await step("the other account's overlay", () => del(davPath(own, 'Vol 1.edit.mokuro'), other), [204, 404]);
-    await step(`the series ${own}`, () => del(`${davPath(own)}/`, admin), [204, 404]);
+    await step(`the series ${own}`, () => delCloud([own], admin, { folder: true }), [204, 404]);
     let now = {};
     try {
         now = await ownTreeNow(rig);
@@ -100,15 +124,15 @@ async function restoreCloud(rig, { found, own, owner, other, admin }) {
     // ones that were there goes alone.
     for (const device of devices(Object.keys(now))) {
         if (hadDevices.has(device)) continue;
-        await step(`history/${device}/`, () => del(`${davPath('history', device)}/`, owner), [204, 404]);
+        await step(`history/${device}/`, () => delCloud(['history', device], owner, { folder: true }), [204, 404]);
     }
     for (const p of Object.keys(now)) {
         const segments = p.split('/');
         if (p in found || (segments[0] === 'history' && !hadDevices.has(segments[1]))) continue;
-        await step(p, () => del(davPath(...segments), owner), [204, 404]);
+        await step(p, () => delCloud(segments, owner), [204, 404]);
     }
     if (hadDevices.size === 0 && devices(Object.keys(now)).size > 0) {
-        await step('history/', () => del(`${davPath('history')}/`, owner), [204, 404]);
+        await step('history/', () => delCloud(['history'], owner, { folder: true }), [204, 404]);
     }
     for (const [p, bytes] of Object.entries(found)) {
         if (p in now && sha256(now[p]) === sha256(bytes)) continue;
