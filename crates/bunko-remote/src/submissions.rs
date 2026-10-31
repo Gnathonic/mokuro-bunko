@@ -12,14 +12,17 @@
 //! (`queued`), and hands them to [`CloudHooks::series_submission`](crate::feed::CloudHooks::series_submission) on the events
 //! thread: `applied`, or `refused` with a `lost-write` conflict row. A version
 //! superseded before it could be read is dropped (the newer one has its own row). A
-//! version readers do not see at its path (a duplicate merge's losing copy, or a case
-//! merge's losing spelling's, submitted before its trash) is applied as its facts only:
-//! `volumes` and `spine_offset` are dropped, since nothing guards those by time and the
-//! losing copy would put back a shelf alignment the winner's reset or never had; the
-//! facts are guarded by `updated_at`. The
-//! merge marks its row so when it opens it (`submission.facts_only`); the index is
-//! never asked at answer time, since after an index rebuild the rows resume before the
-//! full sync has filled the new one, and every version would look unseen.
+//! merge's losing copy, submitted before its trash (a duplicate merge's, which readers
+//! do not see at its path, or a case merge's losing spelling's), is applied as its
+//! facts only: `volumes` and `spine_offset` are dropped, since nothing guards those by
+//! time and the losing copy would put back a shelf alignment the winner's reset or
+//! never had; the facts are guarded by `updated_at`. For a case merge this protects
+//! the merge's replay only: until the merge each spelling is its own folder to
+//! readers, and the feed and first adoption apply either one's file whole as it
+//! arrives, like any reader's write. The merge marks its row so when it opens it
+//! (`submission.facts_only`); the index is never asked at answer time, since after an
+//! index rebuild the rows resume before the full sync has filled the new one, and
+//! every version would look unseen.
 //! Rows still `fetching` or `queued` are resumed at the next start; they wait for the
 //! server's hooks when those are not installed yet.
 //!

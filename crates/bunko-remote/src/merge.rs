@@ -25,7 +25,8 @@
 //!   archives, a stamped layer that differs, or a file against a folder leave the
 //!   whole group in the loser as a `case-merge-blocked` conflict. A loser
 //!   `series.json` is ingested as a submission into the winner's series key, as its
-//!   facts only ([`crate::submissions`]), then trashed. A loser recreated too often stops being merged ([`RECREATE_LIMIT`]).
+//!   facts only ([`crate::submissions`]), then trashed. A loser recreated too often
+//!   stops being merged ([`RECREATE_LIMIT`]).
 //! - **Durability:** each merge is one journal group: a `merge_group` row in
 //!   `state.sqlite` and its steps as outbox ops (origin `Admin`, `Deferred`,
 //!   `group_id`), which the outbox worker never runs. A group resumes after a crash,

@@ -1192,8 +1192,10 @@ fn the_losers_series_json_is_folded_in_as_a_submission_then_trashed() {
 }
 
 /// The loser's `series.json` is folded in as its facts only, as a duplicate merge's
-/// losing copy is: its `volumes` and `spine_offset` are the losing spelling's shelf
-/// alignment, guarded by no time, and would overwrite the winner's.
+/// losing copy is. Before the merge either spelling's file is applied whole as it
+/// arrives (it is a folder of its own to readers); the merge only replays that
+/// version, and its `volumes` and `spine_offset`, guarded by no time, would put back an
+/// alignment the winner's file has changed since.
 #[test]
 fn the_losers_series_json_submits_only_its_facts() {
     let t = T::new(
@@ -1208,13 +1210,23 @@ fn the_losers_series_json_submits_only_its_facts() {
         ],
     );
     t.steady();
+    // Before the merge each spelling is its own folder to readers, and first adoption
+    // took each one's file whole, as the feed takes any write to either.
+    let adopted = t.hooks.submissions.lock().clone();
+    assert!(
+        adopted.iter().any(|(dir, body)| dir == "kingdom"
+            && String::from_utf8_lossy(body).contains("spine_offset")),
+        "{adopted:?}"
+    );
     t.policy();
     t.wait_merges(1);
     assert!(t.at("kingdom").is_none());
-    let subs = t.hooks.submissions.lock().clone();
-    assert!(
-        subs.contains(&("Kingdom".into(), b"{\"title\":\"kingdom\"}".to_vec())),
-        "{subs:?}"
+    // The merge's own submission replays that old version: its facts only, never its
+    // untimed alignment.
+    let merged = t.hooks.submissions.lock()[adopted.len()..].to_vec();
+    assert_eq!(
+        merged,
+        [("Kingdom".to_string(), b"{\"title\":\"kingdom\"}".to_vec())]
     );
 }
 
