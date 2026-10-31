@@ -205,3 +205,45 @@ async fn a_folder_named_like_an_archive_claims_no_sidecar() {
     );
     assert!(!env.lib("series/vol1.edit.mokuro").exists());
 }
+
+/// The listing agrees (F2): beside a folder named `vol1.edit.cbz`, the cloud-root
+/// owner's physical `vol1.edit.mokuro` is still a correction, listed to nobody else,
+/// and each account still sees its own.
+#[tokio::test]
+async fn a_folder_named_like_an_archive_hides_no_correction_in_a_listing() {
+    let env = Env::new();
+    std::fs::create_dir_all(env.lib("series/vol1.edit.cbz")).unwrap();
+    std::fs::write(env.lib("series/vol1.edit.mokuro"), br#"{"pages":[]}"#).unwrap();
+    let body = br#"{"pages":[{"img_path":"1.png","blocks":[]}]}"#;
+    let r = env
+        .req(
+            Some("reader"),
+            "PUT",
+            "/mokuro-reader/series/vol1.edit.mokuro",
+            &[],
+            body,
+        )
+        .await;
+    assert_eq!(r.code(), 201, "{}", r.text());
+    let list = |user: &'static str| {
+        let env = &env;
+        async move {
+            let r = env
+                .req(
+                    Some(user),
+                    "PROPFIND",
+                    "/mokuro-reader/series/",
+                    &[("depth", "1")],
+                    b"",
+                )
+                .await;
+            assert_eq!(r.code(), 207);
+            r.text()
+        }
+    };
+    let other = list("uploader").await;
+    assert!(!other.contains("vol1.edit.mokuro"), "{other}");
+    let own = list("reader").await;
+    assert!(own.contains("vol1.edit.mokuro"), "{own}");
+    assert!(own.contains(&format!(">{}<", body.len())), "{own}");
+}
