@@ -319,17 +319,8 @@ pub(crate) async fn get(inner: &Arc<Inner>, req: &Req) -> DavResult<Resp> {
                 bunko_store::ErrorClass::NotFound | bunko_store::ErrorClass::Other => {
                     DavError::new(StatusCode::NOT_FOUND, e.to_string())
                 }
-                // The cloud's file changed since Bunko last listed it (a read pinned to
-                // the listed version failed; the store lists again at once). The client
-                // sent no precondition, so this is no 412: ask again in a second.
-                bunko_store::ErrorClass::Conflict => DavError {
-                    retry_after: Some(1),
-                    ..DavError::new(
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        "the file changed in the library storage; Bunko is reading it again",
-                    )
-                },
-                _ => DavError::from(e),
+                // Changed behind the index: 503, ask again in a second (no 412).
+                _ => DavError::from_read_io(&e),
             })?;
     let stat = Stat::from_meta(&file.metadata().await?);
     let res = match res {

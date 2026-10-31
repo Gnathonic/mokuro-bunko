@@ -144,6 +144,25 @@ impl DavError {
     }
 }
 
+impl DavError {
+    /// A failed READ of a library file. A store's conflict here is no precondition the
+    /// client sent: the cloud's file changed since Bunko last listed it (a read pinned to
+    /// the listed version failed; the store lists again at once), so the answer is 503
+    /// with `Retry-After: 1`, never 412. Anything else as [`DavError::from_io`].
+    pub fn from_read_io(e: &std::io::Error) -> Self {
+        match bunko_store::classify(e) {
+            bunko_store::ErrorClass::Conflict => DavError {
+                retry_after: Some(1),
+                ..DavError::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "the file changed in the library storage; Bunko is reading it again",
+                )
+            },
+            _ => DavError::from_io(e),
+        }
+    }
+}
+
 /// A lease refusal's own message when it carries the tag, else `fallback (message)`.
 fn lease_message(e: &std::io::Error, fallback: &str) -> String {
     let msg = bunko_store::error_message(e);
