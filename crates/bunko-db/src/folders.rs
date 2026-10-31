@@ -174,7 +174,9 @@ impl Database {
     }
 
     /// Record the adopted `(folder, owner)` pairs and mark adoption done, in one
-    /// transaction (nothing when it was done meanwhile); how many were recorded.
+    /// transaction (nothing when it was done meanwhile); how many were recorded. A
+    /// series that got a record meanwhile (a folder an editor created while adoption
+    /// waited) keeps it: its creator owns it.
     pub fn finish_series_folder_adoption(&self, owners: &[(String, String)]) -> Result<usize> {
         self.write(|conn| {
             let done = conn
@@ -187,8 +189,11 @@ impl Database {
             let mut recorded = 0;
             for (folder, user) in owners {
                 if let Some(key) = key_of(folder) {
-                    put(conn, &key, folder, user)?;
-                    recorded += 1;
+                    recorded += conn.execute(
+                        "INSERT INTO series_folder_owners (series_key, folder_name, \
+                         owner_username) VALUES (?, ?, ?) ON CONFLICT(series_key) DO NOTHING",
+                        params![key, folder.trim_matches('/'), user],
+                    )?;
                 }
             }
             conn.execute(
@@ -327,13 +332,20 @@ mod tests {
         db.with_writer_connection(|c| c.execute("DELETE FROM series_folder_adoption", []))
             .unwrap();
         assert!(db.series_folder_adoption_pending().unwrap());
+        // Created while adoption waited: its creator keeps it.
+        db.record_series_folder_owner("C", "carol").unwrap();
         let owners = [
             ("A".to_string(), "alice".to_string()),
             ("B".to_string(), "bob".to_string()),
+            ("c".to_string(), "alice".to_string()),
         ];
         assert_eq!(db.finish_series_folder_adoption(&owners).unwrap(), 2);
         assert!(!db.series_folder_adoption_pending().unwrap());
         assert_eq!(db.series_folder_owner("b").unwrap().as_deref(), Some("bob"));
+        assert_eq!(
+            db.series_folder_owner("C").unwrap().as_deref(),
+            Some("carol")
+        );
         assert_eq!(db.finish_series_folder_adoption(&owners).unwrap(), 0);
     }
 
