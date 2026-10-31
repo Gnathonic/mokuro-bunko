@@ -161,10 +161,11 @@
   write is kept as a "pre-upgrade" layer first.** With the generation upgrade on, an
   outdated `<Volume>.mokuro` in a family listed under `ocr.upgrade.replace` is upgraded
   even if a person or Mokuro Reader 1.10.0 changed it without marking it edited (a file
-  marked edited is never replaced: see the next entry). One Bunko can prove it wrote is replaced as before:
-  every OCR file it installs now carries a seal, `ocr_engine.seal`, a hash of its pages
-  and its `ocr_engine` block (RFC 8785 canonical JSON, so Mokuro Reader and other tools
-  can check it too; test vectors in `interop/contract/seal/`). Renaming the volume or
+  marked edited is never replaced: see "an EDITED file is never replaced" below). One
+  Bunko can prove it wrote is replaced as before: every OCR file it installs now
+  carries a seal, `ocr_engine.seal`, a hash of its pages and its `ocr_engine` block
+  (RFC 8785 canonical JSON, so Mokuro Reader and other tools can check it too; test
+  vectors in `interop/contract/seal/`). Renaming the volume or
   series, re-saving the file with other formatting, or moving the library to another
   Bunko keeps the seal; changing any OCR text breaks it. Any
   other (stock mokuro output, a file the reader saved corrections into, or one that only
