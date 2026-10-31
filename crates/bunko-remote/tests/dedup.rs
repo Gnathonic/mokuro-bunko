@@ -754,6 +754,48 @@ fn a_merge_that_made_no_progress_waits_for_a_change() {
     wait_until("planned again", || dedups("S") >= 2);
 }
 
+/// The memo only waits an hour: past it, a set that can never progress is planned
+/// again. An unchanged plan of a group that made no progress journals nothing new, so
+/// however often the memo expires there is one record (no audit row, no "Recent
+/// merges" history pushed out); a real change still plans it again.
+#[test]
+fn a_stuck_merge_journals_once_however_often_its_memo_expires() {
+    let f = FakeBackend::drive_like();
+    let a = top_root(&f);
+    let b = top_root(&f);
+    let sa = mkdir(&f, &a, "S");
+    let sb = mkdir(&f, &b, "S");
+    put(&f, &sb, "v.cbz", b"older");
+    put(&f, &sa, "v.cbz", b"newer");
+    for _ in 0..1000 {
+        f.fail_next(FakeOp::Trash, bunko_remote::BErr::Fatal("refused".into()));
+    }
+    let t = T::new(f);
+    t.steady();
+    t.policy();
+    let dedups = |winner: &str| {
+        t.s()
+            .recent_merges()
+            .iter()
+            .filter(|m| m.origin == "dedup" && m.state == "done" && m.winner == winner)
+            .count()
+    };
+    wait_until("S merged once", || dedups("S") >= 1);
+    let roots = dedups("");
+    let lists = || t.fake.calls(FakeOp::ListDir);
+    for _ in 0..5 {
+        let before = lists();
+        t.s().expire_merge_memos();
+        wait_until("planned again", || lists() > before);
+        // A few merge intervals for the pass to finish.
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    assert_eq!((dedups(""), dedups("S")), (roots, 1));
+    put(&t.fake, &sb, "w.cbz", b"w");
+    t.sync_feed();
+    wait_until("planned again after a change", || dedups("S") >= 2);
+}
+
 #[test]
 fn a_merge_runs_no_hooks_and_announces_no_removal_of_a_surviving_path() {
     let f = FakeBackend::mega_like();

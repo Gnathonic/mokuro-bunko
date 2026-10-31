@@ -60,7 +60,8 @@
 //!   folder's direct children, no OCR on what moves), with `storage.library.dedup` on
 //!   and a provider that allows duplicate names. A folder merged
 //!   [`DEDUP_RECREATE_LIMIT`] times in a day is left alone (`dup-recreated`). A group
-//!   that moved and trashed nothing waits for a change in its scope (any origin).
+//!   that moved and trashed nothing waits for a change in its scope (any origin), and
+//!   a re-plan identical to its plan journals nothing (`Plan::fingerprint`).
 //! - **Plan:** per other member, fresh listings of it and the canonical one. An item
 //!   with no counterpart moves in; a folder, or a keep-both file
 //!   ([`crate::names::dedup_keeps_both`]), moves in beside its name; of two files the
@@ -289,6 +290,28 @@ fn last_name(rel: &RelPath) -> &str {
     rel.segments().last().map_or("", String::as_str)
 }
 
+/// Why a scope is not planned again yet.
+#[derive(Debug, Clone)]
+struct Memo {
+    /// As of when: a store event in the scope after this plans it again.
+    at: Instant,
+    /// Until when (`at` + [`EVENT_RETAIN`]: events are only remembered that long).
+    until: Instant,
+    /// The plan ([`Plan::fingerprint`]) of a group that made no progress. Planned the
+    /// same again, it would make none again: it journals nothing, and is memoized anew.
+    idle: Option<String>,
+}
+
+impl Memo {
+    fn new(at: Instant, idle: Option<String>) -> Memo {
+        Memo {
+            at,
+            until: at + EVENT_RETAIN,
+            idle,
+        }
+    }
+}
+
 /// The merge's shared state: the policy, open scopes, recent events, the thread.
 pub(crate) struct MergeState {
     policy: Mutex<Option<Arc<dyn CaseMergePolicy>>>,
@@ -299,8 +322,9 @@ pub(crate) struct MergeState {
     /// closed. The order is this, then the state db, never the other way.
     busy: Mutex<Vec<(Option<String>, Scope)>>,
     events: Mutex<VecDeque<(Instant, Vec<String>)>>,
-    /// Scopes planned with nothing to do (only blocks), and when.
-    memo: Mutex<HashMap<Scope, Instant>>,
+    /// Scopes planned with nothing to do (only blocks), or whose group made no
+    /// progress, and when ([`Memo`]).
+    memo: Mutex<HashMap<Scope, Memo>>,
     started: Instant,
     quiet: Duration,
     interval: Duration,
@@ -596,6 +620,31 @@ impl Plan {
             && self.submits.is_empty()
             && self.l_trash.is_empty()
             && !self.empty_loser)
+    }
+
+    /// What the plan would do, as one string: the same steps on the same versions, and
+    /// the same blocks, give the same fingerprint.
+    fn fingerprint(&self) -> String {
+        let mut h = Sha256::new();
+        for p in self.ordered() {
+            h.update(
+                format!(
+                    "{:?}\0{}\0{:?}\0{:?}\0{}\0{:?}\n",
+                    p.kind,
+                    p.pid,
+                    p.cver,
+                    p.src.as_ref().map(ToString::to_string),
+                    p.dest,
+                    p.parent_pid
+                )
+                .as_bytes(),
+            );
+        }
+        for b in &self.blocks {
+            h.update(format!("block\0{:?}\0{:?}\0{}\n", b.this, b.that, b.detail).as_bytes());
+        }
+        h.update([u8::from(self.empty_loser)]);
+        hex::encode(h.finalize())
     }
 
     fn ordered(&self) -> impl Iterator<Item = &Planned> {
@@ -1095,7 +1144,10 @@ impl<B: Backend> RemoteStore<B> {
         }
         if !scope.stem && self.recreations(scope, "auto") >= RECREATE_LIMIT {
             self.block_recreated(&winner, &losers);
-            self.merge.memo.lock().insert(scope.clone(), Instant::now());
+            self.merge
+                .memo
+                .lock()
+                .insert(scope.clone(), Memo::new(Instant::now(), None));
             return Ok(());
         }
         // Busy first, then the policy's check: a claim cannot slip in between.
@@ -1116,8 +1168,15 @@ impl<B: Backend> RemoteStore<B> {
         };
         self.record_blocks(&plan.blocks);
         if !plan.work() {
-            self.merge.memo.lock().insert(scope.clone(), Instant::now());
+            self.merge
+                .memo
+                .lock()
+                .insert(scope.clone(), Memo::new(Instant::now(), None));
             self.merge.unmark_probe(scope);
+            return Ok(());
+        }
+        let print = plan.fingerprint();
+        if self.unchanged_idle(scope, planned, &print) {
             return Ok(());
         }
         let losers_s: Vec<String> = losers.iter().map(ToString::to_string).collect();
@@ -1142,7 +1201,7 @@ impl<B: Backend> RemoteStore<B> {
             winner
         );
         if let GroupEnd::Done = self.run_group(&gid, policy)? {
-            self.memo_if_idle(&gid, scope, planned);
+            self.memo_if_idle(&gid, scope, planned, print);
         }
         Ok(())
     }
@@ -1150,8 +1209,10 @@ impl<B: Backend> RemoteStore<B> {
     /// A finished group that moved and trashed nothing (every step refused, blocked or
     /// skipped) would be planned the same way next pass, journal row, audit and
     /// listings included, every merge interval: it is memoized as of its planning, so
-    /// only a change since (or the memo's age) plans it again.
-    fn memo_if_idle(&self, gid: &str, scope: &Scope, planned: Instant) {
+    /// only a change since (or the memo's age) plans it again, and with its plan
+    /// (`print`), so that planning the same again journals nothing
+    /// ([`Self::unchanged_idle`]).
+    fn memo_if_idle(&self, gid: &str, scope: &Scope, planned: Instant, print: String) {
         let idle = self
             .core
             .state
@@ -1164,20 +1225,45 @@ impl<B: Backend> RemoteStore<B> {
             })
             .unwrap_or(false);
         if idle {
-            self.merge.memo.lock().insert(scope.clone(), planned);
+            self.merge
+                .memo
+                .lock()
+                .insert(scope.clone(), Memo::new(planned, Some(print)));
         }
+    }
+
+    /// The scope's last group made no progress and this plan (`print`) is that one
+    /// again: it would make none again, so nothing is journaled (no `merge_group` row,
+    /// no audit record pushing real history out of "Recent merges") and the scope is
+    /// memoized anew as of this planning. Its steps run again once something in the
+    /// scope changes the plan, or after a restart (the memo is not kept).
+    fn unchanged_idle(&self, scope: &Scope, planned: Instant, print: &str) -> bool {
+        let mut memo = self.merge.memo.lock();
+        if memo.get(scope).and_then(|m| m.idle.as_deref()) != Some(print) {
+            return false;
+        }
+        memo.insert(scope.clone(), Memo::new(planned, Some(print.to_string())));
+        drop(memo);
+        self.merge.unmark_probe(scope);
+        true
+    }
+
+    /// Test-only: expire every memo, as [`EVENT_RETAIN`] without a change would, so the
+    /// next pass plans every memoized set again.
+    #[cfg(feature = "testing")]
+    pub fn expire_merge_memos(&self) {
+        let now = Instant::now();
+        for m in self.merge.memo.lock().values_mut() {
+            m.until = now;
+        }
+        self.merge.wake();
     }
 
     /// Planned before with nothing to do (or guarded), and nothing changed since.
     fn memoized(&self, scope: &Scope) -> bool {
-        self.merge
-            .memo
-            .lock()
-            .get(scope)
-            .copied()
-            .is_some_and(|at| {
-                self.merge.last_event(scope).is_none_or(|t| t <= at) && at.elapsed() < EVENT_RETAIN
-            })
+        self.merge.memo.lock().get(scope).cloned().is_some_and(|m| {
+            self.merge.last_event(scope).is_none_or(|t| t <= m.at) && Instant::now() < m.until
+        })
     }
 
     // ---- duplicates (D5 rev.) -------------------------------------------------------
@@ -1234,7 +1320,10 @@ impl<B: Backend> RemoteStore<B> {
                 Some(&set.members[0].pid),
                 DUP_RECREATING,
             );
-            self.merge.memo.lock().insert(scope.clone(), Instant::now());
+            self.merge
+                .memo
+                .lock()
+                .insert(scope.clone(), Memo::new(Instant::now(), None));
             return Ok(());
         }
         // Busy first, then the policy's check: a claim cannot slip in between.
@@ -1253,8 +1342,15 @@ impl<B: Backend> RemoteStore<B> {
             }
         };
         if !plan.work() {
-            self.merge.memo.lock().insert(scope.clone(), Instant::now());
+            self.merge
+                .memo
+                .lock()
+                .insert(scope.clone(), Memo::new(Instant::now(), None));
             self.merge.unmark_probe(scope);
+            return Ok(());
+        }
+        let print = plan.fingerprint();
+        if self.unchanged_idle(scope, planned, &print) {
             return Ok(());
         }
         let path = set.path.to_string();
@@ -1279,7 +1375,7 @@ impl<B: Backend> RemoteStore<B> {
             shown(&set.path)
         );
         if let GroupEnd::Done = self.run_group(&gid, policy)? {
-            self.memo_if_idle(&gid, scope, planned);
+            self.memo_if_idle(&gid, scope, planned, print);
         }
         Ok(())
     }
