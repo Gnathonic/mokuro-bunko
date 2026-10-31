@@ -1,9 +1,11 @@
 // S3 with a cloud-root owner (`storage.library.progress_user`, the Readers setting's
-// "Reading progress linked to the cloud") on a cloud a Bunko holds, the reader on the
+// "Reading progress linked to the cloud") on a cloud a Bunko holds, a reader on the
 // cloud itself. The owner's history, positions.json and `<Vol>.edit.mokuro` ARE the
 // cloud's own files (`Core::owns_cloud_root`): the owner reads through WebDAV what the
-// direct reader wrote, and its writes land in the cloud for that reader to merge. Every
-// other account still sees none of it, and its own write of the same path stays its own.
+// direct reader wrote; the owner's own reader, signed in to Bunko, merges it and its page
+// turn, history and correction land in the cloud; and the direct reader's next sync
+// merges those in turn, dropping none of them. Every other account still sees none of
+// it, and its own write of the same path stays its own.
 // The correction goes on a series the spec seeds itself, and the spec leaves the cloud's
 // own tree (the per-user root files and the history) as it found it, so no spec after
 // it reads any of this state.
@@ -12,9 +14,9 @@ import { test, expect } from '../fixtures.mjs';
 import { basic, bunko, davPath } from '../bunko.mjs';
 import { cloudFiles } from '../cloud-direct.mjs';
 import { monthFile, positionsOf, seedSentinel } from '../history-accounts.mjs';
-import { bunkoSeenAlive, cloudBytes, cloudJson, connect, volumeNamed } from './shared.mjs';
+import { bunkoSeenAlive, cloudBytes, cloudJson, connect, recordReaderWrites, volumeNamed } from './shared.mjs';
 
-test.use({ needs: ['history', 'positions'] });
+test.use({ needs: ['history', 'positions', 'edit-layers-personal'] });
 
 const PASSWORD = 'rig-owner-3';
 
@@ -112,12 +114,25 @@ async function restoreCloud(rig, { found, own, owner, other, admin }) {
     return problems;
 }
 
+const OK = { ok: true, errors: [] };
+
+/** The reader on screen with its volume open: a page view is recorded when it ends. */
+const pageShown = (reader) =>
+    reader.page.waitForFunction(() => document.querySelector('.pageImage') !== null, null, { timeout: 30_000 });
+
+/** The first block's text of a `.mokuro` document's first page. */
+const firstLines = (doc) => doc?.pages?.[0]?.blocks?.[0]?.lines ?? null;
+
 /** A correction layer of one page (the shape a reader's `edit` layer has). */
 const layer = (text) =>
     JSON.stringify({ version: '0.2.5', pages: [{ img_path: '001.png', blocks: [{ lines: [text] }] }] });
 
-test("the cloud-root owner's history, positions and correction are the cloud's", async ({ reader, rig }) => {
-    test.setTimeout(300_000);
+test("the cloud-root owner's history, positions and correction are the cloud's", async ({
+    reader,
+    rig,
+    anotherDevice,
+}) => {
+    test.setTimeout(480_000);
     const server = bunko(rig);
     const tag = Date.now().toString(36);
     const owner = await server.createUser(`s3o-owner-${tag}`, PASSWORD, 'registered');
@@ -132,15 +147,14 @@ test("the cloud-root owner's history, positions and correction are the cloud's",
     const before = await server.storage();
     // Read per request: the next one is the owner's.
     await server.setReaders(before.serve_readers, owner.username);
+    let owned = null;
     try {
-        await seedSentinel(rig, expect, tag, own);
+        const seeded = await seedSentinel(rig, expect, tag, own);
         await connect(reader, rig);
         await bunkoSeenAlive(reader);
         expect((await reader.historyStatus()).enabled, 'history syncs beside this Bunko').toBe(true);
         const { id } = await reader.open((await volumeNamed(reader, series, 'Vol 1')).id);
-        await reader.page.waitForFunction(() => document.querySelector('.pageImage') !== null, null, {
-            timeout: 30_000,
-        });
+        await pageShown(reader);
         expect(await reader.setPage(id, 2)).toMatchObject({ page: 2 });
         await reader.showSeries(series);
         let month = null;
@@ -149,7 +163,8 @@ test("the cloud-root owner's history, positions and correction are the cloud's",
                 async () => {
                     expect(await reader.sync()).toEqual({ ok: true, errors: [] });
                     await reader.idle();
-                    month = (await cloudFiles(rig)).find((f) => monthFile(f.path)) ?? null;
+                    // This reader's: an earlier spec's reader may have left its own.
+                    month = (await cloudFiles(rig)).find((f) => monthFile(f.path) && !(f.path in found)) ?? null;
                     const positions = await cloudJson(rig, 'positions.json');
                     return { month: month !== null, page: positions?.positions?.[id]?.[1] ?? null };
                 },
@@ -180,33 +195,106 @@ test("the cloud-root owner's history, positions and correction are the cloud's",
         expect((await server.get(monthPath, x)).status).toBe(404);
         expect(await positionsOf(rig, x)).toBeNull();
 
-        // The owner's writes land in the cloud: positions.json, and a correction.
-        const mine = await positionsOf(rig, o);
-        const edited = { ...mine, owner_tag: tag };
-        expect([200, 201, 204]).toContain(await server.put(davPath('positions.json'), edited, o));
-        expect((await cloudJson(rig, 'positions.json'))?.owner_tag, "the cloud's positions.json").toBe(tag);
+        // The owner's own reader, signed in to Bunko: it takes in the direct reader's
+        // history and position, and its page turn, its history and a correction of the
+        // spec's own volume land in the cloud beside them (its writes go through Bunko's
+        // If-Match passthrough).
+        const directDevice = monthFile(month.path).device;
+        owned = await anotherDevice();
+        const signedIn = await owned.connectWebDAV({
+            url: rig.bunkoUrl,
+            username: owner.username,
+            password: owner.password,
+        });
+        expect(signedIn.sync).toEqual(OK);
+        expect((await owned.historyStatus()).enabled, "the owner's history syncs through Bunko").toBe(true);
+        const ownId = (await volumeNamed(owned, own, 'Vol 1')).id;
+        expect(ownId).toBe(seeded.volumeId);
+        await owned.open(ownId);
+        await pageShown(owned);
+        expect(await owned.setPage(ownId, 3)).toMatchObject({ page: 3 });
+        const text = `持ち主の訂正 ${tag}`;
+        await owned.editFirstBlock(ownId, 1, text);
+        await owned.showSeries(own);
         const edit = `${own}/Vol 1.edit.mokuro`;
-        expect([201, 204]).toContain(await server.put(davPath(own, 'Vol 1.edit.mokuro'), layer(`owner ${tag}`), o));
-        const inCloud = await cloudBytes(rig, edit);
-        expect(inCloud?.toString('utf8'), `the cloud's ${edit}`).toBe(layer(`owner ${tag}`));
+        let ownerMonth = null;
+        await expect
+            .poll(
+                async () => {
+                    expect(await owned.sync()).toEqual(OK);
+                    await owned.idle();
+                    ownerMonth =
+                        (await cloudFiles(rig)).find(
+                            (f) => monthFile(f.path) && !(f.path in found) && monthFile(f.path).device !== directDevice,
+                        ) ?? null;
+                    const positions = (await cloudJson(rig, 'positions.json'))?.positions;
+                    return {
+                        direct: positions?.[id]?.[1] ?? null,
+                        owner: positions?.[ownId]?.[1] ?? null,
+                        ownerMonth: ownerMonth !== null,
+                        edit: firstLines(await cloudJson(rig, edit)),
+                        directDevice: (await owned.historyStatus()).devices.includes(directDevice),
+                    };
+                },
+                { message: "the owner's reader's writes in the cloud", timeout: 120_000, intervals: [1000, 2000, 5000] },
+            )
+            .toEqual({ direct: 2, owner: 3, ownerMonth: true, edit: [text], directDevice: true });
+        const ownerDevice = monthFile(ownerMonth.path).device;
+        // The owner's reader is done: what it wrote stays as it is from here on.
+        await owned.idle();
+        await owned.logout();
+        const ownerEdit = await cloudBytes(rig, edit);
+        const ownerMonthBytes = await cloudBytes(rig, ownerMonth.path);
 
         // Another account: none of it, and its own correction stays off the cloud.
         expect((await server.get(davPath(own, 'Vol 1.edit.mokuro'), x)).status).toBe(404);
         expect(await positionsOf(rig, x)).toBeNull();
         expect([201, 204]).toContain(await server.put(davPath(own, 'Vol 1.edit.mokuro'), layer(`other ${tag}`), x));
         expect((await server.get(davPath(own, 'Vol 1.edit.mokuro'), x)).text).toBe(layer(`other ${tag}`));
-        expect((await cloudBytes(rig, edit))?.toString('utf8'), 'the cloud keeps the owner correction').toBe(
-            layer(`owner ${tag}`),
-        );
-        expect((await server.get(davPath(own, 'Vol 1.edit.mokuro'), o)).text).toBe(layer(`owner ${tag}`));
+        expect(sha256(await cloudBytes(rig, edit)), 'the cloud keeps the owner correction').toBe(sha256(ownerEdit));
+        expect((await server.get(davPath(own, 'Vol 1.edit.mokuro'), o)).text).toBe(ownerEdit.toString('utf8'));
         expect(
             (await cloudFiles(rig)).filter((f) => f.path === edit).length,
             `${edit} in the cloud, once`,
         ).toBe(1);
+
+        // The direct reader merges what the owner wrote: a page turn of its own goes up
+        // beside the owner's position, it takes in the owner's device, and the owner's
+        // history and correction are in the cloud as the owner left them.
+        const writes = recordReaderWrites(reader.page, rig);
+        await reader.open(id);
+        await pageShown(reader);
+        expect(await reader.setPage(id, 4)).toMatchObject({ page: 4 });
+        await reader.showSeries(series);
+        await expect
+            .poll(
+                async () => {
+                    expect(await reader.sync()).toEqual(OK);
+                    await reader.idle();
+                    const positions = (await cloudJson(rig, 'positions.json'))?.positions;
+                    return {
+                        direct: positions?.[id]?.[1] ?? null,
+                        owner: positions?.[ownId]?.[1] ?? null,
+                        ownerDevice: (await reader.historyStatus()).devices.includes(ownerDevice),
+                    };
+                },
+                { message: "the direct reader's merge of the owner's files", timeout: 120_000, intervals: [1000, 2000, 5000] },
+            )
+            .toEqual({ direct: 4, owner: 3, ownerDevice: true });
+        // One more sync, to the end: nothing of the owner's goes on a later one either.
+        expect(await reader.sync()).toEqual(OK);
+        await reader.idle();
+        expect((await cloudJson(rig, 'positions.json'))?.positions?.[ownId]?.[1], "the owner's position").toBe(3);
+        expect(sha256(await cloudBytes(rig, ownerMonth.path) ?? Buffer.alloc(0)), `the owner's ${ownerMonth.path}`).toBe(
+            sha256(ownerMonthBytes),
+        );
+        expect(sha256(await cloudBytes(rig, edit) ?? Buffer.alloc(0)), `the owner's ${edit}`).toBe(sha256(ownerEdit));
+        expect(await writes.names(), 'what the direct reader wrote').not.toContain('Vol 1.edit.mokuro');
     } finally {
         try {
-            // Nothing writes meanwhile: the reader signs out first.
+            // Nothing writes meanwhile: the readers sign out first.
             await reader.logout().catch(() => {});
+            await owned?.logout().catch(() => {});
             const problems = await restoreCloud(rig, { found, own, owner: o, other: x, admin: ad });
             expect.soft(problems, 'putting the cloud back').toEqual([]);
             // Bunko's writes reach the cloud on its own time.

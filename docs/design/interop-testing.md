@@ -702,10 +702,17 @@ out a debounce and decide at its end whether to write.
 - `shared/cloud-owner` (S3 with a cloud-root owner, `shared` on every cloud): the
   Readers setting names an account `progress_user` (`PUT /_admin/api/storage/readers`,
   restored after). The direct reader syncs its history and `positions.json`; the owner
-  reads that month file (the cloud's bytes) and that page through WebDAV, and its
-  `positions.json` PUT and `<Vol>.edit.mokuro` PUT land in the cloud. Another account
-  reads 404 and no `positions.json`, and its own correction at the same path is its
-  own while the cloud keeps the owner's, once. The correction goes on a series the
+  reads that month file (the cloud's bytes) and that page through WebDAV. Then the
+  owner's own reader (`anotherDevice`, signed in to Bunko) syncs: it lists the direct
+  reader's device, and its page turn, its month file and a correction of the spec's
+  volume (`<Vol>.edit.mokuro`) land in the cloud with the direct reader's position
+  still in `positions.json`. Another account reads 404 and no `positions.json`, and its
+  own correction at the same path is its own while the cloud keeps the owner's, once.
+  Last the direct reader turns a page and syncs: `positions.json` holds its new page
+  and the owner's, it lists the owner's device, and the owner's month file and
+  correction are in the cloud byte for byte as the owner's reader left them (the
+  direct reader wrote no `Vol 1.edit.mokuro`). A writer that drops the owner's entry
+  fails it (checked by clobbering `positions.json` before the direct reader's sync). The correction goes on a series the
   spec seeds itself, and whatever happens it leaves the cloud as it found it (the rig
   runs one spec after another with no reset, and `shared/edits` reads `Rig Series/Vol
   1.edit.mokuro`): the reader signs out, the admin removes the series and the other
