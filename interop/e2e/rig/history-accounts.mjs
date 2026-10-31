@@ -43,14 +43,14 @@ export async function positionsOf(rig, auth) {
 
 /**
  * A series seeded by the admin after the history was written (an archive and its own
- * OCR, so it owes no OCR job): `{series, wait}`, `wait()` resolving once Bunko's
- * catalog.json lists it, so a metadata pass has run since the history was there.
+ * OCR, so it owes no OCR job), titled `series`: `{series, volumeId, wait}`, `wait()`
+ * resolving once Bunko's catalog.json lists it, so a metadata pass has run since the
+ * history was there.
  */
-export async function seedSentinel(rig, expect, tag) {
+export async function seedSentinel(rig, expect, tag, series = `S3 Sentinel ${tag}`) {
     const server = bunko(rig);
     const admin = rig.account('admin');
     const auth = basic(admin.username, admin.password);
-    const series = `S3 Sentinel ${tag}`;
     const source = await server.bytes(davPath(rig.library.series, 'Vol 1.cbz'), auth);
     expect(source.status).toBe(200);
     const pages = JSON.parse((await server.get(davPath(rig.library.series, 'Vol 1.mokuro'), auth)).text).pages;
@@ -70,6 +70,7 @@ export async function seedSentinel(rig, expect, tag) {
     expect([201, 204]).toContain(await server.put(davPath(series, 'Vol 1.mokuro'), JSON.stringify(doc), auth));
     return {
         series,
+        volumeId: doc.volume_uuid,
         async wait() {
             let catalog = null;
             await expect

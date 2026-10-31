@@ -705,7 +705,13 @@ out a debounce and decide at its end whether to write.
   reads that month file (the cloud's bytes) and that page through WebDAV, and its
   `positions.json` PUT and `<Vol>.edit.mokuro` PUT land in the cloud. Another account
   reads 404 and no `positions.json`, and its own correction at the same path is its
-  own while the cloud keeps the owner's, once.
+  own while the cloud keeps the owner's, once. The correction goes on a series the
+  spec seeds itself, and whatever happens it leaves the cloud as it found it (the rig
+  runs one spec after another with no reset, and `shared/edits` reads `Rig Series/Vol
+  1.edit.mokuro`): the reader signs out, the admin removes the series and the other
+  account its overlay, the owner writes the four root files and the history back
+  through Bunko as they were (removing what was not there), and the spec fails unless
+  the cloud then holds what it held before.
 
 **As built (I3, scenarios S4 and S6).**
 - From `rename-ocr.mjs`; each scenario uploads series of its own through the reader
