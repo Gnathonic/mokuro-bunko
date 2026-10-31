@@ -81,6 +81,10 @@ impl Default for HistoryLimits {
 pub struct Refusal {
     pub message: String,
     pub detail: Option<&'static str>,
+    /// Set when the decision could not be made now (series folder adoption pending, an
+    /// owner lookup failed): a 503 with this `Retry-After` instead, so a client retries
+    /// rather than taking it as a final refusal of the file.
+    pub retry_after: Option<u64>,
 }
 
 /// [`DavContext::ownership_recheck`]: the auth decision made again. Blocking (it lists

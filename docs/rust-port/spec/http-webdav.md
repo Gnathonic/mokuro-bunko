@@ -470,6 +470,10 @@ before 0.8 get the one uploader of their tracked volumes, once, at startup. For 
   (its uploader, or the series owner);
 * a folder whose listing cannot be read answers 503 with `Retry-After` rather than governing
   nothing;
+* so does an ownership lookup that cannot be answered: a series owner, an archive's
+  uploader or the adoption state the database fails to read, or a library root that cannot be
+  listed when a record's own folder name is not there (another spelling may be). Whichever way
+  the answer would have gone, it never reads as "no owner" or "adoption done";
 * while startup adoption is pending, additions answer 503 with `Retry-After` (adoption is retried
   in the process until it is done; a cloud library whose store does not run holds nothing back,
   since nothing reaches it, and is adopted at a later start).
@@ -481,6 +485,14 @@ controller may replace or delete them.
 
 A decision made from a listing is `Grant::Owner`: DAV makes it again just before a PUT is published,
 before a DELETE removes anything, and before an MKCOL makes its folder. A refused PUT's verdict carries the reason as its `detail`.
+A recheck that cannot decide now (adoption pending, an unreadable listing, a failed lookup) answers
+503 with its `Retry-After` (a PUT's verdict `retry: true`), never the per-file 403 a reader takes
+as final (`bunko_dav::Refusal::retry_after`).
+
+The owner records follow the folders through DAV's and the store's hooks. A hook that cannot list
+the library root gives no folder an owner (a new folder may be a spelling of a listed series, and its
+owner would control every account's volumes in it) and forgets no record: a stale record is inert,
+since every read checks that its folder is listed.
 Personal corrections, keepsakes and reserved ids keep the table above; MOVE, COPY, LOCK and
 PROPPATCH stay `MODIFY_DELETE`.
 

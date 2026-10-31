@@ -498,6 +498,12 @@ impl Staging {
                     )
                 })?;
             if let Err(refusal) = answer {
+                if let Some(secs) = refusal.retry_after {
+                    return Err(Rejection {
+                        retry_after: Some(secs),
+                        ..Rejection::new(503, "server-error", refusal.message, true)
+                    });
+                }
                 let (_, reason, detail, _) = failure_for_status(403);
                 return Err(Rejection::new(
                     403,

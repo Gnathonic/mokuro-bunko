@@ -527,10 +527,7 @@ fn ownership_recheck(core: &Core, req: &Request, ctx: &RequestCtx) -> bunko_dav:
             anon,
             backend.as_ref(),
         )
-        .map_err(|denied| bunko_dav::Refusal {
-            message: denied.message,
-            detail: denied.detail,
-        })
+        .map_err(auth::Denied::into_refusal)
     })
 }
 

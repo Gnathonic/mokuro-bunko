@@ -199,12 +199,16 @@ pub(crate) fn personal_grant_holds(req: &Req, kind: Option<FileKind>) -> DavResu
 
 /// A write auth admitted by a series owner rule ([`DavContext::ownership_recheck`]) is
 /// decided again where it lands: refused (403, the fresh refusal) when it no longer
-/// would be. Blocking.
+/// would be, or 503 with `Retry-After` when that cannot be decided now. Blocking.
 pub(crate) fn ownership_holds(req: &Req) -> DavResult<()> {
     match &req.ctx.ownership_recheck {
-        Some(recheck) => {
-            recheck().map_err(|refusal| DavError::new(StatusCode::FORBIDDEN, refusal.message))
-        }
+        Some(recheck) => recheck().map_err(|refusal| match refusal.retry_after {
+            Some(secs) => DavError {
+                retry_after: Some(secs),
+                ..DavError::new(StatusCode::SERVICE_UNAVAILABLE, refusal.message)
+            },
+            None => DavError::new(StatusCode::FORBIDDEN, refusal.message),
+        }),
         None => Ok(()),
     }
 }

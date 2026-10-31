@@ -24,6 +24,7 @@ fn refusing() -> OwnershipRecheck {
         Err(Refusal {
             message: "Permission denied: this series belongs to another account".into(),
             detail: Some("This series belongs to another account."),
+            retry_after: None,
         })
     })
 }
@@ -179,6 +180,53 @@ async fn a_refused_recheck_stores_nothing() {
         .send_ctx(ctx, request("PUT", path, &[], &cbz_bytes(2)))
         .await;
     assert_eq!(r.code(), 201, "{}", r.text());
+}
+
+/// A recheck that cannot decide now (adoption pending, an owner lookup failed) is a
+/// 503 with Retry-After, which a reader retries; never the per-file 403 it would take
+/// as final. Nothing is stored or deleted.
+#[tokio::test]
+async fn a_recheck_that_cannot_decide_now_is_a_retryable_503() {
+    let env = Env::new();
+    let ctx = || {
+        let mut ctx = env.ctx(Some("uploader"));
+        ctx.ownership_recheck = Some(Arc::new(|| {
+            Err(Refusal {
+                message: "The server could not tell who owns this series; try again shortly."
+                    .into(),
+                detail: None,
+                retry_after: Some(10),
+            })
+        }));
+        ctx
+    };
+    let path = "/mokuro-reader/series/vol1.curated.cbz";
+    let r = env
+        .send_ctx(ctx(), request("PUT", path, &[], &cbz_bytes(2)))
+        .await;
+    assert_eq!(r.code(), 503, "{}", r.text());
+    assert_eq!(r.header("retry-after"), Some("10"));
+    let verdict = r.json();
+    assert_eq!(verdict["retry"], serde_json::json!(true), "{verdict}");
+    assert_eq!(verdict["reason"], serde_json::json!("server-error"));
+    let detail = verdict["detail"].as_str().unwrap();
+    assert!(
+        !detail.contains("401") && !detail.contains("Unauthorized"),
+        "{detail}"
+    );
+    assert!(!env.lib("series/vol1.curated.cbz").exists());
+
+    for (method, path) in [
+        ("DELETE", "/mokuro-reader/series/vol1.cbz"),
+        ("DELETE", "/mokuro-reader/series"),
+        ("MKCOL", "/mokuro-reader/series/Sub"),
+    ] {
+        let r = env.send_ctx(ctx(), request(method, path, &[], b"")).await;
+        assert_eq!(r.code(), 503, "{method} {path}: {}", r.text());
+        assert_eq!(r.header("retry-after"), Some("10"), "{method}");
+    }
+    assert!(env.lib("series/vol1.cbz").exists());
+    assert!(!env.lib("series/Sub").exists());
 }
 
 /// A folder is no archive (rule 2): one named `vol1.edit.cbz` makes no

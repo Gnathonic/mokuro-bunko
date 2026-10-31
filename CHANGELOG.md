@@ -26,12 +26,19 @@
   is done once the first sync finishes (a library that is not connected holds nothing
   back and is done at a later start). A database upgraded from 0.7 records schema
   version 7.
+- **When the server cannot tell who owns a series, it says "try again shortly".** If
+  its database or the library listing fails while it checks a series owner or a
+  volume's uploader, an uploader's request is answered 503 with `Retry-After`, also
+  when that happens just before the file is written, instead of being let through or
+  refused for good.
 
 ### Added
 - **`/login/api/me` says where an account may add files** (`permissions.addFiles`):
   anywhere (`all`), everywhere but the `closedSeries` other accounts own (`open`, an
   uploader), or nowhere (`none`). A reader can tell from it that the server enforces
-  series owners. `metadata.ownedSeries` now lists the series the account owns.
+  series owners. `metadata.ownedSeries` now lists the series the account owns. When
+  the server cannot read who owns what, these lists err towards closed: a series it
+  is unsure of is reported closed and not owned.
 - **Set a library up in Google Drive, OneDrive, MEGA or a WebDAV server.** The setup
   wizard asks where the library lives, then connects it with one button: a browser on
   the server signs in directly. Anywhere else (Docker, a NAS, a phone), Google Drive

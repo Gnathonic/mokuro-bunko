@@ -60,6 +60,12 @@ impl Identity {
     }
 }
 
+/// An ownership lookup that could not be answered (the database or the library root
+/// listing failed). No rule reads it as "no owner" or "adoption done": the request
+/// waits (503 with `Retry-After`), it is never let through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OwnerUnknown;
+
 /// What authentication and the ownership rules need from the database.
 pub trait AuthBackend: Send + Sync {
     /// Live user for a bearer token (disabled/deleted/expired → None).
@@ -81,8 +87,8 @@ pub trait AuthBackend: Send + Sync {
     }
     /// The recorded owner of the series folder `series` (series owners, 0.8), while a
     /// folder of that series is listed: a record whose folder is gone owns nothing.
-    fn series_owner(&self, _series: &str) -> Option<String> {
-        None
+    fn series_owner(&self, _series: &str) -> Result<Option<String>, OwnerUnknown> {
+        Ok(None)
     }
     /// The FILE names (no folders: rule 2) listed in the library folder that holds a
     /// library path: what the owner rules read rule v1 from
@@ -93,8 +99,8 @@ pub trait AuthBackend: Send + Sync {
         Some(Vec::new())
     }
     /// Who uploaded the library archive `rel` (library-relative).
-    fn volume_uploader(&self, _rel: &str) -> Option<String> {
-        None
+    fn volume_uploader(&self, _rel: &str) -> Result<Option<String>, OwnerUnknown> {
+        Ok(None)
     }
     /// Is the library path an existing folder?
     fn is_library_folder(&self, _virtual_path: &str) -> bool {
@@ -103,8 +109,8 @@ pub trait AuthBackend: Send + Sync {
     /// The folders that existed before series owners are still waiting for theirs
     /// (startup adoption has not run): an addition now could make a folder mixed that
     /// is about to be someone's.
-    fn ownership_pending(&self) -> bool {
-        false
+    fn ownership_pending(&self) -> Result<bool, OwnerUnknown> {
+        Ok(false)
     }
 }
 
@@ -253,6 +259,18 @@ impl Denied {
         self
     }
 
+    /// The refusal DAV answers when the decision, made again just before it writes,
+    /// goes this way: a final 403 with its detail, or (a 503: adoption pending, a lookup
+    /// that failed) not now, with its `Retry-After`, so a reader retries the file.
+    pub fn into_refusal(self) -> bunko_dav::Refusal {
+        let unavailable = self.status == StatusCode::SERVICE_UNAVAILABLE;
+        bunko_dav::Refusal {
+            message: self.message,
+            detail: self.detail,
+            retry_after: unavailable.then(|| self.retry_after.unwrap_or(10)),
+        }
+    }
+
     /// 0.5.2 `_error_response`: text/plain body, WWW-Authenticate on 401.
     pub fn into_response(self) -> axum::response::Response {
         let mut resp = axum::response::Response::new(axum::body::Body::from(self.message));
@@ -357,28 +375,63 @@ fn same_account(a: &str, b: &str) -> bool {
 }
 
 /// The owner of the series folder a library path is inside, or (`itself`) is.
-fn folder_owner_of(path: &str, itself: bool, backend: &dyn AuthBackend) -> Option<String> {
+fn folder_owner_of(
+    path: &str,
+    itself: bool,
+    backend: &dyn AuthBackend,
+) -> Result<Option<String>, OwnerUnknown> {
     let folder = paths::series_folder_of(path)
-        .or_else(|| itself.then(|| paths::top_level_folder(path)).flatten())?;
-    backend.series_owner(&folder)
+        .or_else(|| itself.then(|| paths::top_level_folder(path)).flatten());
+    match folder {
+        Some(folder) => backend.series_owner(&folder),
+        None => Ok(None),
+    }
 }
 
-fn owned_by_another(path: &str, itself: bool, user: &str, backend: &dyn AuthBackend) -> bool {
-    folder_owner_of(path, itself, backend).is_some_and(|owner| !same_account(&owner, user))
+fn owns_folder(
+    path: &str,
+    itself: bool,
+    user: &str,
+    backend: &dyn AuthBackend,
+) -> Result<bool, OwnerUnknown> {
+    Ok(folder_owner_of(path, itself, backend)?.is_some_and(|owner| same_account(&owner, user)))
+}
+
+fn owned_by_another(
+    path: &str,
+    itself: bool,
+    user: &str,
+    backend: &dyn AuthBackend,
+) -> Result<bool, OwnerUnknown> {
+    Ok(folder_owner_of(path, itself, backend)?.is_some_and(|owner| !same_account(&owner, user)))
 }
 
 /// Does `user` control the library FILE at `path` (0.8)? The owner of the series folder
 /// it is in does (S3), and so does the uploader of the archive that governs it, of
 /// every one when case variants share that (S2). What no listed archive governs is the
 /// folder owner's only. Folders are never governed (C3): only their owner controls one.
-fn controls(path: &str, user: &str, governors: &[String], backend: &dyn AuthBackend) -> bool {
-    folder_owner_of(path, false, backend).is_some_and(|owner| same_account(&owner, user))
-        || (!governors.is_empty()
-            && governors.iter().all(|archive| {
-                backend
-                    .volume_uploader(archive)
-                    .is_some_and(|u| same_account(&u, user))
-            }))
+/// A lookup that fails decides nothing ([`OwnerUnknown`]).
+fn controls(
+    path: &str,
+    user: &str,
+    governors: &[String],
+    backend: &dyn AuthBackend,
+) -> Result<bool, OwnerUnknown> {
+    if owns_folder(path, false, user, backend)? {
+        return Ok(true);
+    }
+    if governors.is_empty() {
+        return Ok(false);
+    }
+    for archive in governors {
+        if !backend
+            .volume_uploader(archive)?
+            .is_some_and(|u| same_account(&u, user))
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// A library path's folder listing, read once per decision.
@@ -433,6 +486,19 @@ impl Listing {
     /// own primary (OWN-2).
     fn hides_reserved_layer(&self) -> bool {
         sidecar_names::hides_reserved_layer(&self.name, &self.refs())
+    }
+}
+
+/// An ownership lookup failed ([`OwnerUnknown`]): not now, rather than yes or no.
+impl From<OwnerUnknown> for Denied {
+    fn from(_: OwnerUnknown) -> Self {
+        Denied {
+            retry_after: Some(10),
+            ..Denied::new(
+                503,
+                "The server could not check who owns this series; try again shortly.",
+            )
+        }
     }
 }
 
@@ -579,18 +645,17 @@ fn decide(
                 }
                 let user = id.username().unwrap_or_default();
                 let path = &normalized_library_path(path).unwrap_or_else(|| path.to_string());
-                if backend.ownership_pending() {
+                if backend.ownership_pending()? {
                     return Err(adoption_pending());
                 }
                 // Inside another account's series, or a spelling of one (S3).
-                if owned_by_another(path, true, user, backend) {
+                if owned_by_another(path, true, user, backend)? {
                     return Err(Denied::new(403, SERIES_OWNED).with_detail(SERIES_OWNED_DETAIL));
                 }
                 // A folder named after a volume is no archive (rule 2), but only the
                 // series owner makes one (C2, C3).
                 if !Listing::of(path, backend)?.governors().is_empty()
-                    && !folder_owner_of(path, false, backend)
-                        .is_some_and(|o| same_account(&o, user))
+                    && !owns_folder(path, false, user, backend)?
                 {
                     return Err(Denied::new(403, VOLUME_OWNED).with_detail(VOLUME_OWNED_DETAIL));
                 }
@@ -617,14 +682,14 @@ fn decide(
             {
                 let path = &normalized_library_path(path).unwrap_or_else(|| path.to_string());
                 let allowed = if backend.is_library_folder(path) {
-                    folder_owner_of(path, true, backend).is_some_and(|o| same_account(&o, user))
+                    owns_folder(path, true, user, backend)?
                 } else {
                     controls(
                         path,
                         user,
                         &Listing::of(path, backend)?.governors(),
                         backend,
-                    )
+                    )?
                 };
                 if allowed {
                     *grant = Grant::Owner;
@@ -753,7 +818,7 @@ fn authorize_curated(
     {
         let path = &paths::normalized_library_path(path).unwrap_or_else(|| path.to_string());
         if !backend.physical_exists(path, id.caller())
-            && owned_by_another(path, false, user, backend)
+            && owned_by_another(path, false, user, backend)?
         {
             return Err(Denied::new(403, SERIES_OWNED).with_detail(SERIES_OWNED_DETAIL));
         }
@@ -762,7 +827,7 @@ fn authorize_curated(
             user,
             &Listing::of(path, backend)?.governors(),
             backend,
-        ) {
+        )? {
             return Ok(Grant::Owner);
         }
     }
@@ -794,7 +859,7 @@ fn authorize_put(
         if id.role() == Role::Uploader
             && let Some(user) = id.username()
             && backend
-                .series_owner(&series)
+                .series_owner(&series)?
                 .is_some_and(|owner| same_account(&owner, user))
         {
             return Ok(());
@@ -819,21 +884,23 @@ fn authorize_put(
         let path = &normalized_library_path(path).unwrap_or_else(|| path.to_string());
         let listing = Listing::of(path, backend)?;
         let governors = listing.governors();
-        if backend.physical_exists(path, id.caller()) {
-            if !controls(path, user, &governors, backend) {
+        // Listed counts as there: a file that fails its own lookup is still replaced,
+        // never added by the laxer rules for new files.
+        if listing.names.contains(&listing.name) || backend.physical_exists(path, id.caller()) {
+            if !controls(path, user, &governors, backend)? {
                 return Err(Denied::new(
                     403,
                     "Permission denied: cannot replace a file another account uploaded",
                 ));
             }
         } else {
-            if backend.ownership_pending() {
+            if backend.ownership_pending()? {
                 return Err(adoption_pending());
             }
-            if owned_by_another(path, false, user, backend) {
+            if owned_by_another(path, false, user, backend)? {
                 return Err(Denied::new(403, SERIES_OWNED).with_detail(SERIES_OWNED_DETAIL));
             }
-            if !governors.is_empty() && !controls(path, user, &governors, backend) {
+            if !governors.is_empty() && !controls(path, user, &governors, backend)? {
                 return Err(Denied::new(403, VOLUME_OWNED).with_detail(VOLUME_OWNED_DETAIL));
             }
             // Even its controller makes no `V.edit.cbz` beside `V.cbz`: it would turn
@@ -874,8 +941,8 @@ mod tests {
         fn physical_exists(&self, p: &str, _: Option<Caller<'_>>) -> bool {
             p.ends_with(".cbz")
         }
-        fn series_owner(&self, s: &str) -> Option<String> {
-            (s == "Mine").then(|| "u".into())
+        fn series_owner(&self, s: &str) -> Result<Option<String>, OwnerUnknown> {
+            Ok((s == "Mine").then(|| "u".into()))
         }
         /// Every archive is its own volume, alone in its folder.
         fn library_listing(&self, p: &str) -> Option<Vec<String>> {
@@ -886,8 +953,8 @@ mod tests {
                     .collect(),
             )
         }
-        fn volume_uploader(&self, rel: &str) -> Option<String> {
-            rel.ends_with("mine.cbz").then(|| "u".into())
+        fn volume_uploader(&self, rel: &str) -> Result<Option<String>, OwnerUnknown> {
+            Ok(rel.ends_with("mine.cbz").then(|| "u".into()))
         }
     }
 
@@ -1345,8 +1412,8 @@ mod tests {
         fn check_password(&self, _: &str, _: &str) -> Option<AuthUser> {
             None
         }
-        fn series_owner(&self, s: &str) -> Option<String> {
-            (s == "Mine").then(|| "u".into())
+        fn series_owner(&self, s: &str) -> Result<Option<String>, OwnerUnknown> {
+            Ok((s == "Mine").then(|| "u".into()))
         }
         fn physical_exists(&self, p: &str, _: Option<Caller<'_>>) -> bool {
             p.ends_with(".curated.mokuro") && p.contains("/Theirs/")
@@ -1366,6 +1433,12 @@ mod tests {
         records: Vec<(String, String)>,
         pending: bool,
         unreadable: bool,
+        /// Which lookups fail ([`OwnerUnknown`]).
+        owners_unknown: bool,
+        uploaders_unknown: bool,
+        pending_unknown: bool,
+        /// Files cannot be looked up one by one (their folder still lists).
+        stat_fails: bool,
     }
 
     impl Owners {
@@ -1426,7 +1499,7 @@ mod tests {
             None
         }
         fn physical_exists(&self, p: &str, _: Option<Caller<'_>>) -> bool {
-            paths::library_rel(p).is_some_and(|r| self.files.contains(&r))
+            !self.stat_fails && paths::library_rel(p).is_some_and(|r| self.files.contains(&r))
         }
         fn is_volume_primary(&self, p: &str) -> bool {
             let Some((dir, name)) = Self::split(p) else {
@@ -1438,17 +1511,21 @@ mod tests {
                 sidecar_names::SidecarClass::Primary { .. }
             )
         }
-        fn series_owner(&self, series: &str) -> Option<String> {
+        fn series_owner(&self, series: &str) -> Result<Option<String>, OwnerUnknown> {
+            if self.owners_unknown {
+                return Err(OwnerUnknown);
+            }
             let key = bunko_db::fold_series_title_key(series);
             let live = self
                 .folders
                 .iter()
                 .any(|f| !f.contains('/') && bunko_db::fold_series_title_key(f) == key);
-            self.records
+            Ok(self
+                .records
                 .iter()
                 .find(|(f, _)| bunko_db::fold_series_title_key(f) == key)
                 .filter(|_| live)
-                .map(|(_, u)| u.clone())
+                .map(|(_, u)| u.clone()))
         }
         fn library_listing(&self, p: &str) -> Option<Vec<String>> {
             if self.unreadable {
@@ -1459,17 +1536,24 @@ mod tests {
             };
             Some(self.names_in(&dir).into_iter().map(String::from).collect())
         }
-        fn volume_uploader(&self, rel: &str) -> Option<String> {
-            self.uploads
+        fn volume_uploader(&self, rel: &str) -> Result<Option<String>, OwnerUnknown> {
+            if self.uploaders_unknown {
+                return Err(OwnerUnknown);
+            }
+            Ok(self
+                .uploads
                 .iter()
                 .find(|(r, _)| r == rel)
-                .map(|(_, u)| u.clone())
+                .map(|(_, u)| u.clone()))
         }
         fn is_library_folder(&self, p: &str) -> bool {
             paths::library_rel(p).is_some_and(|r| self.folders.contains(&r))
         }
-        fn ownership_pending(&self) -> bool {
-            self.pending
+        fn ownership_pending(&self) -> Result<bool, OwnerUnknown> {
+            if self.pending_unknown {
+                return Err(OwnerUnknown);
+            }
+            Ok(self.pending)
         }
     }
 
@@ -2085,6 +2169,153 @@ mod tests {
                 &as_user("ed", Role::Editor)
             ),
             Ok(Grant::Table)
+        );
+    }
+
+    /// A lookup that fails is neither "no owner" nor "adoption done": every rule
+    /// that reads it waits (503, Retry-After), whichever way the answer would have gone;
+    /// a request that reads none of them is decided as before.
+    #[test]
+    fn a_lookup_that_fails_holds_the_request() {
+        let base = || {
+            Owners::default()
+                .upload("S/V.cbz", "alice")
+                .upload("T/V.cbz", "bob")
+                .owned("S", "alice")
+                .folder("U")
+        };
+        let alice = as_user("alice", Role::Uploader);
+        let bob = as_user("bob", Role::Uploader);
+        let owners = Owners {
+            owners_unknown: true,
+            ..base()
+        };
+        let uploaders = Owners {
+            uploaders_unknown: true,
+            ..base()
+        };
+        let pending = Owners {
+            pending_unknown: true,
+            ..base()
+        };
+        let held = |lib: &Owners, method: &str, path: &str, who: &Identity| {
+            let m = Method::from_bytes(method.as_bytes()).unwrap();
+            let d = authorize_grant(&m, path, None, who, OPEN, lib).unwrap_err();
+            assert_eq!(
+                (d.status.as_u16(), d.retry_after, d.detail),
+                (503, Some(10), None),
+                "{method} {path}"
+            );
+            assert!(
+                !d.message.contains("401") && !d.message.contains("Unauthorized"),
+                "{}",
+                d.message
+            );
+        };
+        for (method, path, who) in [
+            // Would be refused (alice owns S) ...
+            ("PUT", "/mokuro-reader/S/W.cbz", &bob),
+            ("MKCOL", "/mokuro-reader/S/Sub", &bob),
+            ("MKCOL", "/mokuro-reader/s", &bob),
+            ("PUT", "/mokuro-reader/S/V.curated.mokuro", &bob),
+            // ... or allowed.
+            ("PUT", "/mokuro-reader/S/W.cbz", &alice),
+            ("DELETE", "/mokuro-reader/S", &alice),
+            ("DELETE", "/mokuro-reader/S/V.cbz", &alice),
+            ("PUT", "/mokuro-reader/S/series.json", &alice),
+            ("PUT", "/mokuro-reader/U/W.cbz", &bob),
+        ] {
+            held(&owners, method, path, who);
+        }
+        for (method, path, who) in [
+            ("DELETE", "/mokuro-reader/T/V.cbz", &bob),
+            ("PUT", "/mokuro-reader/T/V.cbz", &bob),
+            ("PUT", "/mokuro-reader/T/V.mokuro", &bob),
+            ("PUT", "/mokuro-reader/T/V.curated.mokuro", &alice),
+        ] {
+            held(&uploaders, method, path, who);
+        }
+        // The folder owner controls what is in it without asking who uploaded it.
+        assert_eq!(
+            decide_as(&uploaders, "DELETE", "/mokuro-reader/S/V.cbz", &alice),
+            Ok(Grant::Owner)
+        );
+        for (method, path) in [
+            ("PUT", "/mokuro-reader/U/W.cbz"),
+            ("MKCOL", "/mokuro-reader/New"),
+        ] {
+            held(&pending, method, path, &bob);
+        }
+        // Replacing what it controls is no addition: adoption is not asked.
+        assert_eq!(
+            decide_as(&pending, "PUT", "/mokuro-reader/T/V.cbz", &bob),
+            Ok(Grant::Owner)
+        );
+        // ModifyDelete roles read none of them.
+        let editor = as_user("ed", Role::Editor);
+        for lib in [&owners, &uploaders, &pending] {
+            assert_eq!(
+                decide_as(lib, "PUT", "/mokuro-reader/S/W.cbz", &editor),
+                Ok(Grant::Table)
+            );
+        }
+    }
+
+    /// A listed file is replaced, not added, even when it cannot be looked up by itself:
+    /// a lookup error never turns a replacement into an addition with laxer rules.
+    #[test]
+    fn a_listed_file_is_no_addition() {
+        let lib = Owners {
+            stat_fails: true,
+            ..Owners::default().upload("U/notes.txt", "alice")
+        };
+        let bob = as_user("bob", Role::Uploader);
+        assert_eq!(
+            decide_as(&lib, "PUT", "/mokuro-reader/U/notes.txt", &bob),
+            Err((403, None))
+        );
+        assert_eq!(
+            decide_as(&lib, "PUT", "/mokuro-reader/U/other.txt", &bob),
+            Ok(Grant::Owner)
+        );
+    }
+
+    /// The recheck DAV makes just before it writes answers the same way: a 503 is "not
+    /// now" with its Retry-After, an ownership refusal stays a final 403 with its
+    /// detail.
+    #[test]
+    fn a_recheck_tells_not_now_from_no() {
+        let lib = Owners {
+            owners_unknown: true,
+            ..Owners::default().upload("S/V.cbz", "alice")
+        };
+        let bob = as_user("bob", Role::Uploader);
+        let put = |lib: &Owners| {
+            authorize(
+                &Method::PUT,
+                "/mokuro-reader/S/W.cbz",
+                None,
+                &bob,
+                OPEN,
+                lib,
+            )
+            .unwrap_err()
+            .into_refusal()
+        };
+        let not_now = put(&lib);
+        assert_eq!((not_now.retry_after, not_now.detail), (Some(10), None));
+        let lib = Owners {
+            pending: true,
+            ..Owners::default().upload("S/V.cbz", "alice")
+        };
+        assert_eq!(put(&lib).retry_after, Some(10));
+        let lib = Owners::default()
+            .upload("S/V.cbz", "alice")
+            .owned("S", "alice");
+        let no = put(&lib);
+        assert_eq!(
+            (no.retry_after, no.detail, no.message.as_str()),
+            (None, Some(SERIES_OWNED_DETAIL), SERIES_OWNED)
         );
     }
 

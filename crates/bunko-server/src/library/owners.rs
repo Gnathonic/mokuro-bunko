@@ -15,7 +15,9 @@
 //!
 //! Records are read only through [`series_folder_is_live`]: a folder that went without
 //! a hook (a crash, a delete in the cloud while the server was off) leaves a record
-//! that nothing acts on, and the next creator of the folder replaces it.
+//! that nothing acts on, and the next creator of the folder replaces it. So a hook
+//! that cannot list the library root keeps a record rather than forget it, and gives
+//! no folder an owner it could not check: a stale record is inert, a wrong one is not.
 //!
 //! Bunko's own writes (the processor, the compiler, covers, keepsakes, the inbox, a
 //! duplicate merge) never call these: they assign no owner.
@@ -46,17 +48,25 @@ fn is_series_folder_name(name: &str) -> bool {
 }
 
 /// The series folders listed at the library root (through the store: an index read on
-/// a cloud library); `None` when the root cannot be listed. Blocking.
-fn series_folders(library: &Path) -> Option<Vec<String>> {
-    let entries = bunko_store::fs::read_dir(library).ok()?;
-    Some(
-        entries
-            .flatten()
-            .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
-            .filter_map(|e| e.file_name().into_string().ok())
-            .filter(|n| is_series_folder_name(n))
-            .collect(),
-    )
+/// a cloud library); `Err` when the root, or any entry of it, cannot be read: a listing
+/// missing a folder would read its series as unowned. Blocking.
+fn series_folders(library: &Path) -> std::io::Result<Vec<String>> {
+    let mut out = Vec::new();
+    for entry in bunko_store::fs::read_dir(library)? {
+        let entry = entry?;
+        let is_dir = match entry.file_type() {
+            Ok(t) => t.is_dir(),
+            // Gone since the listing: no folder.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e),
+        };
+        if let (true, Ok(name)) = (is_dir, entry.file_name().into_string())
+            && is_series_folder_name(&name)
+        {
+            out.push(name);
+        }
+    }
+    Ok(out)
 }
 
 /// One segment, no more: a series folder's library rel.
@@ -66,35 +76,42 @@ fn top_level(rel: &str) -> Option<&str> {
 }
 
 /// The series keys of the folders listed at the library root. Blocking.
-pub fn live_series_keys(library: &Path) -> Option<HashSet<String>> {
-    Some(
-        series_folders(library)?
-            .iter()
-            .map(|n| fold_series_title_key(n))
-            .collect(),
-    )
+pub fn live_series_keys(library: &Path) -> std::io::Result<HashSet<String>> {
+    Ok(series_folders(library)?
+        .iter()
+        .map(|n| fold_series_title_key(n))
+        .collect())
 }
 
 /// Is a folder of `folder`'s series listed at the library root? The folder itself is
-/// one lookup; any other spelling takes the root listing. Blocking.
-pub fn series_folder_is_live(library: &Path, folder: &str) -> bool {
+/// one lookup; any other spelling takes the root listing, and `Err` when that cannot
+/// be read: "not listed" would make an owned series anyone's. Blocking.
+pub fn series_folder_is_live(library: &Path, folder: &str) -> std::io::Result<bool> {
     let Some(folder) = top_level(folder) else {
-        return false;
+        return Ok(false);
     };
     if is_series_folder_name(folder) && bunko_store::fs::is_dir(library.join(folder)) {
-        return true;
+        return Ok(true);
     }
     let key = fold_series_title_key(folder);
-    live_series_keys(library).is_some_and(|keys| keys.contains(&key))
+    Ok(live_series_keys(library)?.contains(&key))
 }
 
-/// A folder of the series `key` other than the names in `except` is listed.
-fn variant_listed(library: &Path, key: &str, except: &[&str]) -> bool {
-    series_folders(library).is_some_and(|names| {
-        names
-            .iter()
-            .any(|n| !except.contains(&n.as_str()) && fold_series_title_key(n) == key)
-    })
+/// A folder of the series `key` other than the names in `except` is listed (`Err`:
+/// the root cannot be listed).
+fn variant_listed(library: &Path, key: &str, except: &[&str]) -> std::io::Result<bool> {
+    Ok(series_folders(library)?
+        .iter()
+        .any(|n| !except.contains(&n.as_str()) && fold_series_title_key(n) == key))
+}
+
+/// [`variant_listed`], logged when it cannot tell.
+fn variant_known(library: &Path, key: &str, except: &[&str]) -> Option<bool> {
+    variant_listed(library, key, except)
+        .inspect_err(|e| {
+            tracing::warn!("[LIBRARY] series folder owner: the library root cannot be listed: {e}")
+        })
+        .ok()
 }
 
 fn log<T>(what: &str, r: bunko_db::Result<T>) {
@@ -105,24 +122,26 @@ fn log<T>(what: &str, r: bunko_db::Result<T>) {
 
 /// A client's MKCOL created the series folder `rel`: `actor` owns it, replacing a
 /// record its series kept from a folder that is gone. A new spelling of a series
-/// still listed joins it and owns nothing. Blocking.
+/// still listed joins it and owns nothing, and so does one made while the root cannot
+/// be listed: the series may be listed, and owning it would hand `actor` every other
+/// account's volumes in it. Blocking.
 pub fn folder_created(db: &Database, library: &Path, rel: &str, actor: &str) {
     let Some(folder) = top_level(rel) else {
         return;
     };
-    if variant_listed(library, &fold_series_title_key(folder), &[folder]) {
+    if variant_known(library, &fold_series_title_key(folder), &[folder]) != Some(false) {
         return;
     }
     log("record", db.record_series_folder_owner(folder, actor));
 }
 
-/// The library folder `rel` went: its series' record goes with its last spelling.
-/// Blocking.
+/// The library folder `rel` went: its series' record goes with its last spelling. One
+/// that cannot be told the last stays (inert while no spelling is listed). Blocking.
 pub fn folder_removed(db: &Database, library: &Path, rel: &str) {
     let Some(folder) = top_level(rel) else {
         return;
     };
-    if variant_listed(library, &fold_series_title_key(folder), &[folder]) {
+    if variant_known(library, &fold_series_title_key(folder), &[folder]) != Some(false) {
         return;
     }
     log("forget", db.forget_series_folder_owner(folder));
@@ -149,13 +168,23 @@ fn uploaders_under(db: &Database, rel: &str) -> Vec<String> {
 /// records already moved with it. Joining a series still listed under another
 /// spelling, it keeps that series' owner only when it was that account's too (S1,
 /// OWN-5). Blocking.
+///
+/// When the root cannot be listed, `old`'s record stays (inert if no spelling is
+/// listed) and `new` is taken to join a series of unknown uploaders: it keeps an owner
+/// only when it was that owner's already, and never gets one it could not check.
 pub fn folder_moved(db: &Database, library: &Path, old: &str, new: &str) {
+    // An uploader no account is: a join with it agrees with no owner but a record.
+    let unknown = || vec![String::new()];
     match (top_level(old), top_level(new)) {
         (Some(old), Some(new)) => {
             let others = [old, new];
-            let old_lives_on = variant_listed(library, &fold_series_title_key(old), &others);
-            let joins = variant_listed(library, &fold_series_title_key(new), &others)
-                .then(|| uploaders_under(db, new));
+            let old_lives_on =
+                variant_known(library, &fold_series_title_key(old), &others) != Some(false);
+            let joins = match variant_known(library, &fold_series_title_key(new), &others) {
+                Some(true) => Some(uploaders_under(db, new)),
+                Some(false) => None,
+                None => Some(unknown()),
+            };
             log(
                 "move",
                 db.move_series_folder_owner(old, new, old_lives_on, joins.as_deref()),
@@ -163,7 +192,7 @@ pub fn folder_moved(db: &Database, library: &Path, old: &str, new: &str) {
         }
         (Some(old), None) => folder_removed(db, library, old),
         (None, Some(new)) => {
-            if variant_listed(library, &fold_series_title_key(new), &[new]) {
+            if variant_known(library, &fold_series_title_key(new), &[new]) != Some(false) {
                 log(
                     "join",
                     db.series_folder_joined(new, &uploaders_under(db, new)),
@@ -258,9 +287,14 @@ pub fn adopt_series_folder_owners(db: &Database, library: &Path) -> Option<Folde
             return None;
         }
     }
-    let Some(folders) = series_folders(library) else {
-        tracing::warn!("[LIBRARY] series folder adoption waits: the library root cannot be listed");
-        return None;
+    let folders = match series_folders(library) {
+        Ok(folders) => folders,
+        Err(e) => {
+            tracing::warn!(
+                "[LIBRARY] series folder adoption waits: the library root cannot be listed: {e}"
+            );
+            return None;
+        }
     };
     let tracked = match db.tracked_volume_uploaders() {
         Ok(rows) => rows,
@@ -357,6 +391,87 @@ pub async fn adopt_series_folder_owners_until_done(
         tokio::select! {
             _ = stop.cancelled() => return,
             _ = tokio::time::sleep(every) => {}
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// Runs `f` with the library root searchable but not listable; `false` when the
+    /// root could list it anyway (the root user reads anything).
+    fn unlistable(library: &Path, f: impl FnOnce()) -> bool {
+        std::fs::set_permissions(library, std::fs::Permissions::from_mode(0o311)).unwrap();
+        let listable = bunko_store::fs::read_dir(library).is_ok();
+        f();
+        std::fs::set_permissions(library, std::fs::Permissions::from_mode(0o755)).unwrap();
+        !listable
+    }
+
+    fn library(folders: &[&str]) -> (tempfile::TempDir, PathBuf, Database) {
+        let dir = tempfile::tempdir().unwrap();
+        let library = dir.path().join("library");
+        for folder in folders {
+            bunko_store::fs::create_dir_all(library.join(folder)).unwrap();
+        }
+        let db = Database::open(dir.path().join("mokuro.db")).unwrap();
+        (dir, library, db)
+    }
+
+    /// A folder made while the root cannot be listed may be a spelling of a listed
+    /// series: it takes no owner, and the series keeps its own.
+    #[test]
+    fn a_folder_made_unseen_owns_nothing() {
+        let (_dir, library, db) = library(&["S", "s", "New"]);
+        db.record_series_folder_owner("S", "alice").unwrap();
+        let checked = unlistable(&library, || {
+            folder_created(&db, &library, "s", "bob");
+            folder_created(&db, &library, "New", "bob");
+        });
+        if checked {
+            assert_eq!(
+                db.series_folder_owner("S").unwrap().as_deref(),
+                Some("alice")
+            );
+            assert_eq!(db.series_folder_owner("New").unwrap(), None);
+        }
+        // Seen, a new series is its creator's.
+        folder_created(&db, &library, "New", "bob");
+        assert_eq!(
+            db.series_folder_owner("New").unwrap().as_deref(),
+            Some("bob")
+        );
+    }
+
+    /// A removal that cannot tell whether it took the last spelling keeps the record.
+    #[test]
+    fn a_folder_removed_unseen_keeps_its_record() {
+        let (_dir, library, db) = library(&["S"]);
+        db.record_series_folder_owner("S", "alice").unwrap();
+        let checked = unlistable(&library, || folder_removed(&db, &library, "s"));
+        if checked {
+            assert_eq!(
+                db.series_folder_owner("S").unwrap().as_deref(),
+                Some("alice")
+            );
+        }
+    }
+
+    /// A move that cannot tell whether it joins a listed series hands that series no
+    /// owner, and keeps the moved folder's record where it was.
+    #[test]
+    fn a_folder_moved_unseen_hands_over_nothing() {
+        let (_dir, library, db) = library(&["t"]);
+        db.record_series_folder_owner("S", "alice").unwrap();
+        let checked = unlistable(&library, || folder_moved(&db, &library, "S", "T"));
+        if checked {
+            assert_eq!(db.series_folder_owner("T").unwrap(), None);
+            assert_eq!(
+                db.series_folder_owner("S").unwrap().as_deref(),
+                Some("alice")
+            );
         }
     }
 }

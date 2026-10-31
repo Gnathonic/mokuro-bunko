@@ -1,6 +1,6 @@
 //! `AuthBackend` on top of `bunko_db::Database` and the storage layout.
 
-use crate::auth::{AuthBackend, AuthUser, paths};
+use crate::auth::{AuthBackend, AuthUser, OwnerUnknown, paths};
 use bunko_core::StorageLayout;
 use bunko_core::reader_tree::{self, Caller};
 use bunko_core::sidecar_names;
@@ -177,26 +177,32 @@ impl AuthBackend for DbAuthBackend {
         is_volume_primary(&self.layout, virtual_path)
     }
 
-    fn series_owner(&self, series: &str) -> Option<String> {
+    fn series_owner(&self, series: &str) -> Result<Option<String>, OwnerUnknown> {
         let owner = match self.db.series_folder_owner(series) {
-            Ok(owner) => owner?,
+            Ok(Some(owner)) => owner,
+            Ok(None) => return Ok(None),
             Err(e) => {
                 warn!("series owner lookup failed: {e}");
-                return None;
+                return Err(OwnerUnknown);
             }
         };
-        crate::library::owners::series_folder_is_live(&self.layout.library(), series)
-            .then_some(owner)
+        match crate::library::owners::series_folder_is_live(&self.layout.library(), series) {
+            Ok(live) => Ok(live.then_some(owner)),
+            Err(e) => {
+                warn!("series owner lookup: the library root cannot be listed: {e}");
+                Err(OwnerUnknown)
+            }
+        }
     }
 
     fn library_listing(&self, virtual_path: &str) -> Option<Vec<String>> {
         library_listing(&self.layout, virtual_path)
     }
 
-    fn volume_uploader(&self, rel: &str) -> Option<String> {
-        self.db.get_volume_owner(rel).unwrap_or_else(|e| {
+    fn volume_uploader(&self, rel: &str) -> Result<Option<String>, OwnerUnknown> {
+        self.db.get_volume_owner(rel).map_err(|e| {
             warn!("volume owner lookup failed: {e}");
-            None
+            OwnerUnknown
         })
     }
 
@@ -205,20 +211,20 @@ impl AuthBackend for DbAuthBackend {
             .is_some_and(|rel| bunko_store::fs::is_dir(self.layout.library().join(rel)))
     }
 
-    fn ownership_pending(&self) -> bool {
+    fn ownership_pending(&self) -> Result<bool, OwnerUnknown> {
         use std::sync::atomic::Ordering;
         if self.adopted.load(Ordering::Relaxed) || self.adoption_waived.load(Ordering::Relaxed) {
-            return false;
+            return Ok(false);
         }
         match self.db.series_folder_adoption_pending() {
-            Ok(true) => true,
+            Ok(true) => Ok(true),
             Ok(false) => {
                 self.adopted.store(true, Ordering::Relaxed);
-                false
+                Ok(false)
             }
             Err(e) => {
                 warn!("series folder adoption state: {e}");
-                false
+                Err(OwnerUnknown)
             }
         }
     }
@@ -381,11 +387,124 @@ mod tests {
         let backend = DbAuthBackend::new(db.clone(), layout);
         db.record_series_folder_owner("Dr Stone", "alice").unwrap();
         db.record_series_folder_owner("Gone", "alice").unwrap();
-        assert_eq!(backend.series_owner("Dr Stone").as_deref(), Some("alice"));
-        assert_eq!(backend.series_owner("dr  stone").as_deref(), Some("alice"));
-        assert_eq!(backend.series_owner("Gone"), None);
-        assert_eq!(backend.series_owner("Nothing"), None);
-        assert!(!backend.ownership_pending());
+        assert_eq!(backend.series_owner("Dr Stone"), Ok(Some("alice".into())));
+        assert_eq!(backend.series_owner("dr  stone"), Ok(Some("alice".into())));
+        assert_eq!(backend.series_owner("Gone"), Ok(None));
+        assert_eq!(backend.series_owner("Nothing"), Ok(None));
+        assert_eq!(backend.ownership_pending(), Ok(false));
+    }
+
+    fn uploader(name: &str) -> crate::auth::Identity {
+        crate::auth::Identity {
+            user: Some(AuthUser {
+                id: 7,
+                username: name.into(),
+                role: bunko_core::Role::Uploader,
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// `(status, Retry-After)` of an uploader's request, or `None` when it is allowed.
+    fn decide(
+        backend: &DbAuthBackend,
+        method: &str,
+        path: &str,
+        user: &str,
+    ) -> Option<(u16, Option<u64>)> {
+        let anon = crate::auth::AnonymousAccess {
+            browse: true,
+            download: true,
+        };
+        let m = http::Method::from_bytes(method.as_bytes()).unwrap();
+        crate::auth::authorize(&m, path, None, &uploader(user), anon, backend)
+            .err()
+            .map(|d| (d.status.as_u16(), d.retry_after))
+    }
+
+    /// A library with `S/` owned by alice, holding her `S/V.cbz`.
+    fn owned_library() -> (tempfile::TempDir, Arc<Database>, DbAuthBackend) {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = StorageLayout::new(dir.path());
+        bunko_store::fs::create_dir_all(layout.library().join("S")).unwrap();
+        bunko_store::fs::write(layout.library().join("S/V.cbz"), b"x").unwrap();
+        let db = Arc::new(Database::open(dir.path().join("mokuro.db")).unwrap());
+        db.record_series_folder_owner("S", "alice").unwrap();
+        db.record_volume_upload("S/V.cbz", "alice").unwrap();
+        let backend = DbAuthBackend::new(db.clone(), layout);
+        (dir, db, backend)
+    }
+
+    fn drop_table(db: &Database, table: &str) {
+        db.with_writer_connection(|c| c.execute(&format!("DROP TABLE {table}"), []))
+            .unwrap();
+    }
+
+    /// An owner lookup that fails is no "unowned": the addition waits (503), it is never
+    /// let into the folder.
+    #[test]
+    fn a_failed_owner_lookup_holds_an_addition() {
+        let (_dir, db, backend) = owned_library();
+        assert_eq!(
+            decide(&backend, "PUT", "/mokuro-reader/S/W.cbz", "bob"),
+            Some((403, None))
+        );
+        drop_table(&db, "series_folder_owners");
+        for (method, path) in [
+            ("PUT", "/mokuro-reader/S/W.cbz"),
+            ("MKCOL", "/mokuro-reader/S/Sub"),
+            ("PUT", "/mokuro-reader/S/series.json"),
+        ] {
+            assert_eq!(
+                decide(&backend, method, path, "bob"),
+                Some((503, Some(10))),
+                "{method} {path}"
+            );
+        }
+    }
+
+    /// Adoption state that cannot be read is no "adoption done".
+    #[test]
+    fn a_failed_adoption_lookup_holds_an_addition() {
+        let (_dir, db, backend) = owned_library();
+        drop_table(&db, "series_folder_adoption");
+        assert_eq!(
+            decide(&backend, "PUT", "/mokuro-reader/S/W.cbz", "alice"),
+            Some((503, Some(10)))
+        );
+    }
+
+    /// An uploader lookup that fails says "not now", not "not yours".
+    #[test]
+    fn a_failed_uploader_lookup_is_no_refusal() {
+        let (_dir, db, backend) = owned_library();
+        drop_table(&db, "series_folder_owners");
+        drop_table(&db, "volume_uploads");
+        assert_eq!(
+            decide(&backend, "DELETE", "/mokuro-reader/S/V.cbz", "alice"),
+            Some((503, Some(10)))
+        );
+    }
+
+    /// A library root that cannot be listed cannot tell whether another spelling of an
+    /// owned series is live: its owner is unknown, never "none" (an addition through a
+    /// spelling the store folds onto `S/` would otherwise pass).
+    #[cfg(unix)]
+    #[test]
+    fn an_unlistable_root_leaves_the_owner_unknown() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_dir, _db, backend) = owned_library();
+        let root = backend.layout.library();
+        // Searchable (`S/` is still reached by name) but not listable.
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o311)).unwrap();
+        let listable = bunko_store::fs::read_dir(&root).is_ok(); // root reads anything
+        let variant = decide(&backend, "PUT", "/mokuro-reader/s/W.cbz", "bob");
+        let named = decide(&backend, "PUT", "/mokuro-reader/S/W.cbz", "bob");
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if !listable {
+            assert_eq!(variant, Some((503, Some(10))));
+            assert_eq!(named, Some((403, None)));
+        }
     }
 
     /// F4: a waived adoption holds nothing back, and stays pending for a later start.
@@ -397,11 +516,11 @@ mod tests {
         db.with_writer_connection(|c| c.execute("DELETE FROM series_folder_adoption", []))
             .unwrap();
         let backend = DbAuthBackend::new(db.clone(), layout);
-        assert!(backend.ownership_pending());
+        assert_eq!(backend.ownership_pending(), Ok(true));
         backend
             .adoption_waiver()
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        assert!(!backend.ownership_pending());
+        assert_eq!(backend.ownership_pending(), Ok(false));
         assert!(db.series_folder_adoption_pending().unwrap());
     }
 
