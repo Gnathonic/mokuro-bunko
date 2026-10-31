@@ -290,9 +290,15 @@ shared). For `uploader`:
 - A file named after a volume (the volume's archive, its `.mokuro`, its cover,
   its layer files, anything else under its name) is written, replaced or
   deleted only by the account that uploaded that volume or by the series owner.
+  A volume listed under a longer name (`Title.v01.cbz` beside `Title.cbz`) is
+  its own uploader's, not the shorter one's.
+- No uploader adds an archive named like a volume's correction, curated or
+  keepsake layer (`V.edit.cbz`, `V.curated.cbz` beside `V.cbz`), not even
+  that volume's own uploader: it would hide those layers.
 - The series owner replaces and deletes anything in its series, whoever added
   it, and the series folder itself; it is also the one that may update the
-  series' `series.json` and publish its `curated` layer.
+  series' `series.json`. A volume's uploader, or the series owner, may publish
+  that volume's `curated` layer.
 - Its own correction layers (`<Volume>.edit.mokuro`) are its own, in any series.
 
 `/login/api/me` lists the series the account owns (`ownedSeries`) and those it

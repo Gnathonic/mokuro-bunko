@@ -450,19 +450,37 @@ before 0.8 get the one uploader of their tracked volumes, once, at startup. For 
 * nothing new (a PUT of a new file, an MKCOL) goes inside a folder another account owns, nor at a
   top-level spelling of one: 403 `Permission denied: this series belongs to another account`;
 * a FILE governed by a listed archive (`sidecar_names::governing_archives`: the archive, its
-  sidecars, a `.mokuro` rule v1 reads as its primary or layer, a name nested under it; the
-  shortest stem wins) is created, replaced or deleted only by an account that controls it: the
-  archive's uploader, or the owner of its folder. A new one is otherwise 403
+  sidecars, a `.mokuro` rule v1 reads as its primary or layer, a name nested under it by a layer
+  id with a letter, ids folded like stems) is created, replaced or deleted only by an account that
+  controls it: the archive's uploader, or the owner of its folder. The NEAREST listed archive
+  governs (a listed `Berserk.v01.cbz` is its own, whoever adds `Berserk.cbz` later; a name not
+  listed yet takes the nearest listed archive above it), except that an archive hiding a reserved
+  layer of the one above it (`V.curated.cbz`, `V.edit.cbz`, `V.pre-upgrade.cbz` beside `V.cbz`)
+  passes control up to it. A new one is otherwise 403
   `Permission denied: this file belongs to a volume this account did not upload`; an existing
   one keeps 4.4's replace refusal. What nothing governs is the folder owner's to replace or delete;
   a new volume in an unowned folder is anyone's to add;
+* nobody below `MODIFY_DELETE` creates such a hiding archive beside a listed volume, its
+  controller included: 403 `Permission denied: this name is kept for a layer of the volume beside
+  it` (it would turn every account's correction of `V`, or its curated or keepsake layer, into the
+  shared primary of the new archive);
 * a folder is never governed: only its series owner deletes one (the series folder included) or
-  makes one named after a volume;
-* `series.json` (4.4 step 2) and curated need the series' recorded owner, or control of the volume;
-* while startup adoption is pending, additions answer 503 with `Retry-After`.
+  makes one named after a volume. A library MKCOL never makes a missing parent (409);
+* `series.json` (4.4 step 2) needs the series' recorded owner; curated needs control of the volume
+  (its uploader, or the series owner);
+* a folder whose listing cannot be read answers 503 with `Retry-After` rather than governing
+  nothing;
+* while startup adoption is pending, additions answer 503 with `Retry-After` (adoption is retried
+  in the process until it is done; a cloud library whose store does not run holds nothing back,
+  since nothing reaches it, and is adopted at a later start).
 
-A decision made from a listing is `Grant::Owner`: DAV makes it again just before a PUT is published
-and before a DELETE removes anything. A refused PUT's verdict carries the reason as its `detail`.
+Known residual: in a folder nobody owns, a sidecar (`V.mokuro`, `V.webp`, a layer file) of a volume
+not listed yet is anyone's to add, and becomes that volume's when its archive arrives. A reader
+sends a volume's sidecars before its archive, so they cannot be refused there; the archive's
+controller may replace or delete them.
+
+A decision made from a listing is `Grant::Owner`: DAV makes it again just before a PUT is published,
+before a DELETE removes anything, and before an MKCOL makes its folder. A refused PUT's verdict carries the reason as its `detail`.
 Personal corrections, keepsakes and reserved ids keep the table above; MOVE, COPY, LOCK and
 PROPPATCH stay `MODIFY_DELETE`.
 

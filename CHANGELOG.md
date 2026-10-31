@@ -10,9 +10,11 @@
   or an archive named after a volume it did not upload, unless it owns the series:
   the series owner controls every volume in it, whoever added it, and may delete it
   and the series folder. Its own corrections (`<Volume>.edit.mokuro`) stay its own
-  everywhere. Editors and admins are not limited. This closes a way for an uploader
-  to take over another account's volume with an archive named after it
-  (`V.curated.cbz` beside `V.cbz`).
+  everywhere. No uploader adds an archive named like a volume's correction, curated
+  or keepsake layer (`V.edit.cbz`, `V.curated.cbz` beside `V.cbz`), that volume's
+  own uploader included. Editors and admins are not limited. This closes a way for
+  an uploader to take over another account's volume with an archive named after it
+  (`V.curated.cbz` beside `V.cbz`, or `Title.cbz` beside `Title.v01.cbz`).
 - **`series.json` updates need the series' owner.** An uploader may submit them only
   for a series it owns; being the only uploader of every volume in it is no longer
   enough.
@@ -21,7 +23,8 @@
   that account's. Every other folder (volumes from several accounts, archives copied
   in by hand, empty) has no owner and stays shared. Until this is done, an uploader's
   new files and folders are answered "try again shortly" (503); on a cloud library it
-  is done once the first sync finishes. A database upgraded from 0.7 records schema
+  is done once the first sync finishes (a library that is not connected holds nothing
+  back and is done at a later start). A database upgraded from 0.7 records schema
   version 7.
 
 ### Added
