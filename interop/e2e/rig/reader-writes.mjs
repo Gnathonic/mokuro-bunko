@@ -146,8 +146,9 @@ export function recordReaderWrites(page, rig) {
             const out = new Set(names);
             const all = new Set(ids);
             for (const w of sessionWrites) {
+                // An opening that named nothing names none of its content either.
                 const got = opened.get(w.key);
-                if (got) {
+                if (got && got.names.length + got.ids.length > 0) {
                     for (const n of got.names) out.add(n);
                     for (const id of got.ids) all.add(id);
                 } else if (!w.found) {

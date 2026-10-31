@@ -158,3 +158,20 @@ test('a write that got no answer wrote nothing; reads are no writes', async () =
     assert.deepEqual(await writes.names(), ['positions.json']);
     assert.deepEqual(writes.unnamed(), []);
 });
+
+test("a session whose opening named nothing leaves its content writes unnamed, not dropped", async () => {
+    const { page, rig } = fakeBrowser('microsoft');
+    const writes = recordReaderWrites(page, rig);
+    const uploadUrl = `${PREAUTH}/graph/upload/626b/s9`;
+    // Opened by item id: no name in the path, none in the answer.
+    page.emit(
+        'requestfinished',
+        request('POST', `${SIM}/graph/v1.0/me/drive/items/o00042/createUploadSession`, {
+            body: { item: {} },
+            answer: { status: 200, json: { uploadUrl } },
+        }),
+    );
+    page.emit('requestfinished', request('PUT', uploadUrl, { answer: { status: 201 } }));
+    assert.deepEqual(await writes.names(), []);
+    assert.deepEqual(writes.unnamed(), ['PUT /graph/upload/626b/s9']);
+});
