@@ -108,8 +108,9 @@ pub enum SubmissionResult {
     Applied,
     /// Not applied, with the reason (kept as a conflict row).
     Refused(String),
-    /// Not answered now (the server is busy or stopping), with the reason: the
-    /// submission stays unanswered and is offered again.
+    /// Not answered now (the server is busy or stopping, or its own store failed),
+    /// with the reason: the submission stays unanswered and is offered again. A
+    /// refusal is final, so a server fault is never answered `Refused`.
     Later(String),
 }
 
