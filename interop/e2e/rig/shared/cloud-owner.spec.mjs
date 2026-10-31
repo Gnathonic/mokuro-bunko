@@ -13,7 +13,7 @@ import { createHash } from 'node:crypto';
 import { test, expect } from '../fixtures.mjs';
 import { basic, bunko, davPath } from '../bunko.mjs';
 import { cloudFiles } from '../cloud-direct.mjs';
-import { cloudDeleter } from '../cloud-restore.mjs';
+import { cloudDeleter, unseenNote } from '../cloud-restore.mjs';
 import { monthFile, positionsOf, seedSentinel } from '../history-accounts.mjs';
 import { bunkoSeenAlive, cloudBytes, cloudJson, connect, recordReaderWrites, volumeNamed } from './shared.mjs';
 
@@ -72,6 +72,8 @@ async function settled(call) {
 
 /** How long a restore waits for Bunko to list files the cloud holds (cloud-restore.mjs). */
 const UNSEEN_WAIT_MS = 60_000;
+/** Unlisted this long is no lag (the rig's Bunko polls every 2 s), so it is noted. */
+const UNSEEN_NOTE_MS = 10_000;
 
 /**
  * Put the cloud back as the spec found it (`found`, ownTreeNow's): the other account's
@@ -91,15 +93,10 @@ async function restoreCloud(rig, { found, own, owner, other, admin }) {
         waitMs: UNSEEN_WAIT_MS,
     });
     const delCloud = async (segments, auth, { folder = false } = {}) => {
-        const { status, unseenMs } = await deleter({ segments, folder, auth });
-        if (unseenMs !== null) {
-            const what = segments.join('/') + (folder ? '/' : '');
-            test.info().annotations.push({
-                type: 'restore-unseen',
-                description: `${what}: Bunko answered 404 for ${Math.round(unseenMs / 1000)} s while the cloud held it`,
-            });
-        }
-        return status;
+        const got = await deleter({ segments, folder, auth });
+        const note = unseenNote(segments.join('/') + (folder ? '/' : ''), got, UNSEEN_NOTE_MS);
+        if (note) test.info().annotations.push({ type: 'restore-unseen', description: note });
+        return got.status;
     };
     const problems = [];
     const step = async (what, call, ok) => {
