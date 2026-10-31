@@ -2,7 +2,7 @@
 // in interop/.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mergeProblems, writesOutside } from './dup-roots.mjs';
+import { asSeeded, mergeProblems, writesOutside } from './dup-roots.mjs';
 
 const folder = (id, parent_id, name, extra = {}) => ({
     id,
@@ -72,5 +72,35 @@ test('writes below the canonical root, or allowed, are not outside it', () => {
     assert.deepEqual(
         writesOutside(rows, 'B', MERGED, (r) => r.parent_id === 'N'),
         [],
+    );
+});
+
+test("a seeded node is no write while the seed's, and one again once rewritten in place", () => {
+    // Root D seeded in the race's second; Drive keeps a file's id when its content is
+    // rewritten, so only the stamp tells the seed's bytes from a later write.
+    const RACE = Date.parse('2026-10-30T12:00:00.400Z');
+    const seededAt = '2026-10-30T12:00:00.300Z';
+    const seed = [
+        folder('D', '', 'mokuro-reader', { modified: seededAt }),
+        file('d-vd', 'D', 'volume-data.json', seededAt),
+        file('d-cbz', 'D', 'Vol 1.cbz', seededAt),
+    ];
+    const allowed = asSeeded(seed, ['d-vd', 'd-cbz']);
+    // As seeded, then trashed (and deleted for good) with D: no write.
+    const asSeed = [
+        ...merged(),
+        { ...seed[0], trashed: true, explicitly_trashed: true },
+        { ...seed[1], trashed: true, deleted: true },
+    ];
+    assert.deepEqual(writesOutside(asSeed, 'B', RACE, allowed), []);
+    // The same id rewritten after the race started: a write outside B.
+    const rewritten = [
+        ...merged(),
+        { ...seed[0], trashed: true, explicitly_trashed: true },
+        { ...seed[1], modified: '2026-10-30T12:00:02.000Z', trashed: true },
+    ];
+    assert.deepEqual(
+        writesOutside(rewritten, 'B', RACE, allowed).map((r) => r.id),
+        ['d-vd'],
     );
 });

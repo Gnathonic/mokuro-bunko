@@ -19,6 +19,7 @@ import { basic, bunko, davPath } from '../bunko.mjs';
 import { processorHold } from '../rename-ocr.mjs';
 import {
     CONTROL_FILES,
+    asSeeded,
     filesBelow,
     mergeProblems,
     mokuroDoc,
@@ -229,6 +230,7 @@ test('S1: Bunko merges duplicate roots under its lease into the older top-level 
                 [`${series}/Vol 1.mokuro`]: mokuroDoc(m, series, 'Vol 1', n, `競争 ${i}`),
                 'volume-data.json': volumeData(series, 'Vol 1', n, 2, new Date().toISOString()),
             });
+            const asSeed = asSeeded(await tree(rig), d.values());
             const raceStart = Date.now();
             let syncs = 0;
             await expect
@@ -263,11 +265,12 @@ test('S1: Bunko merges duplicate roots under its lease into the older top-level 
             merged.push(rootD);
             expect(mergeProblems(rows, seed.rootB, merged)).toEqual([]);
             expect(filesBelow(rows, seed.rootB).get(`${series}/Vol 1.cbz`)?.id).toBe(d.get(`${series}/Vol 1.cbz`));
-            // What D was seeded with is no write: made in raceStart's second, it reads as
-            // one, and the reader deletes its merged-away volume-data.json for good.
+            // What D was seeded with is no write while it is still the seed's node as
+            // seeded: made in raceStart's second, it reads as one, and the reader
+            // deletes its merged-away volume-data.json for good. A rewrite in place
+            // after the seed (Drive keeps the id) moves its stamp and counts again.
             const ever = await treeEver(rig);
-            const seeded = new Set(d.values());
-            const allowed = (r) => seeded.has(r.id) || under(ever, r.id, seed.nested);
+            const allowed = (r) => asSeed(r) || under(ever, r.id, seed.nested);
             expect(writesOutside(ever, seed.rootB, raceStart, allowed)).toEqual([]);
         }
         expect(got503).toEqual([]);

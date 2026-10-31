@@ -266,6 +266,19 @@ export function mergeProblems(rows, canonical, folders) {
 }
 
 /**
+ * What a root was seeded with, as `allowed` for `writesOutside`: `rows` the tree read
+ * right after the seed, `ids` the seeded nodes. A seeded node made in the second a
+ * check starts from reads as a write; it is none while it is the node the seed made.
+ */
+export function asSeeded(rows, ids) {
+    const want = new Set(ids);
+    const stamps = new Map(rows.filter((r) => want.has(r.id)).map((r) => [r.id, r.modified]));
+    // Drive keeps a file's id through a content rewrite: the stamp moves, so it is a
+    // write again. A move or the trash moves no stamp.
+    return (r) => stamps.has(r.id) && stamps.get(r.id) === r.modified;
+}
+
+/**
  * Every file written (or made) at or after `since` (ms) lies below `canonical`, or is
  * one of `allowed(row)`: answers the rows that do not. Trashed files count too: a write
  * into a merged-away root (its pre-merge id kept as a write root) lands in the trash

@@ -609,7 +609,9 @@ out a debounce and decide at its end whether to write.
   checked again after each. "Every file written since" counts trashed files too (a
   write into a merged-away root's old id lands in the trash with it; trashing moves
   no write time in cloudsim), from the whole second of the merge (MEGA stamps a node
-  in whole seconds). The C6 text reads write parents off `/_sim/log`; its entries name
+  in whole seconds). What a race's new root was seeded with is left out only while it
+  carries the stamp it was seeded with (`asSeeded`): Drive keeps a file's id through a
+  rewrite, so a later write into that `volume-data.json` counts again. The C6 text reads write parents off `/_sim/log`; its entries name
   a request path, and a Drive or MEGA upload's parent is in its body, so the tree is
   what can tell. The Storage panel, sampled every 500 ms through the whole spec, never shows
   `suspect`, and the page gets no 503. S9's end (C2-R5) follows: Bunko stopped
