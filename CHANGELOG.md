@@ -39,6 +39,13 @@
   series owners. `metadata.ownedSeries` now lists the series the account owns. When
   the server cannot read who owns what, these lists err towards closed: a series it
   is unsure of is reported closed and not owned.
+- **`/login/api/me` lists the volumes an uploader may publish corrections for in a
+  shared series** (`permissions.curated.volumes`, with `curated.scope` `owned`): each
+  `{series, volume}` (the series folder, the archive name without `.cbz`) of the
+  volumes it uploaded in series it does not own, so a reader can offer Publish volume
+  by volume there, not only for whole series it owns. A series another account owns
+  is listed only where the volume's curated layer exists already. Bunko still decides
+  each publish.
 - **Set a library up in Google Drive, OneDrive, MEGA or a WebDAV server.** The setup
   wizard asks where the library lives, then connects it with one button: a browser on
   the server signs in directly. Anywhere else (Docker, a NAS, a phone), Google Drive

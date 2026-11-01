@@ -22,6 +22,7 @@ use bunko_db::pyfmt::truthy;
 use bunko_db::{TokenKind, User};
 use http::{HeaderMap, header};
 use serde_json::{Value, json};
+use std::collections::{BTreeMap, HashSet};
 use std::str::FromStr;
 
 pub fn routes() -> Router<AccountsDeps> {
@@ -262,9 +263,21 @@ async fn revoke_token(State(d): State<AccountsDeps>, headers: HeaderMap) -> Resp
 /// unlistable, every record of another account closes its series and none is owned;
 /// with the records unreadable, `closed` is `None`: the account may add nowhere. Auth
 /// answers those requests 503 meanwhile, and the reader's next /me corrects it.
+///
+/// `volumes` are the archives it may publish the curated layer of outside the series it
+/// owns ([`curated_volumes`]); there a shorter list only offers less, so whatever cannot
+/// be read is left out.
 struct SeriesFolders {
     owned: Vec<String>,
     closed: Option<Vec<String>>,
+    volumes: Vec<CuratedVolume>,
+}
+
+/// A volume outside the account's own series whose curated layer it may publish: its
+/// series folder as listed, and the archive's stem.
+struct CuratedVolume {
+    series: String,
+    volume: String,
 }
 
 /// The client-facing permissions object (§15.4 `P`): `metadata` nests inside, which is
@@ -272,9 +285,9 @@ struct SeriesFolders {
 /// may add files: anywhere, every series but the `closedSeries` other accounts own, or
 /// nowhere. Its presence tells a reader the server enforces series owners.
 fn permissions(role: Role, folders: Option<SeriesFolders>) -> Value {
-    let (owned, closed) = match folders {
-        Some(f) => (Some(f.owned), f.closed),
-        None => (None, Some(Vec::new())),
+    let (owned, closed, volumes) = match folders {
+        Some(f) => (Some(f.owned), f.closed, f.volumes),
+        None => (None, Some(Vec::new()), Vec::new()),
     };
     let metadata = if has_perm(role, Perm::ModifyDelete) {
         json!({"scope": "all"})
@@ -295,9 +308,24 @@ fn permissions(role: Role, folders: Option<SeriesFolders>) -> Value {
         "canAddFiles": has_perm(role, Perm::AddFiles),
         "canModifyDelete": has_perm(role, Perm::ModifyDelete),
         "metadata": metadata,
-        "curated": {"scope": curated_scope(role)},
+        "curated": curated(role, volumes),
         "addFiles": add_files,
     })
+}
+
+/// `curated`: its scope, and with `owned` the `volumes` it controls outside the series
+/// it owns (those are `metadata.ownedSeries`), so a reader can offer Publish per volume
+/// in a shared series.
+fn curated(role: Role, volumes: Vec<CuratedVolume>) -> Value {
+    let scope = curated_scope(role);
+    if scope != "owned" {
+        return json!({ "scope": scope });
+    }
+    let volumes: Vec<Value> = volumes
+        .into_iter()
+        .map(|v| json!({"series": v.series, "volume": v.volume}))
+        .collect();
+    json!({"scope": scope, "volumes": volumes})
 }
 
 /// Who may publish a volume's shared `curated` layer (D27; auth enforces it): every
@@ -329,6 +357,7 @@ fn series_folders(
             return SeriesFolders {
                 owned: Vec::new(),
                 closed: None,
+                volumes: Vec::new(),
             };
         }
     };
@@ -337,6 +366,15 @@ fn series_folders(
             tracing::warn!("series folders for /me: the library root cannot be listed: {e}")
         })
         .ok();
+    let volumes = match &live {
+        Some(live) => {
+            let keys = |rows: &[bunko_db::SeriesFolderOwner]| -> HashSet<String> {
+                rows.iter().map(|r| r.series_key.clone()).collect()
+            };
+            curated_volumes(db, library, username, live, &keys(&owned), &keys(&closed))
+        }
+        None => Vec::new(),
+    };
     // A record whose folder may or may not be listed closes its series, and owns nothing.
     let listed = |rows: Vec<bunko_db::SeriesFolderOwner>, unsure: bool| -> Vec<String> {
         rows.into_iter()
@@ -347,7 +385,82 @@ fn series_folders(
     SeriesFolders {
         owned: listed(owned, false),
         closed: Some(listed(closed, true)),
+        volumes,
     }
+}
+
+/// The listed archives `username` controls in the series folders it does not own (D1),
+/// by series then stem: those auth lets it publish the curated layer of. A volume is
+/// controlled when every archive governing its `<stem>.curated.mokuro` (the nearest
+/// listed one, `sidecar_names::governing_archives`) is its recorded upload; in a series
+/// another account owns, only while that layer is listed (a new one there is refused).
+/// `owned` and `closed` are the series keys of its own and other accounts' records,
+/// `live` those listed at the root. Archives directly in a series folder only; a folder
+/// or record that cannot be read adds nothing. Blocking.
+fn curated_volumes(
+    db: &bunko_db::Database,
+    library: &std::path::Path,
+    username: &str,
+    live: &HashSet<String>,
+    owned: &HashSet<String>,
+    closed: &HashSet<String>,
+) -> Vec<CuratedVolume> {
+    use bunko_core::sidecar_names::{cbz_stem, governing_archives};
+    use bunko_db::uploads::fold_series_title_key;
+    let uploads = match db.volume_uploads_by(username) {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!("volume uploads for /me: {e}");
+            return Vec::new();
+        }
+    };
+    let mut by_folder: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for rel in &uploads {
+        if let Some((folder, name)) = rel.split_once('/')
+            && !name.contains('/')
+        {
+            by_folder.entry(folder).or_default().push(name);
+        }
+    }
+    let mut out = Vec::new();
+    for (folder, archives) in by_folder {
+        let key = fold_series_title_key(folder);
+        if !live.contains(&key) || owned.contains(&key) {
+            continue;
+        }
+        let Ok(entries) = bunko_store::fs::read_dir(library.join(folder)) else {
+            continue;
+        };
+        let names: Vec<String> = entries
+            .flatten()
+            .filter(|e| e.file_type().is_ok_and(|t| !t.is_dir()))
+            .filter_map(|e| e.file_name().into_string().ok())
+            .collect();
+        let listed: Vec<&str> = names.iter().map(String::as_str).collect();
+        for archive in archives {
+            let Some(stem) = cbz_stem(archive).filter(|_| listed.contains(&archive)) else {
+                continue;
+            };
+            let layer = format!("{stem}.curated.mokuro");
+            if closed.contains(&key) && !listed.contains(&layer.as_str()) {
+                continue;
+            }
+            let governors = governing_archives(&layer, &listed);
+            let mine = !governors.is_empty()
+                && governors.iter().all(|g| {
+                    let rel = format!("{folder}/{g}");
+                    uploads.binary_search(&rel).is_ok()
+                });
+            if mine {
+                out.push(CuratedVolume {
+                    series: folder.to_string(),
+                    volume: stem.to_string(),
+                });
+            }
+        }
+    }
+    out.sort_by(|a, b| (&a.series, &a.volume).cmp(&(&b.series, &b.volume)));
+    out
 }
 
 /// The 200 identity body for a signed-in user (an uploader's series folders are read
@@ -462,6 +575,10 @@ mod tests {
         let folders = SeriesFolders {
             owned: vec!["A".into()],
             closed: Some(vec!["B".into()]),
+            volumes: vec![CuratedVolume {
+                series: "C".into(),
+                volume: "Vol 1".into(),
+            }],
         };
         let p = permissions(Role::Uploader, Some(folders));
         assert_eq!(
@@ -470,13 +587,14 @@ mod tests {
                 Some(SeriesFolders {
                     owned: Vec::new(),
                     closed: None,
+                    volumes: Vec::new(),
                 })
             )["addFiles"],
             json!({"scope": "none"})
         );
         assert_eq!(
             serde_json::to_string(&p).unwrap(),
-            r#"{"canWriteProgress":true,"canAddFiles":true,"canModifyDelete":false,"metadata":{"scope":"owned","ownedSeries":["A"]},"curated":{"scope":"owned"},"addFiles":{"scope":"open","closedSeries":["B"]}}"#
+            r#"{"canWriteProgress":true,"canAddFiles":true,"canModifyDelete":false,"metadata":{"scope":"owned","ownedSeries":["A"]},"curated":{"scope":"owned","volumes":[{"series":"C","volume":"Vol 1"}]},"addFiles":{"scope":"open","closedSeries":["B"]}}"#
         );
         // Where an account may add files (0.8; its presence is the capability).
         for (role, scope) in [
@@ -499,21 +617,18 @@ mod tests {
             json!({"scope": "none"})
         );
         // Who may publish the shared `curated` layer (D27): an uploader only on what
-        // it uploaded, even before it owns a series.
-        for (role, scope) in [
-            (Role::Admin, "all"),
-            (Role::Editor, "all"),
-            (Role::Inviter, "all"),
-            (Role::Uploader, "owned"),
-            (Role::Registered, "none"),
-            (Role::Processor, "none"),
-            (Role::Anonymous, "none"),
+        // it uploaded, even before it owns a series, its volumes outside the series it
+        // owns listed (D1).
+        for (role, curated) in [
+            (Role::Admin, json!({"scope": "all"})),
+            (Role::Editor, json!({"scope": "all"})),
+            (Role::Inviter, json!({"scope": "all"})),
+            (Role::Uploader, json!({"scope": "owned", "volumes": []})),
+            (Role::Registered, json!({"scope": "none"})),
+            (Role::Processor, json!({"scope": "none"})),
+            (Role::Anonymous, json!({"scope": "none"})),
         ] {
-            assert_eq!(
-                permissions(role, None)["curated"],
-                json!({ "scope": scope }),
-                "{role:?}"
-            );
+            assert_eq!(permissions(role, None)["curated"], curated, "{role:?}");
         }
         assert_eq!(
             permissions(Role::Anonymous, None)["canWriteProgress"],
@@ -563,6 +678,56 @@ mod tests {
             p["metadata"],
             json!({"scope": "owned", "ownedSeries": ["B"]})
         );
+    }
+
+    /// The volumes an uploader may publish the curated layer of outside the series it
+    /// owns (D1): its listed uploads in shared folders, as auth decides (the nearest
+    /// listed archive governs), and in another account's series only where the curated
+    /// layer is there already (a new one there is refused).
+    #[test]
+    fn curated_volumes_are_the_uploads_it_controls_outside_its_series() {
+        let (_dir, db, library, bob) = owners_library();
+        for folder in ["Shared", "Zeta"] {
+            bunko_store::fs::create_dir_all(library.join(folder)).unwrap();
+        }
+        db.record_series_folder_owner("Zeta", "carol").unwrap();
+        let files = [
+            ("Shared/Vol 1.cbz", Some("BOB")),
+            ("Shared/Vol 2.cbz", Some("carol")),
+            ("Shared/Vol 1.5.cbz", Some("bob")),
+            // Hides carol's `V`'s curated layer: control passes up to `V`.
+            ("Shared/V.cbz", Some("carol")),
+            ("Shared/V.curated.cbz", Some("bob")),
+            ("B/Mine.cbz", Some("bob")),
+            ("S/Old.cbz", Some("bob")),
+            ("S/Kept.cbz", Some("bob")),
+            ("S/Kept.curated.mokuro", None),
+            ("Loose.cbz", Some("bob")),
+        ];
+        for (rel, uploader) in files {
+            bunko_store::fs::write(library.join(rel), b"x").unwrap();
+            if let Some(u) = uploader {
+                db.record_volume_upload(rel, u).unwrap();
+            }
+        }
+        // Recorded, but no longer listed.
+        db.record_volume_upload("Shared/Gone.cbz", "bob").unwrap();
+        db.record_volume_upload("Elsewhere/Vol 1.cbz", "bob")
+            .unwrap();
+        let p = reported(&db, &library, &bob);
+        assert_eq!(
+            p["curated"],
+            json!({"scope": "owned", "volumes": [
+                {"series": "S", "volume": "Kept"},
+                {"series": "Shared", "volume": "Vol 1"},
+                {"series": "Shared", "volume": "Vol 1.5"},
+            ]})
+        );
+        // Unreadable upload records report none (the reader just offers no Publish).
+        db.with_writer_connection(|c| c.execute("DROP TABLE volume_uploads", []))
+            .unwrap();
+        let p = reported(&db, &library, &bob);
+        assert_eq!(p["curated"], json!({"scope": "owned", "volumes": []}));
     }
 
     /// Owner records that cannot be read are no empty list: /me still answers (a reader

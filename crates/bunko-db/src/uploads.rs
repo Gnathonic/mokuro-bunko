@@ -216,6 +216,21 @@ impl Database {
         Ok(owned.into_iter().collect())
     }
 
+    /// The archives (`volume_key`s) `username` uploaded, by code point, its name matched
+    /// as auth matches account names (ASCII case-insensitive). `/login/api/me`'s
+    /// `curated.volumes`.
+    pub fn volume_uploads_by(&self, username: &str) -> Result<Vec<String>> {
+        self.read(|conn| {
+            Ok(conn
+                .prepare_cached(
+                    "SELECT volume_key FROM volume_uploads \
+                     WHERE uploader_username = ? COLLATE NOCASE ORDER BY volume_key",
+                )?
+                .query_map([username], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?)
+        })
+    }
+
     /// Delete the ownership row of the volume this path belongs to.
     pub fn forget_volume_upload(&self, library_relative_path: &str) -> Result<()> {
         let Some(key) = normalize_volume_key(library_relative_path) else {
@@ -481,5 +496,22 @@ mod tests {
         db.rename_volume_upload("nope.cbz", "x.cbz").unwrap();
         db.forget_volume_upload("Dr Stone/Vol 1.mokuro").unwrap();
         assert_eq!(db.get_volume_owner("Dr Stone/Vol 1.cbz").unwrap(), None);
+    }
+
+    /// An account's recorded uploads, by code point: its name matched as auth matches
+    /// it (ASCII case-insensitive), sidecar stamps never adding a row.
+    #[test]
+    fn the_volumes_an_account_uploaded() {
+        let (_dir, db) = temp_db();
+        db.record_volume_upload("S/V2.cbz", "alice").unwrap();
+        db.record_volume_upload("S/V1.cbz", "Alice").unwrap();
+        db.record_volume_upload("S/V3.cbz", "bob").unwrap();
+        db.record_volume_upload("S/V3.mokuro", "alice").unwrap();
+        db.record_volume_upload("S/V4.mokuro", "alice").unwrap();
+        assert_eq!(
+            db.volume_uploads_by("ALICE").unwrap(),
+            ["S/V1.cbz", "S/V2.cbz"]
+        );
+        assert!(db.volume_uploads_by("carol").unwrap().is_empty());
     }
 }

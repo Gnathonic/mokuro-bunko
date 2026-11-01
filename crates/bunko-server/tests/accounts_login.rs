@@ -94,7 +94,7 @@ async fn me_permissions_per_role() {
             false,
             false,
             json!({"scope": "none"}),
-            "none",
+            json!({"scope": "none"}),
             json!({"scope": "none"}),
         ),
         (
@@ -104,7 +104,7 @@ async fn me_permissions_per_role() {
             false,
             false,
             json!({"scope": "none"}),
-            "none",
+            json!({"scope": "none"}),
             json!({"scope": "none"}),
         ),
         (
@@ -114,7 +114,7 @@ async fn me_permissions_per_role() {
             true,
             false,
             json!({"scope": "owned", "ownedSeries": []}),
-            "owned",
+            json!({"scope": "owned", "volumes": []}),
             json!({"scope": "open", "closedSeries": []}),
         ),
         (
@@ -124,7 +124,7 @@ async fn me_permissions_per_role() {
             true,
             true,
             json!({"scope": "all"}),
-            "all",
+            json!({"scope": "all"}),
             json!({"scope": "all"}),
         ),
         (
@@ -134,7 +134,7 @@ async fn me_permissions_per_role() {
             true,
             true,
             json!({"scope": "all"}),
-            "all",
+            json!({"scope": "all"}),
             json!({"scope": "all"}),
         ),
         (
@@ -144,7 +144,7 @@ async fn me_permissions_per_role() {
             true,
             true,
             json!({"scope": "all"}),
-            "all",
+            json!({"scope": "all"}),
             json!({"scope": "all"}),
         ),
     ] {
@@ -154,7 +154,7 @@ async fn me_permissions_per_role() {
         assert_eq!(b["role"], role);
         assert_eq!(
             b["permissions"],
-            json!({"canWriteProgress": wp, "canAddFiles": add, "canModifyDelete": md, "metadata": meta, "curated": {"scope": curated}, "addFiles": add_files}),
+            json!({"canWriteProgress": wp, "canAddFiles": add, "canModifyDelete": md, "metadata": meta, "curated": curated, "addFiles": add_files}),
             "{user}"
         );
         assert_eq!(b["per_user_layers"], json!(["edit"]), "{user}");

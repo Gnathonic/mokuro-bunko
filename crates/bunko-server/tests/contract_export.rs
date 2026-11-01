@@ -410,9 +410,23 @@ async fn puts(c: &mut Contract, seed: &Seed) {
 }
 
 /// Series owners (0.8): a series the admin created is closed to `reader`, whose `/me`
-/// lists it (never its owner) and whose PUT into it is refused, saying why.
+/// lists it (never its owner) and whose PUT into it is refused, saying why. The volume
+/// `reader` added to the shared (ownerless) `日本語シリーズ` is in its `/me` as one it
+/// may publish the curated layer of (D1).
 async fn series_owners(c: &mut Contract, seed: &Seed) {
     let server = Server::local(seed).await;
+    let r = server
+        .send(
+            &Req::new(
+                "PUT",
+                &dav_path(&["日本語シリーズ", "第2巻.cbz"]),
+                "basic:reader",
+            )
+            .header("content-type", "application/octet-stream")
+            .cbz(1),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.text());
     let r = server
         .send(&Req::new(
             "MKCOL",
@@ -444,6 +458,10 @@ async fn series_owners(c: &mut Contract, seed: &Seed) {
     assert_eq!(
         r.json().unwrap()["permissions"]["addFiles"],
         json!({"scope": "open", "closedSeries": ["Admin Series"]})
+    );
+    assert_eq!(
+        r.json().unwrap()["permissions"]["curated"],
+        json!({"scope": "owned", "volumes": [{"series": "日本語シリーズ", "volume": "第2巻"}]})
     );
     let r = export(
         c,

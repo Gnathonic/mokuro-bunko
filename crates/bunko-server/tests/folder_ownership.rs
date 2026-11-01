@@ -286,6 +286,57 @@ async fn nobody_else_adds_to_an_owned_series() {
     assert_eq!(env.owner("Alice"), None);
 }
 
+/// `/login/api/me` lists the volumes an uploader may publish the curated layer of in a
+/// shared series (D1), and auth agrees: its publish lands on each one listed, and is
+/// refused on every other volume there.
+#[tokio::test]
+async fn me_lists_the_shared_volumes_whose_curated_layer_it_may_publish() {
+    let env = Env::new();
+    std::fs::create_dir_all(env.lib("Shared")).unwrap();
+    for (user, name) in [
+        ("alice", "Vol 1.cbz"),
+        ("bob", "Vol 2.cbz"),
+        ("alice", "Vol 2.5.cbz"),
+    ] {
+        let r = env
+            .put(user, &format!("/mokuro-reader/Shared/{name}"), cbz(1))
+            .await;
+        assert_eq!(r.status, 201, "{name}: {}", r.text());
+    }
+    // Her own series is `ownedSeries`, not a volume list.
+    assert_eq!(env.mkcol("alice", "/mokuro-reader/Alice").await.status, 201);
+    let r = env
+        .put("alice", "/mokuro-reader/Alice/Vol 1.cbz", cbz(1))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.text());
+
+    let r = env
+        .send("alice", "GET", "/login/api/me", &[], Vec::new())
+        .await;
+    let p = &r.json()["permissions"];
+    assert_eq!(
+        p["curated"],
+        serde_json::json!({"scope": "owned", "volumes": [
+            {"series": "Shared", "volume": "Vol 1"},
+            {"series": "Shared", "volume": "Vol 2.5"},
+        ]})
+    );
+    assert_eq!(
+        p["metadata"],
+        serde_json::json!({"scope": "owned", "ownedSeries": ["Alice"]})
+    );
+    for (volume, status) in [("Vol 1", 201), ("Vol 2.5", 201), ("Vol 2", 403)] {
+        let r = env
+            .put(
+                "alice",
+                &format!("/mokuro-reader/Shared/{volume}.curated.mokuro"),
+                br#"{"pages":[]}"#.to_vec(),
+            )
+            .await;
+        assert_eq!(r.status, status, "{volume}: {}", r.text());
+    }
+}
+
 /// The finding (authz-dotted-primary), in a shared folder and both upload orders: a
 /// nested archive is the outer volume's, whichever came first.
 #[tokio::test]

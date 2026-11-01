@@ -302,7 +302,9 @@ shared). For `uploader`:
 - Its own correction layers (`<Volume>.edit.mokuro`) are its own, in any series.
 
 `/login/api/me` lists the series the account owns (`ownedSeries`) and those it
-cannot add to (`addFiles.closedSeries`), without naming their owners. Moving,
+cannot add to (`addFiles.closedSeries`), without naming their owners, and the
+volumes outside its own series whose `curated` layer it may publish (its uploads,
+`curated.volumes`). Moving,
 copying, locking or PROPPATCH of library files, its own included, needs `editor`
 or higher. Editors and admins are not limited by series owners.
 
