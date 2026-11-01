@@ -249,7 +249,11 @@ CREATE INDEX IF NOT EXISTS idx_audit_actor_created       ON audit_logs(actor_use
 CREATE INDEX IF NOT EXISTS idx_volume_uploads_uploader   ON volume_uploads(uploader_username);
 CREATE INDEX IF NOT EXISTS idx_series_entry_cache_series ON series_entry_cache(series_key);
 ```
-(plus `idx_auth_tokens_username`, `idx_ocr_sidecars_volume` above). `test_audit_search.py:192-215` pins
+(plus `idx_auth_tokens_username`, `idx_ocr_sidecars_volume` above). **0.8 (Rust)** adds, with the
+series folder owner tables (schema version 7), `idx_volume_uploads_uploader_nocase ON
+volume_uploads(uploader_username COLLATE NOCASE)`: `/login/api/me` looks an uploader's archives up
+by name, matched ASCII case-insensitively as auth matches it, which the binary index above
+cannot serve. `test_audit_search.py:192-215` pins
 that the three audit indexes exist and are re-created on an existing DB where they were dropped.
 `idx_audit_created_at` is referenced by name in an `INDEXED BY` hint (8.4), so it MUST exist under
 that exact name (or the Rust query must drop the hint).

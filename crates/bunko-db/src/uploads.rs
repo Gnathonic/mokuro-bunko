@@ -95,6 +95,11 @@ pub fn fold_series_title_key(title: &str) -> String {
     out.to_lowercase()
 }
 
+/// [`Database::volume_uploads_by`]: matched as auth matches account names (NOCASE),
+/// which `idx_volume_uploads_uploader_nocase` serves.
+const VOLUME_UPLOADS_BY_SQL: &str = "SELECT volume_key FROM volume_uploads \
+     WHERE uploader_username = ? COLLATE NOCASE ORDER BY volume_key";
+
 impl Database {
     /// Record an upload/edit of a library file. An archive creates ownership (keeping the
     /// first uploader on conflict); a sidecar only stamps an existing row.
@@ -222,10 +227,7 @@ impl Database {
     pub fn volume_uploads_by(&self, username: &str) -> Result<Vec<String>> {
         self.read(|conn| {
             Ok(conn
-                .prepare_cached(
-                    "SELECT volume_key FROM volume_uploads \
-                     WHERE uploader_username = ? COLLATE NOCASE ORDER BY volume_key",
-                )?
+                .prepare_cached(VOLUME_UPLOADS_BY_SQL)?
                 .query_map([username], |r| r.get(0))?
                 .collect::<rusqlite::Result<_>>()?)
         })
@@ -307,6 +309,26 @@ impl Database {
 mod tests {
     use super::*;
     use crate::testutil::temp_db;
+
+    /// `/me` asks for an uploader's archives on every call: by index (the NOCASE one),
+    /// not by a scan of every volume's row.
+    #[test]
+    fn an_accounts_uploads_are_found_by_index() {
+        let (_dir, db) = temp_db();
+        let plan: Vec<String> = db
+            .read(|conn| {
+                Ok(conn
+                    .prepare(&format!("EXPLAIN QUERY PLAN {VOLUME_UPLOADS_BY_SQL}"))?
+                    .query_map(["alice"], |r| r.get::<_, String>(3))?
+                    .collect::<rusqlite::Result<_>>()?)
+            })
+            .unwrap();
+        assert!(
+            plan.iter()
+                .any(|p| p.starts_with("SEARCH volume_uploads USING INDEX")),
+            "{plan:?}"
+        );
+    }
 
     #[test]
     fn volume_keys() {
