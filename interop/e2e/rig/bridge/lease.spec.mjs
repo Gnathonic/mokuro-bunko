@@ -1,9 +1,10 @@
 // bridge (§7.1): Bunko's lease on the cloud library, as the reader meets it. A Bunko
 // started after its marker went stale claims the library afresh (§9.2 step 1): until
 // the claim settles, a write through it answers 503 `storage-lease-claiming` with a
-// Retry-After, which fails the reader's write without touching its sign-in, and once
-// the lease is held the same write lands in the cloud. A Bunko restarted while its
-// marker is fresh resumes it at once (same epoch, no settle wait), and the reader
+// Retry-After of what is left. The reader waits such a short Retry-After out (at most
+// 30 s, at most twice per request) and sends the same request again, so the write
+// lands once the lease is held, without touching its sign-in. A Bunko restarted while
+// its marker is fresh resumes it at once (same epoch, no settle wait), and the reader
 // goes on on the session it had, its next write landing.
 import { test, expect } from '../fixtures.mjs';
 import { recordRequests } from '../bunko.mjs';
@@ -20,27 +21,36 @@ test.describe.configure({ mode: 'serial' });
  */
 const settleMs = (rig) => Math.floor((rig.lease.ttl_s * 1000) / 2);
 
-/** Every 503 the reader got from Bunko, with what it said. */
-function record503s(page, bunkoUrl) {
+/**
+ * Every answer the reader got from Bunko, in order: its status, and for a 503 its
+ * Retry-After and text (null until read).
+ */
+function recordAnswers(page, bunkoUrl) {
     const origin = new URL(bunkoUrl).origin;
     const seen = [];
     page.on('response', async (r) => {
-        if (r.status() !== 503 || new URL(r.url()).origin !== origin) return;
+        if (new URL(r.url()).origin !== origin) return;
         const entry = {
+            status: r.status(),
             method: r.request().method(),
             path: decodeURIComponent(new URL(r.url()).pathname),
             retryAfter: Number(r.headers()['retry-after']),
-            text: null,
+            text: r.status() === 503 ? null : '',
         };
         seen.push(entry);
-        entry.text = await r.text().catch(() => '');
+        if (entry.status === 503) entry.text = await r.text().catch(() => '');
     });
     return seen;
 }
 
+const refusalsOf = (answers) => answers.filter((a) => a.status === 503);
+
 const attention = async (reader) => (await reader.providerStatus())?.needsAttention ?? false;
 
-test('a write during the claim answers 503 storage-lease-claiming; once claimed it lands', async ({ reader, rig }) => {
+test('a write during the claim waits out its 503 storage-lease-claiming and lands once claimed', async ({
+    reader,
+    rig,
+}) => {
     test.setTimeout(300_000);
     const text = `請求中 ${Date.now().toString(36)}`;
     const rel = `${rig.library.series}/Vol 1.curated.mokuro`;
@@ -66,29 +76,35 @@ test('a write during the claim answers 503 storage-lease-claiming; once claimed 
         .poll(async () => (await leaseNow(rig))?.claiming_left_s ?? 0, { timeout: 60_000, intervals: [100, 250] })
         .toBeGreaterThan(2);
 
-    const refusals = record503s(reader.page, rig.bunkoUrl);
+    const answers = recordAnswers(reader.page, rig.bunkoUrl);
+    // One Publish, sent during the claim: held back by the fence, never failed by it.
     const during = await reader.publishCurated(id);
+    expect(during.outcome).toBe('published');
     const after = await leaseNow(rig);
-    expect(after?.state, 'the claim still running when the write came back').toBe('claiming');
-    expect(during.outcome).toBe('failed');
-    expect(refusals.length).toBeGreaterThan(0);
+    expect(after?.state, 'the lease held when the write came back').toBe('held');
+    // A new claim: the epoch moved on.
+    expect(after.holder.epoch).toBeGreaterThan(before.holder.epoch);
+
+    const refusals = refusalsOf(answers);
+    expect(refusals.length, 'the fence refused the write first').toBeGreaterThan(0);
     await expect.poll(() => refusals.every((r) => r.text !== null)).toBe(true);
     for (const r of refusals) {
         expect(r.text, `${r.method} ${r.path}`).toContain('storage-lease-claiming');
         expect(r.retryAfter, `${r.method} ${r.path} Retry-After`).toBeGreaterThanOrEqual(1);
     }
-    // A wait, not a sign-in problem: the session stands.
-    expect(await attention(reader)).toBe(false);
+    // Each refused request went again and got through: the same Publish, never a new one.
+    const through = (r) =>
+        answers
+            .slice(answers.indexOf(r) + 1)
+            .some((a) => a.status !== 503 && a.method === r.method && a.path === r.path);
+    expect(
+        refusals.filter((r) => !through(r)).map((r) => `${r.method} ${r.path}`),
+        'refused requests that never got through',
+    ).toEqual([]);
 
-    await expect
-        .poll(async () => (await leaseNow(rig))?.state, { timeout: settleMs(rig) + 60_000, intervals: [250, 500] })
-        .toBe('held');
-    // A new claim: the epoch moved on.
-    expect((await leaseNow(rig)).holder.epoch).toBeGreaterThan(before.holder.epoch);
-    const held = await reader.publishCurated(id);
-    expect(held.outcome).toBe('published');
     const doc = await landedInCloud(rig, account, rel, (d) => (firstLines(d) ?? []).includes(text));
     expect(firstLines(doc)).toEqual([text]);
+    // A wait, not a sign-in problem: the session stands.
     expect(await attention(reader)).toBe(false);
 });
 
@@ -134,13 +150,13 @@ test('a restart resumes the lease at once; the reader goes on with its session',
     expect(states.filter((l) => l.claiming_left_s !== undefined)).toEqual([]);
     expect((await leaseNow(rig)).holder.epoch).toBe(before.holder.epoch);
 
-    const refusals = record503s(reader.page, rig.bunkoUrl);
+    const answers = recordAnswers(reader.page, rig.bunkoUrl);
     expect(await reader.sync()).toEqual({ ok: true, errors: [] });
     const published = await reader.publishCurated(id);
     expect(published.outcome).toBe('published');
     const doc = await landedInCloud(rig, account, rel, (d) => (firstLines(d) ?? []).includes(text));
     expect(firstLines(doc)).toEqual([text]);
-    expect(refusals).toEqual([]);
+    expect(refusalsOf(answers)).toEqual([]);
     // The same session: the token it had, no new sign-in.
     const after = await requests.take();
     expect(after.filter((r) => r.path.startsWith('/login/'))).toEqual([]);
