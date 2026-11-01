@@ -252,6 +252,47 @@ async fn an_unocrd_cloud_volume_is_ocrd_and_everything_lands_in_the_cloud() {
     server.stop().await;
 }
 
+/// A reader renames a volume straight in the cloud, the archive alone: the cover Bunko
+/// made for it follows it to the new name and none is left under the old one. The
+/// cover node itself moved: it was not removed and made again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cover_bunko_made_follows_its_archive_renamed_in_the_cloud() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("storage");
+    let fake = fake_library();
+    let server = Server::start(&base, &fake, Some(quick), |_| {}).await;
+    let store = server.store();
+    eventually("the cover in the cloud", Duration::from_secs(30), || {
+        node(&fake, "Series/Vol 1.webp").is_some()
+    })
+    .await;
+    idle(&store).await;
+    let cover = node(&fake, "Series/Vol 1.webp").unwrap().pid;
+
+    fake.reader_rename(
+        &format!("{ROOT}/Series/Vol 1.cbz"),
+        &format!("{ROOT}/Series/Vol 1 renamed.cbz"),
+    );
+    store.feed().poll_now();
+    eventually(
+        "the cover under the new name only",
+        Duration::from_secs(30),
+        || {
+            node(&fake, "Series/Vol 1.webp").is_none()
+                && node(&fake, "Series/Vol 1 renamed.webp").is_some()
+        },
+    )
+    .await;
+    idle(&store).await;
+    assert_eq!(copies(&fake, "Series", "Vol 1 renamed.webp").await, 1);
+    assert_eq!(
+        node(&fake, "Series/Vol 1 renamed.webp").map(|n| n.pid),
+        Some(cover),
+        "the same node, moved"
+    );
+    server.stop().await;
+}
+
 /// The marker lease: claimed after the first sync, in the cloud root (§9.2).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_lease_marker_appears_in_the_cloud() {

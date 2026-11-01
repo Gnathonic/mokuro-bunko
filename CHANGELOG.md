@@ -39,6 +39,13 @@
   series owners. `metadata.ownedSeries` now lists the series the account owns. When
   the server cannot read who owns what, these lists err towards closed: a series it
   is unsure of is reported closed and not owned.
+- **`/login/api/me` lists the volumes an uploader may publish corrections for in a
+  shared series** (`permissions.curated.volumes`, with `curated.scope` `owned`): each
+  `{series, volume}` (the series folder, the archive name without `.cbz`) of the
+  volumes it uploaded in series it does not own, so a reader can offer Publish volume
+  by volume there, not only for whole series it owns. A series another account owns
+  is listed only where the volume's curated layer exists already. Bunko still decides
+  each publish.
 - **Set a library up in Google Drive, OneDrive, MEGA or a WebDAV server.** The setup
   wizard asks where the library lives, then connects it with one button: a browser on
   the server signs in directly. Anywhere else (Docker, a NAS, a phone), Google Drive
@@ -319,6 +326,13 @@
   covers of one name, the admin panel blamed a reader upload, and the emptied folder
   went to the trash only in a second merge. A volume a merge is moving now gets its
   cover after the merge.
+- **A cover Bunko makes while a reader renames the volume moves with it.** A reader
+  renaming a volume moves its cover first and the archive last. A cover Bunko made in
+  between, from the archive still under the old name, stayed there once the archive
+  moved, and the reader then refused to rename the series, taking the stray cover for a
+  volume it did not have. A cover Bunko made lately now follows its archive: to the new
+  name, or removed when the new name has a cover already; a deleted archive takes
+  it too. Covers a reader uploaded stay where they are.
 - **A volume renamed while Bunko makes its cover leaves no stray cover behind.** A
   cover made from an archive that a reader moved away meanwhile (a volume rename, then
   its series') was still written under the old name, beside nothing, and the old
@@ -412,6 +426,30 @@
   one Bunko had never seen, Bunko restarted as if its folder had been removed and held
   the library for the admin. It now checks the folder the reader kept, and when
   everything its own held is there, drops its emptied folder quietly.
+
+### Known limits
+- **Merging duplicate folders on Google Drive can trash files Bunko cannot see.**
+  Bunko and Mokuro Reader see only the files made through Mokuro Reader's Google
+  project (Drive's `drive.file` access). A duplicate folder that looks empty to them
+  can still hold files added through the Drive website; the merge moves it to Drive's
+  trash, with those files, where they stay for 30 days. Mokuro Reader's own merge does
+  the same.
+- **Progress files can stay doubled after a duplicate-folder merge.** A merge keeps
+  both copies of `volume-data.json`, `goals.json` and `positions.json`. With a
+  `progress_user`, over WebDAV that account sees the newest copy until a reader that
+  reads the cloud folder directly writes again and merges them.
+- **A merge keeps one copy of a duplicated file.** When a duplicate-folder merge finds
+  two copies of a file (an OCR file or a correction included), it keeps the strictly
+  newer one and moves the other to the provider's trash, where it can be recovered.
+  No `edit-<n>` copy is kept beside it.
+- **Changing `progress_user` hands over the cloud's corrections.** No file moves: the
+  correction files in the cloud folder become the new account's as they are, the
+  previous account's corrections kept on this server (`users/<u>/edits`) are not
+  brought into the cloud folder, and correction files without an owner are looked for
+  only when Bunko starts.
+- **Mokuro Reader tells WebDAV servers apart only by type.** Its protection for
+  edited OCR from a server counts every WebDAV server as one provider, so a second
+  WebDAV server (another Bunko included) is taken for the first.
 
 ## [0.7.3] - 2026-10-12
 

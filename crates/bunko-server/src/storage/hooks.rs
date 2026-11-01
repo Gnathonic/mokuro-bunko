@@ -277,6 +277,9 @@ impl CloudHooks for ServerCloudHooks {
             if let Some(new) = new.as_deref() {
                 self.forget_ocr_records(to, new, false);
             }
+            if is_cbz(from) && is_cbz(to) && old.is_some() && new.is_some() {
+                self.dav.archive_moved(from, to);
+            }
             if is_cbz(from) {
                 self.dav.archives_removed(&[from.to_path_buf()]);
             }

@@ -1010,6 +1010,17 @@ Bunko-specific handlers (authoritative semantics):
   `_forget_ocr_records(new, archive_too=False)`; audit `move` with `details {"destination": <header path>}`.
   **Sidecars are NOT moved** (they stay under the old name; pinned by
   `test_move_library_file_as_admin_preserves_sidecars_and_owner`). `204`.
+  **0.8 (Rust):** one exception, a cover the server's thumbnailer made in the last ten minutes
+  and nobody replaced since (by size): a `.cbz` MOVE inside the library takes it to the new
+  stem, or removes it when the new stem has a cover already (`DavHooks::archive_moved`; a
+  DELETE or a MOVE away removes it, `archives_removed`). A reader renaming a volume moves its
+  cover before the archive, and a cover made in between, from the archive still under the old
+  name, would otherwise be left beside nothing. A WebDAV MOVE or DELETE does it before it
+  answers, on a cloud library too, so a listing right after it never shows the stray cover. A
+  move or removal seen in the cloud does it just after, on one thread that runs these in order
+  (a MOVE's "goes along" before its "archive gone"), never on the store's events thread. A
+  removed FOLDER takes no cover (`Series/` is not `Series.cbz`). Pinned by
+  `crates/bunko-server/tests/cover_rename.rs`, `cloud_bridge_put.rs` and `cloud_e2e.rs`.
 * **File COPY** (generic loop -> `copy_move_single(is_move=False)`): locks `[dst]`; `mkdir -p dst.parent`;
   `shutil.copy2` (preserves mtime/permission bits); `archive_written = dst` if `.cbz`; DB `_forget_ocr_records(new, archive_too=False)`;
   audit `copy`. **No `record_volume_upload` for the copy (the copy is untracked/unowned; QUIRK)**. Sidecars not

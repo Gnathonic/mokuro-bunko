@@ -15,7 +15,13 @@
         ]
       },
       "curated": {
-        "scope": "owned"
+        "scope": "owned",
+        "volumes": [
+          {
+            "series": "日本語シリーズ",
+            "volume": "第2巻"
+          }
+        ]
       },
       "addFiles": {
         "scope": "open",

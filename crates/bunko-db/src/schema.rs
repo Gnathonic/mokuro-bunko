@@ -16,8 +16,9 @@
 //!   rewrites it to 6).
 //!
 //! Version 7 (0.8) adds the series folder owners (`series_folder_owners`, and the
-//! one-row `series_folder_adoption` that says the existing folders were given theirs).
-//! Additive: a 0.7 build opens a version 7 file and ignores both tables.
+//! one-row `series_folder_adoption` that says the existing folders were given theirs),
+//! and `idx_volume_uploads_uploader_nocase`. Additive: a 0.7 build opens a version 7
+//! file and ignores both tables and the index.
 
 use crate::database::column_exists;
 use crate::error::Result;
@@ -216,6 +217,14 @@ const SERIES_FOLDER_ADOPTION_DDL: &str = "
                 )
             ";
 
+/// An account's uploads matched as auth matches account names (`COLLATE NOCASE`, which
+/// 0.5.2's `idx_volume_uploads_uploader` cannot serve): `/login/api/me` asks on every
+/// call (`uploads::volume_uploads_by`).
+const VOLUME_UPLOADS_UPLOADER_NOCASE_INDEX: &str = "
+                CREATE INDEX IF NOT EXISTS idx_volume_uploads_uploader_nocase
+                ON volume_uploads(uploader_username COLLATE NOCASE)
+            ";
+
 /// Step 6 indexes, in 0.5.2's order. `idx_audit_created_at` is named in an `INDEXED BY`
 /// hint by the audit query, so it must exist under exactly this name.
 const INDEXES: &[&str] = &[
@@ -348,6 +357,7 @@ pub(crate) fn init(conn: &Connection) -> Result<()> {
             [],
         )?;
     }
+    conn.execute(VOLUME_UPLOADS_UPLOADER_NOCASE_INDEX, [])?;
 
     // 9. Version bookkeeping.
     let current: Option<i64> = conn

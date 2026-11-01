@@ -87,6 +87,15 @@ pub fn on_store_runtime() -> bool {
     ON_STORE_RUNTIME.with(Cell::get)
 }
 
+/// The name of a store's events thread, which runs its cloud hooks in order.
+pub const EVENTS_THREAD: &str = "bunko-store-events";
+
+/// Whether the current thread is a store's events thread: a cloud hook is running, and
+/// must not wait for anything that may wait for that thread (a write to the store).
+pub fn on_events_thread() -> bool {
+    std::thread::current().name() == Some(EVENTS_THREAD)
+}
+
 /// The message for a content method called from inside an async task.
 const IN_ASYNC_TASK: &str = "called from inside an async task: RemoteStore content methods block on \
      the network; call them from a std thread or tokio::task::spawn_blocking";
@@ -288,7 +297,7 @@ impl Events {
     fn start() -> io::Result<Arc<Events>> {
         let (tx, rx) = mpsc::channel::<Job>();
         let t = std::thread::Builder::new()
-            .name("bunko-store-events".into())
+            .name(EVENTS_THREAD.into())
             .spawn(move || {
                 while let Ok(job) = rx.recv() {
                     if catch_unwind(AssertUnwindSafe(job)).is_err() {

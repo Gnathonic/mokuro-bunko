@@ -130,8 +130,8 @@ storage:
 | `poll.active_s`, `poll.idle_s` | integer | provider default | How often the cloud folder is checked for changes, while busy and while idle. |
 | `drive_background_units_per_min` | integer | `20000` | Google Drive API quota units per minute for background work. |
 | `status_files` | boolean | `true` | Write the OCR queue and server status files into the cloud folder for readers. |
-| `dedup` | boolean | `true` | Google Drive and MEGA: merge folders that have the same name in the same place (two `mokuro-reader` folders, two copies of a series folder) the way Mokuro Reader does, and tell readers so they leave it to Bunko. |
-| `progress_user` | string | — | When readers are served too: the Bunko user who owns the cloud folder's per-account files: the progress files, the reading history and the OCR corrections (`<Vol>.edit.mokuro`) Mokuro Reader keeps there. A reader that reads the cloud folder directly shares them with that account. With nobody chosen they belong to no one and nobody sees the corrections (the Storage tab counts them). |
+| `dedup` | boolean | `true` | Google Drive and MEGA: merge folders that have the same name in the same place (two `mokuro-reader` folders, two copies of a series folder) the way Mokuro Reader does, and tell readers so they leave it to Bunko. On Google Drive a copy that looks empty to Bunko can still hold files added through the Drive website (Bunko, like Mokuro Reader, sees only the files made through Mokuro Reader's Google project); the merge moves that copy to Drive's trash with them, for 30 days, as Mokuro Reader's merge does. After a merge `volume-data.json`, `goals.json` and `positions.json` can stay as two copies until a reader reading the cloud folder directly writes them again; of two copies of any other file (folders and Bunko's own status files excepted, which are kept as both) the strictly newer stays and the other goes to the trash (on a tie, or when a time is unknown, the copy in the folder that is kept stays). |
+| `progress_user` | string | — | When readers are served too: the Bunko user who owns the cloud folder's per-account files: the progress files, the reading history and the OCR corrections (`<Vol>.edit.mokuro`) Mokuro Reader keeps there. A reader that reads the cloud folder directly shares them with that account. With nobody chosen they belong to no one and nobody sees the corrections (the Storage tab counts them). Choosing another account moves no file: it gets the cloud folder's corrections as they are, the previous account's corrections kept on this server (`users/<u>/edits`) are not brought into the cloud folder, and correction files without an owner are looked for only when Bunko starts. |
 | `google_project` | string | `release` | Which Mokuro Reader's Google project Bunko signs in with, so it sees that reader's Drive files: `release` (reader.mokuro.app) or `beta`. `MOKURO_GOOGLE_PROJECT`. Becomes `custom` by itself when `oauth.google` is set; `custom` without it is refused. |
 | `oauth.google.*` | string | — | Your own Google OAuth clients, replacing both built-in ones: `client_id` + `client_secret` (Desktop client, browser sign-in on this machine) and `device_client_id` + `device_client_secret` ("TVs and Limited Input" client, sign-in with a code). Either pair may be left out; that sign-in flow is then unavailable. An id without its secret (or the reverse) is refused. |
 | `oauth.microsoft.client_id` | string | — | Your own Microsoft app registration for OneDrive: a public client with the "Mobile and desktop" redirect `http://localhost` (any port is used at sign-in). |
@@ -302,7 +302,9 @@ shared). For `uploader`:
 - Its own correction layers (`<Volume>.edit.mokuro`) are its own, in any series.
 
 `/login/api/me` lists the series the account owns (`ownedSeries`) and those it
-cannot add to (`addFiles.closedSeries`), without naming their owners. Moving,
+cannot add to (`addFiles.closedSeries`), without naming their owners, and the
+volumes outside its own series whose `curated` layer it may publish (its uploads,
+`curated.volumes`). Moving,
 copying, locking or PROPPATCH of library files, its own included, needs `editor`
 or higher. Editors and admins are not limited by series owners.
 

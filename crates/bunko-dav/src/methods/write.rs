@@ -690,6 +690,9 @@ fn move_file(
         fs::create_dir_all(parent)?;
     }
     fs::rename(src, dest)?;
+    if is_cbz(src) && is_cbz(dest) && old_rel.is_some() && new_rel.is_some() {
+        req.ctx.hooks.archive_moved(src, dest);
+    }
     if is_cbz(src) {
         effects.note_removed(inner, src);
     }

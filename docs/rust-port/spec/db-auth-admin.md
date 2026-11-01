@@ -249,7 +249,11 @@ CREATE INDEX IF NOT EXISTS idx_audit_actor_created       ON audit_logs(actor_use
 CREATE INDEX IF NOT EXISTS idx_volume_uploads_uploader   ON volume_uploads(uploader_username);
 CREATE INDEX IF NOT EXISTS idx_series_entry_cache_series ON series_entry_cache(series_key);
 ```
-(plus `idx_auth_tokens_username`, `idx_ocr_sidecars_volume` above). `test_audit_search.py:192-215` pins
+(plus `idx_auth_tokens_username`, `idx_ocr_sidecars_volume` above). **0.8 (Rust)** adds, with the
+series folder owner tables (schema version 7), `idx_volume_uploads_uploader_nocase ON
+volume_uploads(uploader_username COLLATE NOCASE)`: `/login/api/me` looks an uploader's archives up
+by name, matched ASCII case-insensitively as auth matches it, which the binary index above
+cannot serve. `test_audit_search.py:192-215` pins
 that the three audit indexes exist and are re-created on an existing DB where they were dropped.
 `idx_audit_created_at` is referenced by name in an `INDEXED BY` hint (8.4), so it MUST exist under
 that exact name (or the Rust query must drop the hint).
@@ -996,6 +1000,21 @@ reader acts on it as true, and takes a failed `/me` for a server without owners,
 answers 200): with the library root unlistable, every record of another account is closed and
 none is owned; with the records unreadable, `addFiles` is `{"scope":"none"}` and `ownedSeries`
 empty. Auth answers those requests 503 meanwhile; the reader's next `/me` corrects the lists.
+
+**0.8 curated volumes (Rust, D1).** With `"scope":"owned"` (and only then) `curated` gains a
+second key, `"volumes": [{"series": S, "volume": V}, ...]`: the volumes the uploader may publish
+the curated layer of outside the series it owns (those are `metadata.ownedSeries`), so a reader
+can offer Publish per volume in a shared series. `S` is the series folder as listed, `V` the
+archive's stem (the `.cbz` name without `.cbz`); sorted by `S`, then `V`, code point. An entry is
+an archive listed directly in a series folder (listed at the root, not owned by the account)
+that auth would let it publish `<V>.curated.mokuro` for: every archive governing that name
+(`sidecar_names::governing_archives`, the nearest listed one) is the account's recorded upload
+(`volume_uploads`, name matched ASCII case-insensitively, as auth matches it), and in a series
+another account owns the layer is listed already (a new one there is refused). Here a shorter
+list only offers less, so a folder or the upload records that cannot be read add nothing; an
+empty list is normal. Bunko stays the judge: a 403 on a publish stays final. Pinned by
+`accounts::login` unit tests, `tests/folder_ownership.rs` (the list agrees with auth's PUT
+decision) and the `login-me-closed-series` contract fixture.
 
 ### 15.5 `GET /api/nav/config` (:361-383) - no auth
 Response 200: `{"home_enabled": bool, "catalog_enabled": bool, "queue_show_in_nav": bool,

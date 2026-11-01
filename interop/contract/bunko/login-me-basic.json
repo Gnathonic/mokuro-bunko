@@ -15,7 +15,8 @@
         ]
       },
       "curated": {
-        "scope": "owned"
+        "scope": "owned",
+        "volumes": []
       },
       "addFiles": {
         "scope": "open",
