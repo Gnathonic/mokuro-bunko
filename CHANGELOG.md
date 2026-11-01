@@ -364,6 +364,30 @@
 - `library connect --create` no longer asks "Create it?" before creating the folder; it
   prints "Creating mokuro-reader/…".
 
+### Known limits
+- **Merging duplicate folders on Google Drive can trash files Bunko cannot see.**
+  Bunko and Mokuro Reader see only the files made through Mokuro Reader's Google
+  project (Drive's `drive.file` access). A duplicate folder that looks empty to them
+  can still hold files added through the Drive website; the merge moves it to Drive's
+  trash, with those files, where they stay for 30 days. Mokuro Reader's own merge does
+  the same.
+- **Progress files can stay doubled after a duplicate-folder merge.** With a
+  `progress_user`, a merge keeps both copies of `volume-data.json`, `goals.json` and
+  `positions.json`. Over WebDAV that account sees the newest copy until a reader that
+  reads the cloud folder directly writes again and merges them.
+- **A merge keeps one copy of a duplicated file.** When a duplicate-folder merge finds
+  two copies of a file (an OCR file or a correction included), it keeps the strictly
+  newer one and moves the other to the provider's trash, where it can be recovered.
+  No `edit-<n>` copy is kept beside it.
+- **Changing `progress_user` hands over the cloud's corrections.** No file moves: the
+  correction files in the cloud folder become the new account's as they are, the
+  previous account's corrections kept on this server (`users/<u>/edits`) are not
+  brought into the cloud folder, and correction files without an owner are looked for
+  only when Bunko starts.
+- **Mokuro Reader tells WebDAV servers apart only by type.** Its protection for
+  edited OCR from a server counts every WebDAV server as one provider, so a second
+  WebDAV server (another Bunko included) is taken for the first.
+
 ## [0.7.3] - 2026-10-12
 
 Background work can no longer make the web server stop answering.
