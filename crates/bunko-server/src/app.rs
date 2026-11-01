@@ -280,6 +280,7 @@ impl Services {
         };
         dav_hooks.add_listener(library.clone());
         let thumbs = Arc::new(crate::thumbs::Thumbnails::default());
+        dav_hooks.add_listener(thumbs.clone());
         let ocr = {
             let store: Arc<dyn bunko_library::MetadataStore> = library.store().clone();
             let lib = library.clone();

@@ -87,6 +87,10 @@ pub trait DavHooks: Send + Sync + 'static {
     fn archives_removed(&self, _paths: &[PathBuf]) {}
     /// A library `.cbz` is now in place (PUT, or MOVE/COPY into place): queue its OCR.
     fn archive_arrived(&self, _cbz: &Path) {}
+    /// A file MOVE renamed the library `.cbz` `from` to the library `.cbz` `to` (its
+    /// sidecars stay where they are). Called right after the rename, under both paths'
+    /// write locks, before `archives_removed`.
+    fn archive_moved(&self, _from: &Path, _to: &Path) {}
     /// After `archive_arrived` for a PUT only: the follow-up headers, if any OCR is owed.
     /// `series` is the archive's parent relative to the library (`.` for a loose root
     /// file), `volume` its stem.

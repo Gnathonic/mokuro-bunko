@@ -267,6 +267,13 @@
   covers of one name, the admin panel blamed a reader upload, and the emptied folder
   went to the trash only in a second merge. A volume a merge is moving now gets its
   cover after the merge.
+- **A cover Bunko makes while a reader renames the volume moves with it.** A reader
+  renaming a volume moves its cover first and the archive last. A cover Bunko made in
+  between, from the archive still under the old name, stayed there once the archive
+  moved, and the reader then refused to rename the series, taking the stray cover for a
+  volume it did not have. A cover Bunko made lately now follows its archive: to the new
+  name, or removed when the new name has a cover already; a deleted archive takes
+  it too. Covers a reader uploaded stay where they are.
 - **A volume renamed while Bunko makes its cover leaves no stray cover behind.** A
   cover made from an archive that a reader moved away meanwhile (a volume rename, then
   its series') was still written under the old name, beside nothing, and the old

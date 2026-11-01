@@ -159,6 +159,9 @@ impl DavHooks for ServerDavHooks {
     fn archive_arrived(&self, cbz: &Path) {
         self.each(|l| l.archive_arrived(cbz));
     }
+    fn archive_moved(&self, from: &Path, to: &Path) {
+        self.each(|l| l.archive_moved(from, to));
+    }
     fn put_follow_up(&self, cbz: &Path, series: &str, volume: &str) -> Option<PutFollowUp> {
         self.listeners
             .read()
