@@ -371,9 +371,9 @@
   can still hold files added through the Drive website; the merge moves it to Drive's
   trash, with those files, where they stay for 30 days. Mokuro Reader's own merge does
   the same.
-- **Progress files can stay doubled after a duplicate-folder merge.** With a
-  `progress_user`, a merge keeps both copies of `volume-data.json`, `goals.json` and
-  `positions.json`. Over WebDAV that account sees the newest copy until a reader that
+- **Progress files can stay doubled after a duplicate-folder merge.** A merge keeps
+  both copies of `volume-data.json`, `goals.json` and `positions.json`. With a
+  `progress_user`, over WebDAV that account sees the newest copy until a reader that
   reads the cloud folder directly writes again and merges them.
 - **A merge keeps one copy of a duplicated file.** When a duplicate-folder merge finds
   two copies of a file (an OCR file or a correction included), it keeps the strictly
