@@ -36,9 +36,10 @@
 //! then takes it for a volume it does not have). So a cover this process made lately
 //! ([`MADE_KEPT`]) goes with its archive: a file MOVE of the archive (DAV, or a move in
 //! the cloud) takes it along to the new name, or removes it when the new name has a
-//! cover already, and a deleted archive takes it too (on a cloud library just after,
-//! on a thread of its own: never on the store's events thread). A cover a client
-//! wrote, or replaced since, stays where it is (sidecars are pinned on a MOVE).
+//! cover already, and a deleted archive takes it too. A WebDAV request does this
+//! before it answers; a change seen in the cloud, just after, on one thread that runs
+//! these in order (never on the store's events thread). A cover a client wrote, or
+//! replaced since, stays where it is (sidecars are pinned on a MOVE).
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::Read;
@@ -83,14 +84,22 @@ type Busy<'a> = &'a dyn Fn(&Path) -> bool;
 pub struct MadeCovers(Mutex<HashMap<PathBuf, (u64, Instant)>>);
 
 impl MadeCovers {
+    /// Forget the covers made longer ago than [`MADE_KEPT`].
+    fn prune(made: &mut HashMap<PathBuf, (u64, Instant)>) {
+        made.retain(|_, (_, at)| at.elapsed() < MADE_KEPT);
+    }
+
     /// The cover made for `cbz`, now gone, and its size, if it is still the one made
     /// (by size): its record is taken. `None` while the archive is there (a replaced
-    /// one).
+    /// one), and for a folder (`Series/` is not the archive `Series.cbz`).
     fn take_left(
         made: &mut HashMap<PathBuf, (u64, Instant)>,
         cbz: &Path,
     ) -> Option<(PathBuf, u64)> {
-        made.retain(|_, (_, at)| at.elapsed() < MADE_KEPT);
+        Self::prune(made);
+        if !is_cbz(cbz) {
+            return None;
+        }
         let cover = cover_path(cbz);
         if !made.contains_key(&cover) || fs::exists(cbz) {
             return None;
@@ -144,6 +153,12 @@ impl MadeCovers {
     }
 }
 
+/// A `.cbz` name, any case.
+fn is_cbz(p: &Path) -> bool {
+    p.extension()
+        .is_some_and(|e| e.to_string_lossy().eq_ignore_ascii_case("cbz"))
+}
+
 /// `<stem>.webp`.
 pub fn cover_path(cbz: &Path) -> PathBuf {
     cbz.with_extension("webp")
@@ -162,9 +177,7 @@ pub fn needs_thumbnail(cbz: &Path) -> bool {
 /// [`needs_thumbnail`], with a cloud library's local `.nocover` records.
 pub fn needs_thumbnail_with(cbz: &Path, nocover: Option<&NoCoverSet>) -> bool {
     fs::is_file(cbz)
-        && cbz
-            .extension()
-            .is_some_and(|e| e.to_string_lossy().eq_ignore_ascii_case("cbz"))
+        && is_cbz(cbz)
         && !fs::exists(cover_path(cbz))
         && !fs::exists(nocover_path(cbz))
         && nocover.is_none_or(|n| !n.contains(cbz))
@@ -433,6 +446,18 @@ fn ensure_cover(
 /// case merge opened on it meanwhile (`busy`): the merge moves its own cover in. A
 /// published cover is recorded in `made`, for the archive's move to take along.
 fn publish_cover(cbz: &Path, webp: &[u8], busy: Busy, made: &MadeCovers) -> Result<bool, String> {
+    publish_cover_with(cbz, webp, busy, made, &|_| {})
+}
+
+/// [`publish_cover`], calling `before_record` between the archive's last check and the
+/// record (tests land a MOVE or DELETE there).
+fn publish_cover_with(
+    cbz: &Path,
+    webp: &[u8],
+    busy: Busy,
+    made: &MadeCovers,
+    before_record: &dyn Fn(&Path),
+) -> Result<bool, String> {
     let mut made = made.0.lock();
     if !fs::exists(cbz) || busy(cbz) {
         return Ok(false);
@@ -470,6 +495,8 @@ fn publish_cover(cbz: &Path, webp: &[u8], busy: Busy, made: &MadeCovers) -> Resu
         let _ = fs::remove_file(&out);
         return Ok(false);
     }
+    before_record(cbz);
+    MadeCovers::prune(&mut made);
     made.insert(out, (webp.len() as u64, Instant::now()));
     Ok(true)
 }
@@ -500,8 +527,7 @@ pub fn thumbnail_candidates_with(dir: &Path, nocover: Option<&NoCoverSet>) -> Ve
     let library = nocover.map_or(dir, |n| n.library.as_path());
     let mut out = Vec::new();
     walk(dir, &mut |p| {
-        if p.extension()
-            .is_some_and(|e| e.to_string_lossy().eq_ignore_ascii_case("cbz"))
+        if is_cbz(p)
             && !crate::ocr::types::is_per_user_path(library, p)
             && needs_thumbnail_with(p, nocover)
         {
@@ -543,20 +569,61 @@ pub struct Thumbnails {
     nocover: std::sync::OnceLock<Arc<NoCoverSet>>,
     /// The covers made lately, which follow their archive.
     made: Arc<MadeCovers>,
+    follow: FollowUps,
 }
 
-/// Run `f` here on a library on this disk; on a cloud library on a thread of its own.
-/// The cloud's hooks run on the store's events thread, which must never wait for a
-/// cover being published (a publish may wait for that thread) or write to the store.
-fn off_events_thread(cbz: &Path, f: impl FnOnce() + Send + 'static) {
-    if !bunko_store::store_for(cbz).is_some_and(|s| s.caps().remote) {
-        return f();
+type FollowUp = Box<dyn FnOnce() + Send>;
+
+/// Where the cover follow-ups of the WebDAV hooks run. A WebDAV request runs its own,
+/// before it answers: a client listing right after a MOVE never sees a cover beside
+/// nothing. The cloud's hooks run on the store's events thread, which must never wait
+/// for a cover being published (a publish may wait for that thread): theirs are handed
+/// to ONE thread, started on first use, which runs them in order, so a MOVE's "the
+/// cover goes along" always comes before its "the archive is gone".
+#[derive(Default)]
+struct FollowUps(Mutex<Option<std::sync::mpsc::Sender<FollowUp>>>);
+
+impl FollowUps {
+    fn run(&self, f: impl FnOnce() + Send + 'static) {
+        if !bunko_remote::store::on_events_thread() {
+            return f();
+        }
+        let mut tx = self.0.lock();
+        if tx.is_none() {
+            let (send, recv) = std::sync::mpsc::channel::<FollowUp>();
+            let started = std::thread::Builder::new()
+                .name("bunko-cover-follow".into())
+                .spawn(move || {
+                    while let Ok(f) = recv.recv() {
+                        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).is_err() {
+                            tracing::error!("a cover follow-up panicked");
+                        }
+                    }
+                });
+            match started {
+                Ok(_) => *tx = Some(send),
+                Err(e) => {
+                    warn!("could not start the cover follow-ups of moved archives: {e}");
+                    return;
+                }
+            }
+        }
+        if let Some(tx) = &*tx {
+            let _ = tx.send(Box::new(f));
+        }
     }
-    if let Err(e) = std::thread::Builder::new()
-        .name("bunko-cover-follow".into())
-        .spawn(f)
-    {
-        warn!("could not start the cover follow-up of a moved archive: {e}");
+
+    /// Wait until every follow-up handed over so far has run.
+    #[cfg(test)]
+    fn flush(&self) {
+        let Some(tx) = self.0.lock().clone() else {
+            return;
+        };
+        let (done, ran) = std::sync::mpsc::sync_channel(1);
+        let _ = tx.send(Box::new(move || {
+            let _ = done.send(());
+        }));
+        let _ = ran.recv();
     }
 }
 
@@ -565,12 +632,16 @@ fn off_events_thread(cbz: &Path, f: impl FnOnce() + Send + 'static) {
 impl bunko_dav::DavHooks for Thumbnails {
     fn archive_moved(&self, from: &Path, to: &Path) {
         let (made, f, t) = (self.made.clone(), from.to_path_buf(), to.to_path_buf());
-        off_events_thread(from, move || made.archive_moved(&f, &t));
+        self.follow.run(move || made.archive_moved(&f, &t));
     }
     fn archives_removed(&self, paths: &[PathBuf]) {
-        let Some(first) = paths.first() else { return };
-        let (made, paths) = (self.made.clone(), paths.to_vec());
-        off_events_thread(first, move || made.archives_removed(&paths));
+        // Only an archive can have a cover made for it.
+        let paths: Vec<PathBuf> = paths.iter().filter(|p| is_cbz(p)).cloned().collect();
+        if paths.is_empty() {
+            return;
+        }
+        let made = self.made.clone();
+        self.follow.run(move || made.archives_removed(&paths));
     }
 }
 
@@ -1057,6 +1128,174 @@ mod tests {
             .collect();
         names.sort();
         assert_eq!(names, ["Vol 1.cbz", "Vol 1.webp"]);
+    }
+
+    fn names_in(dir: &Path) -> Vec<String> {
+        let mut names: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// A MOVE or DELETE of the archive lands after the check that follows the publish,
+    /// before the cover is recorded: its hook waits for the record, then takes the
+    /// cover along (or away). Without the lock the hook would find nothing recorded and
+    /// leave the cover beside nothing.
+    #[test]
+    fn a_move_or_delete_landing_before_the_record_takes_the_cover() {
+        for delete in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            let series = tmp.path().join("Series");
+            std::fs::create_dir_all(&series).unwrap();
+            let (from, to) = (series.join("Vol 1.cbz"), series.join("Vol 1 renamed.cbz"));
+            cbz(&from, &[("a.png", &png(10, 10))]);
+            let webp =
+                bunko_thumb::make_thumbnail_limited(&png(10, 10), MAX_DECODE_BYTES, MAX_SIDE)
+                    .unwrap();
+            let made = Arc::new(MadeCovers::default());
+            let hook = Mutex::new(None);
+            let before_record = |cbz: &Path| {
+                if delete {
+                    std::fs::remove_file(cbz).unwrap();
+                } else {
+                    std::fs::rename(cbz, &to).unwrap();
+                }
+                let (made, from, to) = (made.clone(), from.clone(), to.clone());
+                let (done, finished) = std::sync::mpsc::channel();
+                *hook.lock() = Some(std::thread::spawn(move || {
+                    if delete {
+                        made.archives_removed(&[from]);
+                    } else {
+                        made.archive_moved(&from, &to);
+                    }
+                    let _ = done.send(());
+                }));
+                // Unlocked, the hook would be done by now, before the record.
+                let _ = finished.recv_timeout(Duration::from_millis(200));
+            };
+            assert!(publish_cover_with(&from, &webp, &|_| false, &made, &before_record).unwrap());
+            hook.lock().take().unwrap().join().unwrap();
+            let want: &[&str] = if delete {
+                &[]
+            } else {
+                &["Vol 1 renamed.cbz", "Vol 1 renamed.webp"]
+            };
+            assert_eq!(names_in(&series), want, "delete: {delete}");
+        }
+    }
+
+    /// A folder removed or moved away is no archive: the cover made for a loose archive
+    /// of the folder's name beside it (`Series.cbz` next to `Series/`) stays.
+    #[test]
+    fn a_folder_removed_leaves_the_cover_of_an_archive_named_like_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lib = tmp.path().join("library");
+        std::fs::create_dir_all(lib.join("Series")).unwrap();
+        std::fs::create_dir_all(lib.join("Vol.1")).unwrap();
+        let loose = lib.join("Series.cbz");
+        let dotted = lib.join("Vol.cbz");
+        cbz(&loose, &[("a.png", &png(10, 10))]);
+        cbz(&dotted, &[("a.png", &png(10, 10))]);
+        let webp =
+            bunko_thumb::make_thumbnail_limited(&png(10, 10), MAX_DECODE_BYTES, MAX_SIDE).unwrap();
+        let made = MadeCovers::default();
+        assert!(publish_cover(&loose, &webp, &|_| false, &made).unwrap());
+        assert!(publish_cover(&dotted, &webp, &|_| false, &made).unwrap());
+        std::fs::remove_dir_all(lib.join("Series")).unwrap();
+        std::fs::remove_dir_all(lib.join("Vol.1")).unwrap();
+        made.archives_removed(&[lib.join("Series"), lib.join("Vol.1")]);
+        assert_eq!(
+            names_in(&lib),
+            ["Series.cbz", "Series.webp", "Vol.cbz", "Vol.webp"]
+        );
+    }
+
+    /// The record of covers made is pruned as covers are made too, not only when an
+    /// archive moves: a first scan of a large library does not keep one entry per
+    /// volume for good.
+    #[test]
+    fn old_cover_records_are_pruned_as_covers_are_made() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cbz_path = tmp.path().join("Vol 1.cbz");
+        cbz(&cbz_path, &[("a.png", &png(10, 10))]);
+        let webp =
+            bunko_thumb::make_thumbnail_limited(&png(10, 10), MAX_DECODE_BYTES, MAX_SIDE).unwrap();
+        let made = MadeCovers::default();
+        let long_ago = Instant::now()
+            .checked_sub(MADE_KEPT + Duration::from_secs(1))
+            .expect("the clock goes back that far");
+        made.0
+            .lock()
+            .insert(tmp.path().join("Old.webp"), (3, long_ago));
+        assert!(publish_cover(&cbz_path, &webp, &|_| false, &made).unwrap());
+        let kept: Vec<PathBuf> = made.0.lock().keys().cloned().collect();
+        assert_eq!(kept, [cover_path(&cbz_path)]);
+    }
+
+    /// The cloud's hooks (on its events thread) hand a MOVE's two follow-ups over in
+    /// order, and they run in that order: the cover follows the archive, never removed
+    /// by the "archive gone" step first. The events thread never waits for the lock.
+    #[test]
+    fn the_cloud_hooks_follow_ups_run_in_order() {
+        use bunko_dav::DavHooks as _;
+        for round in 0..10 {
+            let tmp = tempfile::tempdir().unwrap();
+            let series = tmp.path().join("Series");
+            std::fs::create_dir_all(&series).unwrap();
+            let (from, to) = (series.join("Vol 1.cbz"), series.join("Vol 1 renamed.cbz"));
+            cbz(&from, &[("a.png", &png(10, 10))]);
+            let webp =
+                bunko_thumb::make_thumbnail_limited(&png(10, 10), MAX_DECODE_BYTES, MAX_SIDE)
+                    .unwrap();
+            let thumbs = Arc::new(Thumbnails::default());
+            assert!(publish_cover(&from, &webp, &|_| false, &thumbs.made).unwrap());
+            let cover = std::fs::read(cover_path(&from)).unwrap();
+            std::fs::rename(&from, &to).unwrap();
+            {
+                // Held: both follow-ups are handed over before either can run.
+                let _held = thumbs.made.0.lock();
+                let (t, from, to) = (thumbs.clone(), from.clone(), to.clone());
+                let (done, handed) = std::sync::mpsc::channel();
+                std::thread::Builder::new()
+                    .name(bunko_remote::store::EVENTS_THREAD.into())
+                    .spawn(move || {
+                        t.archive_moved(&from, &to);
+                        t.archives_removed(&[from]);
+                        let _ = done.send(());
+                    })
+                    .unwrap();
+                handed
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("the events thread does not wait for a cover");
+            }
+            thumbs.follow.flush();
+            assert_eq!(
+                names_in(&series),
+                ["Vol 1 renamed.cbz", "Vol 1 renamed.webp"],
+                "round {round}"
+            );
+            assert_eq!(std::fs::read(cover_path(&to)).unwrap(), cover, "followed");
+        }
+    }
+
+    /// Anywhere but on the events thread (a WebDAV request) the follow-up is done when
+    /// the hook returns, so the MOVE answers with the cover already in place.
+    #[test]
+    fn a_dav_hook_follows_up_before_it_returns() {
+        use bunko_dav::DavHooks as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let (from, to) = (tmp.path().join("Vol 1.cbz"), tmp.path().join("Vol 2.cbz"));
+        cbz(&from, &[("a.png", &png(10, 10))]);
+        let webp =
+            bunko_thumb::make_thumbnail_limited(&png(10, 10), MAX_DECODE_BYTES, MAX_SIDE).unwrap();
+        let thumbs = Thumbnails::default();
+        assert!(publish_cover(&from, &webp, &|_| false, &thumbs.made).unwrap());
+        std::fs::rename(&from, &to).unwrap();
+        thumbs.archive_moved(&from, &to);
+        thumbs.archives_removed(&[from]);
+        assert_eq!(names_in(tmp.path()), ["Vol 2.cbz", "Vol 2.webp"]);
     }
 
     #[test]

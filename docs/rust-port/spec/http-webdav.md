@@ -1015,9 +1015,12 @@ Bunko-specific handlers (authoritative semantics):
   stem, or removes it when the new stem has a cover already (`DavHooks::archive_moved`; a
   DELETE or a MOVE away removes it, `archives_removed`). A reader renaming a volume moves its
   cover before the archive, and a cover made in between, from the archive still under the old
-  name, would otherwise be left beside nothing. On a cloud library, and for a move made in the
-  cloud, it is done just after, off the store's events thread. Pinned by
-  `crates/bunko-server/tests/cover_rename.rs` and `cloud_e2e.rs`.
+  name, would otherwise be left beside nothing. A WebDAV MOVE or DELETE does it before it
+  answers, on a cloud library too, so a listing right after it never shows the stray cover. A
+  move or removal seen in the cloud does it just after, on one thread that runs these in order
+  (a MOVE's "goes along" before its "archive gone"), never on the store's events thread. A
+  removed FOLDER takes no cover (`Series/` is not `Series.cbz`). Pinned by
+  `crates/bunko-server/tests/cover_rename.rs`, `cloud_bridge_put.rs` and `cloud_e2e.rs`.
 * **File COPY** (generic loop -> `copy_move_single(is_move=False)`): locks `[dst]`; `mkdir -p dst.parent`;
   `shutil.copy2` (preserves mtime/permission bits); `archive_written = dst` if `.cbz`; DB `_forget_ocr_records(new, archive_too=False)`;
   audit `copy`. **No `record_volume_upload` for the copy (the copy is untracked/unowned; QUIRK)**. Sidecars not

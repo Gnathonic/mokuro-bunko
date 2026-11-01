@@ -13,6 +13,7 @@
 //!   the admin storage status says the same; while another Bunko holds the lease it
 //!   is a 503 naming that.
 //! - No PUT, failed or not, leaves a staging file or a `state.sqlite` staging row.
+//! - A volume's MOVE answers with the cover Bunko made for it already moved along.
 
 // Fixtures are checked with std::fs on purpose (the store's state folder is local).
 #![allow(clippy::disallowed_methods)]
@@ -550,6 +551,58 @@ async fn mkcol_copy_move_and_delete_work_on_a_cloud_library() {
     assert_eq!(r.status, 204, "{}", r.text());
     assert!(cloud(&fake, "Other/Moved.cbz").is_none());
     server.assert_no_staging_leak().await;
+    server.stop().await;
+}
+
+/// A reader renames a volume over the bridge, the archive alone, after Bunko made its
+/// cover: the MOVE answers with that cover already at the new name, so a listing right
+/// after it shows no cover beside nothing (which the reader's series rename takes for a
+/// volume it does not have). The cover node itself moved: it was not made again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_bridge_move_answers_with_bunkos_cover_moved_along() {
+    let fake = fake_library(FakeBackend::drive_like());
+    let server = Server::start(&fake, no_lease).await;
+    eventually(
+        "Bunko's cover in the cloud",
+        Duration::from_secs(30),
+        || cloud(&fake, "Series/Vol 1.webp").is_some(),
+    )
+    .await;
+    let cover = fake
+        .node_at(&format!("{ROOT}/Series/Vol 1.webp"))
+        .unwrap()
+        .pid;
+    let dest = format!("{}/mokuro-reader/Series/Vol%201%20renamed.cbz", server.url);
+    let r = server
+        .dav(
+            "MOVE",
+            "/mokuro-reader/Series/Vol%201.cbz",
+            &[("destination", &dest)],
+            None,
+        )
+        .await;
+    assert_eq!(r.status, 204, "{}", r.text());
+    let r = server
+        .dav(
+            "PROPFIND",
+            "/mokuro-reader/Series/",
+            &[("depth", "1")],
+            None,
+        )
+        .await;
+    assert_eq!(r.status, 207, "{}", r.text());
+    let listing = r.text();
+    assert!(!listing.contains("Vol%201.webp"), "{listing}");
+    assert!(listing.contains("Vol%201%20renamed.webp"), "{listing}");
+    server.idle().await;
+    eventually(
+        "the cover moved in the cloud",
+        Duration::from_secs(30),
+        || cloud(&fake, "Series/Vol 1.webp").is_none(),
+    )
+    .await;
+    let moved = fake.node_at(&format!("{ROOT}/Series/Vol 1 renamed.webp"));
+    assert_eq!(moved.map(|n| n.pid), Some(cover), "the same node, moved");
     server.stop().await;
 }
 
