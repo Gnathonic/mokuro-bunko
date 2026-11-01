@@ -1,11 +1,12 @@
 // bridge (§7.1): Bunko's lease on the cloud library, as the reader meets it. A Bunko
 // started after its marker went stale claims the library afresh (§9.2 step 1): until
 // the claim settles, a write through it answers 503 `storage-lease-claiming` with a
-// Retry-After of what is left. The reader waits such a short Retry-After out (at most
-// 30 s, at most twice per request) and sends the same request again, so the write
-// lands once the lease is held, without touching its sign-in. A Bunko restarted while
-// its marker is fresh resumes it at once (same epoch, no settle wait), and the reader
-// goes on on the session it had, its next write landing.
+// Retry-After of what is left of the settle wait (30 s while Bunko then confirms its
+// claim). The reader waits such a short Retry-After out (at most 30 s, at most twice
+// per request) and sends the same request again, so the write lands once the lease is
+// held, without touching its sign-in. A Bunko restarted while its marker is fresh
+// resumes it at once (same epoch, no settle wait), and the reader goes on on the
+// session it had, its next write landing.
 import { test, expect } from '../fixtures.mjs';
 import { recordRequests } from '../bunko.mjs';
 import { firstLines, landedInCloud, leaseNow, newAccount, openVolume } from './bridge.mjs';
@@ -86,13 +87,21 @@ test('a write during the claim waits out its 503 storage-lease-claiming and land
     expect(after.holder.epoch).toBeGreaterThan(before.holder.epoch);
 
     const refusals = refusalsOf(answers);
-    expect(refusals.length, 'the fence refused the write first').toBeGreaterThan(0);
+    // The Publish's own upload was among them, and its last answer let it through.
+    const isPublish = (a) => a.method === 'PUT' && a.path.endsWith(`/${rel}`);
+    expect(refusals.some(isPublish), 'the fence refused the Publish itself').toBe(true);
+    await expect
+        .poll(() => Math.floor((answers.filter(isPublish).at(-1)?.status ?? 0) / 100), {
+            message: 'the Publish landed',
+        })
+        .toBe(2);
     await expect.poll(() => refusals.every((r) => r.text !== null)).toBe(true);
     for (const r of refusals) {
         expect(r.text, `${r.method} ${r.path}`).toContain('storage-lease-claiming');
         expect(r.retryAfter, `${r.method} ${r.path} Retry-After`).toBeGreaterThanOrEqual(1);
     }
-    // Each refused request went again and got through: the same Publish, never a new one.
+    // Each refused request was answered later (the one publishCurated call above is what
+    // makes it the same Publish).
     const through = (r) =>
         answers
             .slice(answers.indexOf(r) + 1)
