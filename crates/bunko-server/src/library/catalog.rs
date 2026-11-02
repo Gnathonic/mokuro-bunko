@@ -124,7 +124,7 @@ async fn handle_api(
             if cover.is_empty() {
                 return util::text(400, "Missing cover path");
             }
-            serve_cover(&deps, &cover).await
+            serve_cover(&deps, &cover, headers).await
         }
         _ => {
             if let Some(name) = path.strip_prefix("/catalog/api/series/") {
@@ -135,7 +135,7 @@ async fn handle_api(
                     .unwrap_or_else(internal_error);
             }
             if let Some(cover) = path.strip_prefix("/catalog/api/cover/") {
-                return serve_cover(&deps, &unquote(cover)).await;
+                return serve_cover(&deps, &unquote(cover), headers).await;
             }
             json_error(404, "Not found")
         }
@@ -348,11 +348,71 @@ fn image_type(ext: &str) -> Option<&'static str> {
     })
 }
 
+/// What a cover's response carries: its file, length, type and validators.
+struct CoverFile {
+    file: PathBuf,
+    size: u64,
+    content_type: &'static str,
+    etag: String,
+    last_modified: Option<String>,
+}
+
+/// The cover's validators. The tag is DAV's file ETag (`{mtime:.6}-{size}`), so one
+/// file has one tag whichever way it is read.
+fn cover_validators(meta: &bunko_store::Meta) -> (String, Option<String>) {
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok());
+    let etag = format!(
+        "\"{:.6}-{}\"",
+        mtime.map_or(0.0, |d| d.as_secs_f64()),
+        meta.len()
+    );
+    let last_modified = mtime.and_then(|d| {
+        let at = time::OffsetDateTime::from_unix_timestamp(d.as_secs() as i64).ok()?;
+        at.format(time::macros::format_description!(
+            "[weekday repr:short], [day] [month repr:short] [year] [hour]:[minute]:[second] GMT"
+        ))
+        .ok()
+    });
+    (etag, last_modified)
+}
+
+/// `If-None-Match` names `etag` (weak or strong, or `*`).
+fn none_match(headers: &HeaderMap, etag: &str) -> bool {
+    headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| {
+            v.split(',')
+                .map(str::trim)
+                .any(|t| t == "*" || t.trim_start_matches("W/") == etag)
+        })
+}
+
+/// A cover's validators and `no-cache`: its URL names the file, not the version, so a
+/// browser asks every time and an unchanged cover costs a `304` (a cover the server
+/// remakes for a replaced archive keeps its name).
+fn cover_headers(h: &mut HeaderMap, cover: &CoverFile) {
+    if let Ok(v) = HeaderValue::from_str(&cover.etag) {
+        h.insert(header::ETAG, v);
+    }
+    if let Some(v) = cover
+        .last_modified
+        .as_deref()
+        .and_then(|d| HeaderValue::from_str(d).ok())
+    {
+        h.insert(header::LAST_MODIFIED, v);
+    }
+    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+}
+
 /// `_serve_cover`: a library image, streamed (never buffered whole).
-async fn serve_cover(deps: &LibraryDeps, cover: &str) -> Response {
+async fn serve_cover(deps: &LibraryDeps, cover: &str, headers: &HeaderMap) -> Response {
     let library = deps.runtime.library_path().to_path_buf();
     let cover = cover.to_owned();
-    let checked = blocking(move || -> Result<(PathBuf, u64, &'static str), Response> {
+    let checked = blocking(move || -> Result<CoverFile, Response> {
         let base = resolve(&library).unwrap_or_else(|| library.clone());
         let file = resolve(&library.join(&cover)).ok_or_else(|| util::text(400, "Invalid path"))?;
         if !is_within(&file, &base) {
@@ -365,14 +425,28 @@ async fn serve_cover(deps: &LibraryDeps, cover: &str) -> Response {
         let name = file.file_name().and_then(|n| n.to_str()).unwrap_or("");
         let ext = pyunicode::lower(bunko_library::sidecar::py_suffix(name));
         let content_type = image_type(&ext).ok_or_else(|| util::text(403, "Forbidden"))?;
-        Ok((file, meta.len(), content_type))
+        let (etag, last_modified) = cover_validators(&meta);
+        Ok(CoverFile {
+            size: meta.len(),
+            file,
+            content_type,
+            etag,
+            last_modified,
+        })
     })
     .await;
-    let (file, mut size, content_type) = match checked {
+    let found = match checked {
         Some(Ok(found)) => found,
         Some(Err(resp)) => return resp,
         None => return internal_error(),
     };
+    if none_match(headers, &found.etag) {
+        let mut resp = Response::new(Body::empty());
+        *resp.status_mut() = http::StatusCode::NOT_MODIFIED;
+        cover_headers(resp.headers_mut(), &found);
+        return resp;
+    }
+    let (file, mut size, content_type) = (found.file.clone(), found.size, found.content_type);
     let Ok(handle) = bunko_store::afs::File::open(&file).await else {
         return util::text(500, "Error");
     };
@@ -391,10 +465,7 @@ async fn serve_cover(deps: &LibraryDeps, cover: &str) -> Response {
     let h = resp.headers_mut();
     h.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
     h.insert(header::CONTENT_LENGTH, HeaderValue::from(size));
-    h.insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("public, max-age=3600"),
-    );
+    cover_headers(h, &found);
     resp
 }
 
