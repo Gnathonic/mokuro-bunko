@@ -1,5 +1,19 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- **Every libtorch OCR session leaked its model's weights.** The packages bind the
+  shared weights files in place (AOTInductor user-managed constants), and AOTInductor
+  takes a reference to each bound weight that it never gives back, so closing a
+  session freed the recognizer but not its weights: about 280 MB of VRAM per
+  hayai-nova bf16 session, 1.5 GB per paddle-manga fp16 one, and the fp32 weights in
+  RAM per CPU session. A processor on a 24 GB GPU filled it in about 80 sessions
+  and from then on read every volume on the CPU ("CUDA out of memory ... falling back
+  to the CPU"). The weights' memory is now freed when the recognizer is, and a
+  processor's memory stays flat across sessions. Needs the new backend pack
+  (`libbunko_torch`); `examples/torch_reload` in `bunko-engines` reproduces it.
+
 ## [0.7.3] - 2026-10-12
 
 Background work can no longer make the web server stop answering.
