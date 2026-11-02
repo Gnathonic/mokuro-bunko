@@ -167,7 +167,53 @@ async fn series_page_config_status_cover_and_static() {
     assert_eq!(cover.status, 200);
     assert_eq!(&cover.body[..], b"RIFFwebp");
     assert_eq!(cover.header("content-type"), Some("image/webp"));
-    assert_eq!(cover.header("cache-control"), Some("public, max-age=3600"));
+    // Revalidated on every use: a cover remade under the same name shows at once.
+    assert_eq!(cover.header("cache-control"), Some("no-cache"));
+    let etag = cover.header("etag").expect("an ETag").to_string();
+    assert!(etag.starts_with('"') && etag.ends_with('"'), "{etag}");
+    assert!(cover.header("last-modified").is_some());
+    let same = env
+        .send(
+            req("GET", "/catalog/api/cover?path=Dr%20Stone/Volume%2001.webp")
+                .header("if-none-match", etag.as_str())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(same.status, 304);
+    assert!(same.body.is_empty());
+    assert_eq!(same.header("etag"), Some(etag.as_str()));
+    assert_eq!(same.header("cache-control"), Some("no-cache"));
+    let other = env
+        .send(
+            req("GET", "/catalog/api/cover?path=Dr%20Stone/Volume%2001.webp")
+                .header("if-none-match", "\"something-else\"")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(other.status, 200);
+    assert_eq!(&other.body[..], b"RIFFwebp");
+    // A remade cover is another version.
+    let file = env.series_dir("Dr Stone").join("Volume 01.webp");
+    std::fs::write(&file, b"RIFFnewer").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&file)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(2))
+        .unwrap();
+    let remade = env
+        .send(
+            req("GET", "/catalog/api/cover?path=Dr%20Stone/Volume%2001.webp")
+                .header("if-none-match", etag.as_str())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(remade.status, 200);
+    assert_eq!(&remade.body[..], b"RIFFnewer");
+    assert_ne!(remade.header("etag"), Some(etag.as_str()));
     assert_eq!(
         env.send(get("/catalog/api/cover/Dr%20Stone/Volume%2001.webp"))
             .await
