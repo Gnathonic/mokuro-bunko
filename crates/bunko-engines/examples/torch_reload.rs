@@ -15,7 +15,10 @@ use bunko_vlm::{CropSet, Precision, Rgb};
 fn gpu_mib() -> String {
     let pid = std::process::id().to_string();
     let out = std::process::Command::new("nvidia-smi")
-        .args(["--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"])
+        .args([
+            "--query-compute-apps=pid,used_memory",
+            "--format=csv,noheader,nounits",
+        ])
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
         .unwrap_or_default();
@@ -66,7 +69,8 @@ fn main() -> Result<()> {
         let rec = pipeline
             .recognizer_for(engine, prec, &device, 512)
             .map_err(anyhow::Error::msg)?;
-        rec.read(&lines, Some(&[16])).map_err(|e| anyhow::anyhow!("{e}"))?;
+        rec.read(&lines, Some(&[16]))
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
         drop(rec);
         println!("{i},{},{}", rss_mib(), gpu_mib());
     }
