@@ -169,9 +169,11 @@
 
 ### Changed
 - **An update keeps the installed OCR backend.** This release opens the backend packs
-  of 0.7.1 and later (it builds the same packs), so updating from those (by hand, the
+  of 0.7.4 and later (it builds the same packs), so updating from those (by hand, the
   automatic update or a new Docker image) downloads no pack; a release whose pack
-  changes still fetches its own.
+  changes still fetches its own. The packs of 0.7.1 to 0.7.3 leak a libtorch model's
+  weights on every OCR session (fixed in 0.7.4), so an update from those fetches the
+  new pack.
 - **OCR corrections have their own layer names.** Edits never touch a volume's main
   OCR file. `<Volume>.edit.mokuro` (and `edit-2`, `edit-3`, …) are an account's own
   corrections: any account that can save progress, `registered` included, writes,

@@ -791,7 +791,8 @@ own release's `release.json`, and counts an installed pack of any release it ope
 installed, so an update between such releases downloads nothing. A pack is compiled from
 bunko-torch, bunko-vlm, bunko-vulkan, bunko-ncnn and bunko-ocr, with what
 `torch_specs.rs`, `torch_pack.rs` and `vulkan_pack.rs` pin (libtorch, wheels, ncnn, the
-layout); 0.7.1 to 0.8.0 build the same packs. When a change to those is one an older
+layout); 0.7.4 to 0.8.0 build the same packs (the packs of 0.7.1 to 0.7.3 lack 0.7.4's
+fix for a libtorch recognizer's leaked weights, so 0.8 refuses them). When a change to those is one an older
 pack lacks, `OLDEST_PACK_RELEASE` moves to the release being made. bunko-torch's test
 `pack_inputs` fingerprints those files and fails on any change until it is decided
 either way (move the floor, or record the new fingerprint). A pack without

@@ -246,8 +246,9 @@ pub struct PackManifest {
 /// new libtorch), set this to the release being made: older packs are then refused and
 /// `install-ocr` fetches this release's. The test `pack_inputs` (bunko-torch) fails on
 /// any change to those files until it is decided either way. Packs of 0.7.0 differ (0.7.1
-/// changed bunko-torch and the pack script).
-pub const OLDEST_PACK_RELEASE: &str = "0.7.1";
+/// changed bunko-torch and the pack script); packs of 0.7.1 to 0.7.3 leak a libtorch
+/// recognizer's weights on every session (0.7.4 frees them when the recognizer is dropped).
+pub const OLDEST_PACK_RELEASE: &str = "0.7.4";
 
 /// Whether a build of mokuro-bunko `release` opens a pack built by `pack_version`: a
 /// release from [`OLDEST_PACK_RELEASE`] up to `release` itself (never a later one: an
