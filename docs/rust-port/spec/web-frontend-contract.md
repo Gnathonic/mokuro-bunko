@@ -447,7 +447,7 @@ queues[{name,capacity,mean_depth,max_depth}],runs,last_run_at}`|null), `processo
 precision,precision_modes[],devices}]`, `detectors[{id,label,devices}]`, `devices[{id,label}]`,
 `patch_budgets[int]`, `precision_modes[{id,label}]`, `precision_default`, `name_pattern`
 (regex source, JS builds a `RegExp`; fallback `^[a-z0-9][a-z0-9-]{0,31}$`), `reserved_names[]`
-(`original,gcv,updated-ocr,edit,curated`; `edit-<n>` and `curated-<n>` too), `reserved_prefixes[]` (`tr-,pre-upgrade,previous-ocr`). `processors[]` (non-local only used):
+(`original,gcv,updated-ocr,edit,curated`; `edit-<n>` and `curated-<n>` too), `reserved_prefixes[]` (`tr-`). `processors[]` (non-local only used):
 `name`, `label`, `local`, `catalog.engines[]` (engine ids installed there).
 Bench state JS reads: `state` (`idle|queued|running|done|failed|cancelled`), `position`,
 `waiting_for_queue`, `autobench`, `processor`, `progress{trial,max_trials,stage_workers,pages,

@@ -10,11 +10,11 @@
   or an archive named after a volume it did not upload, unless it owns the series:
   the series owner controls every volume in it, whoever added it, and may delete it
   and the series folder. Its own corrections (`<Volume>.edit.mokuro`) stay its own
-  everywhere. No uploader adds an archive named like a volume's correction, curated
-  or keepsake layer (`V.edit.cbz`, `V.curated.cbz` beside `V.cbz`), that volume's
-  own uploader included. Editors and admins are not limited. This closes a way for
-  an uploader to take over another account's volume with an archive named after it
-  (`V.curated.cbz` beside `V.cbz`, or `Title.cbz` beside `Title.v01.cbz`).
+  everywhere. No uploader adds an archive named like a volume's correction or curated
+  layer (`V.edit.cbz`, `V.curated.cbz` beside `V.cbz`), that volume's own uploader
+  included. Editors and admins are not limited. This closes a way for an uploader to
+  take over another account's volume with an archive named after it (`V.curated.cbz`
+  beside `V.cbz`, or `Title.cbz` beside `Title.v01.cbz`).
 - **`series.json` updates need the series' owner.** An uploader may submit them only
   for a series it owns; being the only uploader of every volume in it is no longer
   enough.
@@ -31,6 +31,10 @@
   volume's uploader, an uploader's request is answered 503 with `Retry-After`, also
   when that happens just before the file is written, instead of being let through or
   refused for good.
+- **OCR generations can no longer be named `edit`, `curated`, `edit-<n>` or
+  `curated-<n>`.** Those names are readers' corrections now (see "OCR corrections have
+  their own layer names" below). A config that already names a generation one of them
+  fails to load, with an error naming that row, until it is renamed.
 
 ### Added
 - **`/login/api/me` says where an account may add files** (`permissions.addFiles`):
@@ -80,8 +84,9 @@
   byte-for-byte the same goes to the trash; covers, layers and OCR files only the
   younger folder has move in under the older spelling; its `series.json` is merged into
   the series first. When both spellings hold different OCR for the same archive, the
-  one matching the primary OCR setting becomes the main file and the other is always
-  kept beside it as `<Volume>.pre-upgrade.mokuro` first, so no OCR or edit is lost.
+  one matching the primary OCR setting becomes the main file and no copy of the other
+  is kept beside it: the younger folder's goes to the provider's trash, and the older
+  folder's is written over in place (a provider that keeps old versions keeps it).
   Two different archives (or OCR files Bunko cannot choose between)
   stay where they are, listed under the Storage tab's conflicts with **Keep this copy**
   / **Keep that copy**; the tab also lists the **Recent merges**. Upload owners, OCR
@@ -181,12 +186,9 @@
   or curated upload needs its volume's `.cbz` beside it (409 otherwise) and a JSON body
   with `pages` and no `ocr_engine` (422), at most 32 MiB. `<Volume>.curated.mokuro` holds corrections shared with everyone: editors,
   inviters and admins publish it on any volume, an uploader on the volumes it
-  uploaded, a first upload included. `pre-upgrade` files are Bunko's own and no client
-  writes one; `curated-<n>` and names starting `previous-ocr` are refused too (a volume
-  rename still moves them along under the same name). An OCR
-  generation can no longer be named `edit`, `curated`, `edit-<n>`, `curated-<n>`, or
-  start with `pre-upgrade` or `previous-ocr`: a config that already names one fails to
-  load, with an error naming that row, until it is renamed. A library on this disk
+  uploaded, a first upload included. `curated-<n>` names are refused (a volume rename
+  still moves them along under the same name); OCR generations can no longer take any
+  of these names (see Breaking). A library on this disk
   that already holds `<Volume>.edit.mokuro` files gives each, at start, to the account
   the audit log shows wrote it last; the Storage tab counts the ones with no such
   account ("N correction files have no owner"), which nobody sees. In a cloud library
@@ -249,27 +251,27 @@
   the server, the WebDAV layer and the metadata compiler now passes through one
   interface (`bunko-store`), so the library can live somewhere other than the local disk
   in 0.8. Local libraries behave exactly as before.
-- **Upgrades no longer skip a main OCR file for an unmarked change; a file Bunko didn't
-  write is kept as a "pre-upgrade" layer first.** With the generation upgrade on, an
-  outdated `<Volume>.mokuro` in a family listed under `ocr.upgrade.replace` is upgraded
-  even if a person or Mokuro Reader 1.10.0 changed it without marking it edited (a file
-  marked edited is never replaced: see "an EDITED file is never replaced" below). One
-  Bunko can prove it wrote is replaced as before: every OCR file it installs now carries
-  a seal, `ocr_engine.seal`, a hash of its pages and its `ocr_engine` block (RFC 8785
-  canonical JSON, so Mokuro Reader and other tools can check it too; test vectors in
+- **Upgrades no longer skip a main OCR file for an unmarked change, and keep no copy of
+  it.** With the generation upgrade on, an outdated `<Volume>.mokuro` in a family listed
+  under `ocr.upgrade.replace` is replaced outright, even if a person or Mokuro Reader
+  1.10.0 changed it without marking it edited (a file marked edited is never replaced:
+  see "an EDITED file is never replaced" below). No copy of the old file is kept: on a
+  cloud library it goes to the provider's trash, or its version history where it keeps
+  one; on a library on this disk it is gone. So corrections Mokuro Reader 1.10.0 saved
+  into a main OCR file are replaced when an admin turns upgrades on. Upgrades stay off
+  by default, and the Mokuro Reader release that pairs with 0.8 moves a device's own
+  1.10.0 corrections into its `edit` layer once. A file whose recipe cannot be read is
+  still never upgraded. Every OCR file Bunko installs now carries a seal,
+  `ocr_engine.seal`, a hash of its pages and its `ocr_engine` block (RFC 8785 canonical
+  JSON, so Mokuro Reader and other tools can check it too; test vectors in
   `interop/contract/seal/`). Renaming the volume or series, re-saving the file with
   other formatting, or moving the library to another Bunko keeps the seal; changing any
-  OCR text breaks it. Any other (stock mokuro output, a file the reader saved
-  corrections into, or one that only carries Bunko's `ocr_engine` stamp, which anyone
-  who can write the file can add) is first copied, byte for byte, to
-  `<Volume>.pre-upgrade.mokuro` (`pre-upgrade-2` and so on if that name holds other
-  bytes), and the new file goes in only once that copy is safely written; if the copy
-  cannot be written, the volume is left alone until the next pass. A file whose recipe
-  cannot be read is still never upgraded. A layer is copied in as the new main file only
-  when Bunko can prove it wrote that layer the same way and its own file carries the
-  matching stamp, and layers without a stamp (a reader's edits, `pre-upgrade` copies)
-  are never used or deleted. The admin page's list of edited volumes and the "Upgrade
-  anyway" button are gone, as is the `force` option of `POST /api/ocr/upgrade/<volume>`.
+  OCR text breaks it. A layer is copied in as the new main file only when its seal
+  proves Bunko wrote it and its own file carries the matching stamp (a stamp alone
+  proves nothing: anyone who can write the file can add one), and layers without a
+  stamp (a reader's edits, any hand-made layer) are never used or deleted. The admin
+  page's list of edited volumes and the "Upgrade anyway" button are gone, as is the
+  `force` option of `POST /api/ocr/upgrade/<volume>`.
 - **OCR files say which revision of their engine made them, and when.** Every file Bunko
   installs carries `ocr_engine.revision` (an engine's output revision, raised only when
   its output changes; a file without one, such as every 0.7 file, is revision 1) and
@@ -282,14 +284,13 @@
   recipe at an older revision is upgraded even if its family is not listed (Bunko's
   sealed file is replaced with no copy), and so is a generation layer Bunko wrote at
   an older revision, in place. A file Mokuro Reader marked edited (an `edited` block)
-  is never replaced or preserved, whatever stamp or seal it carries, and never used as
+  is never replaced or copied, whatever stamp or seal it carries, and never used as
   the new main file; the admin page counts these. When its OCR is outdated, the new OCR
   is written beside it as `<Volume>.<primary generation>.mokuro` (for example
   `Vol 1.hayai-nova.mokuro`), sealed, and becomes the main file only if the edit mark
   is removed. A reader's edited file does not say which OCR it started from, so with
-  `mokuro-legacy` listed (the default) each edited volume gets this once. A
-  `pre-upgrade` keepsake is never read as a recipe. The format is in
-  `docs/design/sidecar-provenance.md`.
+  `mokuro-legacy` listed (the default) each edited volume gets this once. The format is
+  in `docs/design/sidecar-provenance.md`.
 - **OCR never writes `<Volume>_1.mokuro` beside a file already there.** When a
   `.mokuro` arrives at the destination while its OCR runs (a reader renaming a volume,
   a person's upload), that file stays and the result is discarded (audited, not a
@@ -307,7 +308,7 @@
   When such an upload over WebDAV has exactly the pages of Bunko's sealed file (the one
   it replaces, or the one of the same volume in that folder), Bunko puts the block back
   and seals it again, so the upgrade still knows Bunko wrote it. Corrections that reader
-  saves into the main file still land there; an upgrade keeps them as `pre-upgrade`.
+  saves into the main file still land there, and an upgrade replaces them with no copy.
 - **Internal: the interop rig runs the reader against Bunko on every PR.** The
   `Interop` workflow builds the testing server, cloudsim and the Mokuro Reader commit
   `interop/reader.ref` pins (it fails, naming the file, until that pin exists), then

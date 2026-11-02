@@ -8,14 +8,15 @@ is a volume's main sidecar, which is a layer) follow sidecar names rule v1
 (`interop/contract/sidecar-names.json`, `bunko_core::sidecar_names`).
 
 The rule this serves (decision D4, `0.8-remote-storage.md`): the main `<Vol>.mokuro` is
-model output. A person's corrections live in layers whose content says they are not
-model output, and nothing Bunko does replaces a person's text without keeping it.
+model output. A person's corrections live in layers, or in a main whose `edited` block
+says it is not model output, and Bunko never replaces either. A main without that
+block is model output: an upgrade replaces it outright, with no copy kept (owner
+decision, 2026-11-01).
 
 ## Blocks
 
-A sidecar may carry, at top level, at most one of `edited` and `ocr_engine`, and
-`preserved` only on a keepsake layer. Readers and tools that do not know a block keep it
-as they found it; mokuro itself ignores all three.
+A sidecar may carry, at top level, at most one of `edited` and `ocr_engine`. Readers and
+tools that do not know a block keep it as they found it; mokuro itself ignores both.
 
 **`ocr_engine`** — GENERATED. Written by the engine runner and completed by Bunko at
 install.
@@ -38,21 +39,18 @@ removes it.
 the base being the file the edit started from. A file with `edited` carries no
 `ocr_engine`; Bunko still reads one left in as part of the edited file, and ignores it.
 
-**`preserved`** — PRESERVED. Bunko's keepsake of a main sidecar it replaced, as the layer
-`<Vol>.pre-upgrade.mokuro` (`-2`, `-3`… when taken):
-`{"by": "mokuro-bunko", "reason": "generation-upgrade", "replaced_at": <ISO>, "sha256": <the old file's bytes>, "replaced_by": <new ocr_engine.id>}`,
-and no `ocr_engine`. Only Bunko writes it.
-
 ## Precedence
 
 Decided in this order, first match wins:
 
 1. an `edited` object: **EDITED** (a person's text);
-2. a `preserved` object: **PRESERVED** (nobody's recipe; never read as one);
-3. an `ocr_engine` object with a string `id`: **GENERATED**(id, revision, sealed or not);
-4. a top-level non-empty `version` string: **LEGACY** (stock mokuro output, family
+2. an `ocr_engine` object with a string `id`: **GENERATED**(id, revision, sealed or not);
+3. a top-level non-empty `version` string: **LEGACY** (stock mokuro output, family
    `mokuro-legacy`);
-5. anything else: **UNKNOWN** (never upgraded).
+4. anything else: **UNKNOWN** (never upgraded).
+
+Any other top-level key, a `preserved` object among them (an unreleased 0.8 draft wrote
+one; no released Bunko did), is no block and plays no part in this order.
 
 An `ocr_engine` stamp only names a recipe. It proves nothing about who wrote the file:
 anyone who can write the file can add one, and a tool that re-saves an edited file can
@@ -110,9 +108,11 @@ All of this applies only with `ocr.upgrade.enabled` (default off), except the `_
 
 - **Outdated main.** A GENERATED or LEGACY main is outdated when its recipe is the
   primary's own at a lower revision, or its family is listed in `ocr.upgrade.replace`.
-  A sealed one is replaced with no copy; any other is first kept as `pre-upgrade`.
-  UNKNOWN and PRESERVED are never outdated.
-- **EDITED main.** Never replaced, preserved or swapped. When the recipe beneath the edit
+  It is replaced outright, sealed or not, with no copy kept: on a cloud library the
+  replace is never a permanent delete (a provider whose replace makes a new node has
+  the old one trashed), on a local library the atomic rename replaces it. UNKNOWN is
+  never outdated.
+- **EDITED main.** Never replaced, copied or swapped. When the recipe beneath the edit
   is outdated, the new OCR is written beside it as the layer
   `<Vol>.<primary generation name>.mokuro` (`ocr_engine.generation` = that name,
   sealed), while that name is free or holds Bunko's own sealed output of an older
@@ -144,9 +144,10 @@ All of this applies only with `ocr.upgrade.enabled` (default off), except the `_
   the block when it renames a volume; this keeps the provenance of those renames.
 
 Accepted limits: a page edit by Mokuro Reader 1.10.0 still lands in the main sidecar
-(diverting it would break that reader's sync); an upgrade keeps it as `pre-upgrade`
-before replacing the main. A 1.10.0 rename into another series folder finds no sealed
-main beside it and stays unsealed (kept as `pre-upgrade` before an upgrade). A rename
+(diverting it would break that reader's sync), so an upgrade, once an admin turns
+upgrades on, replaces it with no copy (owner decision, 2026-11-01; the 0.8 reader
+carries a device's own 1.10.0 corrections into its `edit` layer once). A 1.10.0 rename
+into another series folder finds no sealed main beside it and stays unsealed. A rename
 written straight to a cloud folder, not through Bunko's WebDAV, is not re-sealed.
 
 ## Reader carry rule

@@ -436,8 +436,7 @@ table above:
 |---|---|
 | personal (`edit`, `edit-<n>`) | `_authorize_progress_write` (every `WRITE_PROGRESS` account writes its own copy, `registered` included). A MOVE/COPY to any other name: 403 `Permission denied: corrections can only move between correction files`, and so is one INTO a personal name from any other. A `.gz` PUT: 403 `Permission denied: corrections are saved as plain .mokuro`. DAV then refuses a MOVE/COPY to a `.gz` name (403) or to one not ending in exactly `.mokuro` (409), as it does a PUT. |
 | curated (`curated`) | PUT: `MODIFY_DELETE` on any volume, or `uploader` where `can_user_delete_library_path` (the volume it uploaded), the first create included; else 401 / 403 `Permission denied: cannot publish shared corrections for this volume`. DELETE/MOVE/COPY keep steps 10-13. |
-| server keepsake (`pre-upgrade`, `pre-upgrade-<n>`) | a PUT, or a MOVE/COPY into one: 401 / 403 `Permission denied: this file is written by the server`. A MOVE from a keepsake to the same id (a volume rename: the reader moves every listed layer) keeps steps 10-13. |
-| reserved (`curated-<n>`, the rest of `pre-upgrade*`, `previous-ocr*`) | a PUT, or a MOVE/COPY into one: 401 / 403 `Permission denied: this layer name is reserved`. A MOVE that keeps the id keeps steps 10-13, as for a keepsake. |
+| reserved (`curated-<n>`) | a PUT, or a MOVE/COPY into one: 401 / 403 `Permission denied: this layer name is reserved`. A MOVE that keeps the id (a volume rename: the reader moves every listed layer) keeps steps 10-13. |
 
 `original`, `gcv`, `updated-ocr`, `tr-*` and hand-made ids keep the table above (shared files).
 
@@ -455,14 +454,14 @@ before 0.8 get the one uploader of their tracked volumes, once, at startup. For 
   controls it: the archive's uploader, or the owner of its folder. The NEAREST listed archive
   governs (a listed `Berserk.v01.cbz` is its own, whoever adds `Berserk.cbz` later; a name not
   listed yet takes the nearest listed archive above it), except that an archive hiding a reserved
-  layer of the one above it (`V.curated.cbz`, `V.edit.cbz`, `V.pre-upgrade.cbz` beside `V.cbz`)
+  layer of the one above it (`V.curated.cbz`, `V.edit.cbz`, `V.curated-2.cbz` beside `V.cbz`)
   passes control up to it. A new one is otherwise 403
   `Permission denied: this file belongs to a volume this account did not upload`; an existing
   one keeps 4.4's replace refusal. What nothing governs is the folder owner's to replace or delete;
   a new volume in an unowned folder is anyone's to add;
 * nobody below `MODIFY_DELETE` creates such a hiding archive beside a listed volume, its
   controller included: 403 `Permission denied: this name is kept for a layer of the volume beside
-  it` (it would turn every account's correction of `V`, or its curated or keepsake layer, into the
+  it` (it would turn every account's correction of `V`, or its curated layer, into the
   shared primary of the new archive);
 * a folder is never governed: only its series owner deletes one (the series folder included) or
   makes one named after a volume. A library MKCOL never makes a missing parent (409);
@@ -493,7 +492,7 @@ The owner records follow the folders through DAV's and the store's hooks. A hook
 the library root gives no folder an owner (a new folder may be a spelling of a listed series, and its
 owner would control every account's volumes in it) and forgets no record: a stale record is inert,
 since every read checks that its folder is listed.
-Personal corrections, keepsakes and reserved ids keep the table above; MOVE, COPY, LOCK and
+Personal corrections and reserved ids keep the table above; MOVE, COPY, LOCK and
 PROPPATCH stay `MODIFY_DELETE`.
 
 `_authorize_progress_write` (`auth.py:889-921`): unauthenticated -> 401 `Authentication required to save progress`;

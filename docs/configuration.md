@@ -292,8 +292,8 @@ shared). For `uploader`:
   deleted only by the account that uploaded that volume or by the series owner.
   A volume listed under a longer name (`Title.v01.cbz` beside `Title.cbz`) is
   its own uploader's, not the shorter one's.
-- No uploader adds an archive named like a volume's correction, curated or
-  keepsake layer (`V.edit.cbz`, `V.curated.cbz` beside `V.cbz`), not even
+- No uploader adds an archive named like a volume's correction or curated
+  layer (`V.edit.cbz`, `V.curated.cbz` beside `V.cbz`), not even
   that volume's own uploader: it would hide those layers.
 - The series owner replaces and deletes anything in its series, whoever added
   it, and the series folder itself; it is also the one that may update the
