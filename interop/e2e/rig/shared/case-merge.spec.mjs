@@ -2,10 +2,12 @@
 // first holds `kingdom/Vol 2` (another device's upload), which the reader downloads
 // and reads a page of; then an OLDER `Kingdom/` appears with `Vol 1`. Bunko merges the
 // younger spelling into the older one by itself (`Kingdom/Vol 2.cbz`, the loser
-// trashed once empty). After the reader's next sync its row for Vol 2 has taken the
-// cloud's spelling (`Kingdom`), under the same volume id and with the same progress,
-// and nothing ever goes back into `kingdom/`: no folder of that spelling is made and
-// nothing is uploaded into the one Bunko trashed, so Bunko has no second merge to make.
+// trashed once empty). While Vol 2 is still open the reader keeps the spelling (taking
+// the cloud's would rewrite the open volume's row and reload its pages mid-page); once
+// the reader is out of it, its next sync gives the row for Vol 2 the cloud's spelling
+// (`Kingdom`), under the same volume id and with the same progress. Nothing ever goes
+// back into `kingdom/`, before or after: no folder of that spelling is made and nothing
+// is uploaded into the one Bunko trashed, so Bunko has no second merge to make.
 //
 // The seeds are made the way another client would make them: `/_sim/node`, which can
 // date a folder in the past, or rclone's WebDAV (MKCOL, PUT; never its directory on
@@ -153,12 +155,22 @@ test('a case-variant merge: the reader takes the older spelling, keeps the volum
             gone: true,
         });
 
-    // The reader's sync after the merge, and one more with everything it queued.
+    // The reader's sync after the merge, Vol 2 still open in it. The adoption runs on
+    // the sync's listing, beside the sync, as listing work `idle` waits for: it has
+    // run, and left the open volume's spelling alone for a later listing.
     const before = rig.provider === 'rclone' ? null : new Map((await tree(rig)).map((r) => [r.id, r]));
     const writes = recordCloudWrites(reader.page, rig);
     expect(await reader.sync()).toEqual(OK);
     await reader.idle();
-    // The adoption runs on the sync's listing, beside the sync: its outcome is the row.
+    expect((await reader.library()).volumes.filter((v) => v.id === id)).toMatchObject([
+        { series: YOUNGER, title: 'Vol 2' },
+    ]);
+
+    // Out of the reader, back to the series page (where its Back goes): the next sync
+    // adopts the cloud's spelling, and one more runs with everything it queued.
+    await reader.showSeries(YOUNGER);
+    expect(await reader.sync()).toEqual(OK);
+    await reader.idle();
     await expect
         .poll(async () => (await reader.library()).volumes.filter((v) => v.id === id), { timeout: 60_000 })
         .toMatchObject([{ series: OLDER, title: 'Vol 2', cloudPath: `${OLDER}/Vol 2.cbz` }]);
