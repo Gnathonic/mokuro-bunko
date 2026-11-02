@@ -557,7 +557,12 @@ async fn a_case_fold_never_routes_into_the_per_user_tree() {
         pc.canonical_path("/mokuro-reader/Goals.json", None),
         "/mokuro-reader/Goals.json"
     );
-    // With a library series beside it, the request lands in the series.
+    // With a library series beside it, the request lands in the series. A series
+    // `History/` beside `history/` needs a case-sensitive filesystem (not the default on
+    // Windows or macOS, where both are one folder).
+    if env.lib("HISTORY").exists() {
+        return;
+    }
     std::fs::create_dir_all(env.lib("History")).unwrap();
     for spelling in ["HISTORY", "hIstory"] {
         let path = format!("/mokuro-reader/{spelling}/v.cbz");
