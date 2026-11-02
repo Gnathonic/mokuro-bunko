@@ -543,13 +543,15 @@ fn check_backend(target: &crate::ocr_target::OcrTarget) -> Check {
         dir.display(),
         want.reason
     );
-    // A pack belongs to exactly one release.
-    if !bunko_engines::torch::abi::same_release(&m.bunko_version, bunko_core::VERSION) {
+    // A pack of a release this build opens (abi::OLDEST_PACK_RELEASE up to this one).
+    if !bunko_engines::torch::abi::release_opens_pack(&m.bunko_version, bunko_core::VERSION) {
         return Check::fail(
             "OCR backend",
             format!(
-                "{detail}; the backend pack is from mokuro-bunko {}, this is {}: each release runs only its own pack",
+                "{detail}; the backend pack is from mokuro-bunko {}, this is {}, which opens the packs of {} to {}",
                 m.bunko_version,
+                bunko_core::VERSION,
+                bunko_engines::torch::abi::OLDEST_PACK_RELEASE,
                 bunko_core::VERSION
             ),
             Some(format!(

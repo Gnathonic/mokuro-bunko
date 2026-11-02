@@ -163,6 +163,10 @@
   are test builds, never offered as an update.
 
 ### Changed
+- **An update keeps the installed OCR backend.** This release opens the backend packs
+  of 0.7.1 and later (it builds the same packs), so updating from those (by hand, the
+  automatic update or a new Docker image) downloads no pack; a release whose pack
+  changes still fetches its own.
 - **OCR corrections have their own layer names.** Edits never touch a volume's main
   OCR file. `<Volume>.edit.mokuro` (and `edit-2`, `edit-3`, …) are an account's own
   corrections: any account that can save progress, `registered` included, writes,

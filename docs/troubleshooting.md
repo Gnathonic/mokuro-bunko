@@ -105,8 +105,9 @@ without installing anything.
   for Linux x86_64 (`cpu`, `cu130`, `rocm7.1`), Windows x86_64 (`cpu`,
   `cu130`) and macOS on Apple silicon (`cpu`) only.
 - **"... is release X, not Y"** or **"the archive holds the backend pack of
-  mokuro-bunko X, not Y"**: the pack must come from the release of the
-  running version. A source build of an unreleased version needs its own pack
+  mokuro-bunko X; release Y opens the packs of A to Y"**: the pack must come from
+  the running version's release, or an earlier one that builds the same pack (0.7.1
+  and later, for 0.8). A source build of an unreleased version needs its own pack
   (`cargo run -p xtask -- torch-pack --variant <variant>` writes it to
   `dist/`; then `install-ocr --from dist`).
 - **A host without internet**: download the pack archive

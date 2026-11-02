@@ -580,7 +580,7 @@ pub struct InstallOcrArgs {
     #[arg(long, value_parser = PossibleValuesParser::new(["auto", "cpu", "cu130", "rocm7.1", "vulkan"]))]
     pub variant: Option<String>,
     /// Only when needed (what the Docker images run on start): nothing when local OCR
-    /// is off or a fitting pack of this release is installed; otherwise install the
+    /// is off or a fitting pack this release opens is installed; otherwise install the
     /// pack and the enabled engines' models, and remove the packs it replaces.
     /// MOKURO_OCR_AUTO_INSTALL=false turns it off
     #[arg(long)]

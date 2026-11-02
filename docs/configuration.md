@@ -666,18 +666,20 @@ Updates card), `processor.auto_update: true` in a processor's `processor.yaml`
 (`processor setup --auto-update`, the processor's pairing page, or its Settings
 → Updates page).
 
-**A release is one unit.** An OCR backend pack belongs to exactly one
-mokuro-bunko release: release X's program opens only release X's pack (its
-`pack.json` says `bunko_version`; a pack built outside a release, without one,
-is accepted as a development pack). Another release's pack is refused with
-`the backend pack is from mokuro-bunko A, this is B: each release runs only its
-own pack; run 'mokuro-bunko install-ocr' (with automatic updates on, an update
+**A release is one unit.** An OCR backend pack is built by one mokuro-bunko
+release (its `pack.json` says `bunko_version`; a pack built outside a release,
+without one, is accepted as a development pack). Release X's program opens the
+packs of the releases that build the same pack as X, from the oldest such
+release up to X itself (0.7.1 and later, for 0.8); any other is refused with
+`the backend pack is from mokuro-bunko A, this is B, which opens the packs of O
+to B; run 'mokuro-bunko install-ocr' (with automatic updates on, an update
 installs it)`, and `doctor`, `/control/status` and
 the tray name the pack in use as `<variant> for <release>`. The models a release
 uses are named by manifests compiled into its program, so new model files only
 ever arrive with a new release. An update therefore installs, together: the
 program (the tray is part of it), the release's pack for the variant installed
-here, and the release's model files.
+here unless the installed pack is one the release opens, and the release's
+model files.
 
 **Server.** With `auto` on, every check (12 h by default;
 `MOKURO_UPDATE_CHECK_SECONDS` sets the period) that finds a newer release on
@@ -693,12 +695,16 @@ the channel starts an update:
    checks its pack for the installed variant into `backends/.staging-<variant>`
    (signature, sha256, every file; the host requirements such as the NVIDIA
    driver version; the free disk space), loads it (a GPU pack must find its GPU),
-   and fetches its model files with it. Nothing installed has changed yet.
+   and fetches its model files with it. When the installed pack is one it opens,
+   it loads that one instead and downloads no pack. Nothing installed has changed
+   yet.
 3. The switch: the running program is copied aside (`.mokuro-bunko-previous`;
    on Windows the other program of the pair beside its own), the installed pack
    moves to `backends/.prev-<name>`, the staged pack takes its place, the
    program is replaced, and `<storage>/.update.json` records it. The server
-   restarts.
+   restarts. (A kept pack stays where it is and only the program switches; step 4
+   then has no new pack to check, since step 2 loaded the kept one in the new
+   release.)
 4. The new release checks its pack in a child process (`install-ocr --probe`,
    the pack it will really open, with its real environment). If it loads, the
    kept copies and the model files the release no longer names are deleted, and

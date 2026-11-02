@@ -165,8 +165,8 @@ new server nothing installs until `/setup` finishes: its "OCR on this machine"
 choice decides, and finishing starts the install. After that, at every start
 (and on a processor, which has no setup), when
 local OCR is on, an enabled generation needs the backend (hayai-nova,
-paddle-manga; a processor: always) and no fitting pack of this release is
-installed, they start serving at once and run the same detection and install
+paddle-manga; a processor: always) and no fitting pack this release opens is
+installed (its own, or one of an earlier release that builds the same pack), they start serving at once and run the same detection and install
 (`install-ocr --if-needed`, as a child process) meanwhile; with the pack in
 place, the same run fetches missing models:
 
@@ -954,7 +954,8 @@ backend](#ocr-backend-install-ocr)), with what the container was given:
 3. It applies `ocr.backend` (`MOKURO_OCR_BACKEND`): `auto` takes that GPU,
    `cpu` stays on the CPU, `cuda` / `rocm` take that vendor's GPU, or the CPU
    with a note when it is not there.
-4. It downloads the matching backend pack of this release into
+4. It downloads the matching backend pack of this release (unless one of an
+   earlier release with the same pack is already there, after an update) into
    `/data/backends` (~80 MB for the CPU; ~350 MB plus ~1.6 GB of NVIDIA's CUDA
    libraries from PyPI; ~3 GB for AMD) and the models of the enabled OCR
    engines into `/data/models`; local OCR then starts by itself.

@@ -6,7 +6,7 @@
 //!    for a supported AMD GPU on Linux, else `cpu`; in a container only GPUs passed in
 //!    count); `--variant` overrides (`--variant auto`: the hardware alone).
 //! 2. Find it in the signed `release.json` of **this** version (`backends[target]`;
-//!    a pack belongs to exactly one release: this binary opens no other release's),
+//!    this binary opens the packs of `abi::OLDEST_PACK_RELEASE` up to its own release),
 //!    download the archive (resuming), check its sha256, unpack it into
 //!    `<storage>/backends/.staging-*`, check every file against `pack.json`.
 //! 3. Fetch the libraries `pack.json` lists as external (NVIDIA's CUDA wheels on PyPI,
@@ -19,7 +19,7 @@
 //! ([`crate::ocr_target`]). A processor also uses a pack found in the library's storage.
 //!
 //! `--if-needed` (the Docker image's entrypoint runs it on every start): nothing when
-//! local OCR is off, `MOKURO_OCR_AUTO_INSTALL=false`, or a pack of this release that
+//! local OCR is off, `MOKURO_OCR_AUTO_INSTALL=false`, or a pack this release opens that
 //! serves the choice is there (for `cpu`, a GPU pack also serves); otherwise the steps
 //! above, then the packs the new one replaces are removed.
 //!
@@ -612,7 +612,7 @@ mod full {
         })
     }
 
-    /// `install-ocr --if-needed`: a pack of this release that serves `variant` is
+    /// `install-ocr --if-needed`: a pack this release opens that serves `variant` is
     /// installed (the message to print), or None. For `cpu` an installed GPU pack
     /// counts too: it runs on the CPU as well, and keeping it costs no download when
     /// the container next starts with its GPU again.
@@ -700,8 +700,12 @@ mod full {
                 if m.variant != variant || m.target != bunko_update::TARGET {
                     continue;
                 }
-                // A pack belongs to one release: another release's does not count.
-                if !bunko_engines::torch::abi::same_release(&m.bunko_version, bunko_core::VERSION) {
+                // Only a pack of a release this build opens counts: an update from one of
+                // those keeps its pack (the same files this release would download).
+                if !bunko_engines::torch::abi::release_opens_pack(
+                    &m.bunko_version,
+                    bunko_core::VERSION,
+                ) {
                     continue;
                 }
                 if pack_complete(&dir, &m) {
@@ -710,6 +714,18 @@ mod full {
             }
         }
         None
+    }
+
+    /// The installed pack in `dir`, when an update to `version` keeps it: a complete pack
+    /// for this target of a release `version` opens (`abi::release_opens_pack`). A
+    /// development pack (no release) is never kept: an update brings the release's own.
+    pub fn pack_this_release_keeps(dir: &Path, version: &str) -> Option<PackManifest> {
+        let m = PackManifest::parse(&std::fs::read(dir.join(pack::PACK_JSON)).ok()?).ok()?;
+        (!m.bunko_version.trim().is_empty()
+            && m.target == bunko_update::TARGET
+            && bunko_engines::torch::abi::release_opens_pack(&m.bunko_version, version)
+            && pack_complete(dir, &m))
+        .then_some(m)
     }
 
     /// Every file of the pack (archive and external) is there with its size.
@@ -1049,6 +1065,9 @@ mod full {
                 .and_then(|b| PackManifest::parse(&b).ok())
                 .map(|m| m.variant)
         });
+        let kept = current
+            .as_deref()
+            .and_then(|d| pack_this_release_keeps(d, version));
         let Some(variant) = variant else {
             // No OCR backend here: only the models that need none.
             println!("No OCR backend pack installed here: fetching the models only");
@@ -1067,6 +1086,44 @@ mod full {
                 "Note: this machine now fits the {} pack ({}); the update keeps the installed {variant} pack",
                 want.variant, want.reason
             );
+        }
+        // The installed pack is one this release opens: the pack it would download (the
+        // releases from abi::OLDEST_PACK_RELEASE up to it build the same one). Keep it:
+        // check it loads in this release and fetch the models with it; nothing to switch.
+        if let Some(m) = kept {
+            let dir = current.as_deref().unwrap_or(Path::new(""));
+            println!(
+                "Keeping the installed {variant} backend pack ({}, mokuro-bunko {}): release {version} opens it",
+                dir.display(),
+                m.bunko_version
+            );
+            // SAFETY: no other thread runs yet in this short-lived child.
+            unsafe { std::env::set_var(bunko_engines::torch::PACK_ENV, dir) };
+            let pipeline =
+                bunko_engines::EnginePipeline::new(ocr.engine_config(bunko_engines::Backend::Auto));
+            match probe_pipeline(&pipeline) {
+                Ok(lines) => lines.iter().for_each(|l| println!("{l}")),
+                Err(e) => {
+                    return fail(PackFailure::owner(
+                        format!(
+                            "its OCR backend (the installed {variant} pack of {}) does not load in release {version}: {e}",
+                            m.bunko_version
+                        ),
+                        format!(
+                            "This machine stays on its current release. Check 'mokuro-bunko doctor'; release {version} may not support this GPU/driver."
+                        ),
+                    ));
+                }
+            }
+            if let Err(e) = super::super::models::download(ocr, None) {
+                return fail(PackFailure::retry(format!(
+                    "its models could not be fetched: {e}"
+                )));
+            }
+            return PrefetchResult {
+                ok: true,
+                ..Default::default()
+            };
         }
         let (_, key) = role_update_settings(ocr);
         let source = ReleaseSource {
@@ -1446,12 +1503,13 @@ mod full {
                 "Use the pack archive of this machine's variant and platform.",
             ));
         }
-        if !bunko_engines::torch::abi::same_release(&manifest.bunko_version, version) {
+        if !bunko_engines::torch::abi::release_opens_pack(&manifest.bunko_version, version) {
             let _ = std::fs::remove_dir_all(&staging);
             return Err(PackFailure::owner(
                 format!(
-                    "the archive holds the backend pack of mokuro-bunko {}, not {version}: each release runs only its own pack",
-                    manifest.bunko_version
+                    "the archive holds the backend pack of mokuro-bunko {}; release {version} opens the packs of {} to {version}",
+                    manifest.bunko_version,
+                    bunko_engines::torch::abi::OLDEST_PACK_RELEASE
                 ),
                 format!("Use the pack archive of release {version}."),
             ));
@@ -1571,7 +1629,7 @@ mod tests {
     }
 
     #[test]
-    fn another_releases_pack_does_not_count_as_installed() {
+    fn only_a_pack_this_release_opens_counts_as_installed() {
         let dir = tempfile::tempdir().unwrap();
         let pack = dir.path().join("torch-cpu-2.13.0");
         std::fs::create_dir_all(&pack).unwrap();
@@ -1587,9 +1645,17 @@ mod tests {
         write("0.0.1");
         assert!(
             find_installed(&roots, "cpu").is_none(),
-            "another release's pack"
+            "the pack of a release older than OLDEST_PACK_RELEASE"
+        );
+        write("999.0.0");
+        assert!(
+            find_installed(&roots, "cpu").is_none(),
+            "a newer release's pack"
         );
         write(bunko_core::VERSION);
+        assert!(find_installed(&roots, "cpu").is_some());
+        // An update from a release that builds the same pack keeps it.
+        write(bunko_engines::torch::abi::OLDEST_PACK_RELEASE);
         assert!(find_installed(&roots, "cpu").is_some());
         write("");
         assert!(
@@ -1649,6 +1715,46 @@ mod tests {
     }
 
     #[test]
+    fn an_update_keeps_a_pack_its_release_opens() {
+        let dir = tempfile::tempdir().unwrap();
+        let pack = dir.path().join("torch-cu130-2.13.0");
+        std::fs::create_dir_all(pack.join("lib")).unwrap();
+        std::fs::write(pack.join("lib/libtorch.so"), b"1234").unwrap();
+        let write = |version: &str, target: &str, size: u64| {
+            let m = serde_json::json!({
+                "format": 1, "name": "torch-cu130-2.13.0", "variant": "cu130", "torch": "2.13.0",
+                "target": target, "os": "linux", "arch": "x86_64", "abi": 1, "library": "",
+                "bunko_version": version,
+                "files": [{"path": "lib/libtorch.so", "size": size, "sha256": "00"}]
+            });
+            std::fs::write(pack.join("pack.json"), m.to_string()).unwrap();
+        };
+        let oldest = bunko_engines::torch::abi::OLDEST_PACK_RELEASE;
+        let t = bunko_update::TARGET;
+        write(oldest, t, 4);
+        let kept = pack_this_release_keeps(&pack, bunko_core::VERSION).unwrap();
+        assert_eq!(kept.bunko_version, oldest);
+        // Not kept: an older or newer release's, another target's, an incomplete one, or a
+        // development pack (an update brings the release's own).
+        for (version, target, size) in [
+            ("0.0.1", t, 4),
+            ("999.0.0", t, 4),
+            (oldest, "aarch64-apple-darwin", 4),
+            (oldest, t, 5),
+            ("", t, 4),
+        ] {
+            write(version, target, size);
+            assert!(
+                pack_this_release_keeps(&pack, bunko_core::VERSION).is_none(),
+                "{version} {target} {size}"
+            );
+        }
+        // An unreadable pack.json neither.
+        std::fs::write(pack.join("pack.json"), "{").unwrap();
+        assert!(pack_this_release_keeps(&pack, bunko_core::VERSION).is_none());
+    }
+
+    #[test]
     fn if_needed_keeps_a_fitting_pack() {
         let dir = tempfile::tempdir().unwrap();
         let roots = vec![dir.path().to_path_buf()];
@@ -1666,7 +1772,7 @@ mod tests {
         // Nothing installed: install.
         assert!(already_fits(&roots, "cpu").is_none());
         assert!(already_fits(&roots, "rocm7.1").is_none());
-        // Another release's pack does not count.
+        // The pack of a release this one does not open does not count.
         add("rocm7.1", "0.0.1");
         assert!(already_fits(&roots, "rocm7.1").is_none());
         assert!(already_fits(&roots, "cpu").is_none());

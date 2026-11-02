@@ -189,8 +189,9 @@ in `/config`). Differences:
   `/data/backends` (a download of ~80 MB for the CPU, ~2 GB for NVIDIA, ~3 GB for
   AMD; 0.4 / 2.5 / 6.8 GB on disk) and the enabled engines' models into
   `/data/models`, instead of 0.5.2's pip-installed torch environments. Later starts
-  reuse them; a new image version downloads its own pack in the background and
-  removes the old one, keeping the models. There is no `nvidia/cuda` base any more (the
+  reuse them, and so does a new image version while the backend is unchanged (0.7.1
+  to 0.8 share one); a version that changes it downloads its pack in the background
+  and removes the old one, keeping the models. There is no `nvidia/cuda` base any more (the
   CUDA libraries come with the pack), but an NVIDIA GPU still needs the driver (≥ 580)
   and the container toolkit on the host. **AMD GPUs now work in Docker**:
   `--device /dev/kfd --device /dev/dri`.
