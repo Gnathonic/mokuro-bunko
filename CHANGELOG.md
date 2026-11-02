@@ -1,6 +1,9 @@
 # Changelog
 
-## [Unreleased]
+## [0.7.4] - 2026-11-02
+
+OCR sessions no longer leak their model's weights, so a GPU processor keeps reading on
+the GPU instead of filling its memory and falling back to the CPU.
 
 ### Fixed
 - **Every libtorch OCR session leaked its model's weights.** The packages bind the
