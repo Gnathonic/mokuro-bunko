@@ -114,6 +114,11 @@ mod tests {
         assert!(got.contains(&"vol 01.hayai.mokuro".to_string()));
         assert!(got.contains(&"VOL 01.MOKURO".to_string()));
 
+        // Archives that differ only in case need a case-sensitive filesystem (not the
+        // default on Windows or macOS, where this would overwrite `Vol 01.cbz`).
+        if !crate::path_case::is_case_sensitive(&d.join("Vol 01.cbz")) {
+            return;
+        }
         std::fs::write(d.join("vol 01.cbz"), b"x").unwrap();
         std::fs::write(d.join("VOL 01.cbz"), b"x").unwrap();
         let got = names("Vol 01.cbz");
