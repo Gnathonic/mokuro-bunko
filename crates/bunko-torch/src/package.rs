@@ -175,6 +175,19 @@ impl Weights {
     }
 }
 
+/// Frees the weights' memory. Dropping the tensors is not enough: the packages they
+/// were bound to (user-managed) leak a reference to each one, so without this every
+/// recognizer load kept a full copy of its weights for the life of the process (a
+/// processor filled a 24 GB GPU in about 80 OCR sessions, then fell back to the CPU).
+/// Holders declare `Weights` after their packages, so the packages are gone first.
+impl Drop for Weights {
+    fn drop(&mut self) {
+        for t in self.tensors.values() {
+            crate::aoti::release_storage(t);
+        }
+    }
+}
+
 /// The three graphs of one package set, bound and ready to run.
 pub struct PackageSet {
     pub vision: Aoti,
@@ -182,7 +195,8 @@ pub struct PackageSet {
     pub step: Aoti,
     /// Graph I/O contract ([`IO_VERSIONS`]).
     pub io: u32,
-    /// The shared weights (kept alive here: the packages use them in place).
+    /// The shared weights (kept alive here: the packages use them in place). After the
+    /// packages: dropping `Weights` frees their memory, once the packages are gone.
     pub weights: Option<Weights>,
 }
 

@@ -30,6 +30,15 @@ unsafe extern "C" {
         n: c_int,
         err: *mut *mut c_char,
     ) -> c_int;
+    fn bt_tensor_release_storage(t: *mut C_tensor);
+}
+
+/// Frees `t`'s storage now, even while something else still references it (see
+/// `bt_tensor_release_storage` in the shim). Only for a tensor nothing will read again:
+/// every view of the same storage is left empty.
+pub(crate) fn release_storage(t: &Tensor) {
+    // SAFETY: a live tensor handle; the shim only resets its storage's data.
+    unsafe { bt_tensor_release_storage(t.as_ptr() as *mut C_tensor) }
 }
 
 fn take_err(e: *mut c_char) -> String {

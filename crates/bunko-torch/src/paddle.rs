@@ -49,7 +49,8 @@ pub struct TorchPaddle {
     prefill: Aoti,
     step: Aoti,
     io: u32,
-    // The packages' shared weights (bound in place: kept alive with them).
+    // The packages' shared weights (bound in place: kept alive with them). Declared
+    // after the packages: dropping `Weights` frees their memory, once the packages are gone.
     _weights: Option<Weights>,
     dev: tch::Device,
     prec: TPrec,

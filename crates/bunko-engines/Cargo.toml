@@ -62,5 +62,9 @@ name = "torch_crops"
 required-features = ["torch"]
 
 [[example]]
+name = "torch_reload"
+required-features = ["torch"]
+
+[[example]]
 name = "vulkan_check"
 required-features = ["torch"]
