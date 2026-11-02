@@ -140,6 +140,21 @@ int bt_aoti_load_constants(void* h, const char** fqns, at::Tensor** tensors, int
   }
 }
 
+// Frees the data of `t`'s storage now, whatever else still references that storage.
+//
+// For weights bound with `bt_aoti_load_constants`: AOTInductor's user-managed constants
+// (`MaybeOwningAtenTensorHandle(handle, user_managed=true)`, torch 2.13/2.14) take a new
+// tensor handle on each constant (`aoti_torch_new_tensor_handle`, a storage reference)
+// and never delete it, so the weights' storage outlives every package and every load
+// leaks a full copy of the weights (VRAM on a GPU, RAM on the CPU). Called once no
+// package uses the tensor: the leaked handles keep pointing at an empty storage.
+void bt_tensor_release_storage(at::Tensor* t) {
+  try {
+    if (t && t->defined() && t->has_storage()) t->storage().unsafeGetStorageImpl()->reset();
+  } catch (...) {
+  }
+}
+
 // Returns the number of outputs written to `outs` (<= max_out), -1 on error.
 int bt_aoti_run(void* h, at::Tensor** ins, int n_in, at::Tensor** outs, int max_out, char** err) {
   try {
