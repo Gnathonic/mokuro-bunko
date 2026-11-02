@@ -33,7 +33,7 @@ pub const MAX_GENERATION_NAME: usize = 32;
 pub const RETIRED_FROM_PRIMARY: &str = "retired_from_primary";
 pub const RESERVED_NAMES: &[&str] = &["original", "gcv", "updated-ocr", "edit", "curated"];
 /// Also reserved: `edit-<n>` and `curated-<n>` ([`sidecar_names::layer_class`]).
-pub const RESERVED_PREFIXES: &[&str] = &["tr-", "pre-upgrade", "previous-ocr"];
+pub const RESERVED_PREFIXES: &[&str] = &["tr-"];
 pub const MAX_STAGE_WORKERS: u32 = 64;
 pub const MAX_QUEUE_CAPACITY: u32 = 256;
 pub const POOL_KEYS: &[&str] = &[
@@ -286,17 +286,10 @@ pub fn name_rejection(name: &str) -> Option<String> {
              is invisible to every reader)"
         ));
     }
-    // The correction and keepsake families (D27), any `-<n>` included.
+    // The correction families (D27), any `-<n>` included: `edit`, `edit-<n>`,
+    // `curated`, `curated-<n>`.
     let family = match sidecar_names::layer_class(name) {
         LayerClass::Other => None,
-        LayerClass::ServerKeepsake => Some("Bunko keeps replaced sidecars under it"),
-        LayerClass::Reserved if name.starts_with("pre-upgrade") => {
-            Some("Bunko keeps replaced sidecars under it")
-        }
-        LayerClass::Reserved if name.starts_with("previous-ocr") => {
-            Some("the reader keeps its local copy of a replaced OCR under it")
-        }
-        // `edit`, `edit-<n>`, `curated`, `curated-<n>`.
         _ => Some("readers' corrections are saved under it"),
     };
     if let Some(why) = family {
@@ -1090,32 +1083,38 @@ mod tests {
         assert!(name_rejection(&"a".repeat(33)).is_some());
     }
 
-    /// A generation's file must never read as a reader's corrections, the shared
-    /// curated layer, or a keepsake of a replaced main (D27).
+    /// A generation's file must never read as a reader's corrections or the shared
+    /// curated layer (D27).
     #[test]
-    fn correction_and_keepsake_names_are_reserved() {
-        for name in [
-            "edit",
-            "edit-2",
-            "curated",
-            "curated-3",
-            "pre-upgrade",
-            "pre-upgrade-2",
-            "previous-ocr",
-            "previous-ocr-4",
-        ] {
+    fn correction_names_are_reserved() {
+        for name in ["edit", "edit-2", "curated", "curated-3"] {
             assert!(name_rejection(name).is_some(), "{name}");
         }
         for name in ["hayai-nova", "editor", "curated-ocr-x", "edits"] {
             assert!(name_rejection(name).is_none(), "{name}");
         }
         assert!(name_rejection("edit-2").unwrap().contains("corrections"));
-        assert!(name_rejection("pre-upgrade").unwrap().contains("replaced"));
-        assert!(
-            name_rejection("previous-ocr")
-                .unwrap()
-                .contains("local copy")
-        );
+    }
+
+    /// Owner decision, 2026-11-01: `pre-upgrade` and `previous-ocr` are names like any
+    /// other, and a row may carry them.
+    #[test]
+    fn pre_upgrade_and_previous_ocr_are_ordinary_generation_names() {
+        for name in [
+            "pre-upgrade",
+            "pre-upgrade-2",
+            "previous-ocr",
+            "previous-ocr-4",
+        ] {
+            assert!(name_rejection(name).is_none(), "{name}");
+        }
+        let p = parse_generation_list(&json!([
+            {"name": "pre-upgrade", "engine": "hayai-nova", "primary": true},
+            {"name": "previous-ocr", "engine": "paddle-manga"}
+        ]))
+        .unwrap();
+        assert_eq!(p.rows[0].name, "pre-upgrade");
+        assert_eq!(p.rows[1].files_suffix(), ".previous-ocr.mokuro");
     }
 
     #[test]

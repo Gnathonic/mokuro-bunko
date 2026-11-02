@@ -19,8 +19,8 @@
 //! that cannot list the library root keeps a record rather than forget it, and gives
 //! no folder an owner it could not check: a stale record is inert, a wrong one is not.
 //!
-//! Bunko's own writes (the processor, the compiler, covers, keepsakes, the inbox, a
-//! duplicate merge) never call these: they assign no owner.
+//! Bunko's own writes (the processor, the compiler, covers, the inbox, a duplicate
+//! merge) never call these: they assign no owner.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};

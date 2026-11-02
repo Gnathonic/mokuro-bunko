@@ -19,8 +19,8 @@
 //!    (16 lowercase hex digits), directly under `<base>/cloud` and not a symlink (nor
 //!    resolving anywhere else), is ever marked or removed.
 //!
-//! Disconnect never deletes anything in the cloud: the `pre-upgrade` layers D4 keeps
-//! are files of the cloud library and stay there. Google is never revoked.
+//! Disconnect never deletes anything in the cloud: every file of the cloud library
+//! stays there. Google is never revoked.
 
 use std::io;
 use std::path::{Path, PathBuf};

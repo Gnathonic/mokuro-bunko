@@ -305,12 +305,11 @@ impl Default for DatabaseConfig {
 #[derive(Debug, Clone, PartialEq)]
 pub struct UpgradeConfig {
     /// Replace older primary OCR with the current primary recipe (generation-upgrade.md
-    /// §3): the new file replaces the volume's main `.mokuro`. One proven to be Bunko's
-    /// own bytes (sealed) is replaced outright; any other (stock mokuro, an older
-    /// reader's unmarked correction, or one that only carries Bunko's stamp) is first kept
-    /// as the layer `<Vol>.pre-upgrade.mokuro`. A file a reader marked EDITED (an
-    /// `edited` block) is never replaced: its new OCR goes beside it as
-    /// `<Vol>.<primary generation name>.mokuro` (docs/design/sidecar-provenance.md).
+    /// §3): the new file replaces the volume's main `.mokuro` outright, with no copy
+    /// kept (on a remote store the replaced file goes to the provider's trash). A file
+    /// a reader marked EDITED (an `edited` block) is never replaced: its new OCR goes
+    /// beside it as `<Vol>.<primary generation name>.mokuro`
+    /// (docs/design/sidecar-provenance.md).
     pub enabled: bool,
     /// Recipe families to replace: engine ids or `mokuro-legacy`.
     pub replace: Vec<String>,

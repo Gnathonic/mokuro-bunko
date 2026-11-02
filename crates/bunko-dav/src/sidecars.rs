@@ -12,7 +12,7 @@ use crate::paths;
 /// [`sidecar_names::sweep_set`] gives that volume (other spellings of those, its
 /// layers). Folders are no sidecars and archive nothing (rule 2).
 ///
-/// Never a file that, with `cbz` gone, is a correction, curated or keepsake layer of
+/// Never a file that, with `cbz` gone, is a correction or curated layer of
 /// another listed archive: an archive nested under a volume's name (`V.edit.cbz` beside
 /// `V.cbz`) would otherwise take `V`'s own `V.edit.mokuro` or `V.curated.mokuro` with
 /// it, for good.
@@ -47,7 +47,7 @@ pub fn siblings(cbz: &Path) -> Vec<PathBuf> {
         let leaving = paths::file_name(path);
         !matches!(
             sidecar_names::layer_class_of_name(&leaving, &others),
-            Some(LayerClass::Personal | LayerClass::Curated | LayerClass::ServerKeepsake)
+            Some(LayerClass::Personal | LayerClass::Curated)
         )
     });
     out
@@ -122,8 +122,8 @@ mod tests {
         assert!(names("vol 01.cbz").contains(&"vol 01.hayai.mokuro".to_string()));
     }
 
-    /// C11: an archive nested under a volume's name leaves that volume's correction,
-    /// curated and keepsake layers; folders are no archives.
+    /// C11: an archive nested under a volume's name leaves that volume's correction
+    /// and curated layers; folders are no archives.
     #[test]
     fn a_nested_archive_leaves_the_outer_volumes_layers() {
         let dir = tempfile::tempdir().unwrap();

@@ -1,13 +1,12 @@
 //! The generation upgrade on a cloud library (D4, the in-memory `FakeBackend`): the same
-//! rules as on a local one (`ocr_upgrade_edited.rs`). An outdated main sidecar Bunko did
-//! not stamp is kept as `<Vol>.pre-upgrade.mokuro`, which commits before the swap
-//! uploads; a failed layer upload skips the volume until the next census; the node a
-//! swap replaces is never deleted for good; a reader's overwrite of a Bunko-written
-//! main sidecar forgets its row, so the next census upgrades it after keeping it; one
-//! proven to be Bunko's own bytes (its version in the store's ledger, its sha256 in its
-//! row) is replaced with no copy, while one that only carries Bunko's stamp is kept
-//! first; a layer is swapped in only on the same proof, and unstamped layers are never
-//! swapped in or deleted.
+//! rules as on a local one (`ocr_upgrade_edited.rs`). An outdated main sidecar is
+//! replaced outright, with no copy kept, whoever wrote it (owner decision, 2026-11-01);
+//! the node a swap replaces is never deleted for good (D16: a provider whose replace
+//! makes a new node has the old one trashed, one that replaces in place keeps it as a
+//! revision where it keeps any); a failed upload skips the volume until the next
+//! census; a reader's overwrite of a Bunko-written main sidecar forgets its row, so the
+//! next census upgrades it; a layer is swapped in only on proof that Bunko wrote it
+//! (its seal), and unstamped layers are never swapped in or deleted.
 
 // Fixtures are checked with std::fs on purpose (none here touch the cloud through it).
 #![allow(clippy::disallowed_methods)]
@@ -235,22 +234,24 @@ impl Cloud {
     }
 }
 
-/// A `pre-upgrade` layer keeps exactly `old` plus its `preserved` block, no stamp.
-fn assert_preserves(kept: Option<Value>, old: &str) {
-    let mut kept = kept.expect("the pre-upgrade layer is in the cloud");
-    let block = kept
-        .as_object_mut()
-        .unwrap()
-        .shift_remove("preserved")
-        .expect("a preserved block");
-    assert_eq!(block["by"], "mokuro-bunko");
-    assert_eq!(block["reason"], "generation-upgrade");
-    assert_eq!(block["sha256"], sha(old.as_bytes()));
-    assert_eq!(block["replaced_by"], "hayai-nova");
-    assert!(kept.get("ocr_engine").is_none(), "{kept}");
-    let mut want: Value = serde_json::from_str(old).unwrap();
-    want.as_object_mut().unwrap().shift_remove("ocr_engine");
-    assert_eq!(kept, want, "the old content, unchanged");
+/// No copy of the replaced main sidecar: no layer beside it in the cloud, none uploaded,
+/// and the audit names none.
+fn assert_no_copy(cloud: &Cloud, fake: &FakeBackend, vol: &str) {
+    let mut names = fake.upload_log();
+    names.retain(|n| n.starts_with(&format!("{vol}.")) && n.ends_with(".mokuro"));
+    names.retain(|n| n != &format!("{vol}.mokuro") && n != &format!("{vol}.hayai-nova.mokuro"));
+    assert!(names.is_empty(), "no layer uploaded: {names:?}");
+    for id in ["pre-upgrade", "previous-ocr"] {
+        assert!(
+            cloud
+                .cloud_bytes(&format!("Series/{vol}.{id}.mokuro"))
+                .is_none(),
+            "{vol}: no {id} layer"
+        );
+    }
+    let audit = &cloud.upgrade_audits()[0];
+    assert_eq!(audit["replaced"], true, "{audit}");
+    assert!(audit.get("preserved_as").is_none(), "{audit}");
 }
 
 fn library(fake: &FakeBackend, main: &str) {
@@ -258,10 +259,10 @@ fn library(fake: &FakeBackend, main: &str) {
     fake.reader_put(&format!("{ROOT}/Series/Vol 1.mokuro"), main.as_bytes());
 }
 
-/// MEGA-like: a replace is a new node, and the old one is never deleted for good; the
-/// layer upload comes before the swap's.
+/// MEGA-like: a replace is a new node, and the old one is never deleted for good; no
+/// copy is uploaded before or after the swap.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_stamp_less_cloud_sidecar_is_kept_then_replaced_and_never_deleted_for_good() {
+async fn a_stamp_less_cloud_sidecar_is_replaced_with_no_copy_and_never_deleted_for_good() {
     let fake = Arc::new(FakeBackend::mega_like());
     library(&fake, LEGACY);
     let cloud = Cloud::start(fake.clone()).await;
@@ -275,13 +276,7 @@ async fn a_stamp_less_cloud_sidecar_is_kept_then_replaced_and_never_deleted_for_
         cloud.cloud_bytes("Series/Vol 1.mokuro").as_deref(),
         Some(sealed(HAYAI).as_str())
     );
-    assert_preserves(cloud.cloud_json("Series/Vol 1.pre-upgrade.mokuro"), LEGACY);
-    let uploads = fake.upload_log();
-    let at = |name: &str| uploads.iter().position(|n| n == name);
-    assert!(
-        at("Vol 1.pre-upgrade.mokuro").unwrap() < at("Vol 1.mokuro").unwrap(),
-        "the layer committed before the swap uploaded: {uploads:?}"
-    );
+    assert_no_copy(&cloud, &fake, "Vol 1");
     let store = cloud.store().clone();
     assert!(blocking(move || store.wait_outbox_idle(Duration::from_secs(20))).await);
     // The old node is no longer live, and was never deleted for good. (The fake's MEGA
@@ -295,23 +290,46 @@ async fn a_stamp_less_cloud_sidecar_is_kept_then_replaced_and_never_deleted_for_
         !fake.deleted_log().contains(&old.pid),
         "never deleted for good"
     );
-    assert_eq!(
-        cloud.upgrade_audits()[0]["preserved_as"],
-        "Series/Vol 1.pre-upgrade.mokuro"
-    );
-    assert!(
-        cloud
-            .services
-            .db
-            .get_ocr_sidecar("Series/Vol 1.pre-upgrade.mokuro")
-            .unwrap()
-            .is_none()
-    );
     assert_eq!(cloud.judge("Series/Vol 1.cbz").await, Verdict::Current);
 }
 
+/// Drive-like: the replace is a new version of the same node; the old content stays a
+/// provider revision, nothing is deleted for good, and no copy is written beside it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_failed_layer_upload_skips_the_cloud_volume_until_the_next_census() {
+async fn a_stamp_less_cloud_sidecar_is_replaced_in_place_with_no_copy() {
+    let fake = Arc::new(FakeBackend::drive_like());
+    library(&fake, LEGACY);
+    let cloud = Cloud::start(fake.clone()).await;
+    let old = fake
+        .node_at(&format!("{ROOT}/Series/Vol 1.mokuro"))
+        .unwrap();
+    let (trashed, deleted) = (fake.trashed_log().len(), fake.deleted_log().len());
+    cloud
+        .upgrade_generated("Series/Vol 1.cbz", HAYAI)
+        .await
+        .unwrap();
+    assert_eq!(
+        cloud.cloud_bytes("Series/Vol 1.mokuro").as_deref(),
+        Some(HAYAI)
+    );
+    let now = fake
+        .node_at(&format!("{ROOT}/Series/Vol 1.mokuro"))
+        .unwrap();
+    assert_eq!(now.pid, old.pid, "replaced in place");
+    assert_ne!(now.cver, old.cver);
+    assert_no_copy(&cloud, &fake, "Vol 1");
+    let store = cloud.store().clone();
+    assert!(blocking(move || store.wait_outbox_idle(Duration::from_secs(20))).await);
+    assert_eq!(
+        fake.deleted_log().len(),
+        deleted,
+        "nothing deleted for good"
+    );
+    assert_eq!(fake.trashed_log().len(), trashed, "nothing else trashed");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_upload_skips_the_cloud_volume_until_the_next_census() {
     let fake = Arc::new(FakeBackend::drive_like());
     library(&fake, LEGACY);
     let cloud = Cloud::start(fake.clone()).await;
@@ -321,15 +339,10 @@ async fn a_failed_layer_upload_skips_the_cloud_volume_until_the_next_census() {
         BErr::Fatal("the provider refused it".into()),
     );
     let err = cloud.upgrade_direct("Series/Vol 1.cbz").await.unwrap_err();
-    assert!(err.contains("pre-upgrade"), "{err}");
+    assert!(err.contains("could not install"), "{err}");
     assert_eq!(
         cloud.cloud_bytes("Series/Vol 1.mokuro").as_deref(),
         Some(LEGACY)
-    );
-    assert!(
-        cloud
-            .cloud_bytes("Series/Vol 1.pre-upgrade.mokuro")
-            .is_none()
     );
     assert!(cloud.upgrade_audits().is_empty());
 
@@ -338,14 +351,14 @@ async fn a_failed_layer_upload_skips_the_cloud_volume_until_the_next_census() {
         cloud.cloud_bytes("Series/Vol 1.mokuro").as_deref(),
         Some(sealed(HAYAI).as_str())
     );
-    assert_preserves(cloud.cloud_json("Series/Vol 1.pre-upgrade.mokuro"), LEGACY);
+    assert_no_copy(&cloud, &fake, "Vol 1");
 }
 
 /// Bunko's own `<Vol>.mokuro`, then the reader saves a correction over it in the
 /// cloud: the row no longer describes the file, so the census sees the old recipe and
-/// upgrades it, keeping the reader's bytes first.
+/// upgrades it, with no copy of the reader's bytes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_reader_overwrite_in_the_cloud_forgets_the_row_and_is_kept_before_the_upgrade() {
+async fn a_reader_overwrite_in_the_cloud_forgets_the_row_and_is_upgraded() {
     let fake = Arc::new(FakeBackend::drive_like());
     fake.reader_put(&format!("{ROOT}/Series/Vol 1.cbz"), &cbz(3));
     let cloud = Cloud::start(fake.clone()).await;
@@ -392,15 +405,14 @@ async fn a_reader_overwrite_in_the_cloud_forgets_the_row_and_is_kept_before_the_
         cloud.cloud_bytes("Series/Vol 1.mokuro").as_deref(),
         Some(HAYAI)
     );
-    assert_preserves(cloud.cloud_json("Series/Vol 1.pre-upgrade.mokuro"), LEGACY);
+    assert_no_copy(&cloud, &fake, "Vol 1");
 }
 
-/// Bunko's own main sidecar (its version in the ledger, its bytes in its row) is replaced
-/// with no copy; a stamped one a reader uploaded is kept first, as is one whose row
-/// matches but whose version Bunko did not write; reader-uploaded layers, stamped or
-/// not, are never swapped in or deleted.
+/// Every outdated main sidecar is replaced with no copy: Bunko's own (sealed), a
+/// stamped one a reader uploaded, one whose row matches but whose bytes Bunko did not
+/// seal; reader-uploaded layers, stamped or not, are never swapped in or deleted.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_cloud_sidecar_proven_bunkos_own_is_replaced_without_a_copy_and_others_are_kept() {
+async fn every_outdated_cloud_main_is_replaced_without_a_copy_and_layers_stay() {
     let fake = Arc::new(FakeBackend::drive_like());
     fake.reader_put(&format!("{ROOT}/Series/Vol 1.cbz"), &cbz(3));
     // Vol 2: a reader pushed the hayai-nova layer back without its stamp; its row
@@ -437,15 +449,10 @@ async fn a_cloud_sidecar_proven_bunkos_own_is_replaced_without_a_copy_and_others
         cloud.cloud_bytes("Series/Vol 1.mokuro").as_deref(),
         Some(sealed(HAYAI).as_str())
     );
-    assert!(
-        cloud
-            .cloud_bytes("Series/Vol 1.pre-upgrade.mokuro")
-            .is_none()
-    );
-    assert!(cloud.upgrade_audits()[0].get("preserved_as").is_none());
+    assert_no_copy(&cloud, &fake, "Vol 1");
 
     // Vol 3: the reader-uploaded stamped layer is no source; a job's result replaces
-    // the stamped main only after keeping it.
+    // the stamped main.
     assert_eq!(cloud.judge("Series/Vol 3.cbz").await, Verdict::NeedsOcr);
     let (up, cbz3, layer3) = (
         cloud.up(),
@@ -460,10 +467,7 @@ async fn a_cloud_sidecar_proven_bunkos_own_is_replaced_without_a_copy_and_others
         .upgrade_generated("Series/Vol 3.cbz", HAYAI)
         .await
         .unwrap();
-    assert_preserves(
-        cloud.cloud_json("Series/Vol 3.pre-upgrade.mokuro"),
-        BUNKO_OLD,
-    );
+    assert_no_copy(&cloud, &fake, "Vol 3");
     assert_eq!(
         cloud
             .cloud_bytes("Series/Vol 3.hayai-nova.mokuro")
@@ -479,10 +483,7 @@ async fn a_cloud_sidecar_proven_bunkos_own_is_replaced_without_a_copy_and_others
         .upgrade_generated("Series/Vol 4.cbz", HAYAI)
         .await
         .unwrap();
-    assert_preserves(
-        cloud.cloud_json("Series/Vol 4.pre-upgrade.mokuro"),
-        BUNKO_OLD,
-    );
+    assert_no_copy(&cloud, &fake, "Vol 4");
 
     cloud
         .services
@@ -513,7 +514,7 @@ async fn a_cloud_sidecar_proven_bunkos_own_is_replaced_without_a_copy_and_others
         .upgrade_generated("Series/Vol 2.cbz", HAYAI)
         .await
         .unwrap();
-    assert_preserves(cloud.cloud_json("Series/Vol 2.pre-upgrade.mokuro"), LEGACY);
+    assert_no_copy(&cloud, &fake, "Vol 2");
     for layer in ["Series/Vol 2.hayai-nova.mokuro", "Series/Vol 2.mine.mokuro"] {
         assert_eq!(
             cloud.cloud_bytes(layer).as_deref(),

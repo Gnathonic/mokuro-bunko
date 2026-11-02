@@ -284,7 +284,7 @@ async fn keep_that_copy_resolves_a_blocked_merge_through_the_admin_api() {
 
 /// Differing main sidecars beside identical archives: the server's policy keeps the
 /// one whose recipe matches the primary row (here the winner's, stamped by Bunko), and
-/// the loser's stock mokuro file is kept as the winner's `pre-upgrade` layer first.
+/// the loser's stock mokuro file goes to the provider's trash, with no layer written.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_main_sidecar_matching_the_primary_recipe_is_kept() {
     let primary = bunko_core::generations::default_generation("g-1");
@@ -301,6 +301,10 @@ async fn the_main_sidecar_matching_the_primary_recipe_is_kept() {
     fake.reader_put(&format!("{ROOT}/Kingdom/Vol 1.mokuro"), &stamped);
     fake.reader_put(&format!("{ROOT}/kingdom/Vol 1.cbz"), b"same");
     fake.reader_put(&format!("{ROOT}/kingdom/Vol 1.mokuro"), &stock);
+    let loser = fake
+        .node_at(&format!("{ROOT}/kingdom/Vol 1.mokuro"))
+        .unwrap()
+        .pid;
     let _e = env_with(fake.clone(), move |c| {
         c.ocr.upgrade.enabled = true;
         c.ocr.generations = vec![primary];
@@ -316,9 +320,25 @@ async fn the_main_sidecar_matching_the_primary_recipe_is_kept() {
         fake.content(&n.pid).unwrap()
     };
     assert_eq!(bytes("Kingdom/Vol 1.mokuro"), stamped);
-    let kept: Value = serde_json::from_slice(&bytes("Kingdom/Vol 1.pre-upgrade.mokuro")).unwrap();
-    assert_eq!(kept["x"], 1);
-    assert_eq!(kept["preserved"]["by"], "mokuro-bunko");
+    assert_no_layer_written(&fake);
+    assert!(
+        fake.trashed_log().contains(&loser),
+        "the loser's main is trashed"
+    );
+    assert!(
+        !fake.deleted_log().contains(&loser),
+        "never deleted for good"
+    );
+}
+
+/// No layer of `Vol 1` was written: the only `Vol 1.*.mokuro` upload is none at all.
+fn assert_no_layer_written(fake: &FakeBackend) {
+    let layers: Vec<String> = fake
+        .upload_log()
+        .into_iter()
+        .filter(|n| n.starts_with("Vol 1.") && n.ends_with(".mokuro") && n != "Vol 1.mokuro")
+        .collect();
+    assert!(layers.is_empty(), "no layer written: {layers:?}");
 }
 
 /// The cloud root's `history/` is its owner's reading history (0.8), not a spelling of
@@ -363,8 +383,8 @@ async fn a_history_series_is_never_merged_with_the_reading_history() {
 }
 
 /// Two main sidecars of the primary's own recipe: the current revision wins over an
-/// older one (every engine is at revision 1 today, so the loser says 0), which is kept
-/// as the winner's `pre-upgrade` layer.
+/// older one (every engine is at revision 1 today, so the loser says 0), which goes to
+/// the provider's trash with no layer written.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_lower_revision_main_sidecar_loses_a_case_merge() {
     let primary = bunko_core::generations::default_generation("g-1");
@@ -397,8 +417,8 @@ async fn a_lower_revision_main_sidecar_loses_a_case_merge() {
         fake.content(&n.pid).unwrap()
     };
     assert_eq!(bytes("Kingdom/Vol 1.mokuro"), current);
-    let kept: Value = serde_json::from_slice(&bytes("Kingdom/Vol 1.pre-upgrade.mokuro")).unwrap();
-    assert_eq!(kept["preserved"]["by"], "mokuro-bunko");
+    assert_no_layer_written(&fake);
+    assert!(fake.deleted_log().is_empty(), "nothing deleted for good");
 }
 
 /// A byte-identical copy of an archive in the younger spelling goes to the trash; the

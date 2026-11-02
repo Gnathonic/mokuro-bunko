@@ -12,8 +12,10 @@
 //! with a block of its own is stored as sent.
 //!
 //! Accepted limits: a 1.10.0 reader's page edit still lands in the main (diverting it
-//! would break that reader's sync); D4's `pre-upgrade` keeps it before any upgrade
-//! replaces it. A rename into another series folder finds no sealed main beside it.
+//! would break that reader's sync), and an upgrade replaces it with no copy once an
+//! admin turns upgrades on (owner decision, 2026-11-01; the 0.8 reader carries a
+//! device's own 1.10.0 corrections into its `edit` layer once). A rename into another
+//! series folder finds no sealed main beside it.
 
 use std::path::Path;
 

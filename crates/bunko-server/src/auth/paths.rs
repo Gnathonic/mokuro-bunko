@@ -100,8 +100,8 @@ pub fn layer_class_of_path(path: &str) -> Option<LayerClass> {
     layer_id_of_path(path).map(|id| sidecar_names::layer_class(&id))
 }
 
-/// The layer id a library file's name carries (`pre-upgrade-2` for
-/// `S/V.pre-upgrade-2.mokuro`), listing-free and exact-case like
+/// The layer id a library file's name carries (`curated-2` for
+/// `S/V.curated-2.mokuro`), listing-free and exact-case like
 /// [`layer_class_of_path`].
 pub fn layer_id_of_path(path: &str) -> Option<String> {
     let rel = library_relative_normalized(path)?;
@@ -205,10 +205,13 @@ mod tests {
             class("/mokuro-reader/S/V.curated.mokuro"),
             Some(LayerClass::Curated)
         );
-        assert_eq!(
-            class("/mokuro-reader/V.pre-upgrade-2.mokuro"),
-            Some(LayerClass::ServerKeepsake)
-        );
+        // Neither id is reserved: hand-made ids like any other.
+        for p in [
+            "/mokuro-reader/V.pre-upgrade-2.mokuro",
+            "/mokuro-reader/S/V.previous-ocr.mokuro",
+        ] {
+            assert_eq!(class(p), Some(LayerClass::Other), "{p}");
+        }
         assert_eq!(
             class("/mokuro-reader/S/V.curated-2.mokuro"),
             Some(LayerClass::Reserved)

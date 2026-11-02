@@ -349,7 +349,7 @@ async fn a_nested_archive_is_the_outer_volumes_in_either_order() {
         "V.curated.cbz",
         "V.EDIT.cbz",
         "V.Curated.cbz",
-        "V.pre-upgrade.cbz",
+        "V.curated-2.cbz",
     ] {
         let r = env
             .put("bob", &format!("/mokuro-reader/S/{name}"), cbz(1))
@@ -394,6 +394,62 @@ async fn a_nested_archive_is_the_outer_volumes_in_either_order() {
     assert_eq!(r.status, 204, "{}", r.text());
     assert!(!env.lib("T/V.curated.cbz").exists());
     assert!(env.lib("T/V.curated.mokuro").exists());
+}
+
+/// Owner decision, 2026-11-01: neither id is reserved, so a client's
+/// `<Vol>.pre-upgrade.mokuro` or `<Vol>.previous-ocr.mokuro` is a hand-made layer, added
+/// by whoever may add files to that volume and refused only for the usual ownership and
+/// permission reasons.
+#[tokio::test]
+async fn pre_upgrade_and_previous_ocr_layers_are_hand_made() {
+    let env = Env::new();
+    std::fs::create_dir_all(env.lib("S")).unwrap();
+    let r = env.put("alice", "/mokuro-reader/S/V.cbz", cbz(2)).await;
+    assert_eq!(r.status, 201, "{}", r.text());
+    let body = || br#"{"version":"0.2.1","pages":[{"blocks":[]},{"blocks":[]}]}"#.to_vec();
+    // What any other hand-made layer of V gets, account by account.
+    let mut hand_made = std::collections::HashMap::new();
+    for user in ["bob", "reader"] {
+        let r = env
+            .put(user, "/mokuro-reader/S/V.mine.mokuro", body())
+            .await;
+        assert_eq!(r.status, 403, "{user}: {}", r.text());
+        hand_made.insert(user, r.json()["detail"].clone());
+    }
+    for (user, name, status) in [
+        ("alice", "V.pre-upgrade.mokuro", 201),
+        ("alice", "V.previous-ocr.mokuro", 201),
+        ("alice", "V.pre-upgrade.mokuro", 204),
+        ("editor", "V.previous-ocr-2.mokuro", 201),
+        ("bob", "V.pre-upgrade-2.mokuro", 403),
+        ("bob", "V.previous-ocr-3.mokuro", 403),
+        ("reader", "V.pre-upgrade-3.mokuro", 403),
+    ] {
+        let r = env
+            .put(user, &format!("/mokuro-reader/S/{name}"), body())
+            .await;
+        assert_eq!(r.status, status, "{user} {name}: {}", r.text());
+        if status == 403 {
+            assert_eq!(r.json()["detail"], hand_made[user], "{user} {name}");
+        }
+    }
+    // Overwriting one is refused like overwriting any other hand-made layer of V.
+    let r = env
+        .put("alice", "/mokuro-reader/S/V.other.mokuro", body())
+        .await;
+    assert_eq!(r.status, 201, "{}", r.text());
+    let other = env
+        .put("bob", "/mokuro-reader/S/V.other.mokuro", body())
+        .await;
+    let r = env
+        .put("bob", "/mokuro-reader/S/V.previous-ocr.mokuro", body())
+        .await;
+    assert_eq!((r.status, r.json()), (other.status, other.json()));
+    assert_eq!(r.status, 403, "{}", r.text());
+    assert!(env.lib("S/V.pre-upgrade.mokuro").exists());
+    assert!(env.lib("S/V.previous-ocr-2.mokuro").exists());
+    assert!(!env.lib("S/V.pre-upgrade-2.mokuro").exists());
+    assert!(!env.lib("S/V.pre-upgrade-3.mokuro").exists());
 }
 
 /// An archive that lands while another account's nested archive is still streaming

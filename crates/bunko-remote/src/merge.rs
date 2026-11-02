@@ -20,8 +20,10 @@
 //!   layers and cover), paired by folded stem; folders merge recursively. Identical
 //!   archives keep the winner's; a loser-only sidecar, layer or cover moves in under
 //!   the winner's stem; an unstamped layer whose id is taken moves in as `-2`, `-3`;
-//!   differing main sidecars keep the one [`CaseMergePolicy::prefer_main`] picks (the
-//!   other, stamped or not, first becomes the winner's `pre-upgrade` layer); differing
+//!   differing main sidecars keep the one [`CaseMergePolicy::prefer_main`] picks and
+//!   the other goes to the provider's trash, with no copy kept (owner decision,
+//!   2026-11-01; the loser's picked main replaces the winner's in place, and where the
+//!   provider's replace makes a new node the old one is trashed); differing
 //!   archives, a stamped layer that differs, or a file against a folder leave the
 //!   whole group in the loser as a `case-merge-blocked` conflict. A loser
 //!   `series.json` is ingested as a submission into the winner's series key, as its
@@ -163,8 +165,8 @@ pub trait CaseMergePolicy: Send + Sync {
     /// row's output-affecting recipe (`Recipe::matches`, not `Verdict::Current`).
     /// `Block` when `ocr.upgrade.enabled` is off, or neither or both match.
     fn prefer_main(&self, a: &Path, b: &Path) -> MergeChoice;
-    /// A layer id Bunko never stamps (`edit*`, `curated*`, `pre-upgrade*`): on a
-    /// collision with different content it moves in under the next free id (`-2`, `-3`).
+    /// A layer id Bunko never stamps (`edit*`, `curated*`): on a collision with
+    /// different content it moves in under the next free id (`-2`, `-3`).
     fn is_unstamped_layer(&self, id: &str) -> bool {
         is_unstamped_layer_id(id)
     }
@@ -184,17 +186,17 @@ pub trait CaseMergePolicy: Send + Sync {
     fn audit(&self, _merge: &MergeRecord) {}
 }
 
-/// `edit`, `curated`, `pre-upgrade` and their `-<n>` copies: layers whose content shows
-/// a human or a preserved file, never Bunko's model output (D4, D27). Exact-case, like
-/// every layer id (sidecar names rule v1).
+/// `edit`, `curated` and their `-<n>` copies: layers whose content shows a human,
+/// never Bunko's model output (D4, D27). Exact-case, like every layer id (sidecar
+/// names rule v1).
 pub fn is_unstamped_layer_id(id: &str) -> bool {
     matches!(
         sidecar_names::layer_class(strip_counter(id)),
-        LayerClass::Personal | LayerClass::Curated | LayerClass::ServerKeepsake
+        LayerClass::Personal | LayerClass::Curated
     )
 }
 
-/// `pre-upgrade` of `pre-upgrade-3`; `id` itself when it has no `-<n>` counter.
+/// `curated` of `curated-3`; `id` itself when it has no `-<n>` counter.
 fn strip_counter(id: &str) -> &str {
     match id.rsplit_once('-') {
         Some((b, n)) if !b.is_empty() && !n.is_empty() && n.bytes().all(|c| c.is_ascii_digit()) => {
@@ -489,10 +491,9 @@ pub(crate) fn spawn<B: Backend>(store: Weak<RemoteStore<B>>, state: Arc<MergeSta
 enum StepKind {
     /// Move a loser node into the winner's target node.
     Move,
-    /// Trash a file the merge superseded (identical, kept, ingested).
+    /// Trash a file the merge superseded (identical, kept, ingested, a superseded
+    /// main sidecar).
     Trash,
-    /// Write a superseded main sidecar as the winner's `pre-upgrade` layer.
-    Layer,
     /// Replace the winner's main sidecar in place with the loser's bytes (a new
     /// version based on the judged one); a provider whose replace makes a new node
     /// has the old one trashed after the commit.
@@ -593,13 +594,12 @@ struct Block {
     detail: String,
 }
 
-/// A merge's steps, in the order they run: every layer is committed before
-/// anything is trashed; then the older copies a duplicate merge replaces; moves and
-/// in-place replaces next; loser files are trashed only after every move (a
-/// duplicate a move meets stops all trashing); emptied folders last, deepest first.
+/// A merge's steps, in the order they run: the older copies a duplicate merge
+/// replaces first; moves and in-place replaces next; loser files are trashed only
+/// after every move (a duplicate a move meets stops all trashing); emptied folders
+/// last, deepest first.
 #[derive(Default)]
 struct Plan {
-    layers: Vec<Planned>,
     /// Duplicate merge: the canonical folder's copy a newer one replaces, trashed
     /// before that one moves in.
     pre_trash: Vec<Planned>,
@@ -616,8 +616,7 @@ struct Plan {
 
 impl Plan {
     fn work(&self) -> bool {
-        !(self.layers.is_empty()
-            && self.pre_trash.is_empty()
+        !(self.pre_trash.is_empty()
             && self.steps.is_empty()
             && self.submits.is_empty()
             && self.l_trash.is_empty()
@@ -629,8 +628,7 @@ impl Plan {
     /// planned them came back (Drive's `files.list` order is unspecified). Each step
     /// counts with its phase, so a trash before the moves is not one after them.
     fn fingerprint(&self) -> String {
-        let phases: [(&str, &[Planned]); 6] = [
-            ("layer", &self.layers),
+        let phases: [(&str, &[Planned]); 5] = [
             ("pre_trash", &self.pre_trash),
             ("step", &self.steps),
             ("submit", &self.submits),
@@ -677,9 +675,8 @@ impl Plan {
     }
 
     fn ordered(&self) -> impl Iterator<Item = &Planned> {
-        self.layers
+        self.pre_trash
             .iter()
-            .chain(&self.pre_trash)
             .chain(&self.steps)
             .chain(&self.submits)
             .chain(&self.l_trash)
@@ -770,34 +767,6 @@ fn file_key(name: &str, stems: &HashSet<String>) -> (String, String) {
         Part::Other => (fold(name), format!("\u{0}{}", fold(name))),
         _ => (fold(&stem), fold(&stem)),
     }
-}
-
-/// The `pre-upgrade` layer bytes of a superseded main sidecar (D4's shape): its JSON
-/// with no `ocr_engine` and a `preserved` block. `None`: not a JSON object.
-pub fn preserved_layer(old: &[u8], replaced_by: &str) -> Option<Vec<u8>> {
-    let mut doc: serde_json::Value = serde_json::from_slice(old).ok()?;
-    let obj = doc.as_object_mut()?;
-    obj.remove("ocr_engine");
-    obj.insert(
-        "preserved".into(),
-        serde_json::json!({
-            "by": "mokuro-bunko",
-            "reason": "case-merge",
-            "replaced_at": crate::status::format_iso_s(now_ms()),
-            "sha256": hex::encode(Sha256::digest(old)),
-            "replaced_by": replaced_by,
-        }),
-    );
-    serde_json::to_vec(&doc).ok()
-}
-
-fn preserved_sha(bytes: &[u8]) -> Option<String> {
-    serde_json::from_slice::<serde_json::Value>(bytes)
-        .ok()?
-        .get("preserved")?
-        .get("sha256")?
-        .as_str()
-        .map(str::to_lowercase)
 }
 
 // ---- the store's side -------------------------------------------------------------
@@ -2001,8 +1970,7 @@ impl<B: Backend> RemoteStore<B> {
             .map(|n| n.stem.clone());
         let mut lsorted: Vec<&Named> = lg.iter().collect();
         lsorted.sort_by_key(|n| n.part != Part::Archive);
-        let (mut layers, mut moves, mut l_trash, mut submits) =
-            (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let (mut moves, mut l_trash, mut submits) = (Vec::new(), Vec::new(), Vec::new());
         let mut archives_identical = false;
         for lf in lsorted {
             let Some(lrel) = lpath(lf) else { continue };
@@ -2068,58 +2036,21 @@ impl<B: Backend> RemoteStore<B> {
                         return Ok(());
                     }
                     let choice = policy.prefer_main(&self.core.abs(&wrel), &self.core.abs(&lrel));
-                    let (old, old_rel, keep_rel) = match choice {
-                        MergeChoice::A => (&lf.node, &lrel, &wrel),
-                        MergeChoice::B => (&wf.node, &wrel, &lrel),
-                        MergeChoice::Block => {
-                            block(
-                                plan,
-                                format!(
-                                    "{lrel} and {wrel} hold different OCR, and neither (or both) \
-                                     matches the primary OCR setting"
-                                ),
-                            );
-                            return Ok(());
-                        }
-                    };
-                    // Never lost (owner rule): the superseded main is first kept as
-                    // the winner's `pre-upgrade` layer, stamped or not (a merge is not
-                    // an upgrade: no "replace without a copy").
-                    let old_bytes = self.bytes_of(old)?;
-                    let sha = hex::encode(Sha256::digest(&old_bytes));
-                    let kept = wg.iter().any(|n| {
-                        matches!(&n.part, Part::Layer(id) if strip_counter(&id.to_lowercase()) == "pre-upgrade")
-                            && self
-                                .bytes_of(&n.node)
-                                .ok()
-                                .and_then(|b| preserved_sha(&b))
-                                .is_some_and(|s| s == sha)
-                    });
-                    if !kept {
-                        let Some(bytes) =
-                            preserved_layer(&old_bytes, &format!("case-merge:{keep_rel}"))
-                        else {
-                            block(plan, format!("{old_rel} is not readable OCR"));
-                            return Ok(());
-                        };
-                        let stem = wstem.clone().unwrap_or_else(|| wf.stem.clone());
-                        let name = Self::free_layer(plan, target, &stem, "pre-upgrade", ".mokuro");
-                        let Some(dest) = w.join(name) else { continue };
-                        layers.push(Planned {
-                            kind: StepKind::Layer,
-                            vg: vg.clone(),
-                            pid: old.pid.clone(),
-                            cver: Some(old.cver.clone()),
-                            src: Some(old_rel.clone()),
-                            dest,
-                            parent_pid: Some(target.to_string()),
-                            is_dir: false,
-                            hooks: false,
-                            bytes: Some(bytes),
-                            series: None,
-                            expect_dup: false,
-                        });
+                    if choice == MergeChoice::Block {
+                        block(
+                            plan,
+                            format!(
+                                "{lrel} and {wrel} hold different OCR, and neither (or both) \
+                                 matches the primary OCR setting"
+                            ),
+                        );
+                        return Ok(());
                     }
+                    // No copy is kept (owner decision, 2026-11-01). A: the loser's main
+                    // is trashed below, like any other superseded file. B: its bytes
+                    // replace the winner's in place and the loser's node is trashed;
+                    // where the provider's replace makes a new node, the winner's old
+                    // node goes to the trash too ([`Self::replaced`]).
                     if choice == MergeChoice::B {
                         // The loser's main replaces the winner's in place: a new version
                         // of the winner's node, based on the version judged here. The
@@ -2156,7 +2087,6 @@ impl<B: Backend> RemoteStore<B> {
                 }
             }
         }
-        plan.layers.extend(layers);
         plan.steps.extend(moves);
         plan.submits.extend(submits);
         plan.l_trash.extend(l_trash);
@@ -2204,7 +2134,7 @@ impl<B: Backend> RemoteStore<B> {
         for p in plan.ordered() {
             let kind = match p.kind {
                 StepKind::Move => OpKind::Move,
-                StepKind::Layer | StepKind::Replace => OpKind::Put,
+                StepKind::Replace => OpKind::Put,
                 StepKind::Trash | StepKind::Submit | StepKind::Finish => OpKind::Trash,
             };
             let id = self.core.next_seq();
@@ -2428,7 +2358,6 @@ impl<B: Backend> RemoteStore<B> {
                 StepKind::Trash | StepKind::Submit => {
                     self.step_trash(gid, &mut op, &ex, &mut hooks)
                 }
-                StepKind::Layer => self.step_layer(gid, &mut op),
                 StepKind::Replace => self.step_replace(gid, &mut op, &mut hooks),
                 StepKind::Finish => self.step_finish(gid, &mut op, &mut hooks),
             }
@@ -2670,99 +2599,6 @@ impl<B: Backend> RemoteStore<B> {
             Err(e) => {
                 tracing::info!(%pid, "case merge: not trashed ({e}); re-planned later");
                 self.core.drop_op(op, false);
-                Ok(StepEnd::Done)
-            }
-        }
-    }
-
-    fn step_layer(&self, gid: &str, op: &mut Op) -> Result<StepEnd, Crash> {
-        let (Some(parent), Some(staged)) = (op.parent_pid.clone(), self.core.staged_path(op))
-        else {
-            self.core.drop_op(op, false);
-            return Ok(StepEnd::Done);
-        };
-        let name = last_name(&op.dest).to_string();
-        let backend = self.core.backend.clone();
-        let (p2, n2) = (parent.clone(), name.clone());
-        let found = self.block_on_as("case merge", Some(ApiClass::Background), async move {
-            backend.find_named(&p2, &n2).await
-        });
-        let existing = match found {
-            Ok((nodes, _)) => nodes,
-            Err(e) if retryable(&e) => return Ok(StepEnd::Pause),
-            Err(e) => {
-                self.block_vg(gid, op, format!("could not keep {}: {e}", op.dest));
-                return Ok(StepEnd::Done);
-            }
-        };
-        if !existing.is_empty() {
-            if op.state == OpState::Uploading {
-                let core = self.core.clone();
-                let o = op.clone();
-                let ex2 = existing.clone();
-                let proven = self.block_on("case merge", async move {
-                    for n in &ex2 {
-                        if core.content_proof(n, &o).await == Proof::Proven {
-                            return Some(n.clone());
-                        }
-                    }
-                    None
-                });
-                if let Some(n) = proven {
-                    self.core.commit_put(op, n, &parent)?;
-                    return Ok(StepEnd::Done);
-                }
-            }
-            self.block_vg(gid, op, format!("{} appeared meanwhile", op.dest));
-            return Ok(StepEnd::Done);
-        }
-        op.state = OpState::Uploading;
-        let _ = self.core.save_op(op);
-        self.core.fail_at("MERGE_LAYER")?;
-        let (Some(sha), size) = (op.sha256, op.size) else {
-            self.core.drop_op(op, false);
-            return Ok(StepEnd::Done);
-        };
-        let backend = self.core.backend.clone();
-        let (p2, n2, s2, oid) = (parent.clone(), name.clone(), staged.clone(), op.op_id());
-        let _window = self.block_on("case merge", self.core.commit_window());
-        let r = self.block_on_as("case merge", Some(ApiClass::Background), async move {
-            let mut ctx = OpCtx {
-                op_id: oid,
-                resume: None,
-            };
-            backend
-                .upload(
-                    UploadTarget::New {
-                        parent: &p2,
-                        name: &n2,
-                    },
-                    UploadSource::File {
-                        path: &s2,
-                        size,
-                        sha256: sha,
-                    },
-                    &mut ctx,
-                )
-                .await
-        });
-        match r {
-            Ok(n) => {
-                self.core.fail_at("uploaded")?;
-                if self.core.hash_proof(&n, op, None) == Proof::Mismatch {
-                    self.block_vg(gid, op, format!("{} was stored with other bytes", op.dest));
-                    return Ok(StepEnd::Done);
-                }
-                self.core.commit_put(op, n, &parent)?;
-                Ok(StepEnd::Done)
-            }
-            Err(e) if retryable(&e) => {
-                op.last_error = Some(e.to_string());
-                let _ = self.core.save_op(op);
-                Ok(StepEnd::Pause)
-            }
-            Err(e) => {
-                self.block_vg(gid, op, format!("could not keep {}: {e}", op.dest));
                 Ok(StepEnd::Done)
             }
         }

@@ -304,7 +304,7 @@ impl OutlookSource for Outlook {
 async fn the_manifest_never_lists_personal_corrections() {
     let env = catalog_env(|c| c.registration.allow_anonymous_download = true).await;
     let dir = env.series_dir("Dr Stone");
-    for id in ["hayai", "curated", "edit", "edit-2", "pre-upgrade"] {
+    for id in ["hayai", "curated", "edit", "edit-2", "mine"] {
         write_mokuro(&dir.join(format!("Volume 01.{id}.mokuro")), "uuid-1", 3);
     }
     let m = env
@@ -319,7 +319,7 @@ async fn the_manifest_never_lists_personal_corrections() {
         .iter()
         .map(|l| l["id"].as_str().unwrap())
         .collect();
-    assert_eq!(ids, ["curated", "hayai", "pre-upgrade"]);
+    assert_eq!(ids, ["curated", "hayai", "mine"]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

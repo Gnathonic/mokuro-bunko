@@ -424,27 +424,19 @@
     },
     {
       "id": "pre-upgrade",
-      "class": "server-keepsake"
+      "class": "other"
     },
     {
       "id": "pre-upgrade-3",
-      "class": "server-keepsake"
-    },
-    {
-      "id": "pre-upgrade-x",
-      "class": "reserved"
-    },
-    {
-      "id": "pre-upgradex",
-      "class": "reserved"
+      "class": "other"
     },
     {
       "id": "previous-ocr",
-      "class": "reserved"
+      "class": "other"
     },
     {
       "id": "previous-ocr-2",
-      "class": "reserved"
+      "class": "other"
     },
     {
       "id": "original",

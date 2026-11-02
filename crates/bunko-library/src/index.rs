@@ -506,14 +506,14 @@ mod tests {
             "V.curated.mokuro",
             "V.edit.mokuro",
             "V.edit-2.mokuro.gz",
-            "V.pre-upgrade.mokuro",
+            "V.mine.mokuro",
         ] {
             bunko_store::fs::write(series.join(name), b"{}").unwrap();
         }
         let snapshot = scan_library(dir.path());
         assert_eq!(
             snapshot.series[0].volumes[0].sidecars,
-            ["curated", "hayai", "pre-upgrade"]
+            ["curated", "hayai", "mine"]
         );
     }
 }

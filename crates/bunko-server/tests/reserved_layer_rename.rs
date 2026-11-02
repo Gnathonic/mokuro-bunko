@@ -1,8 +1,8 @@
 //! A reader renames a volume by moving every file it lists under the old stem (D27,
-//! plan §1): Bunko's keepsakes (`pre-upgrade[-n]`) and the other reserved layers
-//! (`curated-<n>`, `previous-ocr*`) included. Nothing new is written when the id stays
-//! the same, so the 0.7 MOVE rule decides; a client still cannot move another file
-//! into one of those names.
+//! plan §1): the reserved layers (`curated-<n>`) included. Nothing new is written when
+//! the id stays the same, so the 0.7 MOVE rule decides; a client still cannot move
+//! another file into one of those names. Any other id is a hand-made layer's, which
+//! moves like any library file.
 
 // Fixtures are set up and checked with std::fs on purpose.
 #![allow(clippy::disallowed_methods)]
@@ -77,22 +77,25 @@ impl Env {
     }
 }
 
-const LAYERS: [&str; 4] = ["pre-upgrade", "pre-upgrade-2", "curated-2", "previous-ocr"];
+const LAYERS: [&str; 4] = ["curated-2", "curated-3", "pre-upgrade", "previous-ocr"];
 
 #[tokio::test]
-async fn a_volume_rename_carries_its_keepsakes_and_reserved_layers() {
+async fn a_volume_rename_carries_its_reserved_and_hand_made_layers() {
     let env = Env::new();
     std::fs::write(env.lib("S/V.cbz"), b"volume").unwrap();
     std::fs::write(env.lib("S/V.mokuro"), b"{\"pages\":[]}").unwrap();
     for id in LAYERS {
         std::fs::write(env.lib(&format!("S/V.{id}.mokuro")), id).unwrap();
     }
-    // A registered account renames nothing (the 0.7 rule), keepsakes included.
-    assert_eq!(
-        env.mv("reader", "V.pre-upgrade.mokuro", "W.pre-upgrade.mokuro")
-            .await,
-        StatusCode::FORBIDDEN
-    );
+    // A registered account renames nothing (the 0.7 rule), reserved layers included.
+    for id in ["curated-2", "pre-upgrade"] {
+        let (from, to) = (format!("V.{id}.mokuro"), format!("W.{id}.mokuro"));
+        assert_eq!(
+            env.mv("reader", &from, &to).await,
+            StatusCode::FORBIDDEN,
+            "{id}"
+        );
+    }
     // The reader's order: the archive, then every listed sidecar.
     assert_eq!(
         env.mv("editor", "V.cbz", "W.cbz").await,
@@ -115,16 +118,30 @@ async fn a_volume_rename_carries_its_keepsakes_and_reserved_layers() {
         );
         assert!(!env.lib(&format!("S/{from}")).exists(), "{id}");
     }
-    // Still no way to mint a keepsake from another layer.
+    // Still no way to mint a reserved layer from another layer.
     std::fs::write(env.lib("S/W.hayai.mokuro"), b"{\"pages\":[]}").unwrap();
+    assert_eq!(
+        env.mv("editor", "W.hayai.mokuro", "W.curated-4.mokuro")
+            .await,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        env.mv("editor", "W.curated-2.mokuro", "W.curated-4.mokuro")
+            .await,
+        StatusCode::FORBIDDEN
+    );
+    // A hand-made id is no reserved name (owner decision, 2026-11-01): any layer may
+    // move into it, under the 0.7 MOVE rule.
     assert_eq!(
         env.mv("editor", "W.hayai.mokuro", "W.pre-upgrade-3.mokuro")
             .await,
-        StatusCode::FORBIDDEN
+        StatusCode::NO_CONTENT
     );
     assert_eq!(
-        env.mv("editor", "W.pre-upgrade.mokuro", "W.pre-upgrade-3.mokuro")
+        env.mv("editor", "W.previous-ocr.mokuro", "W.previous-ocr-2.mokuro")
             .await,
-        StatusCode::FORBIDDEN
+        StatusCode::NO_CONTENT
     );
+    assert!(env.lib("S/W.pre-upgrade-3.mokuro").exists());
+    assert!(env.lib("S/W.previous-ocr-2.mokuro").exists());
 }

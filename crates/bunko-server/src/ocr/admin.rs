@@ -652,7 +652,7 @@ impl OcrAdmin for OcrControl {
         if path.last() == Some(&"revert") {
             return Some(Err(OcrError::new(
                 410,
-                "there is no revert: an upgrade keeps an OCR file Bunko did not write as the volume's pre-upgrade layer",
+                "there is no revert: an upgrade replaces the main OCR file outright (on a cloud library the old file is in the provider's trash)",
             )));
         }
         let rel: String = path[2..]

@@ -741,7 +741,8 @@ fn denied_unless_signed_in(id: &Identity, message: &str) -> Denied {
 /// Writes of correction, curated and reserved layer files (D27), or `None` when the
 /// rest of the table decides. A personal file is every progress writer's own (DAV
 /// resolves it per account), so it moves only between personal names; nothing a
-/// client sends lands in a server keepsake or a reserved id no client writes here.
+/// client sends lands in a reserved id no client writes here (`curated-<n>`). Any
+/// other layer id is hand-made and governed like any other library file.
 fn authorize_layer(
     m: &str,
     path: &str,
@@ -750,7 +751,6 @@ fn authorize_layer(
     backend: &dyn AuthBackend,
 ) -> Option<Result<Grant, Denied>> {
     const BETWEEN: &str = "Permission denied: corrections can only move between correction files";
-    const SERVER: &str = "Permission denied: this file is written by the server";
     const RESERVED: &str = "Permission denied: this layer name is reserved";
     let moving = matches!(m, "MOVE" | "COPY");
     let source = reserved_layer_at(path, backend);
@@ -791,10 +791,9 @@ fn authorize_layer(
     };
     match (dest, written) {
         (Some(LayerClass::Personal), _) => Some(Err(denied_unless_signed_in(id, BETWEEN))),
-        (_, Some(LayerClass::ServerKeepsake)) => Some(Err(denied_unless_signed_in(id, SERVER))),
         (_, Some(LayerClass::Reserved)) => Some(Err(denied_unless_signed_in(id, RESERVED))),
         (_, Some(LayerClass::Curated)) if !moving => Some(authorize_curated(path, id, backend)),
-        // Deleting or moving a curated or keepsake file keeps the 0.7 rules.
+        // Deleting or moving a curated or reserved file keeps the 0.7 rules.
         _ => None,
     }
 }
@@ -1596,7 +1595,7 @@ mod tests {
             "V.edit.cbz",
             "V.EDIT.cbz",
             "V.Curated.cbz",
-            "V.PRE-UPGRADE.cbz",
+            "V.CURATED-2.cbz",
             "v.curated.cbz",
             "V.hayai.mokuro",
             "V.mokuro",
@@ -1722,8 +1721,7 @@ mod tests {
             "V.edit.cbz",
             "V.edit-2.cbz",
             "V.Curated.cbz",
-            "V.pre-upgrade.cbz",
-            "V.previous-ocr.cbz",
+            "V.curated-2.cbz",
         ] {
             let path = format!("/mokuro-reader/S/{name}");
             assert_eq!(
@@ -1732,11 +1730,17 @@ mod tests {
                 "{name}"
             );
         }
-        // A hand-made id is V's controller's to nest; beside no V, anyone's.
-        assert_eq!(
-            decide_as(&lib, "PUT", "/mokuro-reader/S/V.hayai.cbz", &alice),
-            Ok(Grant::Owner)
-        );
+        // A hand-made id is V's controller's to nest; beside no V, anyone's. The
+        // ids `pre-upgrade` and `previous-ocr` are hand-made ids like any other.
+        for name in ["V.hayai.cbz", "V.pre-upgrade.cbz", "V.previous-ocr.cbz"] {
+            let path = format!("/mokuro-reader/S/{name}");
+            assert_eq!(
+                decide_as(&lib, "PUT", &path, &alice),
+                Ok(Grant::Owner),
+                "{name}"
+            );
+            assert!(decide_as(&lib, "PUT", &path, &bob).is_err(), "{name}");
+        }
         let alone = Owners::default().folder("T");
         assert_eq!(
             decide_as(&alone, "PUT", "/mokuro-reader/T/V.edit.cbz", &bob),
@@ -1747,6 +1751,42 @@ mod tests {
             decide_as(&lib, "PUT", "/mokuro-reader/S/V.edit.mokuro", &bob),
             Ok(Grant::Personal)
         );
+    }
+
+    /// Owner decision, 2026-11-01: neither id is reserved, so a client's
+    /// `<Vol>.pre-upgrade.mokuro` or `<Vol>.previous-ocr.mokuro` is a hand-made layer,
+    /// allowed to whoever may add files to that volume and refused only for the usual
+    /// ownership reasons, never for its name.
+    #[test]
+    fn pre_upgrade_and_previous_ocr_layers_are_hand_made() {
+        let alice = as_user("alice", Role::Uploader);
+        let mallory = as_user("mallory", Role::Uploader);
+        let editor = as_user("ed", Role::Editor);
+        let lib = Owners::default().upload("S/V.cbz", "alice");
+        for name in [
+            "V.pre-upgrade.mokuro",
+            "V.pre-upgrade-2.mokuro",
+            "V.previous-ocr.mokuro",
+            "V.previous-ocr-3.mokuro",
+            "V.hayai.mokuro",
+        ] {
+            let path = format!("/mokuro-reader/S/{name}");
+            assert_eq!(
+                decide_as(&lib, "PUT", &path, &alice),
+                Ok(Grant::Owner),
+                "{name}"
+            );
+            assert_eq!(
+                decide_as(&lib, "PUT", &path, &mallory),
+                Err((403, VOLUME)),
+                "{name}"
+            );
+            assert_eq!(
+                decide_as(&lib, "PUT", &path, &editor),
+                Ok(Grant::Table),
+                "{name}"
+            );
+        }
     }
 
     /// OWN-8: a folder that cannot be listed governs nothing only as far as the rules
@@ -2399,8 +2439,8 @@ mod tests {
     }
 
     /// D27: personal corrections are any progress writer's own; the curated layer is
-    /// published by ModifyDelete roles and an uploader on its own volumes; the server's
-    /// keepsakes and the other reserved ids take no client write.
+    /// published by ModifyDelete roles and an uploader on its own volumes; the reserved
+    /// `curated-<n>` takes no client write; every other id is hand-made.
     #[test]
     fn correction_layers() {
         let m = |name: &str| Method::from_bytes(name.as_bytes()).unwrap();
@@ -2507,15 +2547,23 @@ mod tests {
             assert_eq!(ask("PUT", path, None, None).unwrap_err().0, 401);
         }
 
-        let server = "Permission denied: this file is written by the server";
+        // Neither id is reserved (owner decision, 2026-11-01): a client's write
+        // of `pre-upgrade*` or `previous-ocr*` is a hand-made layer's, decided by the
+        // rest of the table like `V.my-fix.mokuro` below.
         for path in [
             "/mokuro-reader/Mine/V.pre-upgrade.mokuro",
             "/mokuro-reader/Mine/V.pre-upgrade-2.mokuro",
+            "/mokuro-reader/Mine/V.previous-ocr.mokuro",
+            "/mokuro-reader/Mine/V.previous-ocr-2.mokuro",
         ] {
+            assert_eq!(ask("PUT", path, None, up), Ok(()), "{path}");
+            assert_eq!(ask("PUT", path, None, Some(Role::Admin)), Ok(()), "{path}");
             assert_eq!(
-                ask("PUT", path, None, Some(Role::Admin)),
-                Err((403, server.into()))
+                ask("PUT", path, None, reg),
+                ask("PUT", "/mokuro-reader/Mine/V.my-fix.mokuro", None, reg),
+                "{path}"
             );
+            assert_eq!(ask("PUT", path, None, None).unwrap_err().0, 401);
             assert_eq!(
                 ask(
                     "MOVE",
@@ -2523,16 +2571,15 @@ mod tests {
                     Some(&format!("http://h{path}")),
                     Some(Role::Admin)
                 ),
-                Err((403, server.into()))
+                Ok(()),
+                "{path}"
             );
-            // Deleting one keeps its 0.7 rule.
             assert_eq!(ask("DELETE", path, None, up), Ok(()));
         }
         let reserved = "Permission denied: this layer name is reserved";
         for path in [
             "/mokuro-reader/Mine/V.curated-2.mokuro",
-            "/mokuro-reader/Mine/V.previous-ocr.mokuro",
-            "/mokuro-reader/Mine/V.pre-upgraded.mokuro",
+            "/mokuro-reader/Mine/V.curated-10.mokuro",
         ] {
             assert_eq!(
                 ask("PUT", path, None, Some(Role::Admin)),
@@ -2541,10 +2588,10 @@ mod tests {
             );
             assert_eq!(ask("PUT", path, None, None).unwrap_err().0, 401);
         }
-        // A volume rename carries its keepsakes and reserved layers under the same id:
-        // the 0.7 MOVE rule decides. Anything else into those names stays refused.
+        // A volume rename carries its reserved layers under the same id: the 0.7 MOVE
+        // rule decides. Anything else into those names stays refused.
         let edited = Some(Role::Editor);
-        for id in ["pre-upgrade", "pre-upgrade-2", "curated-2", "previous-ocr"] {
+        for id in ["curated-2", "curated-3"] {
             let from = format!("/mokuro-reader/Mine/V.{id}.mokuro");
             let to = format!("http://h/mokuro-reader/Mine/W.{id}.mokuro");
             assert_eq!(ask("MOVE", &from, Some(&to), edited), Ok(()), "{id}");
@@ -2558,15 +2605,6 @@ mod tests {
             );
             assert!(ask("COPY", &from, Some(&to), edited).is_err(), "{id}");
         }
-        assert_eq!(
-            ask(
-                "MOVE",
-                "/mokuro-reader/Mine/V.pre-upgrade.mokuro",
-                Some("http://h/mokuro-reader/Mine/W.pre-upgrade-2.mokuro"),
-                edited
-            ),
-            Err((403, server.into()))
-        );
         assert_eq!(
             ask(
                 "MOVE",

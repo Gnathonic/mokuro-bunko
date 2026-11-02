@@ -839,9 +839,11 @@ fn mokuro(text: &str) -> Vec<u8> {
     serde_json::to_vec(&serde_json::json!({"version": "0.2.1", "pages": [], "note": text})).unwrap()
 }
 
+/// The picked main stays; the other goes to the provider's trash, with no layer written
+/// (owner decision, 2026-11-01).
 #[test]
 fn differing_main_sidecars_keep_the_one_matching_the_primary_recipe() {
-    // The winner's matches: the loser's unstamped one becomes a pre-upgrade layer.
+    // The winner's matches: the loser's is trashed, no copy kept.
     let t = T::new(
         FakeBackend::drive_like(),
         &[
@@ -852,25 +854,22 @@ fn differing_main_sidecars_keep_the_one_matching_the_primary_recipe() {
         ],
     );
     t.steady();
+    let loser_main = t.at("kingdom/Vol 1.mokuro").unwrap().pid;
+    let uploads = t.fake.upload_log().len();
     *t.policy.choice.lock() = MergeChoice::A;
     t.policy();
     t.wait_merges(1);
-    assert_eq!(
-        t.names("Kingdom"),
-        ["Vol 1.cbz", "Vol 1.mokuro", "Vol 1.pre-upgrade.mokuro"]
-    );
+    assert_eq!(t.names("Kingdom"), ["Vol 1.cbz", "Vol 1.mokuro"]);
     assert_eq!(t.bytes("Kingdom/Vol 1.mokuro").unwrap(), mokuro("winner"));
-    let kept: serde_json::Value =
-        serde_json::from_slice(&t.bytes("Kingdom/Vol 1.pre-upgrade.mokuro").unwrap()).unwrap();
-    assert_eq!(kept["note"], "loser");
-    assert_eq!(
-        kept["preserved"]["sha256"],
-        hex::encode(Sha256::digest(mokuro("loser")))
-    );
-    assert!(kept.get("ocr_engine").is_none());
     assert!(t.at("kingdom").is_none());
+    assert!(
+        t.fake.trashed_log().contains(&loser_main),
+        "the loser's main is in the provider's trash"
+    );
+    assert!(t.fake.deleted_log().is_empty(), "nothing deleted for good");
+    assert_eq!(t.fake.upload_log().len(), uploads, "no layer written");
 
-    // The loser's matches: the winner's is kept as the layer, the loser's moves in.
+    // The loser's matches: its main replaces the winner's in place, no copy kept.
     let t = T::new(
         FakeBackend::drive_like(),
         &[
@@ -885,9 +884,7 @@ fn differing_main_sidecars_keep_the_one_matching_the_primary_recipe() {
     t.policy();
     t.wait_merges(1);
     assert_eq!(t.bytes("Kingdom/Vol 1.mokuro").unwrap(), mokuro("loser"));
-    let kept: serde_json::Value =
-        serde_json::from_slice(&t.bytes("Kingdom/Vol 1.pre-upgrade.mokuro").unwrap()).unwrap();
-    assert_eq!(kept["note"], "winner");
+    assert_eq!(t.names("Kingdom"), ["Vol 1.cbz", "Vol 1.mokuro"]);
 
     // Upgrades off, or neither (or both) matching: the group is blocked.
     let t = T::new(
@@ -913,10 +910,10 @@ fn stamped_mokuro(text: &str) -> Vec<u8> {
     .unwrap()
 }
 
-/// The loser's main wins: the winner's is kept as a layer first (stamped or not), then
-/// replaced in place; the winner's is never trashed before the replacement is in.
+/// The loser's main wins: it replaces the winner's in place, with no copy kept (stamped
+/// or not); the winner's is never trashed before the replacement is in.
 #[test]
-fn a_winning_loser_main_replaces_the_winners_in_place_after_keeping_it() {
+fn a_winning_loser_main_replaces_the_winners_in_place_with_no_copy() {
     for (name, make) in [
         ("drive_like", FakeBackend::drive_like as fn() -> FakeBackend),
         ("mega_like", FakeBackend::mega_like),
@@ -937,21 +934,12 @@ fn a_winning_loser_main_replaces_the_winners_in_place_after_keeping_it() {
         *t.policy.choice.lock() = MergeChoice::B;
         t.policy();
         t.wait_merges(1);
-        assert_eq!(
-            t.names("Kingdom"),
-            ["Vol 1.cbz", "Vol 1.mokuro", "Vol 1.pre-upgrade.mokuro"],
-            "{name}"
-        );
+        assert_eq!(t.names("Kingdom"), ["Vol 1.cbz", "Vol 1.mokuro"], "{name}");
         assert_eq!(
             t.bytes("Kingdom/Vol 1.mokuro").unwrap(),
             mokuro("loser"),
             "{name}"
         );
-        // Bunko's own stamp is no shortcut here: the winner's is kept.
-        let kept: serde_json::Value =
-            serde_json::from_slice(&t.bytes("Kingdom/Vol 1.pre-upgrade.mokuro").unwrap()).unwrap();
-        assert_eq!(kept["note"], "winner", "{name}");
-        assert!(kept.get("ocr_engine").is_none(), "{name}");
         assert!(t.at("kingdom").is_none(), "{name}");
         let trashed = t.fake.trashed_log();
         assert!(
@@ -1004,23 +992,19 @@ fn a_refused_replace_leaves_the_winners_main_and_blocks_the_group() {
         ],
     );
     t.steady();
-    // The first upload is the pre-upgrade layer; the replace (the second) gets a 412.
+    // The replace, the group's only upload, gets a 412.
     let fake = t.fake.clone();
     let n = Arc::new(AtomicUsize::new(0));
     let n2 = n.clone();
     t.fake.set_call_hook(Some(Arc::new(move |op| {
-        if op == FakeOp::Upload && n2.fetch_add(1, Ordering::SeqCst) == 1 {
+        if op == FakeOp::Upload && n2.fetch_add(1, Ordering::SeqCst) == 0 {
             fake.fail_next(FakeOp::Upload, BErr::PreconditionFailed);
         }
     })));
     *t.policy.choice.lock() = MergeChoice::B;
     t.policy();
     t.wait_merges(1);
-    assert_eq!(
-        n.load(Ordering::SeqCst),
-        2,
-        "layer, then the refused replace"
-    );
+    assert_eq!(n.load(Ordering::SeqCst), 1, "only the refused replace");
     assert_eq!(t.bytes("Kingdom/Vol 1.mokuro").unwrap(), mokuro("winner"));
     assert_eq!(t.names("kingdom"), ["Vol 1.cbz", "Vol 1.mokuro"]);
     assert!(
@@ -1144,18 +1128,19 @@ fn a_differing_curated_layer_moves_in_as_curated_2() {
 #[test]
 fn unstamped_layer_ids_are_exact() {
     use bunko_remote::merge::is_unstamped_layer_id;
-    for id in [
-        "edit",
-        "edit-2",
-        "curated",
-        "curated-3",
-        "pre-upgrade",
-        "pre-upgrade-2",
-    ] {
+    for id in ["edit", "edit-2", "curated", "curated-3"] {
         assert!(is_unstamped_layer_id(id), "{id}");
     }
-    // Ids match as written (rule v1): `EDIT` is no layer at all.
-    for id in ["EDIT", "Curated", "hayai-nova", "editor", "previous-ocr"] {
+    // Ids match as written (rule v1): `EDIT` is no layer at all. `pre-upgrade` and
+    // `previous-ocr` are hand-made ids like any other.
+    for id in [
+        "EDIT",
+        "Curated",
+        "hayai-nova",
+        "editor",
+        "pre-upgrade",
+        "previous-ocr",
+    ] {
         assert!(!is_unstamped_layer_id(id), "{id}");
     }
 }

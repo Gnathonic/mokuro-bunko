@@ -557,8 +557,9 @@ fn an_unknown_write_time_keeps_the_canonical_copy_the_index_already_shows() {
 
 /// Accepted limit (spec §5.9 "Duplicates"): an OCR file is a file here like any other.
 /// An EDITED main or an `edit` layer that loses to a newer write goes to the provider
-/// trash, where the case merge would keep it (`pre-upgrade`, `edit-2`): the reader's
-/// merge (#308) does the same, and the cloud must end the same whoever merges.
+/// trash, and no layer is written (the case merge would keep the `edit` layer as
+/// `edit-2`): the reader's merge (#308) does the same, and the cloud must end the same
+/// whoever merges.
 #[test]
 fn an_edited_main_and_an_edit_layer_keep_the_newer_write_as_the_reader_does() {
     let f = FakeBackend::drive_like();
@@ -588,12 +589,12 @@ fn an_edited_main_and_an_edit_layer_keep_the_newer_write_as_the_reader_does() {
         t.bytes_in(&sa, "v.edit.mokuro"),
         [br#"{"pages":["theirs"]}"#.to_vec()]
     );
-    let names: Vec<String> = t.kids(&sa).into_iter().map(|(n, _, _)| n).collect();
-    assert!(
-        !names
-            .iter()
-            .any(|n| n.contains("pre-upgrade") || n.contains("edit-2")),
-        "no keepsake layer: {names:?}"
+    let mut names: Vec<String> = t.kids(&sa).into_iter().map(|(n, _, _)| n).collect();
+    names.sort();
+    assert_eq!(
+        names,
+        ["v.cbz", "v.edit.mokuro", "v.mokuro"],
+        "no layer written"
     );
     let trashed = t.fake.trashed_log();
     assert!(trashed.contains(&edited) && trashed.contains(&old_layer));

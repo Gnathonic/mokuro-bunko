@@ -149,9 +149,8 @@ written, and hashes cover the raw bytes. New reader ids always contain a letter.
   "gz"}` or `{"kind": "orphan"}`. `stem` is spelled as in `name` (compare it folded if
   your stems are folded).
 - `layer_class`: `{id, class}`, exact-case: `personal` (`edit`, `edit-<n>`), `curated`
-  (`curated`), `server-keepsake` (`pre-upgrade`, `pre-upgrade-<n>`), `reserved` (no
-  client writes it on Bunko: `curated-<n>`, the rest of the `pre-upgrade` family,
-  `previous-ocr*`), `other` (everything else).
+  (`curated`), `reserved` (no client writes it on Bunko: `curated-<n>`), `other`
+  (everything else).
 - `sweep`: `{archive, folder, expect, why}`: the names that go when `archive` is deleted
   (sorted; compare as a set). Besides rule v1, a sweep never takes a name whose base is
   the stem of any archive of `.cbz`, `.cbr`, `.zip` or `.rar`, so it can leave a file

@@ -107,10 +107,7 @@ pub enum LayerClass {
     Personal,
     /// `curated`: the shared edit, published by accounts with the right to.
     Curated,
-    /// `pre-upgrade`, `pre-upgrade-<n>`: bunko's copy of a replaced main; bunko only.
-    ServerKeepsake,
-    /// Reserved, but no client writes it here: `curated-<n>`, the rest of the
-    /// `pre-upgrade` family, `previous-ocr*` (a reader's device-local keepsake).
+    /// Reserved, but no client writes it here: `curated-<n>`.
     Reserved,
     /// Everything else: engine generations, `original`, `gcv`, `updated-ocr`,
     /// `tr-*`, hand-made ids — governed as before.
@@ -144,12 +141,7 @@ pub fn layer_class(id: &str) -> LayerClass {
         LayerClass::Personal
     } else if id == "curated" {
         LayerClass::Curated
-    } else if is_counted(id, "pre-upgrade") {
-        LayerClass::ServerKeepsake
-    } else if is_counted(id, "curated")
-        || id.starts_with("pre-upgrade")
-        || id.starts_with("previous-ocr")
-    {
+    } else if is_counted(id, "curated") {
         LayerClass::Reserved
     } else {
         LayerClass::Other
@@ -439,8 +431,8 @@ fn hidden_layer_of(stem: &str) -> Option<&str> {
 
 /// Would a NEW archive `name` hide a layer of a listed volume? `V.edit.cbz` beside
 /// `V.cbz` turns `V.edit.mokuro`, an account's own correction of `V`, into the primary
-/// of `V.edit.cbz` (rule 4), and `V.curated.cbz`, `V.pre-upgrade.cbz` do the same to
-/// the shared and the server's layers: true when `name` is `<s>.<id>.cbz`, `<id>` a
+/// of `V.edit.cbz` (rule 4), and `V.curated.cbz`, `V.curated-2.cbz` do the same to
+/// the shared layer and its merge copies: true when `name` is `<s>.<id>.cbz`, `<id>` a
 /// layer id of a reserved class (folded, rule 3), and `<s>.cbz` is listed. Only `.cbz`
 /// names define stems (rule 2).
 pub fn hides_reserved_layer(name: &str, names: &[&str]) -> bool {
@@ -508,7 +500,6 @@ mod tests {
             let want = match case["class"].as_str().unwrap() {
                 "personal" => LayerClass::Personal,
                 "curated" => LayerClass::Curated,
-                "server-keepsake" => LayerClass::ServerKeepsake,
                 "reserved" => LayerClass::Reserved,
                 "other" => LayerClass::Other,
                 other => panic!("unknown class {other}"),
@@ -613,7 +604,7 @@ mod tests {
         for name in [
             "V.EDIT.cbz",
             "V.Curated.cbz",
-            "V.PRE-UPGRADE.cbz",
+            "V.CURATED-2.cbz",
             "v.curated.cbz",
         ] {
             assert_eq!(gov(name, &v), ["V.cbz"], "{name}");
@@ -692,8 +683,9 @@ mod tests {
             ("Berserk.curated.cbz", "Berserk.cbz"),
             ("Berserk.curated.mokuro", "Berserk.cbz"),
             ("Berserk.EDIT.cbz", "Berserk.cbz"),
-            ("Berserk.pre-upgrade.webp", "Berserk.cbz"),
-            ("Berserk.previous-ocr.cbz", "Berserk.cbz"),
+            // Hand-made layer ids like any other (neither id is reserved).
+            ("Berserk.pre-upgrade.webp", "Berserk.pre-upgrade.cbz"),
+            ("Berserk.previous-ocr.cbz", "Berserk.previous-ocr.cbz"),
             ("Berserk.edit.curated.cbz", "Berserk.cbz"),
             ("Berserk.mokuro", "Berserk.cbz"),
             ("Berserk.v02.cbz", "Berserk.cbz"),
@@ -723,8 +715,6 @@ mod tests {
             "V.EDIT.cbz",
             "v.Curated.cbz",
             "V.curated-2.cbz",
-            "V.pre-upgrade.cbz",
-            "V.previous-ocr.cbz",
         ] {
             assert!(hides(name, &v), "{name}");
             assert!(!hides(name, &["W.cbz"]), "{name}");
@@ -736,6 +726,8 @@ mod tests {
             "V.edit.mokuro",
             "V.edit.zip",
             "V.cbz",
+            "V.pre-upgrade.cbz",
+            "V.previous-ocr.cbz",
         ] {
             assert!(!hides(name, &v), "{name}");
         }
