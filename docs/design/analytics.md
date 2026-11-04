@@ -380,6 +380,9 @@ reading_daily(day, username, volume_uuid, volume_key, series_key, series_title, 
   PRIMARY KEY(day, username, volume_uuid)) WITHOUT ROWID
   -- index (series_key, day), index (username, volume_uuid); series_key '' = no known series
 history_cursor(username, device, segment, last_seq, PRIMARY KEY(username, device, segment)) WITHOUT ROWID
+reading_pages(username, volume_uuid, pass_t, pages BLOB, last_ms,
+  PRIMARY KEY(username, volume_uuid, pass_t)) WITHOUT ROWID
+  -- the pages each pass credited (bitmap, ≤ 1 KiB); index (last_ms); pruned after 400 idle days
 volume_progress(username, volume_uuid, series_uuid, series_key, series_title, volume_title,
   progress, chars, completed, completed_at, time_read_min, last_progress_update, updated_at,
   PRIMARY KEY(username, volume_uuid)) WITHOUT ROWID
@@ -451,13 +454,42 @@ account. Skipped and refused files are counted (`reading.worker` in the API).
   another device or month than its path is refused (as the reader's importer refuses
   it), and events dated before 2015 or more than a day ahead are skipped and counted
   (`events_out_of_range`). Page rows
-  (kind 0): `pages += last - first + 1`, `chars += sum(page_chars)`, `dwell_ms +=
-  min(dwell, 15 min)` when dwell ≥ 0, on `day(t)`; adjust rows (kind 1): `dwell_ms +=
-  time_delta_ms`, `chars += chars_delta` (clamped so totals never go negative). Other
-  kinds are ignored. Mark `sources |= 2`. **Built:** a row's first history page events
+  (kind 0): `dwell_ms += min(dwell, 15 min)` when dwell ≥ 0, on `day(t)`; adjust rows
+  (kind 1): `dwell_ms += time_delta_ms`, `chars += chars_delta` (clamped so totals
+  never go negative). Mark `sources |= 2`.
+  **Built:** pages and characters follow the reader's stats engine
+  (`stats-engine.ts`): a page is credited **once per pass** of a volume, to the first
+  counting view that showed it, with that page's `page_chars` value, on that view's
+  day; a two-page spread turned a page at a time (views 1, 2-3, 3-4, ...) or a step
+  back credits nothing twice. A *pass* starts at a `restart` event (kind 2): the
+  views after it read the volume again. A view faster than `SKIP_CPM` (1500
+  characters a minute, or no time at all for some text) is a *skip*: its time counts,
+  it credits no page. A native view's pages are `first_page + i` for each
+  `page_chars` value (at most 2 097 152 values are kept per segment, 16 MiB; a view
+  past that credits no page); a converted (legacy) turn is its first page, never a
+  skip. The credited pages live in
+  `reading_pages(username, volume_uuid, pass_t, pages, last_ms)` (`pass_t` 0 before any restart, else the restart's time; `pages` a bitmap of pages
+  0 to 8 191, a page past that credits nothing), so a page stays credited across the
+  per-device, per-month uploads and across one user's devices; a view belongs to the
+  latest pass started by its time. At most 16 passes are kept per (user, volume), the
+  oldest forgotten past that, and a pass no view or restart touched for 400 days is
+  pruned by the hourly upkeep. Events are taken in the reader's order (time, device,
+  seq) within an upload, and files due together are read in the order they were
+  written; across uploads a page goes to the first view that **arrives** with it, so
+  when an earlier view arrives later (a device syncing late) the page stays on the
+  later view's day (the total is the reader's), and a `restart` that arrives after
+  the views following it leaves those views in the earlier pass (they credit fewer
+  pages than the reader would).
+  Not ported: `forget` (the reader hides the events before it), the reader's look-up
+  visits (views away from the home page that count as skips), its idle rule for
+  converted turns over their cap, and the characters of converted turns (the reader
+  takes the next turn's cumulative count; Bunko counts their `page_chars`). The
+  other kinds (forget, position, resolve) are ignored.
+  **Built:** a row's first history page events
   replace the pages and chars `positions.json` had estimated for that (day, user,
-  volume): positions usually arrives before the 5-minute history upload and would
-  otherwise count twice. Adjust rows apply only to a row that already holds a read (a
+  volume), even when they credit no new page (a skip, pages a pass credited before):
+  positions usually arrives before the 5-minute history upload and would otherwise
+  count twice. Adjust rows apply only to a row that already holds a read (a
   stat edit alone is no read). `history/<device>/device.json`: upsert
   `devices` with its label/platform if present (check the reader's format).
   An unknown `format` is skipped (counted), never an error to the client.

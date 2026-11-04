@@ -810,13 +810,16 @@ async fn the_readers_own_segments_and_unknown_formats() {
     env.mkcol_history("reader", "device-b").await;
     let month = "history/device-a/2026-10.events";
     let legacy = "history/device-a/legacy.events";
+    // The converted turns first, as the reader uploads them (they are older): a page
+    // is credited to the first view that arrives with it, and files are read in the
+    // order they were written.
     assert!(
-        env.reader_put("reader", month, FIXTURE_2026_10)
+        env.reader_put("reader", legacy, FIXTURE_LEGACY)
             .await
             .is_success()
     );
     assert!(
-        env.reader_put("reader", legacy, FIXTURE_LEGACY)
+        env.reader_put("reader", month, FIXTURE_2026_10)
             .await
             .is_success()
     );
@@ -857,13 +860,14 @@ async fn the_readers_own_segments_and_unknown_formats() {
         .collect::<rusqlite::Result<Vec<_>>>()
         .unwrap()
     };
-    // 2026-10-03 (day 20729), V1: 2 + 1 + 1 pages, 120 + 88 + 51 (50.5) - 10 chars,
-    // 41 s + 15 min (an hour, capped) - 60 s; 2026-10-04 (20730), V2: 2 pages, 30 + 5
-    // chars, 90 s + 30 s. Legacy (2026-10-02, 20728), V1: 2 pages, 30 s. The restart,
-    // forget, position and resolve events add nothing.
+    // Legacy (2026-10-02, 20728), V1: pages 4 and 5, 30 s. 2026-10-03 (day 20729), V1:
+    // views of pages 3-4, 5 and 6, but 4 and 5 were credited the day before (one pass:
+    // the restart is V2's), so pages 3 and 6, 120 + 51 (50.5) - 10 chars, 41 s + 15 min
+    // (an hour, capped) - 60 s; 2026-10-04 (20730), V2: 2 pages, 30 + 5 chars, 90 s +
+    // 30 s. The forget, position and resolve events add nothing.
     let expected = [
         (20728, U1.to_string(), 2, 0, 30_000),
-        (20729, U1.to_string(), 4, 249, 41_000 + 900_000 - 60_000),
+        (20729, U1.to_string(), 2, 161, 41_000 + 900_000 - 60_000),
         (20730, U2.to_string(), 2, 35, 120_000),
     ];
     assert_eq!(rows(), expected);
@@ -903,6 +907,109 @@ async fn the_readers_own_segments_and_unknown_formats() {
         env.int("SELECT COUNT(*) FROM history_cursor WHERE segment='legacy'"),
         2
     );
+}
+
+/// Mokuro Reader's own segments of two devices reading in two-page spreads, turning a
+/// page at a time (views 1, 2-3, 3-4, ...; `testdata/spreads-*.events`, written by the
+/// reader in an end-to-end run): its stats engine credits each page once, 12 + 5 + 4
+/// pages and 96 + 40 + 32 characters, not once per view that showed it.
+const SPREADS_DESKTOP: (&str, &[u8]) = (
+    "9276f2e6-d344-4b94-8e3d-5f7c85759675",
+    include_bytes!("../src/analytics/reading/testdata/spreads-desktop-2026-11.events"),
+);
+const SPREADS_SECOND: (&str, &[u8]) = (
+    "001f324d-7d82-4abe-891c-aaca13584b41",
+    include_bytes!("../src/analytics/reading/testdata/spreads-second-2026-11.events"),
+);
+
+/// `(volume_uuid, pages, chars, dwell_ms)` of every read.
+fn page_rows(env: &Env) -> Vec<(String, i64, i64, i64)> {
+    env.reads()
+        .into_iter()
+        .map(|r| (r.1, r.3, r.4, r.5))
+        .collect()
+}
+
+#[tokio::test]
+async fn overlapping_views_credit_each_page_once_per_pass() {
+    let env = Env::new();
+    for (device, bytes) in [SPREADS_DESKTOP, SPREADS_SECOND] {
+        env.mkcol_history("reader", device).await;
+        let rel = format!("history/{device}/2026-11.events");
+        assert!(env.reader_put("reader", &rel, bytes).await.is_success());
+    }
+    env.settle().await;
+    let vol = |n: u8| format!("00000000-0000-4000-8000-00000000000{n}");
+    // Minutes as before: every view's dwell.
+    assert_eq!(
+        page_rows(&env),
+        [
+            (vol(0), 12, 96, 60_111),
+            (vol(1), 5, 40, 20_023),
+            (vol(3), 4, 32, 15_023),
+        ]
+    );
+
+    // Through the API, over the reader's own paths: a skip, another device, a restart,
+    // a later upload of the same month.
+    let env = Env::new();
+    let now = base_ms();
+    let t = now - 900_000;
+    let month = month_of(t);
+    let other = "1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f";
+    env.mkcol_history("reader", DEVICE).await;
+    env.mkcol_history("reader", other).await;
+    let first = segment(
+        DEVICE,
+        &month,
+        &[U1],
+        &[
+            (1, t, page(0, 1, 1, &[10], 5_000)),
+            (2, t + 5_000, page(0, 2, 3, &[10, 10], 5_000)),
+            (3, t + 10_000, page(0, 3, 4, &[10, 10], 5_000)),
+            // A step back.
+            (4, t + 15_000, page(0, 2, 3, &[10, 10], 5_000)),
+            // Flicked through: 2000 characters in a second is a skip.
+            (5, t + 20_000, page(0, 5, 6, &[1000, 1000], 1_000)),
+        ],
+    );
+    let rel = format!("history/{DEVICE}/{month}.events");
+    assert!(env.reader_put("reader", &rel, &first).await.is_success());
+    env.settle().await;
+    assert_eq!(page_rows(&env), [(U1.to_string(), 4, 40, 21_000)]);
+    // The second device: page 4 again, 5 read now.
+    let second = segment(
+        other,
+        &month,
+        &[U1],
+        &[(1, t + 30_000, page(0, 4, 5, &[10, 10], 5_000))],
+    );
+    let rel_other = format!("history/{other}/{month}.events");
+    assert!(
+        env.reader_put("reader", &rel_other, &second)
+            .await
+            .is_success()
+    );
+    env.settle().await;
+    assert_eq!(page_rows(&env), [(U1.to_string(), 5, 50, 26_000)]);
+    // The first device's file again, with a restart and page 1 after it: a new pass.
+    let mut events = vec![
+        (1, t, page(0, 1, 1, &[10], 5_000)),
+        (2, t + 5_000, page(0, 2, 3, &[10, 10], 5_000)),
+        (3, t + 10_000, page(0, 3, 4, &[10, 10], 5_000)),
+        (4, t + 15_000, page(0, 2, 3, &[10, 10], 5_000)),
+        (5, t + 20_000, page(0, 5, 6, &[1000, 1000], 1_000)),
+    ];
+    events.push((6, t + 40_000, json!([2, 0])));
+    events.push((7, t + 45_000, page(0, 1, 2, &[10, 10], 5_000)));
+    let again = segment(DEVICE, &month, &[U1], &events);
+    assert!(env.reader_put("reader", &rel, &again).await.is_success());
+    env.settle().await;
+    assert_eq!(page_rows(&env), [(U1.to_string(), 7, 70, 31_000)]);
+    env.flush().await;
+    let v = env.admin("/_admin/api/analytics/reading?range=24h").await;
+    assert_eq!(sum(series(&v, "pages")), 7.0);
+    assert_eq!(v["top_volumes"][0]["pages"], 7, "{v}");
 }
 
 /// More accounts than the users view lists: `accounts` still counts them all, and the

@@ -698,9 +698,13 @@ with what it saw before, so a file uploaded twice, another device's merged copy,
 volume listed twice in one file (its last entry counts, as in the reader), or the
 reader's DELETE-then-PUT never counts twice. A new reading position is a *read*
 of that volume on that day (a position first seen more than 48 hours old is not); the
-reading history adds the pages read and the time spent (one page view counts for 15
-minutes at most). `volume-data.json` gives each account's progress and finished
-volumes for the completion funnel, and the device names the reader shows. Volumes
+reading history adds the time spent (one page view counts for 15 minutes at most) and
+the pages read as Mokuro Reader's own statistics count them: each page once per read
+of a volume (a restart reads it again), whichever device or upload brings it, so a
+two-page spread or turning back never counts a page twice, and a page flicked past
+faster than 1,500 characters a minute adds its time but not the page.
+`volume-data.json` gives each account's progress and finished volumes for the
+completion funnel, and the device names the reader shows. Volumes
 are matched to the library's series by their volume id, else by the series the
 reader names; a volume of no known series is shown as `(unknown)`. Files larger than
 the reader writes (4 MiB for `positions.json`, 16 MiB for a history file, 32 MiB for

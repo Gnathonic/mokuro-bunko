@@ -15,3 +15,10 @@ To make them again: export the reader's sources without touching its working tre
 imports of `gen-fixtures.ts` at `<dir>`, bundle it with the reader's esbuild
 (`esbuild gen-fixtures.ts --bundle --platform=node --format=esm --outfile=gen.mjs`) and
 run `node gen.mjs <out dir>`.
+
+`spreads-desktop-2026-11.events` and `spreads-second-2026-11.events` are not made by
+`gen-fixtures.ts`: the reader (develop at 30c2202e) wrote them itself, on two devices of
+one account, in an end-to-end run against Bunko that read in two-page spreads turning a
+page at a time (made-up volume ids, generated device ids). Its stats engine
+(`prepareVolume` and `countVolume` of `stats-engine.ts`) credits them 12 + 5 + 4 pages
+and 96 + 40 + 32 characters.

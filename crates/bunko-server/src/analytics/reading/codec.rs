@@ -40,6 +40,10 @@ pub const FORMAT: f64 = 1.0;
 pub const MAX_INFLATED: usize = 16 << 20;
 /// Most rows one segment may hold.
 pub const MAX_EVENTS: usize = 250_000;
+/// Most `page_chars` values kept per segment with `keep_page_chars` (16 MiB): the
+/// reader's views show a page or two, so a real segment keeps far fewer; past it a
+/// view keeps none of its values (its sum and count are still known).
+pub const MAX_KEPT_CHARS: usize = 2 << 20;
 /// `Number.MAX_SAFE_INTEGER`.
 const MAX_SAFE: f64 = 9_007_199_254_740_991.0;
 /// Cells a row is read for (a page row's 13; more are ignored, as in the reader).
@@ -138,6 +142,8 @@ pub enum Payload {
         chars_sum: f64,
         chars_len: u32,
         chars_at: u32,
+        /// How many of the values were kept ([`MAX_KEPT_CHARS`]).
+        chars_kept: u32,
         chars_before: f64,
         dwell_ms: Option<f64>,
         layout: Layout,
@@ -204,16 +210,17 @@ impl Segment {
         }
     }
 
-    /// A page event's `page_chars` (empty unless decoded with `keep_page_chars`).
+    /// A page event's `page_chars` (empty unless decoded with `keep_page_chars`, and
+    /// once [`MAX_KEPT_CHARS`] values were kept).
     pub fn page_chars(&self, e: &Event) -> &[f64] {
         match e.payload {
             Payload::Page {
                 chars_at,
-                chars_len,
+                chars_kept,
                 ..
             } => self
                 .page_chars
-                .get(chars_at as usize..(chars_at as usize + chars_len as usize))
+                .get(chars_at as usize..(chars_at as usize + chars_kept as usize))
                 .unwrap_or_default(),
             _ => &[],
         }
@@ -338,12 +345,13 @@ enum Cell {
     /// A string: its value as an array index when it is one (`"0"`, `"12"`).
     Str(Option<usize>),
     /// An array: whether every element is a finite number, their sum and count, and
-    /// where its values start in the kept `page_chars`.
+    /// where its values start in the kept `page_chars` and how many were kept.
     List {
         numbers: bool,
         sum: f64,
         len: u32,
         at: u32,
+        kept: u32,
     },
     /// null, a boolean or an object.
     Other,
@@ -438,13 +446,14 @@ fn pre_event(c: &[Cell; CELLS]) -> Result<PreEvent, &'static str> {
         0 => {
             let first_page = int(c[4])?;
             let last_page = int(c[5])?;
-            let (sum, len, at) = match c[6] {
+            let (sum, len, at, kept) = match c[6] {
                 Cell::List {
                     numbers: true,
                     sum,
                     len,
                     at,
-                } => (sum, len, at),
+                    kept,
+                } => (sum, len, at, kept),
                 _ => return Err("malformed list cell"),
             };
             let chars_before = num(c[7])?;
@@ -464,6 +473,7 @@ fn pre_event(c: &[Cell; CELLS]) -> Result<PreEvent, &'static str> {
                 chars_sum: sum,
                 chars_len: len,
                 chars_at: at,
+                chars_kept: kept,
                 chars_before,
                 dwell_ms,
                 layout: lookup(c[9], LAYOUTS.len()).map_or(Layout::Unknown, |i| LAYOUTS[i]),
@@ -1019,14 +1029,15 @@ impl<'de> Visitor<'de> for CellSeed<'_> {
     }
     fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Cell, A::Error> {
         let at = self.page_chars.len();
-        let (mut numbers, mut sum, mut len) = (true, 0.0f64, 0u32);
+        let (mut numbers, mut sum, mut len, mut kept) = (true, 0.0f64, 0u32, 0u32);
         while let Some(c) = seq.next_element_seed(ScalarSeed)? {
             match c {
                 Scalar::Num(v) if numbers && v.is_finite() => {
                     sum += v;
                     len = len.saturating_add(1);
-                    if self.keep {
+                    if self.keep && self.page_chars.len() < MAX_KEPT_CHARS {
                         self.page_chars.push(v);
+                        kept += 1;
                     }
                 }
                 _ => numbers = false,
@@ -1034,12 +1045,14 @@ impl<'de> Visitor<'de> for CellSeed<'_> {
         }
         if !numbers && self.keep {
             self.page_chars.truncate(at);
+            kept = 0;
         }
         Ok(Cell::List {
             numbers,
             sum,
             len,
             at: u32::try_from(at).unwrap_or(u32::MAX),
+            kept,
         })
     }
 }
@@ -1370,5 +1383,33 @@ mod tests {
             Err(SegmentError::TooLarge)
         );
         assert!(decode(&deflate(&text.to_string())).is_ok());
+    }
+
+    #[test]
+    fn kept_page_chars_are_bounded() {
+        // Views of 1000 pages each (no reader writes such a view): past
+        // MAX_KEPT_CHARS values a view keeps none, its sum and count still known.
+        let n = MAX_KEPT_CHARS / 1000 + 2;
+        let chars: Vec<u8> = vec![1; 1000];
+        // [0, dSeq, dT, vol, first, last, page_chars, chars_before, dwell, ...]
+        let row = |dt: i64| json!([0, 1, dt, 0, 0, 999, chars, 0, 5000, 0, 0, 1, 1]);
+        let rows: Vec<Value> = (0..n).map(|i| row(if i == 0 { T } else { 1 })).collect();
+        let text = json!({"format": 1, "device": "d", "month": "2026-10", "first_seq": 1,
+            "last_seq": n, "count": n, "volumes": ["v"], "rows": rows});
+        let s = decode_with(&deflate(&text.to_string()), keep()).unwrap();
+        assert_eq!(s.page_chars.len(), MAX_KEPT_CHARS);
+        let kept: Vec<usize> = s.events.iter().map(|e| s.page_chars(e).len()).collect();
+        assert_eq!(kept[0], 1000);
+        assert_eq!(kept[n - 3], 1000);
+        assert_eq!(kept[n - 2], MAX_KEPT_CHARS % 1000);
+        assert_eq!(kept[n - 1], 0);
+        match s.events[n - 1].payload {
+            Payload::Page {
+                chars_sum,
+                chars_len,
+                ..
+            } => assert_eq!((chars_sum, chars_len), (1000.0, 1000)),
+            _ => panic!("a page event"),
+        }
     }
 }

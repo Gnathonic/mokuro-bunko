@@ -258,6 +258,10 @@ fn prune(conn: &Connection, now_s: i64, r: &Retention) -> Result<u64> {
     del("DELETE FROM slow_requests WHERE at < ?1", slow_cut)?;
     del("DELETE FROM crawl_episodes WHERE last_at < ?1", crawl_cut)?;
     del("DELETE FROM host_minute WHERE minute < ?1", minute_cut)?;
+    // The pages a reading pass credited: kept while its volume may still see views of
+    // that pass (a device syncing late), not with the reading rows (kept forever).
+    let pass_cut = (now_s - super::reading::PASS_KEEP_DAYS * DAY).saturating_mul(1000);
+    del("DELETE FROM reading_pages WHERE last_ms < ?1", pass_cut)?;
     Ok(n)
 }
 

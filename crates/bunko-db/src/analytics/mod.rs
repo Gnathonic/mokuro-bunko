@@ -14,7 +14,7 @@
 //! |---|---|
 //! | `mod` | `meta` (salt, schema version, `tracking_since`, rollup mark, counters) |
 //! | [`traffic`] | `traffic_*`, `latency_*`, `errors_*`, `principal_*`, `anon_ips`, `ip_daily`, `auth_failures*`, `slow_requests`, `volume_downloads`, `uploads_daily` |
-//! | [`reading`] | `read_positions`, `reading_daily`, `history_cursor`, `volume_progress`, `devices` |
+//! | [`reading`] | `read_positions`, `reading_daily`, `history_cursor`, `reading_pages`, `volume_progress`, `devices` |
 //! | [`library`] | `library_scan`, `library_daily`, `archive_pages` |
 //! | [`host`] | `host_minute`, `host_hourly` |
 //! | [`crawl`] | `crawl_episodes` |
@@ -426,6 +426,7 @@ mod tests {
             "read_positions",
             "reading_daily",
             "history_cursor",
+            "reading_pages",
             "volume_progress",
             "devices",
             "library_scan",

@@ -31,7 +31,7 @@ use crate::analytics::Analytics;
 use bunko_core::reader_tree::{self, Caller};
 use bunko_dav::DavTarget;
 use bunko_db::analytics::reading::{
-    Attribution, DeviceSeen, HistoryEvent, HistoryKind, ProgressRecord,
+    Attribution, DeviceSeen, HistoryEvent, HistoryKind, ProgressRecord, is_skip,
 };
 use files::FileKind;
 use parking_lot::Mutex;
@@ -82,6 +82,9 @@ pub struct FileWritten {
 
 struct Pending {
     first: Instant,
+    /// Write order: files due together are read in the order they were first written
+    /// (a page is credited to the first view that arrives with it).
+    order: u64,
     due: Instant,
     at_ms: i64,
 }
@@ -132,6 +135,8 @@ pub struct Reading {
     queued: AtomicU64,
     dropped: AtomicU64,
     pending: Mutex<HashMap<(String, String), Pending>>,
+    /// The next [`Pending::order`].
+    next_order: AtomicU64,
     /// One file is read at a time (the worker and [`Reading::settle`]).
     work: tokio::sync::Mutex<()>,
     resolver: resolve::Resolver,
@@ -168,6 +173,7 @@ impl Reading {
             queued: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
             pending: Mutex::new(HashMap::new()),
+            next_order: AtomicU64::new(0),
             work: tokio::sync::Mutex::new(()),
             resolver: resolve::Resolver::new(),
             counters: Counters::default(),
@@ -276,6 +282,7 @@ impl Reading {
                 }
                 v.insert(Pending {
                     first: now,
+                    order: self.next_order.fetch_add(1, Ordering::Relaxed),
                     due: now + self.debounce(),
                     at_ms: ev.at_ms,
                 });
@@ -287,7 +294,7 @@ impl Reading {
         self.pending.lock().values().map(|p| p.due).min()
     }
 
-    /// The files due by `now` (every one with `all`), oldest first.
+    /// The files due by `now` (every one with `all`), first written first.
     fn take_due(&self, now: Instant, all: bool) -> Vec<(String, String, i64)> {
         let mut pending = self.pending.lock();
         let keys: Vec<(String, String)> = pending
@@ -295,11 +302,12 @@ impl Reading {
             .filter(|(_, p)| all || p.due <= now)
             .map(|(k, _)| k.clone())
             .collect();
-        let mut out: Vec<(Instant, (String, String, i64))> = keys
+        // `order` follows `first` (both are set on a file's first write).
+        let mut out: Vec<(u64, (String, String, i64))> = keys
             .into_iter()
-            .filter_map(|k| pending.remove(&k).map(|p| (p.first, (k.0, k.1, p.at_ms))))
+            .filter_map(|k| pending.remove(&k).map(|p| (p.order, (k.0, k.1, p.at_ms))))
             .collect();
-        out.sort_by_key(|(first, _)| *first);
+        out.sort_by_key(|(order, _)| *order);
         out.into_iter().map(|(_, f)| f).collect()
     }
 
@@ -612,7 +620,11 @@ fn segment(
     bytes: &[u8],
     (at_ms, now_ms): (i64, i64),
 ) -> bunko_db::Result<Outcome> {
-    let seg = match codec::decode(bytes) {
+    let opts = codec::Options {
+        keep_page_chars: true,
+        ..codec::Options::default()
+    };
+    let seg = match codec::decode_with(bytes, opts) {
         Ok(s) => s,
         Err(codec::SegmentError::UnsupportedFormat) => return Ok(Outcome::UnknownFormat),
         Err(codec::SegmentError::TooLarge) => return Ok(Outcome::TooLarge),
@@ -663,15 +675,26 @@ fn segment(
             kind: match e.payload {
                 codec::Payload::Page {
                     first_page,
-                    last_page,
                     chars_sum,
                     dwell_ms,
                     ..
-                } => HistoryKind::Page {
-                    pages: last_page.saturating_sub(first_page).saturating_add(1),
-                    chars: chars_sum.round() as i64,
-                    dwell_ms: dwell_ms.map(|d| d.round() as i64),
-                },
+                } => {
+                    let page_chars = seg.page_chars(e);
+                    // The reader's `prepareVolume`: a native view shows a page per
+                    // `page_chars` value; a converted (legacy) turn is its first page
+                    // only, and never a skip.
+                    let page_chars = if seg.header.legacy {
+                        page_chars.get(..1).unwrap_or(&[0.0])
+                    } else {
+                        page_chars
+                    };
+                    HistoryKind::Page {
+                        first_page,
+                        page_chars,
+                        dwell_ms: dwell_ms.map(|d| d.round() as i64),
+                        skip: !seg.header.legacy && is_skip(chars_sum, dwell_ms),
+                    }
+                }
                 codec::Payload::Adjust {
                     time_delta_ms,
                     chars_delta,
@@ -679,6 +702,7 @@ fn segment(
                     time_delta_ms: time_delta_ms.round() as i64,
                     chars_delta: chars_delta.round() as i64,
                 },
+                codec::Payload::Restart => HistoryKind::Restart,
                 _ => HistoryKind::Other,
             },
         })

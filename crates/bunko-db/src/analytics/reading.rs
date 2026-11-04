@@ -7,9 +7,12 @@
 //!   are distinct users; *minutes* are `dwell_ms / 60000`.
 //! - `positions.json` sets `opens` and, while no history covers that row, adds the
 //!   page and character deltas between two positions ([`AnalyticsTx::ingest_positions`]).
-//! - A history segment's new events (`seq` past the cursor) add pages, characters and
-//!   dwell; the first page events for a row replace what the positions estimated
-//!   there, since the history is the exact log ([`AnalyticsTx::ingest_history`]).
+//! - A history segment's new events (`seq` past the cursor) add dwell, and pages and
+//!   characters as the reader's stats engine credits them: a page once per pass of a
+//!   volume, to the first view that read it (`reading_pages` keeps what each pass has
+//!   credited, across uploads and devices). The first page events for a row replace
+//!   what the positions estimated there, since the history is the exact log
+//!   ([`AnalyticsTx::ingest_history`]).
 //! - `volume-data.json` replaces the user's `volume_progress` rows
 //!   ([`AnalyticsTx::replace_volume_progress`]), which the completion funnel reads.
 //!
@@ -47,6 +50,16 @@ pub(crate) const DDL: &[&str] = &[
         last_seq INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (username, device, segment)
     ) WITHOUT ROWID",
+    // The pages each pass of a user's volume has credited (design §6): `pass_t` 0 is
+    // the reading before any restart, else the restart's time; `pages` is a bitmap (bit
+    // `p % 8` of byte `p / 8` for page `p`), at most `PASS_MAX_PAGES / 8` bytes.
+    // `last_ms`: the newest view or restart it saw (the upkeep prunes by it).
+    "CREATE TABLE IF NOT EXISTS reading_pages (
+        username TEXT NOT NULL, volume_uuid TEXT NOT NULL, pass_t INTEGER NOT NULL,
+        pages BLOB NOT NULL DEFAULT x'', last_ms INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (username, volume_uuid, pass_t)
+    ) WITHOUT ROWID",
+    "CREATE INDEX IF NOT EXISTS idx_reading_pages_last ON reading_pages (last_ms)",
     "CREATE TABLE IF NOT EXISTS volume_progress (
         username TEXT NOT NULL, volume_uuid TEXT NOT NULL, series_uuid TEXT,
         series_key TEXT NOT NULL DEFAULT '', series_title TEXT, volume_title TEXT,
@@ -79,6 +92,29 @@ pub const POSITIONS_KEEP_MS: i64 = 35 * 86_400_000;
 pub const DWELL_CAP_MS: i64 = 15 * 60 * 1000;
 /// Devices kept per account (the reader's ids come from files the account writes).
 pub const DEVICES_PER_USER: i64 = 64;
+/// A page view faster than this many characters a minute is a skip (the reader's
+/// `SKIP_CPM`): its time counts, it credits no page.
+pub const SKIP_CPM: f64 = 1500.0;
+/// Pages a pass can credit: page numbers `0..PASS_MAX_PAGES` (a 1 KiB bitmap); a view
+/// of a page past it credits nothing for that page.
+pub const PASS_MAX_PAGES: i64 = 8192;
+/// Passes kept per (user, volume): a restart past this forgets the oldest pass (a view
+/// older than every pass kept then starts a pass of its own again, its pages credited
+/// anew).
+pub const PASSES_PER_VOLUME: usize = 16;
+/// `reading_pages` rows that saw no view or restart for this long are pruned by the
+/// hourly upkeep (a page of so old a pass, read again, counts again).
+pub const PASS_KEEP_DAYS: i64 = 400;
+
+/// Is a view of `chars` characters on screen for `dwell_ms` a skip (the reader's
+/// `prepareVolume`: faster than [`SKIP_CPM`], or no time at all for some text)? An
+/// unknown dwell never is.
+pub fn is_skip(chars: f64, dwell_ms: Option<f64>) -> bool {
+    match dwell_ms {
+        Some(d) if chars > 0.0 => d <= 0.0 || chars / d * 60_000.0 > SKIP_CPM,
+        _ => false,
+    }
+}
 
 const MS_PER_DAY: i64 = 86_400_000;
 
@@ -118,19 +154,24 @@ pub struct PositionsOutcome {
 
 /// What a decoded history event adds (bunko-server's codec maps the reader's kinds).
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum HistoryKind {
-    /// A page view: `pages` = `last - first + 1`, `chars` = `sum(page_chars)`.
+pub enum HistoryKind<'a> {
+    /// A page view: pages `first_page..first_page + page_chars.len()` on screen, each
+    /// with its characters.
     Page {
-        pages: i64,
-        chars: i64,
+        first_page: i64,
+        page_chars: &'a [f64],
         dwell_ms: Option<i64>,
+        /// A skip ([`is_skip`]): its time counts, it credits no page.
+        skip: bool,
     },
     /// A manual stat edit.
     Adjust {
         time_delta_ms: i64,
         chars_delta: i64,
     },
-    /// restart, forget, position, resolve: nothing to add.
+    /// A new pass of the volume: its pages can be read again.
+    Restart,
+    /// forget, position, resolve: nothing to add.
     Other,
 }
 
@@ -143,7 +184,7 @@ pub struct HistoryEvent<'a> {
     pub seq: i64,
     pub t_ms: i64,
     pub volume_uuid: &'a str,
-    pub kind: HistoryKind,
+    pub kind: HistoryKind<'a>,
 }
 
 /// What one history segment did.
@@ -157,6 +198,10 @@ pub struct HistoryOutcome {
     pub rows: u64,
     /// Adjust-only days with no read to adjust.
     pub adjust_skipped: u64,
+    /// Pages credited (each page once per pass).
+    pub pages: u64,
+    /// Page views that were skips.
+    pub skips: u64,
 }
 
 /// One `volume-data.json` record, as the reader wrote it.
@@ -213,6 +258,99 @@ struct DayAgg {
     adjust_chars: i64,
 }
 
+/// One pass of a volume (`reading_pages`): the pages it has credited.
+struct Pass {
+    t: i64,
+    bits: Vec<u8>,
+    last_ms: i64,
+    dirty: bool,
+}
+
+impl Pass {
+    fn new(t: i64, last_ms: i64) -> Pass {
+        Pass {
+            t,
+            bits: Vec::new(),
+            last_ms,
+            dirty: true,
+        }
+    }
+
+    /// Credit the pages of a view at `t_ms` this pass has not credited yet: how many,
+    /// and their characters.
+    fn credit(&mut self, first_page: i64, page_chars: &[f64], t_ms: i64) -> (i64, f64) {
+        let (mut pages, mut chars) = (0i64, 0f64);
+        for (i, c) in page_chars.iter().enumerate() {
+            let Some(page) = i64::try_from(i)
+                .ok()
+                .and_then(|i| first_page.checked_add(i))
+            else {
+                break;
+            };
+            if !(0..PASS_MAX_PAGES).contains(&page) {
+                continue;
+            }
+            let (byte, bit) = ((page / 8) as usize, 1u8 << (page % 8));
+            if self.bits.len() <= byte {
+                self.bits.resize(byte + 1, 0);
+            }
+            if self.bits[byte] & bit != 0 {
+                continue;
+            }
+            self.bits[byte] |= bit;
+            pages += 1;
+            if c.is_finite() && *c > 0.0 {
+                chars += c;
+            }
+        }
+        if pages > 0 || t_ms > self.last_ms {
+            self.dirty = true;
+        }
+        self.last_ms = self.last_ms.max(t_ms);
+        (pages, chars)
+    }
+}
+
+/// The passes of one (user, volume), oldest first, as stored and as this ingest
+/// changed them.
+#[derive(Default)]
+struct Passes {
+    list: Vec<Pass>,
+    /// Passes forgotten (past [`PASSES_PER_VOLUME`]): their rows go.
+    dropped: Vec<i64>,
+}
+
+impl Passes {
+    /// The pass a view at `t_ms` belongs to: the latest one started by then (the one
+    /// before any restart when none was).
+    fn at(&mut self, t_ms: i64) -> &mut Pass {
+        let i = match self.list.iter().rposition(|p| p.t <= t_ms) {
+            Some(i) => i,
+            None => {
+                self.list.insert(0, Pass::new(0, t_ms));
+                0
+            }
+        };
+        &mut self.list[i]
+    }
+
+    /// A restart at `t_ms`: a new pass from then on.
+    fn restart(&mut self, t_ms: i64) {
+        match self.list.binary_search_by_key(&t_ms, |p| p.t) {
+            Ok(i) => {
+                let p = &mut self.list[i];
+                p.dirty |= t_ms > p.last_ms;
+                p.last_ms = p.last_ms.max(t_ms);
+            }
+            Err(i) => self.list.insert(i, Pass::new(t_ms, t_ms)),
+        }
+        while self.list.len() > PASSES_PER_VOLUME {
+            let old = self.list.remove(0);
+            self.dropped.push(old.t);
+        }
+    }
+}
+
 /// The counters of a `reading_daily` write.
 struct DayCounts {
     opens: i64,
@@ -223,6 +361,53 @@ struct DayCounts {
 }
 
 impl AnalyticsTx<'_> {
+    /// The stored passes of `username`'s `uuid`.
+    fn load_passes(&self, username: &str, uuid: &str) -> Result<Passes> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT pass_t, pages, last_ms FROM reading_pages \
+             WHERE username = ?1 AND volume_uuid = ?2 ORDER BY pass_t",
+        )?;
+        let list = stmt
+            .query_map(params![username, uuid], |r| {
+                let mut bits: Vec<u8> = r.get(1)?;
+                bits.truncate((PASS_MAX_PAGES / 8) as usize);
+                Ok(Pass {
+                    t: r.get(0)?,
+                    bits,
+                    last_ms: r.get(2)?,
+                    dirty: false,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(Passes {
+            list,
+            dropped: Vec::new(),
+        })
+    }
+
+    /// Write back what an ingest changed in `uuid`'s passes.
+    fn store_passes(&self, username: &str, uuid: &str, passes: &Passes) -> Result<()> {
+        for t in &passes.dropped {
+            self.conn
+                .prepare_cached(
+                    "DELETE FROM reading_pages \
+                     WHERE username = ?1 AND volume_uuid = ?2 AND pass_t = ?3",
+                )?
+                .execute(params![username, uuid, t])?;
+        }
+        for p in passes.list.iter().filter(|p| p.dirty) {
+            self.conn
+                .prepare_cached(
+                    "INSERT INTO reading_pages (username, volume_uuid, pass_t, pages, last_ms) \
+                     VALUES (?1, ?2, ?3, ?4, ?5) \
+                     ON CONFLICT (username, volume_uuid, pass_t) DO UPDATE SET \
+                     pages = excluded.pages, last_ms = MAX(last_ms, excluded.last_ms)",
+                )?
+                .execute(params![username, uuid, p.t, p.bits, p.last_ms])?;
+        }
+        Ok(())
+    }
+
     fn day_row(&self, day: i64, username: &str, uuid: &str) -> Result<Option<DayRow>> {
         Ok(self
             .conn
@@ -416,9 +601,15 @@ impl AnalyticsTx<'_> {
     }
 
     /// Add one segment's events past each cursor (`history_cursor` per (user, device,
-    /// segment)), per `(day(t), volume)`. A day's first page events replace what the
-    /// positions estimated for that row (the history is the exact log); adjust deltas
-    /// apply to a row that holds a read (clamped at zero), never make one.
+    /// segment)), per `(day(t), volume)`, as the reader's stats engine counts them: a
+    /// view's dwell (at most [`DWELL_CAP_MS`]) always; its pages and their characters
+    /// only for the pages the view's pass of the volume has not credited yet, and none
+    /// for a skip ([`is_skip`]); a restart starts a new pass. The passes are kept in
+    /// `reading_pages`, so a page is credited once whichever upload or device brings its
+    /// views, on the day of the view that credited it. A day's first page events
+    /// replace what the positions estimated for that row (the history is the exact
+    /// log); adjust deltas apply to a row that holds a read (clamped at zero), never
+    /// make one.
     pub fn ingest_history(
         &self,
         username: &str,
@@ -429,7 +620,7 @@ impl AnalyticsTx<'_> {
         let mut out = HistoryOutcome::default();
         // device → (stored last_seq, highest seq ingested now)
         let mut cursors: HashMap<&str, (i64, i64)> = HashMap::new();
-        let mut days: BTreeMap<(i64, &str), DayAgg> = BTreeMap::new();
+        let mut fresh: Vec<&HistoryEvent<'_>> = Vec::new();
         for e in events {
             let cursor = match cursors.get_mut(e.cursor_device) {
                 Some(c) => c,
@@ -452,29 +643,57 @@ impl AnalyticsTx<'_> {
             }
             cursor.1 = cursor.1.max(e.seq);
             out.new_events += 1;
-            let agg = days.entry((day_of_ms(e.t_ms), e.volume_uuid)).or_default();
+            fresh.push(e);
+        }
+        // In the reader's order (time, then device, then seq): a restart starts the
+        // pass of the views after it, and the first view of a page credits it.
+        fresh.sort_by(|a, b| {
+            (a.t_ms, a.cursor_device, a.seq).cmp(&(b.t_ms, b.cursor_device, b.seq))
+        });
+        let mut passes: HashMap<&str, Passes> = HashMap::new();
+        let mut days: BTreeMap<(i64, &str), DayAgg> = BTreeMap::new();
+        for e in fresh {
+            let volume = match passes.entry(e.volume_uuid) {
+                std::collections::hash_map::Entry::Occupied(o) => o.into_mut(),
+                std::collections::hash_map::Entry::Vacant(v) => {
+                    v.insert(self.load_passes(username, e.volume_uuid)?)
+                }
+            };
             match e.kind {
                 HistoryKind::Page {
-                    pages,
-                    chars,
+                    first_page,
+                    page_chars,
                     dwell_ms,
+                    skip,
                 } => {
+                    let agg = days.entry((day_of_ms(e.t_ms), e.volume_uuid)).or_default();
                     agg.page_events = true;
-                    agg.pages = agg.pages.saturating_add(pages.max(0));
-                    agg.chars = agg.chars.saturating_add(chars.max(0));
                     if let Some(d) = dwell_ms.filter(|d| *d >= 0) {
                         agg.dwell_ms = agg.dwell_ms.saturating_add(d.min(DWELL_CAP_MS));
                     }
+                    if skip {
+                        out.skips += 1;
+                        continue;
+                    }
+                    let (pages, chars) = volume.at(e.t_ms).credit(first_page, page_chars, e.t_ms);
+                    agg.pages = agg.pages.saturating_add(pages);
+                    agg.chars = agg.chars.saturating_add(chars.round() as i64);
+                    out.pages += uint(pages);
                 }
                 HistoryKind::Adjust {
                     time_delta_ms,
                     chars_delta,
                 } => {
+                    let agg = days.entry((day_of_ms(e.t_ms), e.volume_uuid)).or_default();
                     agg.adjust_dwell_ms = agg.adjust_dwell_ms.saturating_add(time_delta_ms);
                     agg.adjust_chars = agg.adjust_chars.saturating_add(chars_delta);
                 }
+                HistoryKind::Restart => volume.restart(e.t_ms),
                 HistoryKind::Other => {}
             }
+        }
+        for (uuid, p) in &passes {
+            self.store_passes(username, uuid, p)?;
         }
         for ((day, uuid), agg) in &days {
             if !agg.page_events && agg.adjust_dwell_ms == 0 && agg.adjust_chars == 0 {
@@ -1278,17 +1497,46 @@ mod tests {
         assert_eq!(left, 0);
     }
 
-    fn page(seq: i64, t: i64, pages: i64, chars: i64, dwell: Option<i64>) -> HistoryEvent<'static> {
+    fn page(
+        seq: i64,
+        t: i64,
+        first_page: i64,
+        page_chars: &'static [f64],
+        dwell: Option<i64>,
+    ) -> HistoryEvent<'static> {
         HistoryEvent {
             cursor_device: "dev-a",
             seq,
             t_ms: t,
             volume_uuid: "u1",
             kind: HistoryKind::Page {
-                pages,
-                chars,
+                first_page,
+                page_chars,
                 dwell_ms: dwell,
+                skip: false,
             },
+        }
+    }
+
+    fn on(device: &'static str, mut e: HistoryEvent<'static>) -> HistoryEvent<'static> {
+        e.cursor_device = device;
+        e
+    }
+
+    fn skip(mut e: HistoryEvent<'static>) -> HistoryEvent<'static> {
+        if let HistoryKind::Page { skip, .. } = &mut e.kind {
+            *skip = true;
+        }
+        e
+    }
+
+    fn restart(seq: i64, t: i64) -> HistoryEvent<'static> {
+        HistoryEvent {
+            cursor_device: "dev-a",
+            seq,
+            t_ms: t,
+            volume_uuid: "u1",
+            kind: HistoryKind::Restart,
         }
     }
 
@@ -1322,9 +1570,9 @@ mod tests {
             .unwrap();
         assert_eq!(rows(&db)[0].4, 6, "the positions' estimate: 6 pages");
         let events = [
-            page(1, t, 2, 120, Some(41_000)),
-            page(2, t + 41_000, 1, 88, None),
-            page(3, t + 60_000, 1, 50, Some(3_600_000)),
+            page(1, t, 3, &[120.0, 0.0], Some(41_000)),
+            page(2, t + 41_000, 5, &[88.0], None),
+            page(3, t + 60_000, 6, &[50.0], Some(3_600_000)),
             adjust(4, t + 70_000, "u1", -60_000, -10),
             adjust(5, t + 80_000, "u2", 60_000, 0),
         ];
@@ -1355,8 +1603,8 @@ mod tests {
         assert_eq!(rows(&db)[0].4, 4);
         // More events in the same month: only the new ones.
         let more = [
-            page(4, t + 200_000, 3, 30, Some(1000)),
-            page(6, t + 300_000, 1, 0, Some(-1)),
+            page(4, t + 200_000, 7, &[10.0, 10.0, 10.0], Some(30_000)),
+            page(6, t + 300_000, 7, &[0.0], Some(-1)),
         ];
         let o = db
             .write(|tx| tx.ingest_history("alice", "2027-01", &more, &k))
@@ -1374,6 +1622,115 @@ mod tests {
             .unwrap();
         let r = rows(&db);
         assert_eq!((r[0].5, r[0].6), (0, 0));
+    }
+
+    /// `(day, pages, chars, dwell_ms)` of every read.
+    fn days(db: &AnalyticsDb) -> Vec<(i64, i64, i64, i64)> {
+        rows(db).iter().map(|r| (r.0, r.4, r.5, r.6)).collect()
+    }
+
+    fn pass_rows(db: &AnalyticsDb) -> i64 {
+        db.read(|c| Ok(c.query_row("SELECT COUNT(*) FROM reading_pages", [], |r| r.get(0))?))
+            .unwrap()
+    }
+
+    #[test]
+    fn a_page_is_credited_once_per_pass_across_uploads_and_devices() {
+        let (_d, db) = temp_db();
+        let k = known("u1", "Kingdom");
+        let day = (NOW - 3 * 3_600_000) / DAY;
+        let t = day * DAY + 3_600_000;
+        // Two-page spreads turned a page at a time, then a step back: pages 1-4 once.
+        let first = [
+            page(1, t, 1, &[8.0], Some(5_000)),
+            page(2, t + 5_000, 2, &[8.0, 8.0], Some(5_000)),
+            page(3, t + 10_000, 3, &[8.0, 8.0], Some(5_000)),
+            page(4, t + 15_000, 2, &[8.0], Some(5_000)),
+            // Flicked through (a skip): its time counts, pages 5 and 6 are not read.
+            skip(page(5, t + 20_000, 5, &[500.0, 500.0], Some(1_000))),
+        ];
+        let o = db
+            .write(|tx| tx.ingest_history("alice", "2027-01", &first, &k))
+            .unwrap();
+        assert_eq!((o.pages, o.skips), (4, 1));
+        assert_eq!(days(&db), [(day, 4, 32, 21_000)]);
+        // Another device of the same user, its own upload: page 4 again (credited
+        // already), page 5 now read.
+        let other = [
+            on("dev-b", page(1, t + 30_000, 4, &[8.0, 9.0], Some(5_000))),
+            on("dev-b", page(2, t + 35_000, 3, &[8.0], Some(5_000))),
+        ];
+        let o = db
+            .write(|tx| tx.ingest_history("alice", "2027-01", &other, &k))
+            .unwrap();
+        assert_eq!(o.pages, 1);
+        assert_eq!(days(&db), [(day, 5, 41, 31_000)]);
+        // The next day: the new page is that day's; the old one is credited already.
+        let next = [page(6, t + DAY, 5, &[9.0, 7.0], Some(5_000))];
+        db.write(|tx| tx.ingest_history("alice", "2027-01", &next, &k))
+            .unwrap();
+        assert_eq!(days(&db), [(day, 5, 41, 31_000), (day + 1, 1, 7, 5_000)]);
+        // A restart starts a new pass: page 1 counts again after it, not before (a view
+        // from before it that arrives later is the old pass's).
+        let again = [
+            restart(7, t + DAY + 10_000),
+            page(8, t + DAY + 20_000, 1, &[8.0], Some(5_000)),
+        ];
+        db.write(|tx| tx.ingest_history("alice", "2027-01", &again, &k))
+            .unwrap();
+        let late = [on(
+            "dev-b",
+            page(3, t + DAY + 5_000, 1, &[8.0, 8.0], Some(5_000)),
+        )];
+        db.write(|tx| tx.ingest_history("alice", "2027-01", &late, &k))
+            .unwrap();
+        assert_eq!(days(&db), [(day, 5, 41, 31_000), (day + 1, 2, 15, 15_000)]);
+        assert_eq!(pass_rows(&db), 2);
+        // Page numbers outside the bitmap credit nothing (and grow nothing).
+        let odd = [
+            page(9, t + DAY + 30_000, PASS_MAX_PAGES, &[5.0], Some(5_000)),
+            page(10, t + DAY + 35_000, -3, &[5.0, 5.0], Some(5_000)),
+        ];
+        let o = db
+            .write(|tx| tx.ingest_history("alice", "2027-01", &odd, &k))
+            .unwrap();
+        assert_eq!(o.pages, 0);
+        let longest: i64 = db
+            .read(|c| {
+                Ok(
+                    c.query_row("SELECT MAX(LENGTH(pages)) FROM reading_pages", [], |r| {
+                        r.get(0)
+                    })?,
+                )
+            })
+            .unwrap();
+        assert_eq!(longest, 1, "pages 1-6 fit in one byte");
+        // Restarts past the cap forget the oldest passes.
+        let many: Vec<HistoryEvent<'static>> = (0..40)
+            .map(|i| restart(100 + i, t + DAY + 60_000 + i))
+            .collect();
+        db.write(|tx| tx.ingest_history("alice", "2027-01", &many, &k))
+            .unwrap();
+        assert_eq!(pass_rows(&db), PASSES_PER_VOLUME as i64);
+        // The upkeep lets passes go once nothing touched them for PASS_KEEP_DAYS.
+        let now_s = (t + DAY) / 1000;
+        db.maintain(now_s + (PASS_KEEP_DAYS - 1) * 86_400, &Default::default())
+            .unwrap();
+        assert_eq!(pass_rows(&db), PASSES_PER_VOLUME as i64);
+        db.maintain(now_s + (PASS_KEEP_DAYS + 1) * 86_400, &Default::default())
+            .unwrap();
+        assert_eq!(pass_rows(&db), 0);
+    }
+
+    #[test]
+    fn skips_follow_the_readers_speed_rule() {
+        // 1500 characters a minute is the line; no time for some text is a skip; no
+        // text, or an unknown dwell, never is.
+        assert!(!is_skip(25.0, Some(1_000.0)));
+        assert!(is_skip(26.0, Some(1_000.0)));
+        assert!(is_skip(10.0, Some(0.0)));
+        assert!(!is_skip(0.0, Some(0.0)));
+        assert!(!is_skip(500.0, None));
     }
 
     #[test]
