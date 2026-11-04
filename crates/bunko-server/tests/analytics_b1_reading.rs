@@ -42,6 +42,9 @@ const FIXTURE_2026_10: &[u8] =
     include_bytes!("../src/analytics/reading/testdata/device-a-2026-10.events");
 const FIXTURE_LEGACY: &[u8] =
     include_bytes!("../src/analytics/reading/testdata/device-a-legacy.events");
+/// Another converting device's `legacy.events`: the same converted page events.
+const FIXTURE_LEGACY_B: &[u8] =
+    include_bytes!("../src/analytics/reading/testdata/device-b-legacy.events");
 
 /// `(user, uuid, opens, pages, chars, dwell_ms, sources, series_key)`.
 type Read = (String, String, i64, i64, i64, i64, i64, String);
@@ -525,6 +528,9 @@ async fn reader_sync_files_over_webdav_become_reads_devices_and_progress() {
     assert_eq!(row["volumes_completed"], 1);
     assert_eq!(row["pages"], 3);
     assert!(row["last_seen"].as_i64().unwrap() > 0);
+    // The count is every account of the range, not the listed rows.
+    assert_eq!(u["accounts"], u["rows"].as_array().unwrap().len());
+    assert_eq!(u["rows_limit"], 200);
 
     let f = env
         .admin("/_admin/api/analytics/funnel?series=the%20kingdom")
@@ -880,6 +886,49 @@ async fn the_readers_own_segments_and_unknown_formats() {
     );
     env.settle().await;
     assert_eq!(rows(), expected);
+    // A second converting device uploads the same legacy events on its own path:
+    // read (its header names its own device), and counted once.
+    let segments = env.services.analytics.reading().stats().segments;
+    assert!(
+        env.reader_put("reader", "history/device-b/legacy.events", FIXTURE_LEGACY_B)
+            .await
+            .is_success()
+    );
+    env.settle().await;
+    let stats = env.services.analytics.reading().stats();
+    assert_eq!(stats.segments, segments + 1, "{stats:?}");
+    assert_eq!(stats.malformed, 1, "{stats:?}");
+    assert_eq!(rows(), expected);
+    assert_eq!(
+        env.int("SELECT COUNT(*) FROM history_cursor WHERE segment='legacy'"),
+        2
+    );
+}
+
+/// More accounts than the users view lists: `accounts` still counts them all, and the
+/// rows are the ones with the most traffic.
+#[tokio::test]
+async fn the_users_view_counts_accounts_past_its_row_cap() {
+    let env = Env::new();
+    let today = now_ms().div_euclid(86_400_000);
+    {
+        let c = env.sql();
+        for i in 0..230 {
+            c.execute(
+                "INSERT INTO principal_daily (day, principal, category, requests, bytes_out) \
+                 VALUES (?1, ?2, 'volume', 1, ?3)",
+                rusqlite::params![today, format!("u:user{i:03}"), 1000 + i],
+            )
+            .unwrap();
+        }
+    }
+    let u = env.admin("/_admin/api/analytics/users?range=7d").await;
+    let rows = u["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 200);
+    assert_eq!(u["rows_limit"], 200);
+    assert!(u["accounts"].as_u64().unwrap() >= 230, "{}", u["accounts"]);
+    assert_eq!(rows[0]["username"], "user229");
+    assert!(rows.iter().all(|r| r["username"] != "user000"));
 }
 
 /// The worker itself, started as the server starts it: a write is read once its

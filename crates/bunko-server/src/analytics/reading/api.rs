@@ -196,6 +196,10 @@ pub async fn users(a: &Analytics, q: &ApiQuery) -> Response {
             "wau": db.active_accounts(today - 6, today)?,
             "mau": db.active_accounts(today - 29, today)?,
             "visitors": visitors,
+            // Every account active in the range: `rows` lists at most `rows_limit` of
+            // them (the most bytes first), so the UI counts from this.
+            "accounts": db.active_accounts(d0, d1)?,
+            "rows_limit": ACCOUNTS,
             "rows": rows,
         }))
     })

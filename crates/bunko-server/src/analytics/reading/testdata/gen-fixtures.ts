@@ -56,6 +56,10 @@ async function main() {
   const l = await encodeSegment(DEV, 'legacy', legacy, { legacy: true });
   writeFileSync(`${out}/device-a-legacy.events`, l);
   writeFileSync(`${out}/device-a-legacy.json`, JSON.stringify(await decodeSegment(l), null, 1) + '\n');
+  // A second converting device uploads the same legacy page events on its own path.
+  const b = await encodeSegment('device-b', 'legacy', legacy.slice(1), { legacy: true });
+  writeFileSync(`${out}/device-b-legacy.events`, b);
+  writeFileSync(`${out}/device-b-legacy.json`, JSON.stringify(await decodeSegment(b), null, 1) + '\n');
   const empty = await encodeSegment(DEV, '2026-11', []);
   writeFileSync(`${out}/device-a-2026-11-empty.events`, empty);
   writeFileSync(`${out}/device-a-2026-11-empty.json`, JSON.stringify(await decodeSegment(empty), null, 1) + '\n');

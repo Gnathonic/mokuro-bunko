@@ -296,35 +296,44 @@ impl<'de> Visitor<'de> for EntriesSeed {
         f.write_str("the positions")
     }
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
-        let mut out = Vec::new();
+        // A volume listed twice keeps only its LAST value, as `JSON.parse` does (an
+        // invalid last copy drops the volume, even after a valid one), in the place
+        // of its first: each volume is diffed once against what was stored.
+        let mut slots: Vec<Option<PositionEntry>> = Vec::new();
+        let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
         while let Some(volume) = map.next_key::<String>()? {
             let cells = map.next_value_seed(TupleSeed)?;
-            if out.len() >= MAX_POSITIONS
-                || volume.is_empty()
-                || volume.chars().count() > MAX_ID_CHARS
-            {
+            if volume.is_empty() || volume.chars().count() > MAX_ID_CHARS {
                 continue;
             }
-            let Some([t, page, chars, device]) = cells else {
-                continue;
-            };
-            let (Some(t), Some(page), Some(chars), Val::Str(device)) =
-                (count(&t), count(&page), count(&chars), device)
-            else {
-                continue;
-            };
-            if device.is_empty() || t > self.now_ms.saturating_add(FUTURE_TOLERANCE_MS) {
-                continue;
+            let entry = (|| {
+                let [t, page, chars, device] = cells?;
+                let (Some(t), Some(page), Some(chars), Val::Str(device)) =
+                    (count(&t), count(&page), count(&chars), device)
+                else {
+                    return None;
+                };
+                if device.is_empty() || t > self.now_ms.saturating_add(FUTURE_TOLERANCE_MS) {
+                    return None;
+                }
+                Some(PositionEntry {
+                    volume_uuid: volume.clone(),
+                    t_ms: t,
+                    page,
+                    chars,
+                    device: cut(&device),
+                })
+            })();
+            match index.get(&volume) {
+                Some(&i) => slots[i] = entry,
+                None if slots.len() < MAX_POSITIONS => {
+                    index.insert(volume, slots.len());
+                    slots.push(entry);
+                }
+                None => {}
             }
-            out.push(PositionEntry {
-                volume_uuid: volume,
-                t_ms: t,
-                page,
-                chars,
-                device: cut(&device),
-            });
         }
-        Ok(Some(out))
+        Ok(Some(slots.into_iter().flatten().collect()))
     }
     fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
         while seq.next_element::<IgnoredAny>()?.is_some() {}
@@ -910,6 +919,29 @@ mod tests {
             parse_positions(br#"{"version":1,"positions":[]}"#, NOW),
             Err(FileError::Malformed(_))
         ));
+    }
+
+    /// `JSON.parse` keeps a repeated key's last value, so the reader sees one entry
+    /// per volume: the last copy, even when it is the invalid one.
+    #[test]
+    fn a_repeated_volume_keeps_its_last_value_only() {
+        let text = format!(
+            r#"{{"version":1,"positions":{{
+              "u1":[{t},3,300,"dev-a"],
+              "u2":[{t},4,400,"dev-a"],
+              "u1":[{t},9,900,"dev-b"],
+              "u2":[{t},5,500,""],
+              "u3":"junk",
+              "u3":[{t},7,700,"dev-c"],
+              "u1":[{t},10,1000,"dev-b"]}}}}"#,
+            t = NOW - 1000
+        );
+        let e = parse_positions(text.as_bytes(), NOW).unwrap();
+        let got: Vec<(&str, i64, i64, &str)> = e
+            .iter()
+            .map(|e| (e.volume_uuid.as_str(), e.page, e.chars, e.device.as_str()))
+            .collect();
+        assert_eq!(got, [("u1", 10, 1000, "dev-b"), ("u3", 7, 700, "dev-c")]);
     }
 
     #[test]
