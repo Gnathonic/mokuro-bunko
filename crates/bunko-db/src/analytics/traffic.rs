@@ -44,6 +44,14 @@ pub(crate) const DDL: &[&str] = &[
         category TEXT NOT NULL, status INTEGER NOT NULL, count INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (hour, protocol, method, category, status)
     ) WITHOUT ROWID",
+    "CREATE TABLE IF NOT EXISTS errors_daily (
+        day INTEGER NOT NULL, protocol TEXT NOT NULL, method TEXT NOT NULL,
+        category TEXT NOT NULL, status INTEGER NOT NULL, count INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (day, protocol, method, category, status)
+    ) WITHOUT ROWID",
+    "CREATE TABLE IF NOT EXISTS auth_failures_daily (
+        day INTEGER PRIMARY KEY, count INTEGER NOT NULL DEFAULT 0
+    )",
     "CREATE TABLE IF NOT EXISTS principal_daily (
         day INTEGER NOT NULL, principal TEXT NOT NULL, category TEXT NOT NULL,
         requests INTEGER NOT NULL DEFAULT 0, bytes_out INTEGER NOT NULL DEFAULT 0,
@@ -302,6 +310,16 @@ pub struct DownloadRow<'a> {
     /// The whole file (`Served.size`).
     pub size: u64,
 }
+
+/// The anonymous principal that stands for every new anonymous visitor of a day past
+/// [`ANON_PER_DAY`]: their traffic still counts, but no longer one row each.
+pub const ANON_OTHER: &str = "a:other";
+
+/// Most anonymous visitors a UTC day keeps rows of their own for (design §3). The
+/// daily tables are kept forever and anyone can make up new addresses; past this a
+/// day's newcomers fold into [`ANON_OTHER`], so a flood adds a bounded number of rows
+/// per day.
+pub const ANON_PER_DAY: u64 = 10_000;
 
 /// A download is complete once 95 % of the file was sent (over every request of the
 /// day: resumed downloads add up).
@@ -570,6 +588,31 @@ impl AnalyticsTx<'_> {
                 COMPLETED_FRACTION
             ])?;
         Ok(())
+    }
+
+    /// Distinct anonymous principals with rows on `day` (the flush's [`ANON_PER_DAY`]
+    /// check; a range over the `(day, principal, ...)` key).
+    pub fn anon_principals_on(&self, day: i64) -> Result<u64> {
+        Ok(uint(
+            self.conn
+                .prepare_cached(
+                    "SELECT COUNT(DISTINCT principal) FROM principal_daily \
+                     WHERE day = ?1 AND principal >= 'a:' AND principal < 'a;'",
+                )?
+                .query_row([day], |r| r.get(0))?,
+        ))
+    }
+
+    /// Does `principal` have a row on `day` already?
+    pub fn principal_known_on(&self, day: i64, principal: &str) -> Result<bool> {
+        Ok(self
+            .conn
+            .prepare_cached(
+                "SELECT 1 FROM principal_daily WHERE day = ?1 AND principal = ?2 LIMIT 1",
+            )?
+            .query_row(params![day, principal], |_| Ok(()))
+            .optional()?
+            .is_some())
     }
 
     pub fn add_uploads(&self, day: i64, username: &str, volumes: u64, bytes: u64) -> Result<()> {
@@ -857,16 +900,24 @@ impl AnalyticsDb {
         })
     }
 
-    /// Error counts in hours `from..=to`, most frequent first.
-    pub fn errors(&self, from_hour: i64, to_hour: i64, limit: usize) -> Result<Vec<ErrorAgg>> {
+    /// Error counts over `span`, most frequent first: the hourly rows, and past the
+    /// hourly retention the daily ones (kept forever).
+    pub fn errors(&self, span: &Span, limit: usize) -> Result<Vec<ErrorAgg>> {
         self.read(|c| {
-            let mut stmt = c.prepare_cached(
-                "SELECT status, protocol, method, category, SUM(count) AS n FROM errors_hourly \
-                 WHERE hour >= ?1 AND hour <= ?2 GROUP BY status, protocol, method, category \
-                 ORDER BY n DESC, status ASC LIMIT ?3",
-            )?;
+            let rolled = rolled_through(c)?;
+            let source = span_source(
+                span,
+                "errors_hourly",
+                "errors_daily",
+                "protocol, method, category, status, count",
+            );
+            let mut stmt = c.prepare_cached(&format!(
+                "SELECT status, protocol, method, category, SUM(count) AS n FROM ({source}) \
+                 GROUP BY status, protocol, method, category \
+                 ORDER BY n DESC, status ASC LIMIT ?4"
+            ))?;
             let rows = stmt
-                .query_map(params![from_hour, to_hour, limit as i64], |r| {
+                .query_map(params![span.from, span.to, rolled, limit as i64], |r| {
                     Ok(ErrorAgg {
                         status: r.get(0)?,
                         protocol: r.get(1)?,
@@ -880,20 +931,20 @@ impl AnalyticsDb {
         })
     }
 
-    /// Auth failures per bucket of `span` (only buckets that have any).
+    /// Auth failures per bucket of `span` (only buckets that have any): the hourly
+    /// rows, and past the IP retention the daily totals (no IP, no username; kept
+    /// forever).
     pub fn auth_failure_series(&self, span: &Span) -> Result<Vec<(i64, u64)>> {
-        let (h0, h1) = span.hours();
-        let div = match span.granularity {
-            Granularity::Hour => 1,
-            Granularity::Day => 24,
-        };
         self.read(|c| {
-            let mut stmt = c.prepare_cached(
-                "SELECT hour / ?3 AS b, SUM(count) FROM auth_failures \
-                 WHERE hour >= ?1 AND hour <= ?2 GROUP BY b ORDER BY b",
-            )?;
+            let rolled = rolled_through(c)?;
+            let source = span_source(span, "auth_failures", "auth_failures_daily", "count");
+            let mut stmt = c.prepare_cached(&format!(
+                "SELECT b, SUM(count) FROM ({source}) GROUP BY b ORDER BY b"
+            ))?;
             let rows = stmt
-                .query_map(params![h0, h1, div], |r| Ok((r.get(0)?, uint(r.get(1)?))))?
+                .query_map(params![span.from, span.to, rolled], |r| {
+                    Ok((r.get(0)?, uint(r.get(1)?)))
+                })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             Ok(rows)
         })
@@ -992,7 +1043,8 @@ impl AnalyticsDb {
     }
 
     /// Principals by bytes out over days `from..=to` (processors included), heaviest
-    /// first, with their per-category split and `last_seen`.
+    /// first, with their per-category split and `last_seen`. Two passes over the range
+    /// whatever `limit` is: the top principals, then every category row of theirs.
     pub fn principals(
         &self,
         from_day: i64,
@@ -1005,47 +1057,55 @@ impl AnalyticsDb {
                  FROM principal_daily WHERE day >= ?1 AND day <= ?2 \
                  GROUP BY principal ORDER BY b DESC, principal ASC LIMIT ?3",
             )?;
-            let tops = stmt
+            let mut out: Vec<PrincipalAgg> = stmt
                 .query_map(params![from_day, to_day, limit as i64], |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        PrincipalCounts {
+                    Ok(PrincipalAgg {
+                        principal: r.get(0)?,
+                        totals: PrincipalCounts {
                             requests: uint(r.get(1)?),
                             bytes_out: uint(r.get(2)?),
                             bytes_in: uint(r.get(3)?),
                         },
-                    ))
+                        by_category: Vec::new(),
+                        last_seen: None,
+                    })
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
-            let mut out = Vec::with_capacity(tops.len());
-            for (principal, totals) in tops {
-                let by_category = c
-                    .prepare_cached(
-                        "SELECT category, SUM(requests), SUM(bytes_out) AS b, SUM(bytes_in) \
-                         FROM principal_daily WHERE day >= ?1 AND day <= ?2 AND principal = ?3 \
-                         GROUP BY category ORDER BY b DESC, category ASC",
-                    )?
-                    .query_map(params![from_day, to_day, principal], |r| {
-                        Ok((
-                            r.get::<_, String>(0)?,
-                            PrincipalCounts {
-                                requests: uint(r.get(1)?),
-                                bytes_out: uint(r.get(2)?),
-                                bytes_in: uint(r.get(3)?),
-                            },
-                        ))
-                    })?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                let last_seen: Option<i64> = c
-                    .prepare_cached("SELECT last_seen FROM principal_seen WHERE principal = ?1")?
-                    .query_row([&principal], |r| r.get(0))
-                    .optional()?;
-                out.push(PrincipalAgg {
-                    principal,
-                    totals,
-                    by_category,
-                    last_seen,
+            let at: std::collections::HashMap<String, usize> = out
+                .iter()
+                .enumerate()
+                .map(|(i, p)| (p.principal.clone(), i))
+                .collect();
+            let mut split = c.prepare_cached(
+                "SELECT principal, category, SUM(requests), SUM(bytes_out) AS b, SUM(bytes_in) \
+                 FROM principal_daily WHERE day >= ?1 AND day <= ?2 AND principal IN \
+                 (SELECT principal FROM principal_daily WHERE day >= ?1 AND day <= ?2 \
+                  GROUP BY principal ORDER BY SUM(bytes_out) DESC, principal ASC LIMIT ?3) \
+                 GROUP BY principal, category",
+            )?;
+            let mut rows = split.query(params![from_day, to_day, limit as i64])?;
+            while let Some(r) = rows.next()? {
+                let principal: String = r.get(0)?;
+                if let Some(&i) = at.get(&principal) {
+                    out[i].by_category.push((
+                        r.get(1)?,
+                        PrincipalCounts {
+                            requests: uint(r.get(2)?),
+                            bytes_out: uint(r.get(3)?),
+                            bytes_in: uint(r.get(4)?),
+                        },
+                    ));
+                }
+            }
+            let mut seen =
+                c.prepare_cached("SELECT last_seen FROM principal_seen WHERE principal = ?1")?;
+            for p in &mut out {
+                p.by_category.sort_by(|a, b| {
+                    b.1.bytes_out
+                        .cmp(&a.1.bytes_out)
+                        .then_with(|| a.0.cmp(&b.0))
                 });
+                p.last_seen = seen.query_row([&p.principal], |r| r.get(0)).optional()?;
             }
             Ok(out)
         })
@@ -1115,12 +1175,13 @@ impl AnalyticsDb {
         })
     }
 
-    /// `(downloads, downloaders)` in days `from..=to`.
+    /// `(downloads, downloaders)` in days `from..=to`: completed downloads only (a
+    /// `Range: bytes=0-0` probe is no download).
     pub fn download_totals(&self, from_day: i64, to_day: i64) -> Result<(u64, u64)> {
         self.read(|c| {
             Ok(c.prepare_cached(
                 "SELECT COUNT(*), COUNT(DISTINCT principal) FROM volume_downloads \
-                 WHERE day >= ?1 AND day <= ?2",
+                 WHERE day >= ?1 AND day <= ?2 AND completed",
             )?
             .query_row(params![from_day, to_day], |r| {
                 Ok((uint(r.get(0)?), uint(r.get(1)?)))
@@ -1128,15 +1189,17 @@ impl AnalyticsDb {
         })
     }
 
-    /// Downloads per series in days `from..=to`, most downloaded first. The title is
-    /// the most recent spelling seen.
+    /// Downloads per series in days `from..=to`, most downloaded first: completed
+    /// downloads, their downloaders and distinct volumes; `bytes` is every byte sent,
+    /// partial ones included. The title is the most recent spelling seen.
     pub fn series_downloads(&self, from_day: i64, to_day: i64) -> Result<Vec<SeriesDownloads>> {
         self.read(|c| {
             let mut stmt = c.prepare_cached(
                 "SELECT series_key, \
                  (SELECT v2.series_title FROM volume_downloads v2 WHERE v2.series_key = v.series_key \
                   AND v2.day >= ?1 AND v2.day <= ?2 ORDER BY v2.day DESC LIMIT 1), \
-                 COUNT(*) AS n, COUNT(DISTINCT principal), SUM(bytes), COUNT(DISTINCT volume_key) \
+                 SUM(completed) AS n, COUNT(DISTINCT CASE WHEN completed THEN principal END), \
+                 SUM(bytes), COUNT(DISTINCT CASE WHEN completed THEN volume_key END) \
                  FROM volume_downloads v WHERE day >= ?1 AND day <= ?2 AND series_key != '' \
                  GROUP BY series_key ORDER BY n DESC, series_key ASC",
             )?;
@@ -1156,15 +1219,9 @@ impl AnalyticsDb {
         })
     }
 
-    /// Auth failures in hours `from..=to`.
-    pub fn auth_failure_total(&self, from_hour: i64, to_hour: i64) -> Result<u64> {
-        self.read(|c| {
-            Ok(uint(c
-                .prepare_cached(
-                    "SELECT COALESCE(SUM(count), 0) FROM auth_failures WHERE hour >= ?1 AND hour <= ?2",
-                )?
-                .query_row(params![from_hour, to_hour], |r| r.get(0))?))
-        })
+    /// Auth failures over `span` (see [`AnalyticsDb::auth_failure_series`]).
+    pub fn auth_failure_total(&self, span: &Span) -> Result<u64> {
+        Ok(self.auth_failure_series(span)?.iter().map(|(_, n)| n).sum())
     }
 }
 
@@ -1413,7 +1470,12 @@ mod tests {
             db.anon_ips_of("a:0123456789ab", 0, 5).unwrap(),
             ["203.0.113.9"]
         );
-        assert_eq!(db.auth_failure_total(0, 100).unwrap(), 4);
+        let hours = Span {
+            granularity: Granularity::Hour,
+            from: 0,
+            to: 100,
+        };
+        assert_eq!(db.auth_failure_total(&hours).unwrap(), 4);
         let top = db.auth_failure_top_ips(0, 100, 5).unwrap();
         assert_eq!(top[0].ip, "203.0.113.9");
         assert_eq!(top[0].count, 3);
@@ -1428,5 +1490,59 @@ mod tests {
             })
             .unwrap();
         assert_eq!(series, [(2, 4)]);
+    }
+
+    /// The heaviest principals with their per-category split: the cost does not grow
+    /// with how many are asked for (it used to be one scan of the range per principal).
+    #[test]
+    fn principals_split_by_category_in_one_pass() {
+        let (_d, db) = temp_db();
+        db.write(|tx| {
+            for day in 0..60i64 {
+                for p in 0..600u64 {
+                    let id = format!("u:p{p:03}");
+                    for (cat, bytes) in [("volume", p * 10), ("cover", p)] {
+                        tx.add_principal(
+                            day,
+                            &id,
+                            cat,
+                            &PrincipalCounts {
+                                requests: 1,
+                                bytes_out: bytes,
+                                bytes_in: 0,
+                            },
+                        )?;
+                    }
+                }
+            }
+            tx.see_principal("u:p599", 5, 50)
+        })
+        .unwrap();
+        let time = |limit: usize| {
+            let t = std::time::Instant::now();
+            let rows = db.principals(0, 59, limit).unwrap();
+            (t.elapsed(), rows)
+        };
+        time(5);
+        let (few, rows5) = time(5);
+        let (many, rows) = time(500);
+        assert_eq!(rows.len(), 500);
+        assert_eq!(rows5[..], rows[..5]);
+        let top = &rows[0];
+        assert_eq!(top.principal, "u:p599");
+        assert_eq!(top.totals.bytes_out, 60 * 599 * 11);
+        assert_eq!(top.last_seen, Some(50));
+        assert_eq!(
+            top.by_category
+                .iter()
+                .map(|(c, n)| (c.as_str(), n.bytes_out, n.requests))
+                .collect::<Vec<_>>(),
+            [("volume", 60 * 5990, 60), ("cover", 60 * 599, 60)]
+        );
+        assert!(rows[1].last_seen.is_none());
+        assert!(
+            many < few * 10 + std::time::Duration::from_millis(50),
+            "500 principals took {many:?}, 5 took {few:?}"
+        );
     }
 }

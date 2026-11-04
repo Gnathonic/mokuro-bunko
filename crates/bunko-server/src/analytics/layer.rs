@@ -119,7 +119,7 @@ pub async fn layer(State(a): State<Analytics>, mut req: Request, next: Next) -> 
         ident.and_then(|i| i.username.as_deref()),
         ident.map_or(bunko_core::Role::Anonymous, |i| i.role),
         &ip,
-        a.db().salt(),
+        &a.db().salt(),
     );
     let class = classify::classify(&Input {
         method,

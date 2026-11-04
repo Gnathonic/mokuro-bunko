@@ -5,9 +5,16 @@
 
 use super::Analytics;
 use super::collector::Window;
+use super::principal::PrincipalKind;
+use bunko_db::analytics::AnalyticsTx;
 use bunko_db::analytics::clients::ClientDims;
 use bunko_db::analytics::keys;
-use bunko_db::analytics::traffic::{DownloadRow, IpCounts, KindDims, SlowRequest, TrafficDims};
+use bunko_db::analytics::traffic::{
+    ANON_OTHER, DownloadRow, IpCounts, KindDims, SlowRequest, TrafficDims,
+};
+use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
@@ -18,14 +25,27 @@ pub const MAINTAIN_EVERY: Duration = Duration::from_secs(3600);
 pub(crate) async fn run(a: Analytics, stop: CancellationToken) {
     maintain(&a).await;
     let mut maintained = Instant::now();
+    let mut flushed = Instant::now();
     loop {
         let every = Duration::from_secs(u64::from(a.config().flush_seconds.max(1)));
         tokio::select! {
             _ = stop.cancelled() => return,
-            _ = tokio::time::sleep(every) => {}
+            _ = tokio::time::sleep_until((flushed + every).into()) => {}
+            // A new `flush_seconds` counts from the last flush, not from the next one.
+            _ = a.0.flush_wake.notified() => continue,
         }
+        flushed = Instant::now();
         if let Err(e) = a.flush_now().await {
-            tracing::warn!("[ANALYTICS] flush failed (this window is lost): {e}");
+            let damaged = e
+                .downcast_ref::<bunko_db::DbError>()
+                .is_some_and(bunko_db::DbError::is_corrupt);
+            if damaged {
+                tracing::error!(
+                    "[ANALYTICS] flush failed (this window is lost): {e}; the file is damaged and is moved aside at the next start"
+                );
+            } else {
+                tracing::warn!("[ANALYTICS] flush failed (this window is lost): {e}");
+            }
         }
         if maintained.elapsed() >= MAINTAIN_EVERY {
             maintain(&a).await;
@@ -45,6 +65,47 @@ async fn maintain(a: &Analytics) {
     }
 }
 
+/// The window's anonymous `(day, principal)` pairs that are new on a day which already
+/// has `cap` anonymous principals: they are written as [`ANON_OTHER`] (design §3), so
+/// made-up addresses cannot add rows without bound to the tables kept forever.
+fn anon_overflow(
+    tx: &AnalyticsTx<'_>,
+    w: &Window,
+    cap: u64,
+) -> bunko_db::Result<HashSet<(i64, Arc<str>)>> {
+    let mut pairs: Vec<(i64, Arc<str>)> = w
+        .principals
+        .keys()
+        .map(|(d, p, _)| (*d, p.clone()))
+        .chain(w.downloads.keys().map(|(d, p, _)| (*d, p.clone())))
+        .chain(
+            w.client_principals
+                .keys()
+                .map(|(d, _, _, p)| (*d, p.clone())),
+        )
+        .filter(|(_, p)| PrincipalKind::of(p) == PrincipalKind::Anon && &**p != ANON_OTHER)
+        .collect();
+    pairs.sort();
+    pairs.dedup();
+    let mut per_day: HashMap<i64, u64> = HashMap::new();
+    let mut over = HashSet::new();
+    for (day, p) in pairs {
+        if tx.principal_known_on(day, &p)? {
+            continue;
+        }
+        let n = match per_day.entry(day) {
+            Entry::Occupied(o) => o.into_mut(),
+            Entry::Vacant(v) => v.insert(tx.anon_principals_on(day)?),
+        };
+        if *n < cap {
+            *n += 1;
+        } else {
+            over.insert((day, p));
+        }
+    }
+    Ok(over)
+}
+
 /// Write one window (blocking). `now`: epoch seconds, for the crawl episodes.
 pub(crate) fn write_window(a: &Analytics, w: Window, now: i64) -> bunko_db::Result<()> {
     let dropped = w.dropped_total();
@@ -61,7 +122,37 @@ pub(crate) fn write_window(a: &Analytics, w: Window, now: i64) -> bunko_db::Resu
     // The crawl episodes ride this transaction; the detector applies what it wrote only
     // once it commits.
     let mut crawl = a.crawl().begin_flush(now);
-    let out = a.db().write(|tx| {
+    let cap = a.0.anon_per_day.load(std::sync::atomic::Ordering::Relaxed);
+    let out = a
+        .db()
+        .write(|tx| write_tx(tx, &w, dropped, cap, &mut crawl));
+    crawl.finish(out.is_ok());
+    out
+}
+
+fn write_tx(
+    tx: &AnalyticsTx<'_>,
+    w: &Window,
+    dropped: u64,
+    cap: u64,
+    crawl: &mut super::crawl::CrawlFlush<'_>,
+) -> bunko_db::Result<()> {
+    {
+        let over = anon_overflow(tx, w, cap)?;
+        if !over.is_empty() {
+            tracing::debug!(
+                n = over.len(),
+                "[ANALYTICS] anonymous visitors past the day's {cap} are counted as one"
+            );
+        }
+        let over_ids: HashSet<&Arc<str>> = over.iter().map(|(_, p)| p).collect();
+        let who = |day: i64, p: &Arc<str>| -> Arc<str> {
+            if !over_ids.is_empty() && over.contains(&(day, p.clone())) {
+                Arc::from(ANON_OTHER)
+            } else {
+                p.clone()
+            }
+        };
         for (k, c) in &w.traffic {
             let d = TrafficDims {
                 protocol: k.protocol,
@@ -89,13 +180,18 @@ pub(crate) fn write_window(a: &Analytics, w: Window, now: i64) -> bunko_db::Resu
             tx.add_errors(k.hour, &d, *status, *n)?;
         }
         for ((day, p, cat), c) in &w.principals {
-            tx.add_principal(*day, p, cat, c)?;
+            tx.add_principal(*day, &who(*day, p), cat, c)?;
         }
         for (p, (first, last)) in &w.seen {
-            tx.see_principal(p, *first, *last)?;
+            if !over_ids.contains(p) {
+                tx.see_principal(p, *first, *last)?;
+            }
         }
         for ((day, p, ip), n) in &w.anon_ips {
-            tx.add_anon_ip(*day, p, ip, *n)?;
+            // The address itself is in `ip_daily` (kept `ip_days`) all the same.
+            if !over_ids.contains(p) {
+                tx.add_anon_ip(*day, p, ip, *n)?;
+            }
         }
         for ((day, ip), agg) in &w.ips {
             let c = IpCounts {
@@ -103,7 +199,16 @@ pub(crate) fn write_window(a: &Analytics, w: Window, now: i64) -> bunko_db::Resu
                 bytes_out: agg.bytes_out,
                 errors: agg.errors,
                 auth_failures: agg.auth_failures,
-                principals: agg.principals.iter().map(|p| p.to_string()).collect(),
+                principals: {
+                    let mut ps: Vec<String> = Vec::with_capacity(agg.principals.len());
+                    for p in &agg.principals {
+                        let p = who(*day, p).to_string();
+                        if !ps.contains(&p) {
+                            ps.push(p);
+                        }
+                    }
+                    ps
+                },
                 user_agent: agg.user_agent.clone(),
                 country: agg.country.map(|c| c.as_str().to_string()),
             };
@@ -112,7 +217,7 @@ pub(crate) fn write_window(a: &Analytics, w: Window, now: i64) -> bunko_db::Resu
         for ((day, p, vk), d) in &w.downloads {
             tx.add_download(&DownloadRow {
                 day: *day,
-                principal: p,
+                principal: &who(*day, p),
                 volume_key: vk,
                 series_key: &d.series_key,
                 series_title: &d.series_title,
@@ -138,6 +243,7 @@ pub(crate) fn write_window(a: &Analytics, w: Window, now: i64) -> bunko_db::Resu
             tx.add_client(*day, &d, *requests, *bytes)?;
         }
         for (day, ci, protocol, p) in w.client_principals.keys() {
+            let p = &who(*day, p);
             tx.add_client_principal(*day, ci.app, p)?;
             let d = ClientDims {
                 app: ci.app,
@@ -166,8 +272,6 @@ pub(crate) fn write_window(a: &Analytics, w: Window, now: i64) -> bunko_db::Resu
                 i64::try_from(dropped).unwrap_or(i64::MAX),
             )?;
         }
-        crawl.write(tx)
-    });
-    crawl.finish(out.is_ok());
-    out
+    }
+    crawl.write(tx)
 }

@@ -52,6 +52,8 @@ pub const MAX_WAIT: Duration = Duration::from_secs(60);
 /// Files waiting for their debounce; a new one past this is dropped (counted; the next
 /// write of it makes up for it).
 pub const PENDING_MAX: usize = 4096;
+/// How long a shutdown waits for the files still waiting their debounce to be read.
+pub const STOP_BUDGET: Duration = Duration::from_secs(10);
 
 /// Largest file read back, per kind (bigger ones are skipped and counted).
 pub const MAX_POSITIONS_BYTES: u64 = 4 << 20;
@@ -134,6 +136,10 @@ pub struct Reading {
     work: tokio::sync::Mutex<()>,
     resolver: resolve::Resolver,
     counters: Counters,
+    /// [`DEBOUNCE`] in milliseconds (tests shorten it).
+    debounce_ms: AtomicU64,
+    /// The worker, for [`Reading::stopped`].
+    worker: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 /// What reading one file did.
@@ -165,12 +171,35 @@ impl Reading {
             work: tokio::sync::Mutex::new(()),
             resolver: resolve::Resolver::new(),
             counters: Counters::default(),
+            debounce_ms: AtomicU64::new(DEBOUNCE.as_millis() as u64),
+            worker: Mutex::new(None),
         }
     }
 
+    /// Shorten the debounce (tests).
+    #[doc(hidden)]
+    pub fn set_debounce(&self, d: Duration) {
+        self.debounce_ms
+            .store(d.as_millis() as u64, Ordering::Relaxed);
+    }
+
+    /// Hold the worker off reading files while the guard lives (tests: a slow read).
+    #[doc(hidden)]
+    pub async fn hold_work(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.work.lock().await
+    }
+
+    fn debounce(&self) -> Duration {
+        Duration::from_millis(self.debounce_ms.load(Ordering::Relaxed))
+    }
+
     /// Queue a written per-user file for the worker (never blocks; a full queue drops
-    /// the event and counts it).
+    /// the event and counts it). Files the reading area never reads (profiles, goals)
+    /// take no slot.
     pub fn on_file_written(&self, ev: FileWritten) {
+        if !reads(&ev) {
+            return;
+        }
         match self.tx.try_send(ev) {
             Ok(()) => {
                 self.queued.fetch_add(1, Ordering::Relaxed);
@@ -226,7 +255,7 @@ impl Reading {
     /// Hold `ev` for its debounce. Files the reading area does not read (profiles,
     /// goals: their bytes are counted by the collector) are let go here.
     fn enqueue(&self, ev: FileWritten, now: Instant) {
-        if ev.target != DavTarget::Progress || files::kind_of(&ev.rel) == FileKind::Other {
+        if !reads(&ev) {
             return;
         }
         let mut pending = self.pending.lock();
@@ -234,7 +263,7 @@ impl Reading {
         match pending.entry((ev.username, ev.rel)) {
             std::collections::hash_map::Entry::Occupied(mut o) => {
                 let p = o.get_mut();
-                p.due = (now + DEBOUNCE).min(p.first + MAX_WAIT);
+                p.due = (now + self.debounce()).min(p.first + MAX_WAIT);
                 p.at_ms = p.at_ms.max(ev.at_ms);
                 self.counters.coalesced.fetch_add(1, Ordering::Relaxed);
             }
@@ -247,7 +276,7 @@ impl Reading {
                 }
                 v.insert(Pending {
                     first: now,
-                    due: now + DEBOUNCE,
+                    due: now + self.debounce(),
                     at_ms: ev.at_ms,
                 });
             }
@@ -275,34 +304,80 @@ impl Reading {
     }
 
     /// Start the worker: debounce per (user, file), read each file back, update the
-    /// reading tables.
+    /// reading tables. A batch of due files is read in a task of its own, so the queue
+    /// keeps being taken meanwhile (into the bounded, coalescing pending map); on stop
+    /// the worker reads what is still waiting (at most [`STOP_BUDGET`]).
     pub fn start(&self, a: &Analytics, stop: CancellationToken) {
         let Some(mut rx) = self.take_receiver() else {
             return;
         };
         let a = a.clone();
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
+            let mut batch: Option<tokio::task::JoinHandle<()>> = None;
             loop {
-                let next = a.reading().next_due();
+                let next = match batch {
+                    Some(_) => None,
+                    None => a.reading().next_due(),
+                };
                 let wake = async move {
                     match next {
                         Some(at) => tokio::time::sleep_until(at.into()).await,
                         None => std::future::pending::<()>().await,
                     }
                 };
+                let reading = async {
+                    match batch.as_mut() {
+                        Some(h) => {
+                            let _ = h.await;
+                        }
+                        None => std::future::pending::<()>().await,
+                    }
+                };
                 tokio::select! {
-                    _ = stop.cancelled() => return,
+                    _ = stop.cancelled() => break,
                     ev = rx.recv() => match ev {
                         Some(ev) => a.reading().enqueue(ev, Instant::now()),
-                        None => return,
+                        None => break,
                     },
+                    _ = reading => batch = None,
                     _ = wake => {
                         let due = a.reading().take_due(Instant::now(), false);
-                        a.reading().process(&a, due).await;
+                        let a2 = a.clone();
+                        batch = Some(tokio::spawn(async move {
+                            a2.reading().process(&a2, due).await;
+                        }));
                     }
                 }
             }
+            // Shutting down: what was written last (a restart right after a sync) is
+            // read now, not lost with the queue.
+            while let Ok(ev) = rx.try_recv() {
+                a.reading().enqueue(ev, Instant::now());
+            }
+            let rest = async {
+                if let Some(h) = batch {
+                    let _ = h.await;
+                }
+                let due = a.reading().take_due(Instant::now(), true);
+                a.reading().process(&a, due).await;
+            };
+            if tokio::time::timeout(STOP_BUDGET, rest).await.is_err() {
+                tracing::warn!(
+                    "[ANALYTICS] shutting down before every written reading file was read; the next write of each makes up for it"
+                );
+            }
         });
+        if let Some(old) = self.worker.lock().replace(handle) {
+            old.abort();
+        }
+    }
+
+    /// Wait for the worker to end (after its stop token): [`super::Analytics::stop`].
+    pub async fn stopped(&self) {
+        let handle = self.worker.lock().take();
+        if let Some(h) = handle {
+            let _ = h.await;
+        }
     }
 
     /// Read every waiting file now, without its debounce (tests; the worker's own
@@ -375,6 +450,11 @@ impl Reading {
             ),
         }
     }
+}
+
+/// Is `ev` a file the reading area reads?
+fn reads(ev: &FileWritten) -> bool {
+    ev.target == DavTarget::Progress && files::kind_of(&ev.rel) != FileKind::Other
 }
 
 impl Default for Reading {

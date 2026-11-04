@@ -50,9 +50,15 @@ impl Env {
     }
 
     fn with(edit: impl FnOnce(&mut Config)) -> Env {
+        Self::prepared(edit, |_| {})
+    }
+
+    /// `prepare` runs on the storage folder before the server opens it.
+    fn prepared(edit: impl FnOnce(&mut Config), prepare: impl FnOnce(&std::path::Path)) -> Env {
         let dir = tempfile::tempdir().unwrap();
         let storage = dir.path().join("storage");
         std::fs::create_dir_all(storage.join("library/series")).unwrap();
+        prepare(&storage);
         std::fs::write(storage.join("library/series/vol1.cbz"), volume_bytes()).unwrap();
         std::fs::write(storage.join("library/series/small.cbz"), b"small volume").unwrap();
         let mut config = Config::default();
@@ -435,7 +441,7 @@ async fn an_anonymous_principal_is_a_hash_and_its_ip_lives_only_in_ip_rows() {
     let (status, _, _) = env.call(None, "GET", VOL, &[], b"", IP_B).await;
     assert_eq!(status, StatusCode::OK);
     env.flush().await;
-    let salt = *env.services.analytics.db().salt();
+    let salt = env.services.analytics.db().salt();
     let want = bunko_server::analytics::principal::anon_id(&salt, IP_B);
     let principals = env.text_rows("SELECT DISTINCT principal FROM principal_daily");
     assert_eq!(principals, std::slice::from_ref(&want));
@@ -1294,4 +1300,290 @@ async fn catalog_covers_are_counted_with_their_304_savings() {
         env.int("SELECT SUM(saved_bytes) FROM traffic_hourly"),
         webp.len() as i64
     );
+}
+
+/// `//` and `/.` segments reach the same file; the accounting keys it by its one
+/// canonical path, so they can neither split a download nor make up a series.
+#[tokio::test]
+async fn non_canonical_paths_are_one_download_of_one_series() {
+    let env = Env::new();
+    for path in [
+        "/mokuro-reader/series//vol1.cbz",
+        "/mokuro-reader/series/./vol1.cbz",
+        "/mokuro-reader/./series/vol1.cbz",
+        "/mokuro-reader//series/././vol1.cbz",
+        VOL,
+    ] {
+        let (status, _, body) = env.call(Some("reader"), "GET", path, &[], b"", IP_A).await;
+        assert_eq!((status, body.len()), (StatusCode::OK, SIZE), "{path}");
+    }
+    env.flush().await;
+    let rows: Vec<String> = env.text_rows(
+        "SELECT principal || '|' || volume_key || '|' || series_key || '|' || series_title \
+         FROM volume_downloads",
+    );
+    assert_eq!(rows, ["u:reader|series/vol1.cbz|series|series"]);
+}
+
+/// Anonymous ids: every address of one IPv6 /64 is one visitor, and a day keeps rows
+/// of their own for at most its cap of anonymous visitors; the rest still count, as
+/// `a:other`, with no row (nor address-to-id link) each.
+#[tokio::test]
+async fn anonymous_visitors_are_per_slash_64_and_capped_per_day() {
+    let env = Env::new();
+    env.services.analytics.set_anon_per_day(3);
+    for i in 0..40 {
+        let ip = format!("2001:db8:aa:1::{:x}", i + 1);
+        let (status, _, _) = env.call(None, "GET", "/robots.txt", &[], b"", &ip).await;
+        assert!(status.is_client_error() || status.is_success(), "{status}");
+    }
+    env.flush().await;
+    let anon = |env: &Env| {
+        env.int("SELECT COUNT(DISTINCT principal) FROM principal_daily WHERE principal LIKE 'a:%'")
+    };
+    assert_eq!(anon(&env), 1, "one /64, one visitor");
+    // Two more visitors fit the cap of 3; the five after them are `a:other`.
+    for ip in [
+        "192.0.2.1",
+        "192.0.2.2",
+        "192.0.2.3",
+        "192.0.2.4",
+        "2001:db8:bb::1",
+    ] {
+        env.call(None, "GET", "/robots.txt", &[], b"", ip).await;
+    }
+    env.call(None, "GET", "/robots.txt", &[], b"", "2001:db8:cc::1")
+        .await;
+    env.call(None, "GET", "/robots.txt", &[], b"", "2001:db8:aa:1::99")
+        .await;
+    env.flush().await;
+    let ids = env.text_rows(
+        "SELECT DISTINCT principal FROM principal_daily WHERE principal LIKE 'a:%' ORDER BY 1",
+    );
+    assert_eq!(ids.len(), 4, "{ids:?}");
+    assert!(ids.iter().any(|p| p == "a:other"), "{ids:?}");
+    // Every request still counts.
+    assert_eq!(
+        env.int("SELECT SUM(requests) FROM principal_daily WHERE principal LIKE 'a:%'"),
+        47
+    );
+    assert_eq!(
+        env.int("SELECT SUM(requests) FROM principal_daily WHERE principal = 'a:other'"),
+        4
+    );
+    // No seen row, no address link for the folded ones.
+    assert_eq!(
+        env.int("SELECT COUNT(*) FROM principal_seen WHERE principal LIKE 'a:%'"),
+        3
+    );
+    assert_eq!(
+        env.int("SELECT COUNT(*) FROM anon_ips WHERE principal = 'a:other'"),
+        0
+    );
+}
+
+/// A one-byte `Range` probe is no download: popularity counts completed downloads.
+#[tokio::test]
+async fn a_one_byte_range_probe_is_not_a_download() {
+    let env = Env::new();
+    for i in 0..20 {
+        let ip = format!("2001:db8:{:x}::1", i + 1);
+        let (status, _, body) = env
+            .call(None, "GET", VOL, &[("range", "bytes=0-0")], b"", &ip)
+            .await;
+        assert_eq!((status, body.len()), (StatusCode::PARTIAL_CONTENT, 1));
+    }
+    env.flush().await;
+    let v = env.admin("/_admin/api/analytics/overview?range=24h").await;
+    assert_eq!(v["kpis"]["downloads"], 0, "{}", v["kpis"]);
+    assert_eq!(v["kpis"]["downloaders"], 0);
+    let top = v["top_series"].as_array().unwrap();
+    assert!(
+        top.is_empty(),
+        "a probed series is not on the list: {top:?}"
+    );
+    // One whole download counts.
+    env.call(Some("reader"), "GET", VOL, &[], b"", IP_A).await;
+    env.flush().await;
+    let v = env.admin("/_admin/api/analytics/overview?range=24h").await;
+    assert_eq!(v["kpis"]["downloads"], 1);
+    assert_eq!(v["top_series"][0]["downloads"], 1);
+    let s = env.admin("/_admin/api/analytics/series?range=24h").await;
+    assert_eq!(s["rows"][0]["downloads"], 1, "{}", s["rows"]);
+    assert_eq!(s["rows"][0]["downloaders"], 1);
+}
+
+fn files_named(dir: &std::path::Path, prefix: &str) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with(prefix))
+        .collect();
+    v.sort();
+    v
+}
+
+/// A healthy file that cannot be opened now (here: read-only) keeps its place and
+/// its history; the run counts in memory. It used to be renamed `.broken-*` and the
+/// history dropped out of view, its `-shm` left behind to break the new file too.
+#[tokio::test]
+async fn a_healthy_file_that_cannot_be_opened_is_left_in_place() {
+    use std::os::unix::fs::PermissionsExt;
+    let env = Env::prepared(
+        |_| {},
+        |storage| {
+            let path = storage.join("analytics.sqlite");
+            let c = rusqlite::Connection::open(&path).unwrap();
+            c.execute_batch("CREATE TABLE keep (x); INSERT INTO keep VALUES (42);")
+                .unwrap();
+            drop(c);
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+        },
+    );
+    assert!(env.services.analytics.db().path().is_none(), "in memory");
+    assert_eq!(
+        files_named(&env.storage, "analytics.sqlite"),
+        ["analytics.sqlite"],
+        "nothing moved aside"
+    );
+    assert_eq!(env.int("SELECT x FROM keep"), 42);
+    // It still counts, in memory.
+    env.call(None, "GET", VOL, &[], b"", IP_A).await;
+    env.flush().await;
+    let v = env.admin("/_admin/api/analytics/overview?range=24h").await;
+    assert!(v["kpis"]["requests"].as_u64().unwrap() >= 1);
+}
+
+/// A damaged file (here: a table page overwritten, which the open itself does not
+/// notice: `quick_check` does) is moved aside under a name no earlier one has, and a
+/// new file takes its place.
+#[tokio::test]
+async fn a_damaged_file_is_moved_aside_and_a_new_one_made() {
+    let mut taken = String::new();
+    let env = Env::prepared(
+        |_| {},
+        |storage| {
+            let path = storage.join("analytics.sqlite");
+            {
+                let db = bunko_db::analytics::AnalyticsDb::open(&path).unwrap();
+                db.meta_set("tracking_since", "1").unwrap();
+            }
+            // Overwrite the root page of traffic_hourly.
+            let c = rusqlite::Connection::open(&path).unwrap();
+            let root: i64 = c
+                .query_row(
+                    "SELECT rootpage FROM sqlite_master WHERE name = 'traffic_hourly'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let page: i64 = c.query_row("PRAGMA page_size", [], |r| r.get(0)).unwrap();
+            drop(c);
+            let mut bytes = std::fs::read(&path).unwrap();
+            let at = ((root - 1) * page) as usize;
+            for (i, b) in bytes[at..at + page as usize].iter_mut().enumerate() {
+                *b = (i * 7 + 3) as u8;
+            }
+            std::fs::write(&path, bytes).unwrap();
+            std::fs::write(storage.join("analytics.sqlite-shm"), b"stale").unwrap();
+            // An earlier one moved aside this very second.
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            for s in [now, now + 1] {
+                std::fs::write(storage.join(format!("analytics.sqlite.broken-{s}")), b"old")
+                    .unwrap();
+            }
+            taken = format!("analytics.sqlite.broken-{now}");
+        },
+    );
+    assert!(env.services.analytics.db().path().is_some(), "a new file");
+    let names = files_named(&env.storage, "analytics.sqlite");
+    let moved: Vec<&String> = names
+        .iter()
+        .filter(|n| n.contains(".broken-") && !n.ends_with("-shm") && n.as_str() != taken)
+        .filter(|n| std::fs::read(env.storage.join(n)).unwrap() != b"old")
+        .collect();
+    assert_eq!(moved.len(), 1, "{names:?}");
+    // The stale -shm did not carry over to the new file (SQLite drops it when the
+    // damaged file's connection closes; what it leaves would move aside with it).
+    assert_ne!(
+        std::fs::read(env.storage.join("analytics.sqlite-shm"))
+            .ok()
+            .as_deref(),
+        Some(&b"stale"[..]),
+        "{names:?}"
+    );
+    assert_eq!(
+        std::fs::read(env.storage.join(&taken)).unwrap(),
+        b"old",
+        "an earlier one is never overwritten"
+    );
+    // The new file works.
+    env.call(None, "GET", VOL, &[], b"", IP_A).await;
+    env.flush().await;
+    assert_eq!(
+        traffic(&env, "category='volume'").0,
+        1,
+        "the new file records"
+    );
+}
+
+/// A settings change whose save fails changes nothing: the config, the settings view
+/// and what the layer does agree (it used to say off while still counting).
+#[tokio::test]
+async fn a_settings_change_that_cannot_be_saved_changes_nothing() {
+    use std::os::unix::fs::PermissionsExt;
+    let env = Env::new();
+    let dir = env.dir.path().to_path_buf();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let (status, _, body) = env
+        .call(
+            Some("boss"),
+            "PUT",
+            "/_admin/api/settings/analytics",
+            &[("content-type", "application/json")],
+            json!({"enabled": false}).to_string().as_bytes(),
+            IP_A,
+        )
+        .await;
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    let s = env.admin("/_admin/api/settings").await;
+    assert_eq!(s["analytics"]["enabled"], true);
+    assert!(env.services.analytics.enabled());
+    let v = env.admin("/_admin/api/analytics/overview?range=24h").await;
+    assert_eq!(v["enabled"], true);
+}
+
+/// A shorter `flush_seconds` applies to the wait already running: from 600 s to 5 s,
+/// the next flush is 5 s after the last one, not ten minutes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_new_flush_interval_applies_at_once() {
+    let env = Env::with(|c| c.analytics.flush_seconds = 600);
+    let stop = tokio_util::sync::CancellationToken::new();
+    env.services.analytics.start(stop.clone());
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    env.call(None, "GET", VOL, &[], b"", IP_A).await;
+    let (status, _, body) = env
+        .call(
+            Some("boss"),
+            "PUT",
+            "/_admin/api/settings/analytics",
+            &[("content-type", "application/json")],
+            json!({"flush_seconds": 5}).to_string().as_bytes(),
+            IP_A,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    tokio::time::sleep(std::time::Duration::from_millis(6000)).await;
+    let n = traffic(&env, "category='volume'").0;
+    stop.cancel();
+    assert_eq!(n, 1, "flushed by the new interval");
 }

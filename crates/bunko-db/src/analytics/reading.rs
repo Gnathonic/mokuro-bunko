@@ -1020,12 +1020,13 @@ impl AnalyticsDb {
         })
     }
 
-    /// Distinct downloaders per volume of one series, all time (`volume_downloads`).
+    /// Distinct downloaders per volume of one series, all time (`volume_downloads`,
+    /// completed downloads).
     pub fn downloaders_by_volume(&self, series_key: &str) -> Result<Vec<(String, u64)>> {
         self.read(|c| {
             let mut stmt = c.prepare_cached(
                 "SELECT volume_key, COUNT(DISTINCT principal) FROM volume_downloads \
-                 WHERE series_key = ?1 GROUP BY volume_key",
+                 WHERE series_key = ?1 AND completed GROUP BY volume_key",
             )?;
             let rows = stmt
                 .query_map([series_key], |r| Ok((r.get(0)?, uint(r.get(1)?))))?
@@ -1034,12 +1035,13 @@ impl AnalyticsDb {
         })
     }
 
-    /// Distinct downloaders per series, all time: `(series_key, title, downloaders)`.
+    /// Distinct downloaders per series, all time (completed downloads):
+    /// `(series_key, title, downloaders)`.
     pub fn downloaders_by_series(&self) -> Result<Vec<(String, String, u64)>> {
         self.read(|c| {
             let mut stmt = c.prepare_cached(
                 "SELECT series_key, MAX(COALESCE(series_title, '')), COUNT(DISTINCT principal) \
-                 FROM volume_downloads WHERE series_key != '' GROUP BY series_key",
+                 FROM volume_downloads WHERE series_key != '' AND completed GROUP BY series_key",
             )?;
             let rows = stmt
                 .query_map([], |r| Ok((r.get(0)?, r.get(1)?, uint(r.get(2)?))))?

@@ -100,6 +100,8 @@ pub struct PassStats {
 #[derive(Clone)]
 struct Shared {
     wake: Arc<Notify>,
+    /// The settings changed: the wait until the next pass is worked out again.
+    settings: Arc<Notify>,
     status: Arc<Mutex<ScanStatus>>,
     /// One pass at a time (the periodic task and a test's `scan_now`).
     pass: Arc<tokio::sync::Mutex<()>>,
@@ -113,6 +115,7 @@ impl Scanner {
     pub fn new() -> Scanner {
         Scanner(Shared {
             wake: Arc::new(Notify::new()),
+            settings: Arc::new(Notify::new()),
             status: Arc::new(Mutex::new(ScanStatus::default())),
             pass: Arc::new(tokio::sync::Mutex::new(())),
             gap: Duration::from_millis(1000 / PAGES_PER_SECOND),
@@ -125,27 +128,44 @@ impl Scanner {
         let me = self.0.clone();
         let a = a.clone();
         tokio::spawn(async move {
-            let mut wait = STARTUP_DELAY;
+            let interval = |a: &Analytics| {
+                Duration::from_secs(u64::from(a.config().library_scan.interval_hours.max(1)) * 3600)
+            };
+            let mut next = tokio::time::Instant::now() + STARTUP_DELAY;
+            // When the last pass ended, while the next one waits out the interval (a
+            // settings change works the wait out again from it).
+            let mut ended: Option<tokio::time::Instant> = None;
             loop {
                 tokio::select! {
                     _ = stop.cancelled() => return,
-                    _ = tokio::time::sleep(wait) => {}
+                    _ = tokio::time::sleep_until(next) => {}
                     _ = me.wake.notified() => {}
+                    _ = me.settings.notified() => {
+                        if let Some(end) = ended {
+                            next = end + interval(&a);
+                        }
+                        continue;
+                    }
                 }
-                let interval = Duration::from_secs(
-                    u64::from(a.config().library_scan.interval_hours.max(1)) * 3600,
-                );
-                wait = match me.pass(&a, &stop).await {
+                let outcome = me.pass(&a, &stop).await;
+                let now = tokio::time::Instant::now();
+                (next, ended) = match outcome {
                     Ok((Outcome::Cancelled, _)) => return,
-                    Ok((Outcome::NotReady | Outcome::Disabled, _)) => RETRY,
-                    Ok((Outcome::Done, _)) => interval,
+                    Ok((Outcome::NotReady | Outcome::Disabled, _)) => (now + RETRY, None),
+                    Ok((Outcome::Done, _)) => (now + interval(&a), Some(now)),
                     Err(e) => {
                         tracing::warn!("[ANALYTICS] library scan failed: {e}");
-                        interval
+                        (now + interval(&a), Some(now))
                     }
                 };
             }
         });
+    }
+
+    /// The `analytics:` settings changed: a new interval applies to the wait already
+    /// running (a running pass sees `enabled` going off at its next archive).
+    pub fn settings_changed(&self) {
+        self.0.settings.notify_one();
     }
 
     /// Scan again now (`POST .../library/rescan`). A pass already running finishes
@@ -281,6 +301,10 @@ impl Shared {
             if stop.is_cancelled() {
                 return Ok((Outcome::Cancelled, PassStats::default()));
             }
+            if !a.enabled() {
+                // Turned off mid-walk: nothing of this pass is written.
+                return Ok((Outcome::Disabled, PassStats::default()));
+            }
             let db = db.clone();
             (w, stack) = blocking(move || {
                 for _ in 0..FOLDERS_PER_HOP {
@@ -365,6 +389,12 @@ impl Shared {
             if stop.is_cancelled() {
                 write_batch(&db, &mut batch, left).await?;
                 return Ok((Outcome::Cancelled, stats));
+            }
+            if !a.enabled() {
+                // Turned off: what was read is kept, nothing more is opened.
+                write_batch(&db, &mut batch, left).await?;
+                self.status.lock().pages_pending = Some(left);
+                return Ok((Outcome::Disabled, stats));
             }
             let t0 = Instant::now();
             let row = blocking(move || read_archive(&q, now_s())).await?;

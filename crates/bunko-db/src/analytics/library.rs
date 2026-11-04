@@ -330,7 +330,7 @@ impl AnalyticsDb {
         limit: usize,
     ) -> Result<(u64, Vec<LibrarySeries>)> {
         const WHERE: &str = "WHERE NOT EXISTS (SELECT 1 FROM volume_downloads d \
-             WHERE d.series_key = s.series_key AND d.day >= ?1) \
+             WHERE d.series_key = s.series_key AND d.day >= ?1 AND d.completed) \
              AND NOT EXISTS (SELECT 1 FROM reading_daily r \
              WHERE r.series_key = s.series_key AND r.day >= ?1)";
         self.read(|c| {
@@ -535,9 +535,9 @@ mod tests {
                 series("never", 4),
             ])?;
             tx.conn.execute_batch(
-                "INSERT INTO volume_downloads (day, principal, volume_key, series_key, series_title) \
-                 VALUES (100, 'u:a', 'downloaded/v.cbz', 'downloaded', 'downloaded'), \
-                        (10, 'u:a', 'old/v.cbz', 'old', 'old'); \
+                "INSERT INTO volume_downloads (day, principal, volume_key, series_key, series_title, \
+                 completed) VALUES (100, 'u:a', 'downloaded/v.cbz', 'downloaded', 'downloaded', 1), \
+                        (10, 'u:a', 'old/v.cbz', 'old', 'old', 1); \
                  INSERT INTO reading_daily (day, username, volume_uuid, series_key) \
                  VALUES (95, 'a', 'x', 'read');",
             )?;

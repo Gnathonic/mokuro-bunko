@@ -1,7 +1,11 @@
 //! Who a request is attributed to (design §3): `u:<username>`, `p:<username>` for a
 //! processor account, or `a:<12 hex>` for an anonymous request, the start of
-//! `sha256(salt || canonical client IP)`, so anonymous visitors can be told apart
-//! without long-lived rows keeping raw IPs.
+//! `sha256(salt || client network)`, so anonymous visitors can be told apart without
+//! long-lived rows keeping raw IPs. The network is the IPv4 address, or the /64 of an
+//! IPv6 one (one subscriber's prefix: any client there can make every request a new
+//! address). The salt is replaced every `retention.ip_days`
+//! ([`bunko_db::analytics::AnalyticsDb::salt`]), so an id outliving the raw IPs cannot
+//! be traced back to them.
 
 use bunko_core::Role;
 use sha2::{Digest, Sha256};
@@ -68,11 +72,24 @@ pub fn attempted_username_text(name: &str) -> String {
     name.chars().take(USERNAME_TEXT_MAX).collect()
 }
 
-/// `a:` + the first 12 hex digits of `sha256(salt || ip)` (`ip` canonical).
+/// What an anonymous id is keyed by: an IPv4 address, the `/64` of an IPv6 one, or a
+/// trusted proxy's other text as-is.
+pub fn anon_network(ip: &str) -> std::borrow::Cow<'_, str> {
+    match ip.parse::<IpAddr>() {
+        Ok(IpAddr::V6(v6)) if v6.to_ipv4_mapped().is_none() => {
+            let net = std::net::Ipv6Addr::from(v6.to_bits() & !u128::from(u64::MAX));
+            format!("{net}/64").into()
+        }
+        _ => ip.into(),
+    }
+}
+
+/// `a:` + the first 12 hex digits of `sha256(salt || network)` (`ip` canonical; see
+/// [`anon_network`]).
 pub fn anon_id(salt: &[u8; 32], ip: &str) -> String {
     let mut h = Sha256::new();
     h.update(salt);
-    h.update(ip.as_bytes());
+    h.update(anon_network(ip).as_bytes());
     let digest = h.finalize();
     let mut out = String::with_capacity(14);
     out.push_str("a:");
@@ -108,6 +125,9 @@ pub fn principal_of(
 
 /// The API's `label` of a principal id: the account name, or `Anonymous <hash>`.
 pub fn label(principal: &str) -> String {
+    if principal == bunko_db::analytics::traffic::ANON_OTHER {
+        return "Other anonymous visitors".to_string();
+    }
     match PrincipalKind::of(principal) {
         PrincipalKind::Anon => format!("Anonymous {}", principal.get(2..).unwrap_or("")),
         _ => principal.get(2..).unwrap_or(principal).to_string(),
@@ -153,5 +173,25 @@ mod tests {
             USERNAME_TEXT_MAX
         );
         assert_eq!(attempted_username_text("alice"), "alice");
+    }
+
+    /// Every address of one IPv6 /64 is one visitor; IPv4 addresses stay apart.
+    #[test]
+    fn an_ipv6_slash_64_is_one_anonymous_visitor() {
+        let salt = [3u8; 32];
+        let id = |ip: &str| anon_id(&salt, ip);
+        assert_eq!(
+            id("2001:db8:aa:1::1"),
+            id("2001:db8:aa:1:ffff:1234:5678:9abc")
+        );
+        assert_ne!(id("2001:db8:aa:1::1"), id("2001:db8:aa:2::1"));
+        assert_ne!(id("192.0.2.1"), id("192.0.2.2"));
+        assert_eq!(anon_network("2001:db8:aa:1:2:3:4:5"), "2001:db8:aa:1::/64");
+        assert_eq!(anon_network("192.0.2.1"), "192.0.2.1");
+        assert_eq!(anon_network("proxy-name"), "proxy-name");
+        assert_eq!(
+            label(bunko_db::analytics::traffic::ANON_OTHER),
+            "Other anonymous visitors"
+        );
     }
 }

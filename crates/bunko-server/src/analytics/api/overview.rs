@@ -34,7 +34,6 @@ pub(super) async fn get(a: &Analytics, q: &ApiQuery) -> Response {
             .map(|r| r.counts.requests)
             .sum();
         let (d0, d1) = range.days();
-        let (h0, h1) = range.hours();
         let (downloads, downloaders) = db.download_totals(d0, d1)?;
         let reading = db.reading_totals(d0, d1)?;
         let today = now.div_euclid(86400);
@@ -42,7 +41,7 @@ pub(super) async fn get(a: &Analytics, q: &ApiQuery) -> Response {
         let wau = db.active_principals(today - 6, today)?;
         let mau = db.active_principals(today - 29, today)?;
         let crawl_episodes = db.crawl_episodes_between(range.from, range.to + 1)?;
-        let auth_failures = db.auth_failure_total(h0, h1)?;
+        let auth_failures = db.auth_failure_total(&range.span)?;
         let dropped = db.meta_i64(keys::DROPPED_TOTAL)?.unwrap_or(0);
 
         let by_cat = db.traffic(&range.span, Some(TrafficDim::Category), true, &none)?;
@@ -91,6 +90,8 @@ pub(super) async fn get(a: &Analytics, q: &ApiQuery) -> Response {
         });
         let top_series: Vec<Value> = series
             .into_iter()
+            // Partial transfers alone (a range probe) put no series on the list.
+            .filter(|s| s.2 > 0 || s.3 > 0 || s.4 > 0.0)
             .take(5)
             .map(|(key, title, downloads, readers, minutes)| {
                 json!({"series_key": key, "title": title, "downloads": downloads, "readers": readers, "minutes": round1(minutes)})

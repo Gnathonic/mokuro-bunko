@@ -89,9 +89,21 @@ any change to what the reader sends.
   - `p:<username>` for a `Role::Processor` account (OCR workers; excluded from
     popularity, reading, active users and crawl detection, kept in bandwidth totals);
   - `a:<12 hex>` for an anonymous request: the first 12 hex digits of
-    `sha256(salt || canonical client IP)`. The salt is 32 random bytes created once and
-    kept in the analytics DB `meta` table. Pseudonymous ids let downloads and active
-    users be de-duplicated without keeping raw IPs in long-lived rows.
+    `sha256(salt || network)`, where the network is the canonical IPv4 address, or the
+    `/64` of an IPv6 one (one subscriber's prefix: any client there can make every
+    request a new address, so per-address ids would let one client pass as thousands
+    of visitors). The salt is 32 random bytes in the analytics DB `meta` table,
+    replaced by the hourly upkeep once its period of `retention.ip_days` UTC days is
+    over (`meta.salt_epoch` = day / `ip_days`); the old one is overwritten. An id can
+    therefore be matched to an address by hashing candidates only while its salt
+    lives, never longer than the raw IPs are kept, and a visitor is one id within a
+    salt period only (distinct anonymous visitors over a longer range count a visitor
+    once per period).
+  - A UTC day keeps rows of their own for at most `ANON_PER_DAY` (10,000) anonymous
+    principals: the flush folds that day's later newcomers into `a:other` (their
+    traffic and downloads still count; they get no `principal_seen` or `anon_ips` row,
+    the address stays in `ip_daily`). The daily tables are kept forever and anyone can
+    make up addresses, so this bounds what a flood adds per day.
 - **Raw client IPs** are kept only in rows with an IP retention (`retention.ip_days`,
   default 30): `ip_daily`, `anon_ips`, `auth_failures`, `slow_requests`; and in
   `crawl_episodes` (`retention.crawl_days`, default 90). After that only principals
@@ -247,7 +259,14 @@ record into the window's maps (no I/O):
   (≤ 8), last user agent, country (from geo, section 9).
 - `downloads`: key `(day, principal, volume_key)` → series_key, series_title, bytes,
   size (`Served.size`), for `volume` GETs (not HEAD) with status 200/206 by a `u:` or `a:`
-  principal.
+  principal. A row counts as a **download** (popularity, downloaders, the funnel,
+  dormancy) once it is `completed` (the day's bytes reached 95 % of the file, resumes
+  adding up), so a `Range: bytes=0-0` probe is no download; `bytes` still counts
+  every byte sent. Bytes are what was handed to hyper: an abort can count what was
+  still in the socket buffers.
+- The library path a volume, series or crawl touch is keyed by is canonical: empty
+  and `.` segments (`S//v.cbz`, `S/./v.cbz`), which reach the same file, are dropped
+  (`bunko_dav::canonical_path`).
 - `auth_failures`: key `(hour, ip, attempted_username)` → count, when the slot carries an
   auth error, or a login endpoint answers 401/429.
 - `slow`: the 20 slowest requests per hour (`at, method, path (≤ 256), status, ms,
@@ -339,6 +358,8 @@ latency_hourly(hour, protocol, method, category, headers_hist TEXT, total_hist T
   PRIMARY KEY(hour, protocol, method, category)) WITHOUT ROWID       -- hist = JSON array of 17 counts
 latency_daily(day, ...same...)
 errors_hourly(hour, protocol, method, category, status, count, PRIMARY KEY(...)) WITHOUT ROWID
+errors_daily(day, ...same...)                          -- rolled up; kept forever
+auth_failures_daily(day INTEGER PRIMARY KEY, count)    -- rolled up; no IP, no username
 principal_daily(day, principal, category, requests, bytes_out, bytes_in,
   PRIMARY KEY(day, principal, category)) WITHOUT ROWID
 principal_seen(principal TEXT PRIMARY KEY, first_seen INTEGER, last_seen INTEGER)
@@ -632,13 +653,13 @@ about 48 h), and those answers add `series_granularity: "day"`.
 | `GET overview` | `kpis{bytes_out, bytes_in, est_bytes_out, requests, downloads, downloaders, reads, readers, minutes_read, pages_read, dau, wau, mau, crawl_episodes, errors_5xx, auth_failures, rss_bytes, rss_peak_bytes, cpu_pct, uptime_s, dropped}` (`dau`/`wau`/`mau`: accounts and anonymous visitors, today and the last 7 and 30 days; `dropped`: all time), `bandwidth` (time series of bytes out by category, top 6 + `other`), `top_series[5]{series_key,title,downloads,readers,minutes}`, `top_principals[5]{principal,label,kind,bytes_out}` |
 | `GET traffic?by=category\|protocol\|method\|detail&metric=bytes_out\|bytes_in\|requests&category=` | time series by `by` (top 12 + `(other)`); `by`, `metric`; `totals[]{key,label,requests,bytes_out,bytes_in,est_bytes_out}`; `sync{progress:{bytes_out,bytes_in,requests,by_detail[]{key,label,requests,bytes_out,bytes_in}}, profile:{...}}`; `metadata{bytes_out,bytes_in,requests,by_detail[]{key,label,requests,bytes_out}}`; `dav_methods[]{method,requests,bytes_out,bytes_in}` |
 | `GET principals?limit=50` | `rows[]{principal,label,kind(user\|anon\|processor),requests,bytes_out,bytes_in,by_category{category: bytes_out},last_seen,ips[] (anon only, within IP retention)}`, `totals{users,anon,processor}` |
-| `GET series?sort=downloads\|downloaders\|readers\|reads\|minutes\|pages\|bytes&limit=50&q=` | `rows[]{series_key,title,downloads,downloaders,readers,reads,pages,minutes,bytes_out,prev{downloads,readers},volumes}`, `sort` (prev = the previous period of the same length, for trending; `volumes` = distinct volumes downloaded; `downloads` = (day, principal, volume) rows) |
+| `GET series?sort=downloads\|downloaders\|readers\|reads\|minutes\|pages\|bytes&limit=50&q=` | `rows[]{series_key,title,downloads,downloaders,readers,reads,pages,minutes,bytes_out,prev{downloads,readers},volumes}`, `sort` (prev = the previous period of the same length, for trending; `volumes` = distinct volumes downloaded; `downloads` = completed (day, principal, volume) rows; `bytes_out` = every byte sent, partial downloads included) |
 | `GET funnel?series=<any spelling>` | `series_key,title,in_library,volumes[]{volume_key,title,started,finished,downloads,in_library,page_count}`, `readers_started`, `readers_finished`, `stages[]{key(started\|p25\|p50\|p75\|completed),label,reads}`; without `series`: `series[]{series_key,title,readers_started,readers_finished,volumes_started,downloads}` (top 50) |
 | `GET reading` | time series `minutes` (0.1 min), `pages`, `readers`; `totals{reads,readers,minutes,pages,chars,opens}`; `top_readers[]{username,minutes,pages,volumes,reads,days,chars}`; `top_volumes[]{volume_key (null: not in the library),volume_uuid,title,series_key,series_title,readers,reads,pages,minutes}`; `sources{positions,history}` (each read once); `worker{queued,dropped,pending,files,positions,segments,volume_data,device_files,missing,too_large,unknown_format,malformed,failed,coalesced,pending_dropped,events_out_of_range}` (since start) |
 | `GET users` | time series `dau` (accounts); `dau`, `wau`, `mau` (accounts, today and the last 7 and 30 days); `visitors{dau,wau,mau}` (accounts and anonymous, as the overview counts); `accounts` (every account of the range); `rows_limit` (200); `rows[]{username,last_seen,days_active,requests,bytes_out,bytes_in,devices[]{id,label,first_seen,last_seen,source},clients[] (app keys),minutes,pages,volumes_read,reads,volumes_started,volumes_completed}` (most bytes first) |
 | `GET library` | `scanned_at, cloud, scanning, scan{phase,started_at,duration_ms,pages_duration_ms,interval_hours,waiting,error}, totals{series,volumes,bytes,files}, by_kind[]{kind,label,files,bytes}, by_ext[]{ext (no dot; '' none),files,bytes}, archive_mix[]{mix,series}, no_sidecar{count,series[]}, loose_archives, page_formats{available,reason,scanned,pending,unreadable,formats[]{ext,pages,volumes}}, growth{t,series[series,volumes,bytes]}, uploads{t,series[]{key: uploader-N, label: account},by_uploader[]{username,volumes,bytes},recent[]{volume_key,series_title,username,uploaded_at}}, dormant{days,count,tracking_since,series[]{series_key,title,volumes}}` (`dormant` null before the first scan) |
 | `POST library/rescan` | `{ok:true, scanning:true}`; 409 while analytics are off |
-| `GET health` | time series `status` (keys `2xx`..`5xx`); `errors[]{status,protocol,method,category,count}`; `auth_failures{t,values,top_ips[]{ip,country,count,usernames[]},top_usernames[]{username,count}}`; `latency[]{protocol,method,category,requests,p50_ms,p95_ms,p99_ms,ttfb_p50_ms,ttfb_p95_ms}`; `slow[]{at,method,path,status,ms,principal}` (no protocol: the UI reads it off the method and path as the classifier does); `efficiency{not_modified,saved_bytes,gzip_raw_bytes,gzip_sent_bytes,aborted,aborted_bytes,resumed,est_bytes_out}` |
+| `GET health` | time series `status` (keys `2xx`..`5xx`); `errors[]{status,protocol,method,category,count}`; `auth_failures{t,values,top_ips[]{ip,country,count,usernames[]},top_usernames[]{username,count},ip_days}` (the counts and `errors[]` cover the whole range, from the daily rollups past the hourly and IP retention; `top_ips` and `top_usernames` only the last `ip_days`); `latency[]{protocol,method,category,requests,p50_ms,p95_ms,p99_ms,ttfb_p50_ms,ttfb_p95_ms}`; `slow[]{at,method,path,status,ms,principal}` (no protocol: the UI reads it off the method and path as the classifier does); `efficiency{not_modified,saved_bytes,gzip_raw_bytes,gzip_sent_bytes,aborted,aborted_bytes,resumed,est_bytes_out}` |
 | `GET host?range=24h\|7d\|30d` (another range: 400) | `resolution` (`minute` for 24h, `hour` beyond; `range.granularity` says `hour` for both, the browser's local time), `step` (60 or 3600); time series `rss`, `rss_max`, `cpu_pct`, `cpu_max`, `connections_max`, `inflight_max`, whose values are **null** where there is no reading (the server was down), never 0; `now{rss,peak_rss,cpu_pct (null before the second sample),connections,inflight,host_total,host_available (null on macOS),reading_queue,reading_dropped,collector_dropped}`; `platform_supported{rss,cpu}` |
 | `GET crawlers` | `thresholds{window_hours,min_series,min_coverage}`, `catalog_series`, `episodes[]{id,ip,country,principals[],client,user_agent,kind,started_at,last_at,series,volumes,catalog_series,coverage,bytes_out,requests,status,active}` (newest first, at most 500), `by_ip[]{ip,country,episodes,last_at,bytes_out}`, `episodes_per_day{t,granularity:"day",series[episodes]}`, `tracking{ips,max_ips,entries,max_entries,approx_bytes}` |
 | `GET clients` | `apps[]`, `clients[]`, `browsers[]`, `os[]`, `protocols[]`, `dav_clients[]`, `dav_apps[]` each `{key,label,requests,bytes_out,principals}` (distinct visitors within `principals_days`, the IP retention); `origins[]{origin,requests,hosted_reader}`; `by_app{t,series}` (daily); `totals{requests,bytes_out}` |

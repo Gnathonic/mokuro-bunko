@@ -1,5 +1,6 @@
 //! `GET /_admin/api/analytics/health`: status classes over time, the commonest errors,
-//! failed logins (by IP and by username, within the IP retention), latency per kind of
+//! failed logins (counted over the whole range; by IP and by username within the IP
+//! retention only, `ip_days`), latency per kind of
 //! request, the slowest requests, and transfer efficiency.
 
 use super::{ApiQuery, answer, query, time_series};
@@ -19,6 +20,7 @@ fn ms(v: Option<f64>) -> Value {
 
 pub(super) async fn get(a: &Analytics, q: &ApiQuery) -> Response {
     let db = a.db().clone();
+    let ip_days = a.config().retention.ip_days;
     let range = q.range;
     let body = query("analytics health", move || {
         let none = TrafficFilter::default();
@@ -44,7 +46,7 @@ pub(super) async fn get(a: &Analytics, q: &ApiQuery) -> Response {
             }
         }
         let errors: Vec<Value> = db
-            .errors(h0, h1, ERRORS_MAX)?
+            .errors(&range.span, ERRORS_MAX)?
             .into_iter()
             .map(|e| {
                 json!({"status": e.status, "protocol": e.protocol, "method": e.method, "category": e.category, "count": e.count})
@@ -111,6 +113,8 @@ pub(super) async fn get(a: &Analytics, q: &ApiQuery) -> Response {
                 "values": values,
                 "top_ips": top_ips,
                 "top_usernames": top_usernames,
+                // The IPs and usernames are kept this long; the counts forever.
+                "ip_days": ip_days,
             },
             "latency": latency,
             "slow": slow,

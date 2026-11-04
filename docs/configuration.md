@@ -654,8 +654,8 @@ analytics:
 |--------|------|---------|-------------|
 | `enabled` | boolean | `true` | Count requests. Off, the counting layer passes every request through untouched and nothing is written; what is stored stays viewable in the admin panel. |
 | `flush_seconds` | integer | `60` | How often the in-memory counters are written to the database (5 to 3600). A crash loses at most this much. |
-| `retention.ip_days` | integer | `30` | Days rows with a raw client IP are kept: the per-IP totals, the IPs an anonymous visitor came from, failed sign-ins, and the slowest requests (those at most 7 days). Afterwards only pseudonymous ids remain. |
-| `retention.hourly_days` | integer | `90` | Days the hourly traffic, latency and error rows are kept. Daily totals are kept forever. The last two complete days keep their hourly rows whatever this says, because their daily totals are still being rebuilt from them. |
+| `retention.ip_days` | integer | `30` | Days rows with a raw client IP are kept: the per-IP totals, the IPs an anonymous visitor came from, failed sign-ins per IP and username (their daily count is kept forever), and the slowest requests (those at most 7 days). Afterwards only pseudonymous ids remain. Also how often the anonymous ids' salt is replaced. |
+| `retention.hourly_days` | integer | `90` | Days the hourly traffic, latency and error rows are kept. Daily totals (errors included) are kept forever. The last two complete days keep their hourly rows whatever this says, because their daily totals are still being rebuilt from them. |
 | `retention.host_minute_days` | integer | `7` | Days the per-minute memory and CPU samples are kept. |
 | `retention.crawl_days` | integer | `90` | Days a crawl episode is kept after its last request. |
 | `crawl.window_hours` | integer | `6` | The window the crawl detector looks at, per client IP (1 to 168). |
@@ -672,8 +672,17 @@ in memory and written in one transaction per `flush_seconds`; complete days are
 rolled into daily totals once an hour. An account's traffic is attributed to the
 account (`u:<name>`); an OCR processor's (`p:<name>`) counts as bandwidth but not as
 downloads, reading, active users or crawling; an anonymous request is attributed to a
-pseudonymous id, the start of a salted SHA-256 of its client IP (`a:<12 hex>`), so a
-visitor can be counted once without long-lived rows keeping the address. The client
+pseudonymous id, the start of a salted SHA-256 of its client IPv4 address or IPv6
+`/64` (`a:<12 hex>`), so a visitor can be counted once without long-lived rows
+keeping the address. The salt is replaced every `retention.ip_days` and the old one
+deleted, so once the raw IPs are gone an id can no longer be traced back to its
+address (a visitor is one id within such a period only); a day keeps at most 10,000
+anonymous visitors apart, the rest count together as `a:other`. A download counts
+toward popularity once most of the file (95 %) was sent that day, so a one-byte range
+probe is no download. If `analytics.sqlite` is damaged (SQLite or its `quick_check`
+says so) it is moved aside as `analytics.sqlite.broken-<time>` and a new one is made;
+if it is healthy but cannot be opened (locked by another process, read-only) it is
+left as it is and the analytics are kept in memory for that run. The client
 IP is the one the server resolves, so `server.trusted_proxies` applies. Byte counts
 are response and request **body** bytes (headers and TLS are not counted); behind the
 image's nginx (`MOKURO_NGINX_ACCEL=1`) the archives nginx sends are counted from the

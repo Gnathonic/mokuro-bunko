@@ -41,6 +41,8 @@ pub struct MaintainStats {
     pub days_rolled: u32,
     /// Rows deleted.
     pub pruned: u64,
+    /// A new salt period began: the anonymous ids' salt was replaced.
+    pub salt_rotated: bool,
 }
 
 const DAY: i64 = 86400;
@@ -48,14 +50,53 @@ const DAY: i64 = 86400;
 impl AnalyticsDb {
     /// Roll up, then prune, as of `now_s` (epoch seconds), in one transaction.
     pub fn maintain(&self, now_s: i64, retention: &Retention) -> Result<MaintainStats> {
-        self.write(|tx| {
+        let (stats, salt) = self.write(|tx| {
             let days_rolled = rollup(tx.conn, now_s)?;
             let pruned = prune(tx.conn, now_s, retention)?;
-            Ok(MaintainStats {
+            let salt = rotate_salt(tx.conn, now_s, retention.ip_days)?;
+            let stats = MaintainStats {
                 days_rolled,
                 pruned,
-            })
-        })
+                salt_rotated: salt.is_some(),
+            };
+            Ok((stats, salt))
+        })?;
+        // Only once the new salt is stored: a rolled-back rotation keeps the old one.
+        if let Some(salt) = salt {
+            self.set_salt(salt);
+        }
+        Ok(stats)
+    }
+}
+
+/// Replace the salt when its period (`ip_days` UTC days) is over: the old one is
+/// overwritten, so the ids it made, which outlive the raw IPs in the daily tables,
+/// can no longer be matched to an address by hashing candidates. The first upkeep of
+/// a file only records the period its salt belongs to.
+fn rotate_salt(conn: &Connection, now_s: i64, ip_days: u32) -> Result<Option<[u8; 32]>> {
+    let epoch = now_s.div_euclid(DAY).div_euclid(i64::from(ip_days.max(1)));
+    let stored: Option<i64> =
+        super::meta_get(conn, keys::SALT_EPOCH)?.and_then(|v| v.trim().parse().ok());
+    let set = |key: &str, value: &str| -> Result<()> {
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES (?1, ?2) \
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
+    };
+    match stored {
+        Some(e) if e == epoch => Ok(None),
+        None => {
+            set(keys::SALT_EPOCH, &epoch.to_string())?;
+            Ok(None)
+        }
+        Some(_) => {
+            let salt = super::new_salt();
+            set(keys::SALT, &hex::encode(salt))?;
+            set(keys::SALT_EPOCH, &epoch.to_string())?;
+            Ok(Some(salt))
+        }
     }
 }
 
@@ -107,6 +148,34 @@ fn rollup(conn: &Connection, now_s: i64) -> Result<u32> {
                  WHERE hour >= ?2 AND hour < ?3 \
                  GROUP BY protocol, method, category, detail, status_class",
                 params![day, h0, h1],
+            )?;
+        }
+        // Errors and failed sign-ins (their count only: no IP, no username) outlive
+        // their hourly rows, so long ranges do not read as a quiet server.
+        let error_rows: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM errors_hourly WHERE hour >= ?1 AND hour < ?2",
+            params![h0, h1],
+            |r| r.get(0),
+        )?;
+        if error_rows > 0 {
+            conn.execute("DELETE FROM errors_daily WHERE day = ?1", [day])?;
+            conn.execute(
+                "INSERT INTO errors_daily (day, protocol, method, category, status, count) \
+                 SELECT ?1, protocol, method, category, status, SUM(count) FROM errors_hourly \
+                 WHERE hour >= ?2 AND hour < ?3 GROUP BY protocol, method, category, status",
+                params![day, h0, h1],
+            )?;
+        }
+        let failures: Option<i64> = conn.query_row(
+            "SELECT SUM(count) FROM auth_failures WHERE hour >= ?1 AND hour < ?2",
+            params![h0, h1],
+            |r| r.get(0),
+        )?;
+        if let Some(n) = failures {
+            conn.execute(
+                "INSERT INTO auth_failures_daily (day, count) VALUES (?1, ?2) \
+                 ON CONFLICT (day) DO UPDATE SET count = excluded.count",
+                params![day, n],
             )?;
         }
         let mut merged: Vec<((String, String, String), Histogram, Histogram)> = Vec::new();
@@ -395,5 +464,127 @@ mod tests {
             .read(|c| Ok(c.query_row("SELECT COUNT(*) FROM traffic_hourly", [], |r| r.get(0))?))
             .unwrap();
         assert_eq!(n, 1);
+    }
+
+    /// The salt is replaced once its `ip_days` period is over, and the old one is
+    /// gone from the file: ids made with it can no longer be matched to an address.
+    #[test]
+    fn the_salt_is_replaced_every_ip_days_and_the_old_one_deleted() {
+        let (_d, db) = temp_db();
+        let r = Retention::default();
+        let first = db.salt();
+        let day = 20_010i64; // 20010 / 30 = 667: a period starts on day 20010
+        let stats = db.maintain(day * DAY + 60, &r).unwrap();
+        assert!(
+            !stats.salt_rotated,
+            "the first upkeep only notes the period"
+        );
+        assert_eq!(db.salt(), first);
+        // Later in the same period: kept.
+        let stats = db.maintain((day + 29) * DAY, &r).unwrap();
+        assert!(!stats.salt_rotated);
+        assert_eq!(db.salt(), first);
+        // The next period: a new salt, stored, and the old one nowhere in `meta`.
+        let stats = db.maintain((day + 30) * DAY, &r).unwrap();
+        assert!(stats.salt_rotated);
+        let second = db.salt();
+        assert_ne!(second, first);
+        let stored = db.meta_get(keys::SALT).unwrap().unwrap();
+        assert_eq!(stored, hex::encode(second));
+        let old = hex::encode(first);
+        let holding: i64 = db
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT COUNT(*) FROM meta WHERE value LIKE ?1",
+                    [format!("%{old}%")],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(holding, 0);
+        assert_eq!(
+            db.meta_i64(keys::SALT_EPOCH).unwrap(),
+            Some((day + 30) / 30)
+        );
+    }
+
+    /// A download counts once most of the file went out (resumes add up); a
+    /// one-byte range probe does not.
+    #[test]
+    fn only_completed_downloads_count() {
+        let (_d, db) = temp_db();
+        let day = 20_000i64;
+        let row = |principal: &'static str, bytes: u64| DownloadRow {
+            day,
+            principal,
+            volume_key: "S/v.cbz",
+            series_key: "s",
+            series_title: "S",
+            bytes,
+            size: 1000,
+        };
+        db.write(|tx| {
+            tx.add_download(&row("a:000000000001", 1))?;
+            tx.add_download(&row("a:000000000002", 1))?;
+            tx.add_download(&row("u:alice", 1000))?;
+            tx.add_download(&row("u:bob", 600))?;
+            tx.add_download(&row("u:bob", 400))
+        })
+        .unwrap();
+        assert_eq!(db.download_totals(day, day).unwrap(), (2, 2));
+        let s = db.series_downloads(day, day).unwrap();
+        assert_eq!(
+            (s[0].downloads, s[0].downloaders, s[0].volumes, s[0].bytes),
+            (2, 2, 1, 2002)
+        );
+        assert_eq!(
+            db.downloaders_by_volume("s").unwrap(),
+            [("S/v.cbz".to_string(), 2)]
+        );
+        assert_eq!(db.downloaders_by_series().unwrap()[0].2, 2);
+    }
+
+    /// Errors and failed sign-ins outlive their hourly (and IP) rows as daily counts:
+    /// 1000 failures 40 days ago and 500 errors 100 days ago still show on long ranges.
+    #[test]
+    fn errors_and_failed_sign_ins_outlive_their_hourly_rows() {
+        let (_d, db) = temp_db();
+        let today = 20_100i64;
+        let k = KindDims {
+            protocol: "dav",
+            method: "PROPFIND",
+            category: "metadata",
+        };
+        db.write(|tx| {
+            let h = (today - 40) * 24 + 3;
+            tx.add_auth_failures(h, "192.0.2.9", "admin", 1000)?;
+            tx.add_traffic(h, &D, &c(1))?;
+            let h = (today - 100) * 24 + 5;
+            tx.add_errors(h, &k, 401, 500)?;
+            tx.add_traffic(h, &D, &c(1))
+        })
+        .unwrap();
+        // The upkeep ran every day (the rollup goes on from where it left off).
+        for day in (today - 100)..=today {
+            db.maintain(day * DAY + 7200, &Retention::default())
+                .unwrap();
+        }
+        let count = |t: &str| -> i64 {
+            db.read(|c| Ok(c.query_row(&format!("SELECT COUNT(*) FROM {t}"), [], |r| r.get(0))?))
+                .unwrap()
+        };
+        assert_eq!(count("auth_failures"), 0, "the IP rows are gone");
+        assert_eq!(count("errors_hourly"), 0, "the hourly rows are gone");
+        let all = Span {
+            granularity: Granularity::Day,
+            from: today - 365,
+            to: today,
+        };
+        assert_eq!(db.auth_failure_total(&all).unwrap(), 1000);
+        assert_eq!(db.auth_failure_series(&all).unwrap(), [(today - 40, 1000)]);
+        let errors = db.errors(&all, 10).unwrap();
+        assert_eq!(errors.len(), 1);
+        assert_eq!((errors[0].status, errors[0].count), (401, 500));
+        assert_eq!(errors[0].method, "PROPFIND");
     }
 }

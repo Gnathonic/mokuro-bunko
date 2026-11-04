@@ -964,3 +964,69 @@ async fn the_started_worker_reads_a_file_after_its_debounce() {
     env.services.analytics.stop().await;
     assert_eq!(env.reads().len(), 1);
 }
+
+/// The worker keeps taking events while it reads a batch of files, so the queue's
+/// 1024 slots are a burst size, not a budget per batch; files it never reads (goals,
+/// profiles) take no slot at all.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_queue_drains_while_files_are_read_and_ignored_files_take_no_slot() {
+    use bunko_dav::DavTarget;
+    use bunko_server::analytics::reading::{FileWritten, QUEUE};
+    let env = Env::new();
+    let a = &env.services.analytics;
+    a.reading().set_debounce(Duration::from_millis(20));
+    let stop = tokio_util::sync::CancellationToken::new();
+    a.start(stop.clone());
+    let ev = |user: String, rel: &str| FileWritten {
+        username: user,
+        target: DavTarget::Progress,
+        rel: rel.to_string(),
+        method: "PUT",
+        at_ms: 0,
+    };
+    // A batch the worker is stuck reading (a slow disk).
+    let slow = a.reading().hold_work().await;
+    a.reading()
+        .on_file_written(ev("u0".into(), "positions.json"));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let n = QUEUE * 3;
+    for i in 0..n {
+        a.reading()
+            .on_file_written(ev(format!("u{}", i + 1), "positions.json"));
+        a.reading()
+            .on_file_written(ev(format!("u{}", i + 1), "goals.json"));
+        if i % 64 == 0 {
+            // Requests arrive over time, not all in one instant.
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let (queued, dropped) = (a.reading().queued(), a.reading().dropped());
+    drop(slow);
+    stop.cancel();
+    assert_eq!(dropped, 0, "queued {queued}");
+    assert_eq!(queued, 1 + n as u64, "goals.json never takes a slot");
+}
+
+/// A positions.json written just before a shutdown (an update restart) is read by the
+/// shutdown itself, not lost with the debounce queue.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_shutdown_reads_the_files_still_waiting_their_debounce() {
+    let env = Env::new();
+    let a = &env.services.analytics;
+    a.reading().set_debounce(Duration::from_secs(600));
+    a.start(tokio_util::sync::CancellationToken::new());
+    let now = base_ms();
+    let file = positions(&[(U1, now - 600_000, 12, 3400, DEVICE)]);
+    assert!(
+        env.reader_put("reader", "positions.json", &file)
+            .await
+            .is_success()
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(env.reads().is_empty(), "still waiting its debounce");
+    a.stop().await;
+    let r = env.reads();
+    assert_eq!(r.len(), 1, "{r:?}");
+    assert_eq!((r[0].1.as_str(), r[0].2), (U1, 1));
+}

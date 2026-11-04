@@ -13,7 +13,7 @@
 //! | module | tables |
 //! |---|---|
 //! | `mod` | `meta` (salt, schema version, `tracking_since`, rollup mark, counters) |
-//! | [`traffic`] | `traffic_*`, `latency_*`, `errors_hourly`, `principal_*`, `anon_ips`, `ip_daily`, `auth_failures`, `slow_requests`, `volume_downloads`, `uploads_daily` |
+//! | [`traffic`] | `traffic_*`, `latency_*`, `errors_*`, `principal_*`, `anon_ips`, `ip_daily`, `auth_failures*`, `slow_requests`, `volume_downloads`, `uploads_daily` |
 //! | [`reading`] | `read_positions`, `reading_daily`, `history_cursor`, `volume_progress`, `devices` |
 //! | [`library`] | `library_scan`, `library_daily`, `archive_pages` |
 //! | [`host`] | `host_minute`, `host_hourly` |
@@ -37,7 +37,7 @@ pub mod traffic;
 pub use maintain::{MaintainStats, Retention};
 
 use crate::error::{DbError, Result};
-use parking_lot::{Condvar, Mutex};
+use parking_lot::{Condvar, Mutex, RwLock};
 use rand::RngCore;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use std::path::{Path, PathBuf};
@@ -54,6 +54,9 @@ pub const ANALYTICS_SCHEMA_VERSION: i64 = 1;
 pub mod keys {
     /// 32 random bytes (hex) for the anonymous principals' hash (design §3).
     pub const SALT: &str = "salt";
+    /// The salt period [`SALT`] belongs to: UTC day / `retention.ip_days`. A new
+    /// period gets a new salt and the old one is gone.
+    pub const SALT_EPOCH: &str = "salt_epoch";
     pub const SCHEMA_VERSION: &str = "analytics_schema_version";
     /// Epoch seconds of the first flush that wrote any traffic.
     pub const TRACKING_SINCE: &str = "tracking_since";
@@ -70,6 +73,12 @@ const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 /// Page cache per connection, KiB (a small file; the main DB keeps the big budget).
 const CACHE_KIB: i64 = 2048;
 const READERS: usize = 2;
+/// The `-wal` file is cut back to this after a checkpoint (a big prune or retention
+/// change would otherwise leave it at its high-water size until the server stops).
+const JOURNAL_SIZE_LIMIT: i64 = 8 << 20;
+/// Files up to this size get `PRAGMA quick_check` when opened: a damaged table page
+/// passes the open (the DDL reads only the schema) and would fail every flush after.
+pub const QUICK_CHECK_MAX_BYTES: u64 = 256 << 20;
 
 /// The `analytics.sqlite` handle. See the module docs.
 pub struct AnalyticsDb {
@@ -78,7 +87,9 @@ pub struct AnalyticsDb {
     readers: Mutex<Vec<Connection>>,
     reader_available: Condvar,
     reader_count: usize,
-    salt: [u8; 32],
+    /// The current salt; [`AnalyticsDb::maintain`] replaces it (and its stored copy)
+    /// once its period is over.
+    salt: RwLock<[u8; 32]>,
 }
 
 impl std::fmt::Debug for AnalyticsDb {
@@ -120,6 +131,11 @@ impl AnalyticsDb {
         let writer = open_connection(&path)?;
         writer.pragma_update_and_check(None, "journal_mode", "WAL", |r| r.get::<_, String>(0))?;
         writer.pragma_update(None, "synchronous", "NORMAL")?;
+        writer.pragma_update(None, "journal_size_limit", JOURNAL_SIZE_LIMIT)?;
+        let small = std::fs::metadata(&path).is_ok_and(|m| m.len() <= QUICK_CHECK_MAX_BYTES);
+        if small {
+            quick_check(&writer)?;
+        }
         let mut readers = Vec::with_capacity(READERS);
         let salt = init(&writer)?;
         for _ in 0..READERS {
@@ -133,7 +149,7 @@ impl AnalyticsDb {
             readers: Mutex::new(readers),
             reader_available: Condvar::new(),
             reader_count: READERS,
-            salt,
+            salt: RwLock::new(salt),
         })
     }
 
@@ -148,7 +164,7 @@ impl AnalyticsDb {
             readers: Mutex::new(Vec::new()),
             reader_available: Condvar::new(),
             reader_count: 0,
-            salt,
+            salt: RwLock::new(salt),
         })
     }
 
@@ -157,9 +173,16 @@ impl AnalyticsDb {
         self.path.as_deref()
     }
 
-    /// The salt of the anonymous principals' hash: 32 random bytes made with the file.
-    pub fn salt(&self) -> &[u8; 32] {
-        &self.salt
+    /// The salt of the anonymous principals' hash: 32 random bytes, replaced every
+    /// `retention.ip_days` (the hourly upkeep), the old one deleted. An anonymous id
+    /// can therefore be traced back to its address (by whoever holds the file) only
+    /// while the salt that made it lives, never longer than the raw IPs are kept.
+    pub fn salt(&self) -> [u8; 32] {
+        *self.salt.read()
+    }
+
+    pub(crate) fn set_salt(&self, salt: [u8; 32]) {
+        *self.salt.write() = salt;
     }
 
     /// Run `f` in one write transaction (`BEGIN IMMEDIATE` ... `COMMIT`); an error rolls
@@ -259,6 +282,32 @@ fn meta_get(conn: &Connection, key: &str) -> Result<Option<String>> {
         .optional()?)
 }
 
+/// `PRAGMA quick_check`: anything but `ok` is a damaged file (`SQLITE_CORRUPT`, so
+/// [`DbError::is_corrupt`] tells it).
+fn quick_check(conn: &Connection) -> Result<()> {
+    let first: String = conn.query_row("PRAGMA quick_check(1)", [], |r| r.get(0))?;
+    if first == "ok" {
+        return Ok(());
+    }
+    Err(DbError::Sqlite(rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT),
+        Some(format!("quick_check: {first}")),
+    )))
+}
+
+impl AnalyticsDb {
+    /// Write the WAL back into the file and cut it to [`JOURNAL_SIZE_LIMIT`] (after
+    /// the hourly upkeep, whose prune may be the biggest write of the day).
+    pub fn checkpoint(&self) -> Result<()> {
+        if self.path.is_some() {
+            self.writer
+                .lock()
+                .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
+        }
+        Ok(())
+    }
+}
+
 /// Every area's DDL, the schema version and the salt, in one transaction.
 fn init(conn: &Connection) -> Result<[u8; 32]> {
     conn.execute_batch("BEGIN IMMEDIATE")?;
@@ -279,8 +328,7 @@ fn init(conn: &Connection) -> Result<[u8; 32]> {
         let salt = match tx.meta_get(keys::SALT)?.and_then(|h| parse_salt(&h)) {
             Some(s) => s,
             None => {
-                let mut s = [0u8; 32];
-                rand::rng().fill_bytes(&mut s);
+                let s = new_salt();
                 tx.meta_set(keys::SALT, &hex::encode(s))?;
                 s
             }
@@ -299,7 +347,14 @@ fn init(conn: &Connection) -> Result<[u8; 32]> {
     }
 }
 
-fn parse_salt(hex_text: &str) -> Option<[u8; 32]> {
+/// 32 new random bytes for the salt.
+pub(crate) fn new_salt() -> [u8; 32] {
+    let mut s = [0u8; 32];
+    rand::rng().fill_bytes(&mut s);
+    s
+}
+
+pub(crate) fn parse_salt(hex_text: &str) -> Option<[u8; 32]> {
     let bytes = hex::decode(hex_text.trim()).ok()?;
     bytes.try_into().ok()
 }
@@ -387,7 +442,7 @@ mod tests {
         ] {
             assert!(tables.iter().any(|n| n == t), "missing {t}: {tables:?}");
         }
-        let salt = *db.salt();
+        let salt = db.salt();
         assert_ne!(salt, [0u8; 32]);
         assert_eq!(
             db.meta_get(keys::SCHEMA_VERSION).unwrap().as_deref(),
@@ -396,7 +451,7 @@ mod tests {
         drop(db);
         // Idempotent: a second open keeps the salt and every row.
         let again = AnalyticsDb::open(&path).unwrap();
-        assert_eq!(*again.salt(), salt);
+        assert_eq!(again.salt(), salt);
     }
 
     #[test]
@@ -415,5 +470,35 @@ mod tests {
         db.write(|tx| tx.meta_set_once("once", "x")).unwrap();
         db.write(|tx| tx.meta_set_once("once", "y")).unwrap();
         assert_eq!(db.meta_get("once").unwrap().as_deref(), Some("x"));
+    }
+
+    /// A big write (the prune of a retention change) leaves no high-water `-wal`
+    /// behind once the upkeep checkpoints.
+    #[test]
+    fn the_wal_is_cut_back_after_a_big_write() {
+        let (dir, db) = testutil::temp_db();
+        let wal = dir.path().join(format!("{FILE_NAME}-wal"));
+        let big = "x".repeat(4000);
+        db.write(|tx| {
+            for i in 0..6000 {
+                tx.meta_set(&format!("k{i}"), &big)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        db.write(|tx| {
+            tx.conn
+                .execute("DELETE FROM meta WHERE key LIKE 'k%'", [])?;
+            Ok(())
+        })
+        .unwrap();
+        // About 24 MiB went through the WAL.
+        db.checkpoint().unwrap();
+        db.meta_set("after", "1").unwrap();
+        let after = std::fs::metadata(&wal).unwrap().len();
+        assert!(
+            after <= JOURNAL_SIZE_LIMIT as u64,
+            "-wal left at {after} bytes"
+        );
     }
 }

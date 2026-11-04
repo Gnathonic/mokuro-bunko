@@ -37,7 +37,7 @@ use bunko_core::config::AnalyticsConfig;
 use bunko_db::Database;
 use bunko_db::analytics::{AnalyticsDb, MaintainStats, Retention};
 use parking_lot::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio_util::sync::CancellationToken;
@@ -104,6 +104,10 @@ pub(crate) struct Inner {
     pub deps: AnalyticsDeps,
     pub db: Arc<AnalyticsDb>,
     enabled: AtomicBool,
+    /// [`bunko_db::analytics::traffic::ANON_PER_DAY`] (tests lower it).
+    pub(crate) anon_per_day: AtomicU64,
+    /// The settings changed: the flush task works its wait out again.
+    pub(crate) flush_wake: tokio::sync::Notify,
     pub collector: collector::Collector,
     pub gauges: Arc<Gauges>,
     pub reading: reading::Reading,
@@ -114,6 +118,48 @@ pub(crate) struct Inner {
     pub geo: geo::Geo,
     /// The flush task, its stop token, and whether `stop` ran.
     task: Mutex<Option<(CancellationToken, tokio::task::JoinHandle<()>)>>,
+}
+
+/// Move a damaged `analytics.sqlite` and its `-wal`/`-shm` to
+/// `analytics.sqlite.broken-<ts>[-<n>]` (never over an earlier one), so the new file
+/// inherits none of them. Returns the new name of the main file.
+fn move_aside(path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let ts = now_s();
+    let mut n = 0u32;
+    let aside = loop {
+        let base = if n == 0 {
+            format!("{name}.broken-{ts}")
+        } else {
+            format!("{name}.broken-{ts}-{n}")
+        };
+        let candidate = path.with_file_name(&base);
+        let taken = ["", "-wal", "-shm"]
+            .iter()
+            .any(|s| bunko_store::fs::exists(path.with_file_name(format!("{base}{s}"))));
+        if !taken {
+            break candidate;
+        }
+        n += 1;
+        if n > 1000 {
+            return Err(std::io::Error::other("no free name to move it to"));
+        }
+    };
+    let aside_name = aside
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    bunko_store::fs::rename(path, &aside)?;
+    for side in ["-wal", "-shm"] {
+        let from = path.with_file_name(format!("{name}{side}"));
+        if bunko_store::fs::exists(&from) {
+            bunko_store::fs::rename(&from, path.with_file_name(format!("{aside_name}{side}")))?;
+        }
+    }
+    Ok(aside)
 }
 
 /// Epoch seconds now.
@@ -142,39 +188,50 @@ fn retention_of(cfg: &AnalyticsConfig) -> Retention {
 }
 
 impl Analytics {
-    /// Open `analytics.sqlite` beside the main database. A file that cannot be opened
-    /// is moved aside and made again; if even that fails the analytics live in memory
-    /// for this run (logged): the server never fails to start over its analytics. Only
-    /// a process that cannot run SQLite at all gets an error.
+    /// Open `analytics.sqlite` beside the main database. A damaged file (SQLite says
+    /// corrupt or not a database, or `quick_check` fails) is moved aside with its
+    /// `-wal` and `-shm` and made again; a healthy file that cannot be opened now
+    /// (locked by another process, read-only, unreachable) stays where it is, and the
+    /// analytics live in memory for this run (logged), as they do when even a new file
+    /// cannot be made: the server never fails to start over its analytics. Only a
+    /// process that cannot run SQLite at all gets an error.
     pub fn open(deps: AnalyticsDeps) -> anyhow::Result<Analytics> {
         let path = deps
             .core
             .layout
             .database()
             .with_file_name(bunko_db::analytics::FILE_NAME);
+        let in_memory = |why: &str| -> anyhow::Result<AnalyticsDb> {
+            tracing::warn!(
+                "[ANALYTICS] {} {why}: analytics are kept in memory until the server stops",
+                path.display()
+            );
+            Ok(AnalyticsDb::open_in_memory()?)
+        };
         let db = match AnalyticsDb::open(&path) {
             Ok(db) => db,
-            Err(first) => {
-                let aside = path.with_extension(format!("sqlite.broken-{}", now_s()));
-                tracing::warn!(
-                    "[ANALYTICS] {} cannot be opened ({first}); moving it to {} and starting a new one",
-                    path.display(),
-                    aside.display()
-                );
-                let reopened = bunko_store::fs::rename(&path, &aside)
-                    .map_err(|e| e.to_string())
-                    .and_then(|()| AnalyticsDb::open(&path).map_err(|e| e.to_string()));
-                match reopened {
-                    Ok(db) => db,
-                    Err(e) => {
-                        tracing::warn!(
-                            "[ANALYTICS] {} cannot be made either ({e}): analytics are kept in memory until the server stops",
-                            path.display()
-                        );
-                        AnalyticsDb::open_in_memory()?
-                    }
+            Err(first) if first.is_corrupt() => {
+                let moved = move_aside(&path);
+                match &moved {
+                    Ok(aside) => tracing::warn!(
+                        "[ANALYTICS] {} is damaged ({first}); moved it to {} and starting a new one",
+                        path.display(),
+                        aside.display()
+                    ),
+                    Err(e) => tracing::warn!(
+                        "[ANALYTICS] {} is damaged ({first}) and cannot be moved aside ({e})",
+                        path.display()
+                    ),
+                }
+                match moved.map(|_| AnalyticsDb::open(&path)) {
+                    Ok(Ok(db)) => db,
+                    Ok(Err(e)) => in_memory(&format!("cannot be made either ({e})"))?,
+                    Err(_) => in_memory("stays as it is")?,
                 }
             }
+            Err(e) => in_memory(&format!(
+                "cannot be opened ({e}); it is left as it is, its history untouched"
+            ))?,
         };
         Ok(Self::with_db(deps, db))
     }
@@ -194,6 +251,8 @@ impl Analytics {
             collector: collector::Collector::default(),
             db: Arc::new(db),
             enabled: AtomicBool::new(enabled),
+            anon_per_day: AtomicU64::new(bunko_db::analytics::traffic::ANON_PER_DAY),
+            flush_wake: tokio::sync::Notify::new(),
             gauges,
             deps,
             task: Mutex::new(None),
@@ -206,11 +265,20 @@ impl Analytics {
     }
 
     /// Re-read the `analytics:` settings after an admin edit (the enabled flag is
-    /// cached for the hot path; the areas re-read what they cache).
+    /// cached for the hot path; the areas re-read what they cache; a new flush or scan
+    /// interval applies to the wait already running).
     pub fn settings_changed(&self) {
         let cfg = self.config();
         self.0.enabled.store(cfg.enabled, Ordering::Relaxed);
         self.0.geo.settings_changed(&cfg);
+        self.0.flush_wake.notify_one();
+        self.0.library.settings_changed();
+    }
+
+    /// Lower the day's anonymous-visitor cap (tests: the real one is 10,000).
+    #[doc(hidden)]
+    pub fn set_anon_per_day(&self, n: u64) {
+        self.0.anon_per_day.store(n, Ordering::Relaxed);
     }
 
     /// The live `analytics:` settings.
@@ -284,6 +352,8 @@ impl Analytics {
         if let Some((token, handle)) = task {
             token.cancel();
             let _ = handle.await;
+            // The reading worker reads what is still waiting its debounce first.
+            self.0.reading.stopped().await;
         }
         if let Err(e) = self.flush_now().await {
             tracing::warn!("[ANALYTICS] final flush failed: {e}");
@@ -304,10 +374,13 @@ impl Analytics {
     pub async fn maintain_at(&self, now_s: i64) -> anyhow::Result<MaintainStats> {
         let db = self.0.db.clone();
         let retention = retention_of(&self.config());
-        Ok(
-            tokio::task::spawn_blocking(move || db.maintain(now_s, &retention))
-                .await
-                .map_err(|e| anyhow::anyhow!("maintenance task: {e}"))??,
-        )
+        Ok(tokio::task::spawn_blocking(move || {
+            let stats = db.maintain(now_s, &retention)?;
+            // The prune may have been the biggest write of the day: cut the WAL.
+            db.checkpoint()?;
+            Ok::<_, bunko_db::DbError>(stats)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("maintenance task: {e}"))??)
     }
 }

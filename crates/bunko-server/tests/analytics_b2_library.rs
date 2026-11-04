@@ -658,3 +658,33 @@ async fn a_cloud_library_is_scanned_from_the_index_without_a_download() {
     assert_eq!(v["totals"]["volumes"], 3);
     assert_eq!(kind(&v, "primary_sidecar")["files"], 1);
 }
+
+/// Turning analytics off stops a pass already reading archives at the next one:
+/// "disabled: nothing is written" holds for a scan that was running too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn turning_analytics_off_stops_a_running_pass() {
+    let env = Env::new();
+    for i in 0..40 {
+        write(
+            &env.library.join(format!("Delta/Delta {i:02}.cbz")),
+            &jpeg_volume(1),
+        );
+    }
+    let a = env.services.analytics.clone();
+    let pass = tokio::spawn(async move { a.library_scanner().scan_now(&a).await.unwrap() });
+    // Pages are read at 20 a second: let a few go, then turn analytics off.
+    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+    env.services.core.config.write().analytics.enabled = false;
+    env.services.analytics.settings_changed();
+    let (outcome, _) = pass.await.unwrap();
+    assert_eq!(outcome, Outcome::Disabled);
+    let count = || -> i64 {
+        env.sql()
+            .query_row("SELECT COUNT(*) FROM archive_pages", [], |r| r.get(0))
+            .unwrap()
+    };
+    let read = count();
+    assert!(read > 0 && read < 45, "{read} archives read");
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert_eq!(count(), read, "nothing more is opened");
+}

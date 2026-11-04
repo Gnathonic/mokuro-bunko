@@ -525,8 +525,13 @@ pub(super) async fn analytics(s: &AdminState, req: &ApiRequest) -> Response {
                     .map_err(|e| error(400, e.to_string()))?;
             }
             next.validate().map_err(|e| error(400, e.to_string()))?;
-            s2.core().config.write().analytics = next;
-            save_config(&s2)?;
+            let before = std::mem::replace(&mut s2.core().config.write().analytics, next);
+            if let Err(r) = save_config(&s2) {
+                // Not saved, not applied: the layer's cached flag, the settings view
+                // and the config keep agreeing.
+                s2.core().config.write().analytics = before;
+                return Err(r);
+            }
             Ok(s2.core().config.read().analytics.clone())
         },
     )

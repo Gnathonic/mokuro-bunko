@@ -46,8 +46,11 @@
   sign-ins per IP and username (WebDAV Basic auth and the login page alike), the
   slowest requests, 304 and gzip savings, aborted and resumed downloads, and who
   downloaded which volume. Accounts are counted by name, OCR processors as bandwidth
-  only, anonymous visitors by a salted pseudonymous id; raw client IPs are kept only
-  `analytics.retention.ip_days` (30). It costs no I/O on the request path: counters
+  only, anonymous visitors by a salted pseudonymous id (per IPv4 address or IPv6
+  `/64`, its salt replaced every IP retention period; past 10,000 a day the rest count
+  together); raw client IPs are kept only `analytics.retention.ip_days` (30). A
+  download counts once most of the file was sent, and `//` or `/./` in a path never
+  splits one. It costs no I/O on the request path: counters
   live in memory and are written every `analytics.flush_seconds` (60) to their own
   `analytics.sqlite` beside `mokuro.db`, rolled into daily totals hourly and pruned by
   retention. Memory is bounded even when every request comes from a new address: what
