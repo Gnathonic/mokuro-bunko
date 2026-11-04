@@ -441,6 +441,12 @@
         return (data && data.range && data.range.granularity) || 'day';
     }
 
+    // Series read from a daily table (reading_daily, principal_daily,
+    // clients_daily, library_daily, uploads_daily) have one point per UTC
+    // day whatever the range's granularity: they are labelled as UTC dates.
+    const DAILY = 'day';
+    const DAILY_NOTE = 'Daily, by UTC day';
+
     function rangeLong() {
         const r = RANGES.find((x) => x.key === state.range);
         return r ? r.long : state.range;
@@ -511,7 +517,7 @@
             const fig = C.timeSeries({
                 t: ts.t,
                 series: groups[group].map((sr) => ({ key: sr.key, label: sr.label || sr.key, values: sr.values, color: opts.perSeries ? 'var(--an-s1)' : undefined })),
-                granularity: gran(data),
+                granularity: opts.granularity || gran(data),
                 type: opts.type || 'line',
                 kind,
                 colorFor: opts.colorFor || colors.generic,
@@ -908,9 +914,9 @@
         const minutes = find('minutes');
         const pages = find('pages');
         const readers = find('readers');
-        const g = gran(data);
+        const g = DAILY;
         const small = (sr, label, kind) => card(label, {
-            sub: granularityNote(data),
+            sub: DAILY_NOTE,
             body: C.timeSeries({ t: data.t, series: [{ key: sr.key, label, values: sr.values, color: 'var(--an-s1)' }], granularity: g, type: g === 'day' && (data.t || []).length <= 120 ? 'bar' : 'line', kind, height: 160, label }),
         });
         const sources = data.sources || {};
@@ -918,7 +924,7 @@
             C.kpis([
                 { label: 'Reading time', value: C.fmtMinutes(sum(minutes)), spark: minutes.values },
                 { label: 'Pages read', value: C.fmtNum(sum(pages)), spark: pages.values },
-                { label: 'Most readers in one ' + (g === 'hour' ? 'hour' : 'day'), value: C.fmtNum(Math.max(0, ...(readers.values || []).map(C.num))) },
+                { label: 'Most readers in one day', value: C.fmtNum(Math.max(0, ...(readers.values || []).map(C.num))) },
             ]),
             grid([small(minutes, 'Minutes read', 'minutes'), small(pages, 'Pages read', 'count'), small(readers, 'Readers', 'count')], 'an-grid--3'),
             grid([
@@ -960,7 +966,7 @@
         parts.push(panelFor(users, 'active users', (data) => {
             const rows = data.rows || [];
             const dau = (data.series || []).find((sr) => sr.key === 'dau') || (data.series || [])[0] || { values: [] };
-            const g = gran(data);
+            const g = DAILY;
             return stack([
                 C.kpis([
                     { label: 'Active this week', value: C.fmtNum(data.wau), sub: 'distinct accounts, last 7 days' },
@@ -968,7 +974,7 @@
                     { label: 'Accounts seen', value: C.fmtNum(rows.length), sub: rangeLong() },
                 ]),
                 card('Daily active accounts', {
-                    sub: granularityNote(data),
+                    sub: DAILY_NOTE,
                     body: C.timeSeries({ t: data.t, series: [{ key: 'dau', label: 'Active accounts', values: dau.values, color: 'var(--an-s1)' }], granularity: g, type: g === 'day' && (data.t || []).length <= 120 ? 'bar' : 'line', kind: 'count', height: 180, label: 'Active accounts' }),
                     wide: true,
                 }),
@@ -1121,7 +1127,7 @@
         const growth = data.growth || {};
         return card('Library growth', {
             sub: 'One snapshot per UTC day',
-            body: chartsByUnit(growth, data, { type: 'line', label: 'Library growth', height: 160, perSeries: true }),
+            body: chartsByUnit(growth, data, { type: 'line', label: 'Library growth', height: 160, perSeries: true, granularity: DAILY }),
             wide: true,
         });
     }
@@ -1131,8 +1137,8 @@
         const series = up.series || [];
         const perUploader = series.length > 0 && series.every((sr) => kindOf(sr.key) === 'count');
         const chart = perUploader
-            ? C.timeSeries({ t: up.t, series: series.map((sr) => ({ key: sr.key, label: sr.label || sr.key, values: sr.values })), granularity: 'day', type: 'bar', kind: 'count', colorFor: colors.generic, height: 180, label: 'Volumes uploaded', emptyText: 'No uploads in this range.' })
-            : chartsByUnit(up, data, { type: 'bar', label: 'Uploads', height: 160 });
+            ? C.timeSeries({ t: up.t, series: series.map((sr) => ({ key: sr.key, label: sr.label || sr.key, values: sr.values })), granularity: DAILY, type: 'bar', kind: 'count', colorFor: colors.generic, height: 180, label: 'Volumes uploaded', emptyText: 'No uploads in this range.' })
+            : chartsByUnit(up, data, { type: 'bar', label: 'Uploads', height: 160, granularity: DAILY });
         return card('Uploads', {
             sub: 'Volumes added per day, by uploader',
             body: [chart, C.table([
@@ -1176,8 +1182,8 @@
             });
             return stack([
                 card('Requests by app', {
-                    sub: granularityNote(data) + ' · the hosted reader is recognised by its Origin; WebDAV clients by their user agent',
-                    body: C.timeSeries({ t: tsOf(data, 'by_app').t, series: seriesFrom(tsOf(data, 'by_app'), colors.app, APP), granularity: gran(data), type: 'area', kind: 'count', colorFor: colors.app, label: 'Requests by app' }),
+                    sub: DAILY_NOTE + ' · the hosted reader is recognised by its Origin; WebDAV clients by their user agent',
+                    body: C.timeSeries({ t: tsOf(data, 'by_app').t, series: seriesFrom(tsOf(data, 'by_app'), colors.app, APP), granularity: DAILY, type: 'area', kind: 'count', colorFor: colors.app, label: 'Requests by app' }),
                     wide: true,
                 }),
                 grid([
@@ -1347,15 +1353,30 @@
     }
 
     const DAV_ONLY = ['PROPFIND', 'PROPPATCH', 'MKCOL', 'COPY', 'MOVE', 'LOCK', 'UNLOCK'];
-    // Slow rows carry no protocol: read it off the path, as the server does.
+    // First path segments the server's own pages and APIs are routed under.
+    // Anything else (library folders, series.json, covers, archives,
+    // /mokuro-reader, /inbox) reaches the WebDAV fallback.
+    const WEB_ROOTS = ['_static', '_home', '_admin', 'catalog', 'login', 'register', 'account', 'setup', 'queue'];
+    // Slow rows carry no protocol (section 4.4): read it off the method and
+    // the path, as the server's classifier does (section 4.3). Paths are as
+    // the router sees them, so a sub-path mount's prefix is already gone.
     function slowProtocol(row) {
         if (row.protocol) return row.protocol;
-        const path = String(row.path || '');
-        if (DAV_ONLY.includes(row.method)) return 'dav';
-        if (/(^|\/)_processor\//.test(path)) return 'processor';
-        if (/(^|\/)(catalog|login|_admin)\/api\//.test(path) || /^\/?api\//.test(path)) return 'api';
-        if (/(^|\/)mokuro-reader(\/|$)|\.(cbz|cbr|zip|rar|mokuro|gz)$/i.test(path)) return 'dav';
-        return 'web';
+        const method = String(row.method || '').toUpperCase();
+        const path = String(row.path || '').split('?')[0];
+        const segs = path.replace(/^\/+/, '').split('/');
+        const first = segs[0];
+        const page = method === 'GET' || method === 'HEAD';
+        if (String(row.principal || '').startsWith('p:') || first === '_processor') return 'processor';
+        if (DAV_ONLY.includes(method)) return 'dav';
+        if (first === 'api' || (WEB_ROOTS.includes(first) && segs[1] === 'api') || (first === 'setup' && segs[1] === 'code' && segs.length === 2)) return 'api';
+        // `/` is WebDAV's too; only a browser's GET of it is the home page.
+        if (first === '' && segs.length === 1) return page ? 'web' : 'dav';
+        if (first === 'robots.txt' && segs.length === 1 && page) return 'web';
+        // The admin shell takes any method; the other pages only GET (a PUT
+        // to /login/x falls through to WebDAV, as in 0.5.2).
+        if (first === '_admin' || (WEB_ROOTS.includes(first) && page)) return 'web';
+        return 'dav';
     }
 
     // ------------------------------------------------------------------
