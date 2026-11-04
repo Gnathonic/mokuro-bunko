@@ -6,6 +6,7 @@
     <title>Admin - Mokuro Bunko</title>
     <link rel="stylesheet" href="_static/shared.css">
     <link rel="stylesheet" href="_admin/styles.css">
+    <link rel="stylesheet" href="_admin/analytics.css">
 </head>
 <body>
     <!-- Header -->
@@ -35,6 +36,7 @@
             <button class="tab" data-tab="settings">Settings</button>
             <button class="tab" data-tab="storage">Storage</button>
             <button class="tab" data-tab="status">Status</button>
+            <button class="tab" data-tab="analytics">Analytics</button>
             <button class="tab" data-tab="connectivity">Connectivity</button>
             <button class="tab" data-tab="server">This server</button>
         </nav>
@@ -600,6 +602,24 @@
                 </div>
             </section>
 
+            <!-- Analytics Tab: drawn by analytics.js from /_admin/api/analytics/* -->
+            <section id="analytics-tab" class="tab-content an-root">
+                <div class="toolbar an-toolbar">
+                    <div>
+                        <h2 class="toolbar__title">Analytics</h2>
+                        <p class="an-since" id="an-since"></p>
+                    </div>
+                    <div class="toolbar__actions">
+                        <div class="an-range" id="an-range" role="radiogroup" aria-label="Time range"></div>
+                        <button class="btn btn--secondary btn--sm" id="an-refresh" type="button">Refresh</button>
+                    </div>
+                </div>
+                <nav class="an-views" id="an-views" aria-label="Analytics views"></nav>
+                <div class="an-banner" id="an-banner" role="status" hidden></div>
+                <div id="an-controls" hidden></div>
+                <div class="an-body" id="an-body"></div>
+            </section>
+
             <!-- Connectivity Tab -->
             <section id="connectivity-tab" class="tab-content">
                 <div class="toolbar">
@@ -1008,5 +1028,7 @@
     <script src="_static/nav.js"></script>
     <script src="_admin/admin.js"></script>
     <script src="_admin/storage.js"></script>
+    <script src="_admin/analytics-charts.js"></script>
+    <script src="_admin/analytics.js"></script>
 </body>
 </html>
