@@ -119,8 +119,13 @@
         return m + ' min ' + Math.round((v % 60000) / 1000) + ' s';
     }
 
+    // Reading time: a little reading never reads as none (`<0.1 min`), one decimal
+    // under 10 min (so a volume's 0.3 + 0.3 + 1 min adds up to the 1.6 min shown as
+    // the total), whole minutes up to 2 h, then hours.
     function fmtMinutes(value) {
         const v = num(value);
+        if (v > 0 && v < 0.05) return '<0.1 min';
+        if (v < 10) return oneDp.format(v) + ' min';
         if (v < 120) return intFmt.format(v) + ' min';
         return oneDp.format(v / 60) + ' h';
     }
@@ -173,6 +178,60 @@
     const dayLocalFmt = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' });
     function dayFmtLocal(d) {
         return dayLocalFmt.format(d);
+    }
+
+    // Steps of the x axis over hourly (or finer) points, in seconds: whole minutes for
+    // per-minute points (the Server view), within a day every 1, 2, 3, 4, 6, 8 or 12 h,
+    // over longer spans whole days (the labels are dates there).
+    const MINUTE_STEPS = [60, 120, 300, 600, 900, 1800];
+    const HOUR_STEPS = [1, 2, 3, 4, 6, 8, 12].map((h) => h * 3600);
+    const DAY_STEPS = [1, 2, 3, 7, 14, 28, 56].map((d) => d * 86400);
+    // About what one character of an 11px tick takes, and the room between labels.
+    const TICK_CHAR_PX = 6.6;
+    const TICK_GAP_PX = 14;
+
+    function tickWidth(text) {
+        return String(text).length * TICK_CHAR_PX;
+    }
+
+    // Which points of a time axis get a label. Hourly (or per-minute) points: the first
+    // point at or past every step on the viewer's clock, the smallest step whose labels
+    // never meet (`pxPerSecond` of plot), so they are evenly spaced on whole hours (or
+    // minutes).
+    // Daily points: about one per 80px, snapped to points.
+    function xTicks(t, granularity, pxPerSecond, plotWidth) {
+        const n = t.length;
+        if (n <= 1) return n ? [0] : [];
+        const span = num(t[n - 1]) - num(t[0]);
+        if (granularity !== 'hour' || !(span > 0) || !(pxPerSecond > 0)) {
+            const count = Math.max(2, Math.min(n, Math.floor(plotWidth / 80)));
+            const out = [];
+            for (let k = 0; k < count; k += 1) {
+                const i = Math.round((k * (n - 1)) / (count - 1));
+                if (!out.includes(i)) out.push(i);
+            }
+            return out;
+        }
+        let widest = 0;
+        for (let i = 0; i < n; i += Math.max(1, Math.floor(n / 48))) {
+            widest = Math.max(widest, tickWidth(fmtTick(t[i], granularity, span)));
+        }
+        const room = widest + TICK_GAP_PX;
+        // Never finer than the points themselves.
+        const every = span / (n - 1);
+        const steps = (span <= 86400 * 1.1 ? MINUTE_STEPS.concat(HOUR_STEPS, DAY_STEPS) : DAY_STEPS)
+            .filter((step) => step >= every - 1);
+        const stepS = steps.find((step) => step * pxPerSecond >= room) || steps[steps.length - 1] || every;
+        // Seconds on the viewer's clock (its UTC offset at that point).
+        const local = (i) => num(t[i]) - new Date(num(t[i]) * 1000).getTimezoneOffset() * 60;
+        const out = [];
+        for (let i = 0; i < n; i += 1) {
+            const here = Math.floor(local(i) / stepS);
+            const onStep = local(i) % stepS === 0;
+            if (i === 0 ? onStep : here !== Math.floor(local(i - 1) / stepS)) out.push(i);
+        }
+        // A span shorter than one step (a server up a few minutes): its ends.
+        return out.length ? out : [0, n - 1];
     }
 
     function fmtDateTime(epoch) {
@@ -512,17 +571,50 @@
                 grid.appendChild(s('text', { x: m.l - 6, y: yy + 4, class: 'bc-tick', 'text-anchor': 'end', text: af(v) }));
             });
             root.appendChild(grid);
-            // X ticks: about one per 90px, snapped to points.
-            const xCount = Math.max(2, Math.min(n, Math.floor(pw / 80)));
+            // X ticks (`xTicks`): hourly points on whole hours, evenly spaced.
             const xg = s('g', { class: 'bc-xaxis' });
-            const seen = new Set();
-            for (let k = 0; k < xCount; k += 1) {
-                const i = n === 1 ? 0 : Math.round((k * (n - 1)) / (xCount - 1));
-                if (seen.has(i)) continue;
-                seen.add(i);
-                const anchor = k === 0 && !bar ? 'start' : (k === xCount - 1 && !bar ? 'end' : 'middle');
-                xg.appendChild(s('text', { x: x(i), y: height - 8, class: 'bc-tick', 'text-anchor': anchor, text: fmtTick(t[i], opts.granularity, span) }));
+            const perPoint = bar ? band : (n > 1 ? pw / (n - 1) : pw);
+            const pxPerSecond = n > 1 && span > 0 ? (perPoint * (n - 1)) / span : 0;
+            const picked = xTicks(t, opts.granularity, pxPerSecond, pw);
+            const hourly = opts.granularity === 'hour';
+            // Hourly labels are centred on their time; one that would run off the chart
+            // is left out. Only when that leaves fewer than two (a span shorter than a
+            // step) are the ends held inside the chart instead.
+            const place = (inward) => {
+                const out = [];
+                let prevRight = -Infinity;
+                picked.forEach((i) => {
+                    const text = fmtTick(t[i], opts.granularity, span);
+                    const wide = tickWidth(text);
+                    let anchor = 'middle';
+                    let left = x(i) - wide / 2;
+                    if (inward && left < 0) {
+                        anchor = 'start';
+                        left = x(i);
+                    } else if (inward && left + wide > w) {
+                        anchor = 'end';
+                        left = x(i) - wide;
+                    }
+                    if (left < 0 || left + wide > w || left < prevRight + 4) return;
+                    prevRight = left + wide;
+                    out.push({ i, text, anchor });
+                });
+                return out;
+            };
+            let labels;
+            if (hourly) {
+                labels = place(false);
+                if (labels.length < 2) labels = place(true);
+            } else {
+                labels = picked.map((i, k) => ({
+                    i,
+                    text: fmtTick(t[i], opts.granularity, span),
+                    anchor: bar ? 'middle' : (k === 0 ? 'start' : (k === picked.length - 1 ? 'end' : 'middle')),
+                }));
             }
+            labels.forEach((l) => {
+                xg.appendChild(s('text', { x: x(l.i), y: height - 8, class: 'bc-tick', 'text-anchor': l.anchor, text: l.text }));
+            });
             root.appendChild(xg);
 
             const marks = s('g', { class: 'bc-marks' });
@@ -1036,6 +1128,7 @@
         fmtMs,
         fmtMinutes,
         fmtDuration,
+        xTicks,
         fmtTime,
         fmtDateTime,
         fmtDate,
