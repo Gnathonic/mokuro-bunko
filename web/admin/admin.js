@@ -110,6 +110,11 @@ function initTabs() {
             } else {
                 stopStatusRefresh();
             }
+            if (tabId === 'analytics') {
+                window.bunkoAnalytics.open();
+            } else if (window.bunkoAnalytics) {
+                window.bunkoAnalytics.close();
+            }
             if (tabId === 'connectivity') {
                 loadTunnelStatus();
                 loadDynDNSStatus();
