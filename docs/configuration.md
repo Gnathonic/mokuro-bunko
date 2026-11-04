@@ -659,8 +659,8 @@ analytics:
 | `retention.host_minute_days` | integer | `7` | Days the per-minute memory and CPU samples are kept. |
 | `retention.crawl_days` | integer | `90` | Days a crawl episode is kept after its last request. |
 | `crawl.window_hours` | integer | `6` | The window the crawl detector looks at, per client IP (1 to 168). |
-| `crawl.min_series` | integer | `20` | Distinct series an IP must touch in the window (volume downloads, per-series listings, `series.json`, catalog series pages)... |
-| `crawl.min_coverage` | number | `0.25` | ...that are at least this share of the catalog's series (above 0, at most 1), for an episode to open. Crawlers are reported only: nothing is blocked or slowed. |
+| `crawl.min_series` | integer | `20` | Distinct series an IP must touch in the window (1 to 1,000,000), by downloading a volume or by asking about one series (a `Depth: 1` or `infinity` listing of its folder, its catalog page or manifest; `series.json` and covers are not counted)... |
+| `crawl.min_coverage` | number | `0.25` | ...that are at least this share of the catalog's series (above 0, at most 1), for an episode to open: an IP needs the larger of the two counts (with the defaults and a 30-series library, 20). Folder spellings of one title count as one series. Crawlers are reported only: nothing is blocked or slowed. |
 | `library_scan.interval_hours` | integer | `6` | How often the library's file types are counted (1 to 720); the first scan runs 2 minutes after start, and **Rescan now** (`POST /_admin/api/analytics/library/rescan`) runs one at once. The scan only lists folders and reads file sizes, so on a cloud library it is answered from the store's index and downloads nothing. |
 | `library_scan.page_formats` | boolean | `true` | Also count the page image formats inside archives (a library on this disk only; reads each archive's zip directory, never the pages, at most 20 archives a second). Each archive is read once and again only when its size or modification time changes, so a restart does not read the library again. |
 | `geo.enabled` | boolean | `false` | Opt-in: download DB-IP's free *IP to Country Lite* database (CC BY 4.0, ≤ 64 MiB compressed and uncompressed) to `<storage>/analytics/country.mmdb`, refresh it monthly, and show a rough country per IP, for WebDAV and web requests alike. Loopback, private, link-local, CGNAT (`100.64.0.0/10`) and unique-local IPv6 addresses are `LAN`; an address the database does not place is `ZZ` (unknown). Lookups stay on this server. Off (or with `enabled: false`), nothing is downloaded and no country is recorded; none is either until a database has loaded, local addresses included. |
@@ -685,8 +685,9 @@ variables, dots as underscores (`MOKURO_ANALYTICS_RETENTION_IP_DAYS=14`).
 writes them: about ten seconds after an account's `positions.json`,
 `history/<device>/*.events` or `volume-data.json` is written (a PUT, or a MOVE into
 place), the server reads the file back from that account's own tree and compares it
-with what it saw before, so a file uploaded twice, another device's merged copy, or
-the reader's DELETE-then-PUT never counts twice. A new reading position is a *read*
+with what it saw before, so a file uploaded twice, another device's merged copy, a
+volume listed twice in one file (its last entry counts, as in the reader), or the
+reader's DELETE-then-PUT never counts twice. A new reading position is a *read*
 of that volume on that day (a position first seen more than 48 hours old is not); the
 reading history adds the pages read and the time spent (one page view counts for 15
 minutes at most). `volume-data.json` gives each account's progress and finished

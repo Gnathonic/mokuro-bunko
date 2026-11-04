@@ -37,80 +37,88 @@
   fails to load, with an error naming that row, until it is renamed.
 
 ### Added
-- **Server analytics for the admin: downloads, reading, bandwidth, health and
-  crawlers.** A new counting layer sees every request, WebDAV (any method: PROPFIND,
+- **Server analytics for the admin: what is downloaded and read, by whom, and what
+  it costs.** A new counting layer sees every request, WebDAV (any method: PROPFIND,
   GET, PUT, MOVE, LOCK, ...) as much as the web pages and JSON APIs, and keeps, per
   hour and per day, the requests and response and request body bytes by protocol,
   method, category (volumes, OCR sidecars, covers, navigation and metadata, progress
   and profile sync, uploads, ...) and status, latency histograms, errors, failed
-  sign-ins per IP and username, the slowest requests, 304 and gzip savings, aborted and
-  resumed downloads, and who downloaded which volume. Accounts are counted by name,
-  OCR processors as bandwidth only, anonymous visitors by a salted pseudonymous id;
-  raw client IPs are kept only `analytics.retention.ip_days` (30). It costs no I/O on
-  the request path: counters live in memory and are written every
-  `analytics.flush_seconds` (60) to their own `analytics.sqlite` beside `mokuro.db`,
-  rolled into daily totals hourly and pruned by retention. Memory is bounded even
-  when every request comes from a new address: what a window keeps per client (its
-  address, anonymous id, origin, a refused username cut to 64 characters) shares a
-  10 MiB budget, origins stop at 500 a day (the rest count as `(other)`), and what
-  does not fit is counted as dropped. The admin API serves them
+  sign-ins per IP and username (WebDAV Basic auth and the login page alike), the
+  slowest requests, 304 and gzip savings, aborted and resumed downloads, and who
+  downloaded which volume. Accounts are counted by name, OCR processors as bandwidth
+  only, anonymous visitors by a salted pseudonymous id; raw client IPs are kept only
+  `analytics.retention.ip_days` (30). It costs no I/O on the request path: counters
+  live in memory and are written every `analytics.flush_seconds` (60) to their own
+  `analytics.sqlite` beside `mokuro.db`, rolled into daily totals hourly and pruned by
+  retention. Memory is bounded even when every request comes from a new address: what
+  a window keeps per client (its address, anonymous id, origin, a refused username cut
+  to 64 characters) shares a 10 MiB budget, origins stop at 500 a day (the rest count
+  as `(other)`), and what does not fit is counted as dropped. Every view is served
   under `/_admin/api/analytics/` (`overview`, `traffic`, `principals`, `series`,
-  `health`; the other views answer `{"available": false}` until they collect), and the
-  new `analytics:` config section is editable at `PUT /_admin/api/settings/analytics`
-  and through `MOKURO_ANALYTICS_*`. `analytics.enabled: false` passes requests through
-  untouched and writes nothing. The main database gains an index on
-  `volume_identities(volume_uuid)`.
+  `funnel`, `reading`, `users`, `library`, `health`, `host`, `crawlers`, `clients`,
+  `geo`), and the new `analytics:` config section is editable at
+  `PUT /_admin/api/settings/analytics` and through `MOKURO_ANALYTICS_*`.
+  `analytics.enabled: false` passes requests through untouched and writes nothing
+  (no library scan, no geography download either). The main database gains an index
+  on `volume_identities(volume_uuid)`.
+- **An Analytics tab in the admin panel.** Overview, Traffic (by category, protocol,
+  method or detail, WebDAV by method, the bytes progress and profile sync and
+  navigation cost), Popular (most downloaded and read series, against the previous
+  period, with each series' completion funnel), Reading, Users, Library, Clients &
+  geography, Health, Server, Crawlers and Settings, over 24 hours to all time. The
+  charts are plain inline SVG with a hover and keyboard readout and a table view
+  under each; it works at phone width.
 - **Analytics: reading, active accounts and the completion funnel.** The files Mokuro
   Reader syncs over WebDAV (any client writing them counts the same) are read back
-  after they are written: `positions.json` for who opened which volume when, the
-  reading history (`history/<device>/*.events`, decoded with the reader's own segment
-  format) for pages and time read, `volume-data.json` for progress and finished
-  volumes. Re-uploads, other devices' merged copies and the reader's DELETE-then-PUT
-  never count twice. The admin API's `reading` (minutes, pages and readers per day,
-  top readers and volumes), `users` (active accounts per day, the week's and month's,
-  each account's devices, apps, traffic and reading) and `funnel` (per volume of a
-  series in library order: downloaded, started, finished; or every series) views now
-  answer.
-- **The admin's Analytics → Library view: file types, page formats, growth, uploads
-  and dormant series.** A background scan (2 minutes after start, every
-  `analytics.library_scan.interval_hours`, and on `POST
-  /_admin/api/analytics/library/rescan`) counts the library's files by kind (archives,
-  OCR sidecars and layers, covers, `series.json`, ...) and extension, the archive types
-  per series and the series without any sidecar, and keeps one growth snapshot a day.
-  It lists folders and reads sizes only, so a cloud library is counted from its
-  store's index without a download. On a library on this disk it also counts the
-  page image formats inside each archive from the zip directory alone (at most 20
-  archives a second, each read again only when it changes). Uploads per day per
-  uploader come from the counted WebDAV uploads, and from the main database's upload
-  records for the days before analytics; a series with no download and no read in 90
-  days is listed as dormant. Case and spelling variants of a series folder are one
-  series. `GET /_admin/api/analytics/library` serves it all.
-- **Analytics: server readings and crawl detection.** The Server view
-  (`/_admin/api/analytics/host?range=24h|7d|30d`) charts the process's memory (RSS and
-  peak), CPU, open connections and requests in flight, per minute for a day and per
-  hour beyond, sampled every 15 s on Linux, Android, Windows and macOS (Docker and musl
-  included; in a container the cgroup memory limit is the host memory shown). The
-  Crawlers view (`/_admin/api/analytics/crawlers`) lists episodes of one IP touching
-  `analytics.crawl.min_series` series and `min_coverage` of the catalog within
-  `window_hours`, over WebDAV or HTTP: volume downloads (`download`), per-series
-  folder listings and catalog pages (`metadata`), or both (`mixed`), with the
-  principals, user agent, volumes, bytes and requests of each. Mokuro Reader's normal
-  sync (its one depth-infinity listing, the `series.json` files it refreshes, covers, a
-  few downloads) never opens one. Reported only: nothing is blocked or slowed.
+  about ten seconds after they are written: `positions.json` for who opened which
+  volume when, the reading history (`history/<device>/*.events`, decoded with the
+  reader's own segment format) for pages and time read, `volume-data.json` for
+  progress, finished volumes and device names. Re-uploads, other devices' merged
+  copies, a volume listed twice in one file and the reader's DELETE-then-PUT never
+  count twice. Reading shows minutes, pages and readers per day and the top readers
+  and volumes; Users the accounts active per day, week and month, and each account's
+  traffic, reading time, finished volumes, devices and apps; the funnel, per volume of
+  a series in library order, who downloaded, started and finished it, and how far
+  reads got (a quarter, half, three quarters).
+- **Analytics: file types, page formats, growth, uploads and dormant series.** A
+  background scan (2 minutes after start, every `analytics.library_scan.interval_hours`,
+  and on **Rescan now**, `POST /_admin/api/analytics/library/rescan`) counts the
+  library's files by kind (archives, OCR sidecars and layers, covers, `series.json`,
+  ...) and extension, the archive types per series and the series without any sidecar,
+  and keeps one growth snapshot a day. It lists folders and reads sizes only, so a
+  cloud library is counted from its store's index without a download. On a library on
+  this disk it also counts the page image formats inside each archive (JPEG, PNG,
+  WebP, AVIF, GIF, JPEG XL) from the zip directory alone, at most 20 archives a second,
+  each read again only when it changes; zip64 archives and self-extractors are read
+  too. Uploads per day per uploader come from the counted WebDAV uploads, and from the
+  main database's upload records for the days before analytics; a series with no
+  download and no read in 90 days is listed as dormant. Case and spelling variants of
+  a series folder are one series.
+- **Analytics: server readings and crawl detection.** The Server view charts the
+  process's memory (RSS and peak), CPU, open connections and requests in flight, per
+  minute for a day and per hour beyond, sampled every 15 s on Linux, Android, Windows
+  and macOS (Docker and musl included; in a container the cgroup memory limit is the
+  host memory shown); a time the server was down is a gap, not a zero. The Crawlers
+  view lists episodes of one IP touching at least `analytics.crawl.min_series` series
+  that are also `min_coverage` of the catalog within `window_hours`, over WebDAV or
+  HTTP: volume downloads (`download`), per-series folder listings and catalog pages
+  (`metadata`), or both (`mixed`), with the principals, client, country, volumes, bytes
+  and requests of each, and how often each IP did it. Mokuro Reader's normal sync (its
+  one depth-infinity listing, the `series.json` files it refreshes, covers, a few
+  downloads) never opens one. Reported only: nothing is blocked or slowed.
 - **Analytics: client mix and rough geography.** Each request is classified by
   `Origin` and `User-Agent` (hand-rolled, no UA database): the hosted Mokuro Reader
-  (its configured origin), a reader on another origin, Bunko's own pages, WebDAV
-  clients (rclone, davfs2, the Windows mini-redirector, Finder, Cyberduck, GNOME
-  Files, Kodi, Nextcloud, WinSCP), API tools (curl, wget, Python, Go, Node.js) and
-  crawler bots, with the browser and OS family. `GET /_admin/api/analytics/clients`
-  breaks requests, bytes and distinct visitors down by app, client, browser, OS and
-  protocol, lists the WebDAV clients on their own, and the cross-origin `Origin`s. The
-  opt-in `analytics.geo` downloads DB-IP's free country database (CC BY 4.0) on
-  demand, falls back to last month's while this month's is not out, caps it at 64 MiB,
-  verifies it before it replaces the stored one, refreshes it monthly and on `POST
-  /_admin/api/analytics/geo/refresh`, and answers lookups in memory (`LAN` for local
-  addresses) for WebDAV and web requests alike; `GET /_admin/api/analytics/geo`
-  shows the countries and the database's state. New dependency: `maxminddb` (ISC).
+  (its configured origin), a reader on another origin, Bunko's own pages (its own
+  origin decided as the CSRF check decides it), WebDAV clients (rclone, davfs2, the
+  Windows mini-redirector, Finder, Cyberduck, GNOME Files, Kodi, Nextcloud, WinSCP), API
+  tools (curl, wget, Python, Go, Node.js) and crawler bots, with the browser and OS
+  family; requests, bytes and distinct visitors are broken down by app, client,
+  browser, OS and protocol, the WebDAV clients on their own, with the cross-origin
+  `Origin`s. The opt-in `analytics.geo` downloads DB-IP's free country database
+  (CC BY 4.0) on demand, falls back to last month's while this month's is not out,
+  caps it at 64 MiB, verifies it before it replaces the stored one, refreshes it
+  monthly and on **Refresh database**, and answers lookups in memory (`LAN` for local
+  addresses) for WebDAV and web requests alike. New dependency: `maxminddb` (ISC).
 - **`/login/api/me` says where an account may add files** (`permissions.addFiles`):
   anywhere (`all`), everywhere but the `closedSeries` other accounts own (`open`, an
   uploader), or nowhere (`none`). A reader can tell from it that the server enforces

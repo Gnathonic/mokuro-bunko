@@ -1,6 +1,8 @@
 # Server analytics (0.8)
 
-Status: design, 2026-11-04. Branch `0.8/analytics` (from `0.8/remote-storage`).
+Status: built, 2026-11-04. Branch `0.8/analytics` (from `0.8/remote-storage`). This
+document now describes what was built: where the implementation chose differently from
+the first draft, the text says what it does and why (marked **Built:**).
 
 The admin wants to know how the server is used: what is downloaded and read, by whom,
 how much bandwidth each kind of traffic costs, how healthy the server is, and whether
@@ -257,19 +259,35 @@ record into the window's maps (no I/O):
 - `uploads`: key `(day, username)` → volumes, bytes, for successful (201/204) archive
   PUTs.
 
-The collector also forwards, outside its lock, to the area hooks (section 11 stubs):
+The collector also forwards, outside its lock, to the areas:
 - `crawl::Detector::observe(&Observation)` for every non-processor request (cheap,
   synchronous, bounded);
-- `reading::on_file_written(username, DavTarget, rel)` for a successful (2xx) PUT /
-  DELETE / MOVE of a per-user file (`progress_sync`, `profile_sync`), pushed onto a
-  bounded `tokio::mpsc` channel (cap 1024, drops counted) and handled by the reading
-  worker off the request path.
+- `Reading::on_file_written(FileWritten { username, target, rel, method, at_ms })` for a
+  successful (2xx) PUT / DELETE / MOVE of a per-user file (`progress_sync`,
+  `profile_sync`; a MOVE also reports its destination when that is in the caller's own
+  tree), `try_send` onto a bounded `tokio::mpsc` channel (cap 1024, drops counted) and
+  handled by the reading worker off the request path.
+
+`clients::Clients::classify(&ClientRequest)` and `geo::Geo::country(&IpAddr)` are
+methods on handles kept in `Analytics`, called once per request. The layer drops the
+server's own `Origin` (the CSRF check's same-origin rule, `X-Forwarded-Host` included)
+before it builds the record, so a record only carries cross-origin origins.
+
+**Built:** authentication failures are counted when the slot carries `auth_error` (any
+refused Basic or Bearer credential, with its attempted username cut to 64 characters),
+or when `POST /login/api/{token,check}` answers 401 or 429 (`accounts/login.rs` attaches
+a `LoginAttempt` response extension naming the attempted account). Slow requests are
+ranked by time to headers, not total time, so long downloads do not fill the list; the
+stored path is decoded, cut to 256 characters and has no query.
 
 ### 4.5 Bounds
 
 - Window keys: at most 100 000 entries per map per flush window; beyond that, records
   fold into a per-map overflow counter (logged once per window, shown in the overview as
-  "dropped").
+  "dropped"). **Built:** the maps keyed by text a client chooses (IPs, anonymous ids,
+  principals, downloads, auth failures, client principals, origins, uploads) also share
+  a 10 MiB text budget, so a flood of new addresses with long origins and user agents
+  stays around 10 MiB per window (two windows can be in memory during a flush).
 - `slow`: 20 per hour; `origins`: 500 per day; principals seen per IP: 8.
 - Crawl trackers: 4 096 IPs, LRU (section 8). Geo cache: 16 384 IPs, LRU.
 
@@ -284,13 +302,20 @@ The collector also forwards, outside its lock, to the area hooks (section 11 stu
 - `Analytics::stop().await` does a final flush; it is called in the shutdown sequence
   after `serve` returns and before `services.library.stop()` (and before the DB handle
   is dropped).
+- The crawl episodes go in the same transaction, through a two-step interface so the
+  detector learns only what committed: `let mut crawl = detector.begin_flush(now)` (takes
+  the detector's flush lock before the writer, refreshes a stale catalog count),
+  `crawl.write(tx)` inside the transaction, `crawl.finish(committed)` after it. A
+  rolled-back flush leaves every episode for the next one.
 - Once per hour (and at startup) the same task:
   - rolls `traffic_hourly` and `latency_hourly` into `traffic_daily` / `latency_daily`
     for days that are complete, before pruning;
   - prunes hourly rows older than `retention.hourly_days` (90); IP-bearing rows older
     than `retention.ip_days` (30); `crawl_episodes` older than `retention.crawl_days`
     (90); `host_minute` older than `retention.host_minute_days` (7); `slow_requests`
-    older than 7 days. Daily aggregates are kept forever.
+    older than 7 days. Daily aggregates are kept forever. **Built:** the last two
+    complete days keep their hourly rows whatever `hourly_days` says (the rollup still
+    rebuilds them), so a short retention never erodes a day's total.
 - A crash loses at most one flush window.
 
 ## 5. Tables (`analytics.sqlite`)
@@ -332,6 +357,7 @@ read_positions(username, volume_uuid, t_ms, page, chars, device, PRIMARY KEY(use
 reading_daily(day, username, volume_uuid, volume_key, series_key, series_title, volume_title,
   opens, pages, chars, dwell_ms, sources,           -- sources: bit 1 positions, bit 2 history
   PRIMARY KEY(day, username, volume_uuid)) WITHOUT ROWID
+  -- index (series_key, day), index (username, volume_uuid); series_key '' = no known series
 history_cursor(username, device, segment, last_seq, PRIMARY KEY(username, device, segment)) WITHOUT ROWID
 volume_progress(username, volume_uuid, series_uuid, series_key, series_title, volume_title,
   progress, chars, completed, completed_at, time_read_min, last_progress_update, updated_at,
@@ -340,33 +366,44 @@ devices(username, device_id, label, first_seen, last_seen, source, PRIMARY KEY(u
 
 -- library.rs
 library_scan(id INTEGER PRIMARY KEY CHECK (id = 1), scanned_at INTEGER, json TEXT)   -- latest file-type scan
-library_daily(day INTEGER PRIMARY KEY, series, volumes, bytes, json TEXT)            -- growth snapshot
-archive_pages(volume_key TEXT PRIMARY KEY, size, mtime, pages, formats TEXT, scanned_at)  -- formats = JSON {ext: count}
+library_daily(day INTEGER PRIMARY KEY, series, volumes, bytes, json TEXT)            -- growth snapshot (the day's latest scan)
+archive_pages(volume_key TEXT PRIMARY KEY, size, mtime, pages, formats TEXT, scanned_at)
+  -- formats = JSON {format: pages}; mtime in epoch ns; pages = -1: no readable zip directory
+library_series(series_key TEXT PRIMARY KEY, title, volumes, bytes) WITHOUT ROWID
+  -- the latest scan's series, replaced whole by each scan (what "dormant" is measured against)
 
 -- host.rs
 host_minute(minute INTEGER PRIMARY KEY, rss_avg, rss_max, cpu_pct, connections_max, inflight_max)
 host_hourly(hour INTEGER PRIMARY KEY, rss_avg, rss_max, cpu_avg, cpu_max, connections_max, inflight_max)
 
 -- crawl.rs
-crawl_episodes(id INTEGER PRIMARY KEY, ip, country, principals TEXT, client, user_agent, kind,
+crawl_episodes(id INTEGER PRIMARY KEY AUTOINCREMENT, ip, country, principals TEXT, client, user_agent, kind,
   started_at, last_at, series, volumes, catalog_series, coverage REAL, bytes_out, requests, status)
-  -- index (ip), index (last_at)
+  -- index (ip), index (last_at); AUTOINCREMENT adds SQLite's sqlite_sequence: an id is never reused
 
 -- clients.rs
 clients_daily(day, app, client, browser, os, protocol, requests, bytes_out,
   PRIMARY KEY(day, app, client, browser, os, protocol)) WITHOUT ROWID
 client_principals(day, app, principal, PRIMARY KEY(day, app, principal)) WITHOUT ROWID   -- ip retention
+client_mix_principals(day, app, client, browser, os, protocol, principal,
+  PRIMARY KEY(day, app, client, browser, os, protocol, principal)) WITHOUT ROWID   -- ip retention: distinct visitors per breakdown
 origins_daily(day, origin, requests, PRIMARY KEY(day, origin)) WITHOUT ROWID
 geo_daily(day, country, requests, bytes_out, PRIMARY KEY(day, country)) WITHOUT ROWID
 ```
 
 ## 6. Reading (`analytics/reading/`)
 
-The reading worker receives `(username, target, rel)` after a per-user file is written,
-**debounces per (user, file) for 10 s**, then reads the stored file back from the
-user's directory (`users/<username>/...`, via the server's existing per-user path
-resolution and `bunko_store::fs`) on a `spawn_blocking` thread. Files over 32 MiB are
-skipped (counted).
+The reading worker receives a `FileWritten` after a per-user file is written,
+**debounces per (user, file) for 10 s** (**Built:** and at most 60 s from the first
+write, so a `positions.json` the reader PUTs every few seconds is still read during a
+session; at most 4 096 files wait, more are dropped and counted), then reads the stored
+file back from the user's directory (`users/<username>/...`, via the server's existing
+per-user path resolution and `bunko_store::fs`) on a `spawn_blocking` thread, one file
+at a time. **Built:** size caps per kind instead of one 32 MiB cap, so a crafted file
+stays bounded in the 1 GB lite build: `positions.json` 4 MiB, a history file 16 MiB
+(also its inflated JSON), `volume-data.json` 32 MiB, `device.json` 64 KiB; at most
+20 000 positions, 100 000 volume-data records, 250 000 segment rows and 64 devices per
+account. Skipped and refused files are counted (`reading.worker` in the API).
 
 - **`positions.json`** `{"version":1,"positions":{"<volume_uuid>":[t_ms, page, chars,
   "<deviceId>"]}}`. For each entry, compare with `read_positions`:
@@ -377,14 +414,30 @@ skipped (counted).
   - no stored row: store the baseline; count an observation only if `t_ms` is within
     the last 48 h (a first upload carries up to 30 days of backlog);
   - entries whose `t_ms` did not change are other devices' merged copies: ignore.
+  - **Built:** the file is parsed as the reader's `parsePositionsFile` parses it: a
+    volume listed twice keeps only its last value (`JSON.parse`), so it is diffed once.
+    A page-0 position is a reset (the reader's un-read or restart), never a read. A
+    first-seen entry within 48 h counts as an open with 0 pages (there is no baseline
+    to diff). Rows the file no longer lists are pruned after 35 days (the reader keeps
+    30).
 - **`history/<device>/<YYYY-MM>.events`, `legacy.events`**: port the reader's segment
   decoder (format 1, `src/lib/reading-history/segment-codec.ts` on the reader's
   `develop`: deflated JSON, header + volume dictionary + delta-encoded rows). Ingest
-  only rows with `seq > history_cursor.last_seq` for (user, device, segment). Page rows
+  only rows with `seq > history_cursor.last_seq` for (user, device, segment).
+  **Built:** a legacy segment's cursor is per (user, `legacy:<volume>`, `legacy`), not
+  per uploading device, because every converting device uploads the same converted
+  events; a second device's `legacy.events` adds nothing. A segment whose header names
+  another device or month than its path is refused (as the reader's importer refuses
+  it), and events dated before 2015 or more than a day ahead are skipped and counted
+  (`events_out_of_range`). Page rows
   (kind 0): `pages += last - first + 1`, `chars += sum(page_chars)`, `dwell_ms +=
   min(dwell, 15 min)` when dwell ≥ 0, on `day(t)`; adjust rows (kind 1): `dwell_ms +=
   time_delta_ms`, `chars += chars_delta` (clamped so totals never go negative). Other
-  kinds are ignored. Mark `sources |= 2`. `history/<device>/device.json`: upsert
+  kinds are ignored. Mark `sources |= 2`. **Built:** a row's first history page events
+  replace the pages and chars `positions.json` had estimated for that (day, user,
+  volume): positions usually arrives before the 5-minute history upload and would
+  otherwise count twice. Adjust rows apply only to a row that already holds a read (a
+  stat edit alone is no read). `history/<device>/device.json`: upsert
   `devices` with its label/platform if present (check the reader's format).
   An unknown `format` is skipped (counted), never an error to the client.
 - **`volume-data.json`**: an object keyed by volume uuid with `progress` (pages),
@@ -398,15 +451,27 @@ skipped (counted).
   only, no version bump needed beyond what the main schema already does), then the
   series folder of that key. Fall back to `fold_series_title_key(series_title)` from
   `volume-data.json` when the uuid is unknown. Cache the uuid map in memory, refreshed
-  every 10 min.
+  every 10 min. **Built:** the map also takes `volume_uuid` from the compiled
+  `series_entry_cache` (a volume without a sidecar has the reader's deterministic id
+  only there), is capped at 50 000 entries (about 7.5 MiB; a miss is one indexed
+  `volume_identities` lookup), and is built the first time a reading file arrives. A
+  volume of no known series is stored with `series_key ''` and shown as `(unknown)`.
 - **Definitions** used by the API: a *read* is one (user, volume, day) row in
   `reading_daily`; *readers* are distinct users; *minutes* = `dwell_ms / 60000`.
 - **Completion funnel** for a series: its volumes in library order (natural sort of the
   volume names, reuse the library's sort), and per volume: users with `progress > 0` or
   `completed` (started), users with `completed` (finished), downloads (distinct
-  principals, all time).
+  principals, all time). **Built:** plus `stages`: (user, volume) reads by how far they
+  got (started, a quarter, half, three quarters, finished), from the compiled page
+  counts (a volume without one counts as started or finished only). A series with
+  nothing recorded (renamed, removed, a stale link) answers `200` with `volumes: []`
+  and `in_library: false`, not 404; the `series` parameter is folded, so any spelling
+  works.
 - **Devices**: `devices` from positions and history paths; per user list in the Users
-  panel.
+  panel. **Built:** a name the user gave a device in `volume-data.json`
+  (`tracking.devices`) replaces its label, on a device already seen; `device.json`'s
+  generated label only fills an empty one. A `volume-data.json` that is gone when the
+  debounce fires (a DELETE with no PUT after it) clears that account's progress.
 
 ## 7. Library (`analytics/library/`)
 
@@ -419,17 +484,35 @@ skipped (counted).
   per extension, archive mix per series (`cbz`, `zip`, `cbz+zip`, ...), and series
   without any sidecar. Stored in `library_scan`.
 - **Page formats** (local libraries only; on a cloud library the API reports
-  `available: false, reason: "cloud"`): for each archive not in `archive_pages` or whose
-  size/mtime changed, read the zip central directory only (the `zip` crate), count image
-  entries by lowercased extension (`jpg jpeg png webp avif gif bmp tif tiff jxl`),
-  `pages` = image count. One archive at a time on `spawn_blocking`, at most 20 per
-  second, resumable, rows for vanished archives deleted. `.cbr`/`.rar` that are not zip
-  are counted as `unreadable`.
-- **Growth**: one `library_daily` row per UTC day (written by the scan, or the first scan
-  of the day): series, volumes, bytes, per-kind counts.
-- **Uploads per day per uploader**: `uploads_daily` (from the collector) going forward,
-  plus the main DB's `volume_uploads(uploaded_at, uploader_username)` for days before
-  analytics existed.
+  `available: false, reason: "cloud"`, and `reason: "disabled"` when
+  `library_scan.page_formats` is off): for each archive not in `archive_pages` or whose
+  size/mtime changed, read the zip central directory only, count image entries by
+  lowercased extension, `pages` = image count. One archive at a time on
+  `spawn_blocking`, at most 20 per second, resumable, rows for vanished archives
+  deleted. `.cbr`/`.rar` that are not zip are counted as `unreadable`. **Built:** the
+  directory is read by a hand-written streaming parser, not `zip::ZipArchive` (which
+  loads every entry, so a million-entry archive would spike the heap): constant memory,
+  zip64 end records used whenever present, data in front of the archive (a
+  self-extractor) shifts every offset, an extension-less entry's first 16 bytes are
+  sniffed (at most 512 per archive), and an archive whose parser fails, or panics, is
+  stored as `pages = -1` until it changes. Formats are reported as `jpeg` (jpg, jpeg,
+  jpe, jfif), `png`, `webp`, `avif`, `gif`, `jxl` and `other` (bmp, tif, tiff, heic,
+  heif, and sniffed bmp/tiff).
+- **Growth**: one `library_daily` row per UTC day (**Built:** upserted by every scan, so
+  the day's latest snapshot wins): series, volumes, bytes, per-kind counts. The API's
+  axis starts at the first snapshot when that is inside the range: before it the
+  library's size is unknown, not zero.
+- **Built:** volumes are archives of the four archive extensions in series folders;
+  archives in the library root are `loose_archives`, not a series; the root
+  `thumbnails/`, hidden and symlinked folders and the cloud-root owner's per-user files
+  are skipped, as the library index skips them.
+- **Uploads per day per uploader**: `uploads_daily` (from the collector) for days on or
+  after `tracking_since`, plus the main DB's `volume_uploads(uploaded_at,
+  uploader_username)` for days before analytics existed (those have no size). The API's
+  series keys are positional (`uploader-0`.., `uploader-other`) with the account name as
+  the label, so no account name is ever read as a unit. A WebDAV upload as a PUT to a
+  temporary name and a MOVE to `.cbz` is not counted there (it shows in the file counts
+  after the next scan).
 - **Dormant series**: series in the library with no `volume_downloads` and no
   `reading_daily` row in the last 90 days, with `tracking_since` so the UI can say
   "since analytics started".
@@ -450,31 +533,58 @@ skipped (counted).
 - **Crawl detector** (`analytics/crawl.rs`): per client IP, over a window of
   `crawl.window_hours` (6), approximated by two rotating half-window buckets, track the
   distinct series touched by:
-  - *content*: `volume` GETs (any status 200/206),
-  - *metadata*: `metadata` requests addressing one series (PROPFIND depth 1 of a series
-    folder, `series.json` GETs, `/catalog/api/series`, manifests).
-  Covers are not a signal (the reader fetches them while browsing), and a depth-infinity
-  PROPFIND of the root is not a signal (the reader's normal listing). Series are stored
-  as `u32` hashes of the series key in a `HashSet` capped at the catalog's series count.
-  An episode opens when distinct series ≥ `crawl.min_series` (20) **and** distinct
-  series / catalog series ≥ `crawl.min_coverage` (0.25); kind `download`, `metadata`
-  or `mixed`. While open, every flush updates its counters (`series`, `volumes`,
-  `coverage`, `bytes_out`, `requests`, `last_at`, principals, user agent, client,
-  country). It ends after one window with no activity. Processor principals are exempt;
-  admins are not (the UI shows the principal, so the owner can judge). 4 096 tracked
-  IPs, LRU. Catalog series count comes from the library index (`LibraryCounts`; add a
-  `total_series()`).
+  - *content*: `volume` GETs answered 200 or 206 (WebDAV or the catalog's download link),
+  - *metadata*: requests addressing ONE series answered 2xx or 304: a PROPFIND of a
+    series folder with depth 1 or infinity (what rclone, davfs2, gvfs and the Windows
+    redirector send to walk a tree), `/catalog/api/series?name=`, manifests.
+  **Built:** `series.json` GETs are **no** signal: after a listing the reader fetches
+  every one whose size or date changed, so its first sync, a parser bump or a
+  server-side rewrite would fetch them all and cross the thresholds. Covers, HEADs,
+  sidecars, a depth-0 stat, a depth-infinity PROPFIND of the root (the reader's normal
+  listing, attributed to no series) and anything refused are no signal either; every
+  request of a tracked IP still counts toward its episode's requests and bytes. Once the
+  catalog's series are known (from the library index, each minute, by the host sampler)
+  only a touch of one of them counts. Series are stored as `u32` hashes of the series
+  key, capped at the catalog's series count (plus slack). An episode opens when distinct
+  series ≥ `crawl.min_series` (20) **and** distinct series / catalog series ≥
+  `crawl.min_coverage` (0.25), so an IP needs the larger of `min_series` and
+  `ceil(catalog × min_coverage)`; kind `download` when the downloads alone crossed the
+  thresholds, `metadata` when nothing was downloaded, `mixed` otherwise. Episodes are
+  judged at each flush (`begin_flush`, section 4.6), off the request path. While open,
+  every flush updates its counters (`series`, `volumes`, `coverage`, `bytes_out`,
+  `requests`, `last_at`, principals, user agent, client, country). It ends after one
+  window with no request from that IP; a restart closes the episodes the previous run
+  left open. Processor principals are exempt; admins are not (the UI shows the
+  principal, so the owner can judge). 4 096 tracked IPs (approximate LRU, an IP with an
+  open episode last) and 300 000 touches in all (about 6 MiB). The catalog's size is
+  `LibraryCounts::total_series()`, counted by series key like the touches: folder
+  spellings of one title (case, whitespace) are one series, so a whole-library walk is
+  coverage 1.0.
+  Known false positive: when the reader's depth-infinity listing fails with an error it
+  does not recognise as "unsupported" (a timeout or a 5xx on a large library), it falls
+  back to one depth-1 listing per folder for that sync, which is a metadata episode like
+  davfs2's. Detection is per IP (a crawl split over many addresses is not seen).
+- **Built (sampler):** CPU is a percent of one core (two busy cores read 200 %);
+  `cpu_pct` is null until the second sample; `host_hourly` is rebuilt from the minutes
+  at each sample; host memory is the machine's, or the container's cgroup limit when
+  lower; macOS reports no cheap "available" figure (null). Windows and macOS read their
+  system calls (`windows-sys`, `libc`).
 
 ## 9. Clients and geography
 
-- **`clients::classify(user_agent, origin, protocol, path) -> ClientInfo { app, client,
-  browser, os }`**, hand-rolled (no UA database):
+- **`Clients::classify(&ClientRequest { user_agent, origin, host, protocol, path }) ->
+  ClientInfo { app, client, browser, os }`**, hand-rolled (no UA database):
   - `app`: `reader-hosted` when `Origin` equals the configured reader origin
     (`catalog.reader_url`'s origin, or a default CORS origin; use the config values, never
     new literals); `reader-other` for any other cross-origin `Origin`; `bunko-web` for
     same-origin pages/APIs (`/catalog`, `/_admin`, `/account`, ...); `webdav-client` for
     DAV requests without `Origin` from a non-browser UA; `api-client` / `unknown`
-    otherwise.
+    otherwise. **Built:** same-origin is decided by the CSRF check's rule
+    (`http::csrf::is_own_origin`: `Host` or `X-Forwarded-Host`, and a `Host` without a
+    port matches any port). A cross-origin request is, in this order: the hosted reader;
+    a reader on another origin over WebDAV; Bunko's own page when a browser sends an
+    origin `cors.allowed_origins` refuses (CORS would keep a reader there from reading
+    the answer); a reader on another origin on `/login/api/*`; otherwise an API client.
   - `client`: `browser` or a named non-browser client: `rclone`, `davfs2`,
     `windows-webdav` (Microsoft-WebDAV-MiniRedir), `macos-finder` (WebDAVFS, WebDAVLib),
     `cyberduck`, `gvfs`, `kodi`, `nextcloud`, `winscp`, `curl`, `wget`, `python`, `go`,
@@ -488,7 +598,11 @@ skipped (counted).
   month, falling back to the previous month), ≤ 64 MiB, gunzip, verify it opens with the
   `maxminddb` crate (ISC), write atomically to `<storage base>/analytics/country.mmdb`,
   refresh monthly. Lookups are in memory with an LRU of 16 384. Loopback / private /
-  link-local addresses map to `LAN`. The UI shows the attribution "IP geolocation by
+  link-local addresses map to `LAN`. **Built:** geography runs only while both
+  `analytics.enabled` and `analytics.geo.enabled` are on (no download, no database in
+  memory otherwise); before a database has loaded every lookup is `None`, local
+  addresses included; an address the database does not place is `ZZ`; a failed
+  refresh keeps the loaded database (status `error`) and retries after 6 hours. The UI shows the attribution "IP geolocation by
   DB-IP" with a link to db-ip.com, as the licence requires. `geo::country(&IpAddr) ->
   Option<Country>` is synchronous and cheap; the collector calls it for `ip_daily`,
   `geo_daily` and crawl episodes.
@@ -508,26 +622,33 @@ granularity is `hour` for ranges ≤ 7d, else `day`. Every response carries:
 Time series use `{"t": [epoch_s, ...], "series": [{"key": "volume", "label": "Volumes",
 "values": [ ... ]}]}` with one value per `t` (zeros filled). Byte values are integers.
 
+Daily tables (`reading_daily`, `principal_daily`, `clients_daily`, `library_daily`,
+`uploads_daily`, `volume_downloads`) have one point per UTC day whatever the range's
+granularity: a 24h or 7d range covers every day it touches (so its counts can span up to
+about 48 h), and those answers add `series_granularity: "day"`.
+
 | Endpoint | Body (in addition to the common fields) |
 |---|---|
-| `GET overview` | `kpis{bytes_out, bytes_in, est_bytes_out, requests, downloads, downloaders, reads, readers, minutes_read, pages_read, dau, wau, mau, crawl_episodes, errors_5xx, auth_failures, rss_bytes, rss_peak_bytes, cpu_pct, uptime_s, dropped}`, `bandwidth` (time series of bytes out by category, top 6 + `other`), `top_series[5]{series_key,title,downloads,readers,minutes}`, `top_principals[5]{principal,label,kind,bytes_out}` |
-| `GET traffic?by=category\|protocol\|method\|detail&metric=bytes_out\|bytes_in\|requests&category=` | time series by `by`; `totals[]{key,label,requests,bytes_out,bytes_in,est_bytes_out}`; `sync{progress:{bytes_out,bytes_in,requests,by_detail[]}, profile:{...}}`; `metadata{bytes_out,bytes_in,requests,by_detail[]{key,label,requests,bytes_out}}`; `dav_methods[]{method,requests,bytes_out,bytes_in}` |
-| `GET principals?limit=50` | `rows[]{principal,label,kind(user\|anon\|processor),requests,bytes_out,bytes_in,by_category{...},last_seen,ips[] (anon, within IP retention)}`, `totals{users,anon,processor}` |
-| `GET series?sort=downloads\|downloaders\|readers\|reads\|minutes\|pages\|bytes&limit=50&q=` | `rows[]{series_key,title,downloads,downloaders,readers,reads,pages,minutes,bytes_out,prev{downloads,readers},volumes}` (prev = the previous period of the same length, for trending) |
-| `GET funnel?series=<series_key>` | `series_key,title,volumes[]{volume_key,title,started,finished,downloads}`, `readers_started`, `readers_finished` |
-| `GET reading` | time series `minutes`, `pages`, `readers`; `top_readers[]{username,minutes,pages,volumes}`; `top_volumes[]{volume_key,title,series_title,readers,minutes}`; `sources{positions,history}` |
-| `GET users` | time series `dau`; `wau`, `mau` (latest); `rows[]{username,last_seen,days_active,requests,bytes_out,devices[]{id,label,first_seen,last_seen},clients[]}` |
-| `GET library` | `scanned_at, cloud, totals{series,volumes,bytes}, by_kind[]{kind,label,files,bytes}, by_ext[]{ext,files,bytes}, archive_mix[]{mix,series}, page_formats{available,reason,scanned,pending,unreadable,formats[]{ext,pages,volumes}}, growth{t,series[]...}, uploads{t,series[],by_uploader[]{username,volumes,bytes}}, dormant{days,count,series[]{series_key,title,volumes}}` |
-| `POST library/rescan` | `{ok:true}` |
-| `GET health` | time series `status` (2xx..5xx); `errors[]{status,protocol,method,category,count}`; `auth_failures{t,values,top_ips[]{ip,country,count,usernames[]},top_usernames[]{username,count}}`; `latency[]{protocol,method,category,requests,p50_ms,p95_ms,p99_ms,ttfb_p50_ms,ttfb_p95_ms}`; `slow[]{at,method,path,status,ms,principal}`; `efficiency{not_modified,saved_bytes,gzip_raw_bytes,gzip_sent_bytes,aborted,aborted_bytes,resumed,est_bytes_out}` |
-| `GET host?range=24h\|7d\|30d` | time series `rss`, `rss_max`, `cpu_pct`, `connections_max`, `inflight_max`; `now{rss,peak_rss,cpu_pct,connections,inflight,host_total,host_available}`; `platform_supported{rss,cpu}` |
-| `GET crawlers` | `thresholds{window_hours,min_series,min_coverage}`, `catalog_series`, `episodes[]{id,ip,country,principals[],client,user_agent,kind,started_at,last_at,series,volumes,coverage,bytes_out,requests,status}`, `by_ip[]{ip,country,episodes,last_at,bytes_out}`, time series `episodes_per_day` |
-| `GET clients` | `apps[]`, `clients[]`, `browsers[]`, `os[]`, `protocols[]` each `{key,label,requests,bytes_out,principals}`; `origins[]{origin,requests}`; time series `by_app` |
-| `GET geo` | `enabled, status(off\|downloading\|ready\|error), error, db{version,downloaded_at,attribution,license}, countries[]{country,requests,bytes_out}` |
-| `POST geo/refresh` | `{ok:true}` |
+| `GET overview` | `kpis{bytes_out, bytes_in, est_bytes_out, requests, downloads, downloaders, reads, readers, minutes_read, pages_read, dau, wau, mau, crawl_episodes, errors_5xx, auth_failures, rss_bytes, rss_peak_bytes, cpu_pct, uptime_s, dropped}` (`dau`/`wau`/`mau`: accounts and anonymous visitors, today and the last 7 and 30 days; `dropped`: all time), `bandwidth` (time series of bytes out by category, top 6 + `other`), `top_series[5]{series_key,title,downloads,readers,minutes}`, `top_principals[5]{principal,label,kind,bytes_out}` |
+| `GET traffic?by=category\|protocol\|method\|detail&metric=bytes_out\|bytes_in\|requests&category=` | time series by `by` (top 12 + `(other)`); `by`, `metric`; `totals[]{key,label,requests,bytes_out,bytes_in,est_bytes_out}`; `sync{progress:{bytes_out,bytes_in,requests,by_detail[]{key,label,requests,bytes_out,bytes_in}}, profile:{...}}`; `metadata{bytes_out,bytes_in,requests,by_detail[]{key,label,requests,bytes_out}}`; `dav_methods[]{method,requests,bytes_out,bytes_in}` |
+| `GET principals?limit=50` | `rows[]{principal,label,kind(user\|anon\|processor),requests,bytes_out,bytes_in,by_category{category: bytes_out},last_seen,ips[] (anon only, within IP retention)}`, `totals{users,anon,processor}` |
+| `GET series?sort=downloads\|downloaders\|readers\|reads\|minutes\|pages\|bytes&limit=50&q=` | `rows[]{series_key,title,downloads,downloaders,readers,reads,pages,minutes,bytes_out,prev{downloads,readers},volumes}`, `sort` (prev = the previous period of the same length, for trending; `volumes` = distinct volumes downloaded; `downloads` = (day, principal, volume) rows) |
+| `GET funnel?series=<any spelling>` | `series_key,title,in_library,volumes[]{volume_key,title,started,finished,downloads,in_library,page_count}`, `readers_started`, `readers_finished`, `stages[]{key(started\|p25\|p50\|p75\|completed),label,reads}`; without `series`: `series[]{series_key,title,readers_started,readers_finished,volumes_started,downloads}` (top 50) |
+| `GET reading` | time series `minutes` (0.1 min), `pages`, `readers`; `totals{reads,readers,minutes,pages,chars,opens}`; `top_readers[]{username,minutes,pages,volumes,reads,days,chars}`; `top_volumes[]{volume_key (null: not in the library),volume_uuid,title,series_key,series_title,readers,reads,pages,minutes}`; `sources{positions,history}` (each read once); `worker{queued,dropped,pending,files,positions,segments,volume_data,device_files,missing,too_large,unknown_format,malformed,failed,coalesced,pending_dropped,events_out_of_range}` (since start) |
+| `GET users` | time series `dau` (accounts); `dau`, `wau`, `mau` (accounts, today and the last 7 and 30 days); `visitors{dau,wau,mau}` (accounts and anonymous, as the overview counts); `accounts` (every account of the range); `rows_limit` (200); `rows[]{username,last_seen,days_active,requests,bytes_out,bytes_in,devices[]{id,label,first_seen,last_seen,source},clients[] (app keys),minutes,pages,volumes_read,reads,volumes_started,volumes_completed}` (most bytes first) |
+| `GET library` | `scanned_at, cloud, scanning, scan{phase,started_at,duration_ms,pages_duration_ms,interval_hours,waiting,error}, totals{series,volumes,bytes,files}, by_kind[]{kind,label,files,bytes}, by_ext[]{ext (no dot; '' none),files,bytes}, archive_mix[]{mix,series}, no_sidecar{count,series[]}, loose_archives, page_formats{available,reason,scanned,pending,unreadable,formats[]{ext,pages,volumes}}, growth{t,series[series,volumes,bytes]}, uploads{t,series[]{key: uploader-N, label: account},by_uploader[]{username,volumes,bytes},recent[]{volume_key,series_title,username,uploaded_at}}, dormant{days,count,tracking_since,series[]{series_key,title,volumes}}` (`dormant` null before the first scan) |
+| `POST library/rescan` | `{ok:true, scanning:true}`; 409 while analytics are off |
+| `GET health` | time series `status` (keys `2xx`..`5xx`); `errors[]{status,protocol,method,category,count}`; `auth_failures{t,values,top_ips[]{ip,country,count,usernames[]},top_usernames[]{username,count}}`; `latency[]{protocol,method,category,requests,p50_ms,p95_ms,p99_ms,ttfb_p50_ms,ttfb_p95_ms}`; `slow[]{at,method,path,status,ms,principal}` (no protocol: the UI reads it off the method and path as the classifier does); `efficiency{not_modified,saved_bytes,gzip_raw_bytes,gzip_sent_bytes,aborted,aborted_bytes,resumed,est_bytes_out}` |
+| `GET host?range=24h\|7d\|30d` (another range: 400) | `resolution` (`minute` for 24h, `hour` beyond; `range.granularity` says `hour` for both, the browser's local time), `step` (60 or 3600); time series `rss`, `rss_max`, `cpu_pct`, `cpu_max`, `connections_max`, `inflight_max`, whose values are **null** where there is no reading (the server was down), never 0; `now{rss,peak_rss,cpu_pct (null before the second sample),connections,inflight,host_total,host_available (null on macOS),reading_queue,reading_dropped,collector_dropped}`; `platform_supported{rss,cpu}` |
+| `GET crawlers` | `thresholds{window_hours,min_series,min_coverage}`, `catalog_series`, `episodes[]{id,ip,country,principals[],client,user_agent,kind,started_at,last_at,series,volumes,catalog_series,coverage,bytes_out,requests,status,active}` (newest first, at most 500), `by_ip[]{ip,country,episodes,last_at,bytes_out}`, `episodes_per_day{t,granularity:"day",series[episodes]}`, `tracking{ips,max_ips,entries,max_entries,approx_bytes}` |
+| `GET clients` | `apps[]`, `clients[]`, `browsers[]`, `os[]`, `protocols[]`, `dav_clients[]`, `dav_apps[]` each `{key,label,requests,bytes_out,principals}` (distinct visitors within `principals_days`, the IP retention); `origins[]{origin,requests,hosted_reader}`; `by_app{t,series}` (daily); `totals{requests,bytes_out}` |
+| `GET geo` | `geo_enabled` (analytics and geography both on; `enabled` stays the common analytics flag), `status(off\|downloading\|ready\|error)`, `error`, `db{version,downloaded_at,built_at,database_type,size,attribution,attribution_url,license}`, `attribution{text,url,license}`, `checked_at`, `next_check_at`, `countries[]{country (ISO, LAN or ZZ),requests,bytes_out}` |
+| `POST geo/refresh` | `{ok:true, started}`; `started: false, reason: "off"` when geography is off |
 
-A stub area (not implemented yet) answers `200 {"available": false, ...common}` and the
-UI shows "not collected yet".
+Every view answers its data. The only `available` field left is `page_formats`'s
+(with a `reason`). The UI still shows "Not collected yet" for a top-level
+`{"available": false}`, which development builds of 0.8 answered for an area that did
+not exist yet, and an older server's 404 for a view it does not have.
 
 Settings: the `analytics:` section is editable through the existing admin settings flow
 (`admin/settings.rs`: an `analytics` editor like the others, live, saved to config).
@@ -581,12 +702,13 @@ Foundation (in parallel):
   identity slot, classification, the collector with all its maps, flushing, shutdown,
   gauges in `serve.rs`, the admin dispatch arm and API handlers for `overview`,
   `traffic`, `principals`, `series`, `health`, the settings editor, docs, CHANGELOG.
-  It creates **stub modules** with the final signatures for the areas: `reading`
-  (`on_file_written`, worker start, `api::{reading,users,funnel}`), `library` (scanner
-  start, `rescan`, `api::library`), `host` (sampler start, `now()`, `api::host`),
-  `crawl` (`Detector::observe`, `flush_into(tx)`, `api::crawlers`), `clients`
-  (`classify` returning unknowns, `api::clients`), `geo` (`country` returning `None`,
-  `api::{geo,refresh}`), wired in so the area agents only fill in their own files.
+  It created stub modules with the final signatures for the areas, wired in so the
+  area agents only filled in their own files: `reading` (`Reading::on_file_written`,
+  worker start, `api::{reading,users,funnel}`), `library` (scanner start, `rescan`,
+  `api::library`), `host` (sampler start, `now()`, `api::host`), `crawl`
+  (`Detector::observe`, the flush interface of section 4.6, `api::crawlers`), `clients`
+  (`Clients::classify`, `api::clients`), `geo` (`Geo::country`, `api::{geo,refresh}`).
+  The stubs are gone now that every area answers.
 - **A2 UI**: the whole Analytics tab against the JSON shapes in section 10 (all
   sub-views), developed against mock JSON, verified in a browser.
 

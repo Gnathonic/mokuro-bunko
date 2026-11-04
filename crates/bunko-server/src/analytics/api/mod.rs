@@ -153,12 +153,6 @@ pub fn answer(a: &Analytics, q: &ApiQuery, body: Value) -> Response {
     ok(Value::Object(m))
 }
 
-/// What a stub area answers: `200 {"available": false, ...common}` ("not collected
-/// yet" in the UI).
-pub async fn not_collected(a: &Analytics, q: &ApiQuery) -> Response {
-    answer(a, q, json!({"available": false}))
-}
-
 /// Run a query off the async workers; a database error is a 500.
 pub(crate) async fn query<T: Send + 'static>(
     what: &str,
