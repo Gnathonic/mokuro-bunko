@@ -129,7 +129,10 @@ pub(crate) struct RequestRecord {
     pub aborted: bool,
     /// The request had a `Range` header.
     pub range: bool,
-    pub principal: Principal,
+    /// Who the request is attributed to; `None` for a CORS preflight (design §3): a
+    /// browser sends it on its own, never with credentials, before a cross-origin
+    /// request, so it is traffic but nobody's (no visitor, no crawl signal).
+    pub principal: Option<Principal>,
     /// The client address (canonical; a trusted proxy's text as sent, cut to 64).
     pub ip: Arc<str>,
     pub user_agent: Option<String>,
@@ -149,6 +152,10 @@ pub(crate) struct RequestRecord {
 impl RequestRecord {
     pub fn at(&self) -> i64 {
         self.at_ms.div_euclid(1000)
+    }
+
+    pub fn principal_kind(&self) -> Option<PrincipalKind> {
+        self.principal.as_ref().map(|p| p.kind)
     }
 }
 
@@ -320,22 +327,27 @@ impl Window {
         if error && let Some(n) = slot(&mut self.errors, (kk, r.status), "errors", drops) {
             *n += 1;
         }
-        let p = &r.principal.id;
-        let p_cost = arc_cost(p.len());
+        let principal = r.principal.as_ref();
+        let p = principal.map(|p| &p.id);
+        let p_cost = p.map_or(0, |p| arc_cost(p.len()));
         let ip_cost = arc_cost(r.ip.len());
-        let pk = (day, p.clone(), c.category);
-        if let Some(pc) = text_slot(&mut self.principals, pk, p_cost, "principals", used, drops) {
-            pc.requests += 1;
-            pc.bytes_out += out_total;
-            pc.bytes_in += r.bytes_in;
+        if let Some(p) = p {
+            let pk = (day, p.clone(), c.category);
+            if let Some(pc) = text_slot(&mut self.principals, pk, p_cost, "principals", used, drops)
+            {
+                pc.requests += 1;
+                pc.bytes_out += out_total;
+                pc.bytes_in += r.bytes_in;
+            }
+            if let Some((first, last)) =
+                text_slot(&mut self.seen, p.clone(), p_cost, "principals", used, drops)
+            {
+                *first = if *first == 0 { at } else { (*first).min(at) };
+                *last = (*last).max(at);
+            }
         }
-        if let Some((first, last)) =
-            text_slot(&mut self.seen, p.clone(), p_cost, "principals", used, drops)
-        {
-            *first = if *first == 0 { at } else { (*first).min(at) };
-            *last = (*last).max(at);
-        }
-        if r.principal.kind == PrincipalKind::Anon
+        if let Some(p) = p
+            && r.principal_kind() == Some(PrincipalKind::Anon)
             && let Some(n) = text_slot(
                 &mut self.anon_ips,
                 (day, p.clone(), r.ip.clone()),
@@ -361,7 +373,10 @@ impl Window {
             ip.bytes_out += out_total;
             ip.errors += u64::from(error);
             ip.auth_failures += u64::from(r.auth_failure.is_some());
-            if ip.principals.len() < IP_PRINCIPALS_MAX && !ip.principals.contains(p) {
+            if let Some(p) = p
+                && ip.principals.len() < IP_PRINCIPALS_MAX
+                && !ip.principals.contains(p)
+            {
                 ip.principals.push(p.clone());
             }
             if let Some(ua) = &r.user_agent {
@@ -384,8 +399,12 @@ impl Window {
         let downloads = c.category == category::VOLUME
             && r.method == "GET"
             && matches!(r.status, 200 | 206)
-            && matches!(r.principal.kind, PrincipalKind::User | PrincipalKind::Anon);
+            && matches!(
+                r.principal_kind(),
+                Some(PrincipalKind::User | PrincipalKind::Anon)
+            );
         if downloads
+            && let Some(p) = p
             && let Some(vk) = &c.volume_key
             && let Some(d) = text_slot(
                 &mut self.downloads,
@@ -429,14 +448,16 @@ impl Window {
             n.0 += 1;
             n.1 += out_total;
         }
-        let _ = text_slot(
-            &mut self.client_principals,
-            (day, client, c.protocol, p.clone()),
-            p_cost,
-            "client_principals",
-            used,
-            drops,
-        );
+        if let Some(p) = p {
+            let _ = text_slot(
+                &mut self.client_principals,
+                (day, client, c.protocol, p.clone()),
+                p_cost,
+                "client_principals",
+                used,
+                drops,
+            );
+        }
         // Cross-origin callers only: a browser sends `Origin` on its same-origin writes too.
         if let Some(origin) = &r.origin
             && super::clients::cross_origin(origin, r.host.as_deref())
@@ -454,8 +475,11 @@ impl Window {
             && c.detail == "archive"
             && matches!(r.status, 201 | 204);
         if archive_upload
-            && r.principal.kind == PrincipalKind::User
-            && let Some(user) = &r.principal.username
+            && let Some(Principal {
+                kind: PrincipalKind::User,
+                username: Some(user),
+                ..
+            }) = principal
             && let Some(u) = text_slot(
                 &mut self.uploads,
                 (day, user.clone()),
@@ -528,7 +552,10 @@ fn note_slow(slow: &mut HashMap<i64, Vec<SlowRequest>>, r: &RequestRecord, hour:
             path: r.path.chars().take(SLOW_PATH_MAX).collect(),
             status: r.status,
             ms: r.headers_ms,
-            principal: r.principal.id.to_string(),
+            principal: r
+                .principal
+                .as_ref()
+                .map_or_else(String::new, |p| p.id.to_string()),
             ip: r.ip.to_string(),
         });
     }
@@ -568,11 +595,14 @@ impl super::Inner {
                 .ok()
                 .and_then(|ip| self.geo.country(&ip));
         self.collector.fold(&r, client, country);
-        if r.principal.kind != PrincipalKind::Processor {
+        // A preflight is nobody's: no crawl signal either.
+        if let Some(principal) = r.principal.as_ref()
+            && principal.kind != PrincipalKind::Processor
+        {
             self.crawl.observe(&Observation {
                 at: r.at(),
                 ip: &r.ip,
-                principal: &r.principal.id,
+                principal: &principal.id,
                 protocol: r.class.protocol,
                 method: r.method,
                 category: r.class.category,
@@ -595,7 +625,7 @@ impl super::Inner {
         if !(200..300).contains(&r.status) || !matches!(r.method, "PUT" | "DELETE" | "MOVE") {
             return;
         }
-        let Some(user) = &r.principal.username else {
+        let Some(user) = r.principal.as_ref().and_then(|p| p.username.as_ref()) else {
             return;
         };
         let send = |rel: &str| {
@@ -654,14 +684,14 @@ mod tests {
             total_ms: 9,
             aborted: false,
             range: false,
-            principal: Principal {
+            principal: Some(Principal {
                 id: principal.into(),
                 kind: PrincipalKind::of(principal),
                 username: principal
                     .get(2..)
                     .filter(|_| !principal.starts_with("a:"))
                     .map(Into::into),
-            },
+            }),
             ip: "203.0.113.7".into(),
             user_agent: Some("ua".into()),
             origin: None,
@@ -752,11 +782,11 @@ mod tests {
         let n = 40_000usize;
         for i in 0..n {
             r.ip = format!("2001:db8:{:x}:{:x}::1", i >> 16, i & 0xffff).into();
-            r.principal = Principal {
+            r.principal = Some(Principal {
                 id: format!("a:{i:012x}").into(),
                 kind: PrincipalKind::Anon,
                 username: None,
-            };
+            });
             r.user_agent = Some(format!("{}{i}", "u".repeat(250)));
             r.origin = Some(format!("https://{}{i}.example.com", "o".repeat(200)));
             r.auth_failure = Some(format!("{}{i}", "n".repeat(60)));

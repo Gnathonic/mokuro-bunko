@@ -65,6 +65,10 @@ pub async fn layer(State(a): State<Analytics>, mut req: Request, next: Next) -> 
         })
         .flatten();
     let range = headers.contains_key(header::RANGE);
+    // A CORS preflight: the browser's own question before a cross-origin request,
+    // never with credentials. Counted as traffic, attributed to nobody (design §3).
+    let preflight =
+        method == "OPTIONS" && headers.contains_key(header::ACCESS_CONTROL_REQUEST_METHOD);
     let user_agent = header_text(headers, header::USER_AGENT);
     // Bunko's own origin (the CSRF rule: `Host` or `X-Forwarded-Host`, a port-less
     // `Host` matching any port) counts as none: only cross-origin callers are kept.
@@ -115,19 +119,23 @@ pub async fn layer(State(a): State<Analytics>, mut req: Request, next: Next) -> 
             .unwrap_or(&ip_text),
     )
     .into();
-    let principal = principal::principal_of(
-        ident.and_then(|i| i.username.as_deref()),
-        ident.map_or(bunko_core::Role::Anonymous, |i| i.role),
-        &ip,
-        &a.db().salt(),
-    );
+    let principal = (!preflight).then(|| {
+        principal::principal_of(
+            ident.and_then(|i| i.username.as_deref()),
+            ident.map_or(bunko_core::Role::Anonymous, |i| i.role),
+            &ip,
+            &a.db().salt(),
+        )
+    });
     let class = classify::classify(&Input {
         method,
         path: &path,
         query: query.as_deref(),
         dav: dav.as_ref(),
         depth: depth.as_deref(),
-        processor: principal.kind == PrincipalKind::Processor,
+        processor: principal
+            .as_ref()
+            .is_some_and(|p| p.kind == PrincipalKind::Processor),
         status,
         range,
         accel,

@@ -1504,7 +1504,8 @@
                     { key: 'path', label: 'Path', className: 'an-col-path', render: (r) => mono(r.path) },
                     { key: 'status', label: 'Status', kind: 'int' },
                     { key: 'ms', label: 'Time', kind: 'ms' },
-                    { key: 'principal', label: 'Who', render: (r) => mono(r.principal) },
+                    // A CORS preflight is nobody's: no principal.
+                    { key: 'principal', label: 'Who', render: (r) => (r.principal ? mono(r.principal) : 'preflight') },
                 ], { rows: (data.slow || []).filter((r) => !proto || slowProtocol(r) === proto), sortKey: 'ms', emptyText: 'Nothing slow in this range.' }),
                 wide: true,
             }),

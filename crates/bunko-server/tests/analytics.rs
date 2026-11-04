@@ -758,6 +758,90 @@ async fn early_answers_are_counted_too() {
     );
 }
 
+/// A CORS preflight a signed-in hosted reader's browser sends before its requests
+/// carries no credentials: it is traffic (requests, bytes, the `options` detail, the
+/// address's row) but nobody's, so it makes no anonymous visitor of the reader's IP.
+#[tokio::test]
+async fn a_preflight_is_traffic_but_no_visitor() {
+    let env = Env::with(|c| c.cors.allowed_origins = vec!["https://reader.example.com".into()]);
+    let ua = "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0";
+    let origin = ("origin", "https://reader.example.com");
+    for _ in 0..3 {
+        let (status, _, _) = env
+            .call(
+                None,
+                "OPTIONS",
+                "/mokuro-reader/",
+                &[
+                    origin,
+                    ("user-agent", ua),
+                    ("access-control-request-method", "PROPFIND"),
+                    ("access-control-request-headers", "authorization,depth"),
+                ],
+                b"",
+                IP_B,
+            )
+            .await;
+        assert!(status.is_success(), "{status}");
+        let (status, _, _) = env
+            .call(
+                Some("reader"),
+                "PROPFIND",
+                "/mokuro-reader/",
+                &[origin, ("user-agent", ua), ("depth", "1")],
+                b"",
+                IP_B,
+            )
+            .await;
+        assert_eq!(status.as_u16(), 207);
+    }
+    env.flush().await;
+    // Traffic as before.
+    assert_eq!(
+        traffic(
+            &env,
+            "method='OPTIONS' AND category='metadata' AND detail='options'"
+        )
+        .0,
+        3
+    );
+    assert_eq!(
+        env.int(&format!(
+            "SELECT requests FROM ip_daily WHERE ip = '{IP_B}'"
+        )),
+        6
+    );
+    // Only the account, wherever principals are kept.
+    assert_eq!(
+        env.text_rows(&format!(
+            "SELECT principals FROM ip_daily WHERE ip = '{IP_B}'"
+        )),
+        [r#"["u:reader"]"#]
+    );
+    assert_eq!(
+        env.text_rows("SELECT DISTINCT principal FROM principal_daily ORDER BY 1"),
+        ["u:reader"]
+    );
+    assert_eq!(
+        env.text_rows("SELECT principal FROM principal_seen ORDER BY 1"),
+        ["u:reader"]
+    );
+    assert_eq!(env.int("SELECT COUNT(*) FROM anon_ips"), 0);
+    assert_eq!(
+        env.text_rows("SELECT DISTINCT principal FROM client_principals ORDER BY 1"),
+        ["u:reader"]
+    );
+    assert_eq!(
+        env.text_rows("SELECT DISTINCT principal FROM client_mix_principals ORDER BY 1"),
+        ["u:reader"]
+    );
+    let o = env.admin("/_admin/api/analytics/overview?range=24h").await;
+    assert_eq!(o["kpis"]["dau"], 1, "{}", o["kpis"]);
+    let u = env.admin("/_admin/api/analytics/users?range=24h").await;
+    // Visitors are accounts and anonymous ids together: the reader alone.
+    assert_eq!(u["visitors"]["dau"], 1, "{u}");
+}
+
 /// The same requests with analytics on and off answer byte for byte the same, and off
 /// writes nothing.
 #[tokio::test]

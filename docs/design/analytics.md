@@ -108,13 +108,24 @@ any change to what the reader sends.
   default 30): `ip_daily`, `anon_ips`, `auth_failures`, `slow_requests`; and in
   `crawl_episodes` (`retention.crawl_days`, default 90). After that only principals
   remain.
+- **A CORS preflight** (an `OPTIONS` carrying `Access-Control-Request-Method`) is
+  attributed to **no principal**. **Built:** a browser sends it on its own before a
+  cross-origin request and never with credentials, so a signed-in hosted reader's
+  preflights would otherwise make every IP it syncs from one more anonymous visitor.
+  It still counts as traffic (`traffic_*`, `latency_*`, `errors_*`, `ip_daily`
+  requests and bytes, `clients_daily`, `geo_daily`, `metadata`/`options`), but writes
+  no `principal_daily`, `principal_seen`, `anon_ips` or `client_principals` /
+  `client_mix_principals` row, adds no principal to its `ip_daily` row, counts toward
+  no visitor (dau/wau/mau, users, clients) and is no crawl signal; a slow one is listed
+  with an empty principal (the Health view says `preflight`).
 - The client IP is the server's own resolved client IP (`Core.proxies`,
   `RequestCtx.client_ip`), so trusted proxies / tunnels are honoured. When the identity
   was never resolved for a request (it was answered before the auth layer: `GET /`,
-  `/catalog/api/*`, a CORS preflight, a `path_guard` 400), the analytics layer resolves
-  the IP itself with `core.proxies` (no authentication, no limiter side effect) and the
-  request is anonymous. A non-IP string from a trusted proxy header is hashed as-is for
-  the principal and stored verbatim (truncated to 64 chars) where an IP is stored.
+  `/catalog/api/*`, a `path_guard` 400), the analytics layer resolves the IP itself
+  with `core.proxies` (no authentication, no limiter side effect) and the request is
+  anonymous (a CORS preflight, also answered there, is nobody's: above). A non-IP
+  string from a trusted proxy header is hashed as-is for the principal and stored
+  verbatim (truncated to 64 chars) where an IP is stored.
 
 ## 4. Request accounting
 
@@ -226,6 +237,9 @@ The server may be mounted under a sub-path: classify on the path as the router s
 
 PROPFIND of `/` or `/mokuro-reader` carries the caller's injected per-user entries;
 it stays `metadata` (the reader's whole listing is navigation).
+
+An `OPTIONS` is `metadata` / `options`, a CORS preflight included; a preflight is
+classified like any other request but attributed to no principal (§3).
 
 `method`: the upper-case method; anything outside the 14 known methods (GET, HEAD,
 OPTIONS, POST, PUT, DELETE, PATCH, PROPFIND, PROPPATCH, MKCOL, COPY, MOVE, LOCK,
