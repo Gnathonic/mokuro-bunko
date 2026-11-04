@@ -768,13 +768,15 @@ impl Detector {
     /// sampler calls it every minute, off the request path.
     pub fn refresh_catalog_from(&self, index: &bunko_library::LibraryIndexCache, now: i64) {
         let snapshot = index.get_snapshot();
-        let keys: HashSet<u32, Fx> = snapshot
+        // Counted by series key, as touches are: folder spellings of one title (case,
+        // whitespace) are one series, so a whole-library walk covers 100 %.
+        let folded: HashSet<String> = snapshot
             .series
             .iter()
-            .map(|s| hash32(&bunko_db::fold_series_title_key(&s.name)))
+            .map(|s| bunko_db::fold_series_title_key(&s.name))
             .collect();
-        self.catalog
-            .store(snapshot.series.len() as u64, Ordering::Relaxed);
+        let keys: HashSet<u32, Fx> = folded.iter().map(|k| hash32(k)).collect();
+        self.catalog.store(folded.len() as u64, Ordering::Relaxed);
         self.catalog_at.store(now.max(1), Ordering::Relaxed);
         self.state.lock().catalog_keys = Some(keys);
     }

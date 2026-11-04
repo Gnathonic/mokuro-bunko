@@ -724,3 +724,27 @@ async fn a_rolled_back_flush_writes_the_episodes_at_the_next_one() {
         assert_eq!(e["status"], "open");
     }
 }
+
+/// Folder spellings of one title (case, whitespace) are one series of the catalog, as
+/// they are one series key for the touches: the catalog's size never counts them twice,
+/// so a walk of every folder covers the whole catalog.
+#[tokio::test]
+async fn folder_spellings_of_one_series_count_once_in_the_catalog() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = dir.path().join("storage");
+    seed_library(&storage);
+    for folder in ["series 00", "SERIES  00"] {
+        let d = storage.join("library").join(folder);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("Vol 9.cbz"), vec![b'z'; VOLUME_BYTES]).unwrap();
+    }
+    let env = Env::over(dir, storage).await;
+    let v = env.crawlers("24h").await;
+    assert_eq!(v["catalog_series"], SERIES as u64, "{v}");
+    env.walk(None, RCLONE_IP, RCLONE_UA, 0..SERIES, true).await;
+    env.flush().await;
+    let v = env.crawlers("24h").await;
+    let ep = &v["episodes"][0];
+    assert_eq!(ep["series"], SERIES as u64, "{v}");
+    assert_eq!(ep["coverage"], 1.0, "{v}");
+}

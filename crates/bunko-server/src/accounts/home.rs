@@ -28,7 +28,8 @@ pub trait LibraryCounts: Send + Sync {
         Err("not counted".into())
     }
 
-    /// Series in the index snapshot (the crawl detector's catalog size).
+    /// Series in the index snapshot, folder spellings of one title counted once (the
+    /// crawl detector's catalog size).
     fn total_series(&self) -> Result<u64, String> {
         Err("not counted".into())
     }
