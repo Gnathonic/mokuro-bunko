@@ -3,9 +3,9 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.7.4"
+version = "0.7.5"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 license = "MPL-2.0"
 repository = "https://github.com/Gnathonic/mokuro-bunko"
 
@@ -54,6 +54,9 @@ time = { version = "0.3", features = ["formatting", "parsing", "macros", "serde"
 parking_lot = "0.12"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif", "bmp"] }
+# JPEG XL pages: jxl-rs, the decoder Chromium and Firefox ship, hooked into `image`.
+jxl = "0.8"
+jxl-image-rs-integration = "0.8"
 notify = "8"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "gzip"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }

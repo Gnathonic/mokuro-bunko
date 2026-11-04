@@ -21,8 +21,8 @@ use flate2::read::DeflateDecoder;
 use crate::error::{Error, Result};
 use crate::natsort;
 
-/// `IMAGE_EXTENSIONS` of the 0.5.2 runner.
-pub const IMAGE_EXTENSIONS: [&str; 5] = [".jpg", ".jpeg", ".png", ".webp", ".avif"];
+/// Page suffixes: the 0.5.2 runner's `IMAGE_EXTENSIONS`, plus JPEG XL.
+pub const IMAGE_EXTENSIONS: [&str; 6] = [".jpg", ".jpeg", ".png", ".webp", ".avif", ".jxl"];
 /// Extensions the cover thumbnail considers (§9; differs from the page rule).
 pub const COVER_EXTENSIONS: [&str; 8] = [
     ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".tif",
@@ -498,6 +498,33 @@ mod tests {
                 ("a/1.jpg".to_string(), "a//1.jpg".to_string()),
                 ("sub/vol.webp".to_string(), "sub/vol.webp".to_string())
             ]
+        );
+    }
+
+    /// Regression: a volume whose pages are all JPEG XL failed every OCR attempt with
+    /// "no page images found", because `.jxl` was not a page.
+    #[test]
+    fn jxl_members_are_pages() {
+        let names = ["v/001.jxl", "v/002.JXL", "v/notes.txt"];
+        let m = member_map(names, "vol");
+        assert_eq!(
+            m.iter()
+                .map(|(landed, _)| landed.as_str())
+                .collect::<Vec<_>>(),
+            ["v/001.jxl", "v/002.JXL"]
+        );
+    }
+
+    #[test]
+    fn jxl_files_of_a_directory_are_pages() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("v")).unwrap();
+        for name in ["v/2.jxl", "v/10.jxl", "v/1.jxl", "v/info.txt"] {
+            std::fs::write(dir.path().join(name), b"x").unwrap();
+        }
+        assert_eq!(
+            directory_pages(dir.path()).unwrap(),
+            ["v/1.jxl", "v/2.jxl", "v/10.jxl"]
         );
     }
 }

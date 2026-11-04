@@ -539,10 +539,12 @@ pub async fn serve_router_with(
         let library_dir = services.core.layout.library();
         {
             // 0.5.2 swept corrupt sidecars when the OCR worker started; one-shot, off the
-            // request path.
+            // request path. The same pass lets JPEG XL volumes an older server marked
+            // `.nocover` get their cover.
             let (lib, db) = (library_dir.clone(), services.db.clone());
             tokio::task::spawn_blocking(move || {
-                crate::thumbs::remove_corrupt_sidecars(&lib, Some(&db))
+                crate::thumbs::remove_corrupt_sidecars(&lib, Some(&db));
+                crate::thumbs::clear_jxl_nocovers(&lib);
             });
         }
         let thumbs = services.thumbs.spawn(

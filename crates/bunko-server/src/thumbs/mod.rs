@@ -33,9 +33,9 @@ use parking_lot::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-/// Suffixes a cover may have (`_extract_cover_image_data`): no `.avif`.
-pub const COVER_EXTENSIONS: [&str; 8] = [
-    ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".tif",
+/// Suffixes a cover may have: `_extract_cover_image_data`'s (no `.avif`), plus JPEG XL.
+pub const COVER_EXTENSIONS: [&str; 9] = [
+    ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".tif", ".jxl",
 ];
 /// Decode budget of one cover (pixel buffers).
 pub const MAX_DECODE_BYTES: u64 = 192 * 1024 * 1024;
@@ -359,6 +359,51 @@ fn check_sidecar_capped(path: &Path, cap: u64) -> SidecarCheck {
     }
 }
 
+/// Upgrade from 0.7.4 and older, which could not read JPEG XL and so marked a volume
+/// of JPEG XL pages `.nocover`: drop the marker of every archive holding a `.jxl`
+/// image, so the next scan makes its cover. One-shot at startup; returns how many
+/// markers went.
+pub fn clear_jxl_nocovers(library: &Path) -> usize {
+    let mut marked = Vec::new();
+    walk(library, &mut |p| {
+        let archive = p
+            .extension()
+            .is_some_and(|e| e.to_string_lossy().eq_ignore_ascii_case("cbz"));
+        if archive && nocover_path(p).is_file() {
+            marked.push(p.to_path_buf());
+        }
+    });
+    marked.sort();
+    let mut cleared = 0;
+    for cbz in marked {
+        if !holds_jxl(&cbz) {
+            continue;
+        }
+        match std::fs::remove_file(nocover_path(&cbz)) {
+            Ok(()) => {
+                cleared += 1;
+                info!("Looking for a JPEG XL cover again: {}", cbz.display());
+            }
+            Err(e) => warn!(
+                "could not remove the .nocover marker of {}: {e}",
+                cbz.display()
+            ),
+        }
+    }
+    cleared
+}
+
+/// Whether the archive opens and has a `.jxl` member.
+fn holds_jxl(cbz: &Path) -> bool {
+    let Ok(file) = std::fs::File::open(cbz) else {
+        return false;
+    };
+    let Ok(zip) = zip::ZipArchive::new(std::io::BufReader::new(file)) else {
+        return false;
+    };
+    zip.file_names().any(|n| suffix_lower(n) == ".jxl")
+}
+
 /// `_remove_corrupt_sidecars`: delete every invalid library sidecar; returns how many.
 pub fn remove_corrupt_sidecars(library: &Path, db: Option<&Database>) -> usize {
     let mut found = Vec::new();
@@ -486,6 +531,68 @@ mod tests {
         assert!(series.join("Vol 1.webp").is_file());
         assert!(series.join("Vol 2.webp").is_file());
         assert!(thumbnail_candidates(&lib).is_empty());
+    }
+
+    /// Regression: a volume whose pages are all JPEG XL got a `.nocover` marker
+    /// ("no image") instead of a cover.
+    #[test]
+    fn jxl_volumes_get_covers() {
+        let page = std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../bunko-ocr/tests/fixtures/jxl/page-rgb.jxl"),
+        )
+        .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let lib = tmp.path().join("library");
+        let series = lib.join("Series");
+        std::fs::create_dir_all(&series).unwrap();
+        cbz(
+            &series.join("Vol 1.cbz"),
+            &[("v/002.jxl", &page), ("v/001.jxl", &page)],
+        );
+        let thumbs = Thumbnails::default();
+        assert_eq!(thumbs.scan_once(&lib, &CancellationToken::new()), 1);
+        assert!(!series.join("Vol 1.nocover").exists());
+        let img =
+            image::load_from_memory(&std::fs::read(series.join("Vol 1.webp")).unwrap()).unwrap();
+        assert_eq!(
+            (img.width(), img.height()),
+            bunko_thumb::contain_size(24, 16, bunko_thumb::THUMBNAIL_BOX)
+        );
+    }
+
+    /// Upgrade: 0.7.4 and older could not read JPEG XL, so they marked a volume of JPEG
+    /// XL pages `.nocover` ("no image"), and the marker stops every later look. Those
+    /// markers go; the others stay.
+    #[test]
+    fn jxl_nocover_markers_are_cleared() {
+        let page = std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../bunko-ocr/tests/fixtures/jxl/page-rgb.jxl"),
+        )
+        .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let lib = tmp.path().join("library");
+        let series = lib.join("Series");
+        std::fs::create_dir_all(&series).unwrap();
+        cbz(&series.join("Vol 1.cbz"), &[("v/001.jxl", &page)]);
+        cbz(&series.join("Vol 2.CBZ"), &[("v/001.JXL", &page)]);
+        cbz(&series.join("Vol 3.cbz"), &[("notes.txt", b"x")]);
+        std::fs::write(series.join("Vol 4.cbz"), b"not a zip").unwrap();
+        for stem in ["Vol 1", "Vol 2", "Vol 3", "Vol 4", "Orphan"] {
+            std::fs::write(series.join(format!("{stem}.nocover")), b"").unwrap();
+        }
+        assert_eq!(clear_jxl_nocovers(&lib), 2);
+        assert!(!series.join("Vol 1.nocover").exists());
+        assert!(!series.join("Vol 2.nocover").exists());
+        for stem in ["Vol 3", "Vol 4", "Orphan"] {
+            assert!(series.join(format!("{stem}.nocover")).is_file(), "{stem}");
+        }
+        let thumbs = Thumbnails::default();
+        assert_eq!(thumbs.scan_once(&lib, &CancellationToken::new()), 2);
+        assert!(series.join("Vol 1.webp").is_file());
+        assert!(series.join("Vol 2.webp").is_file());
+        assert_eq!(clear_jxl_nocovers(&lib), 0);
     }
 
     #[test]
