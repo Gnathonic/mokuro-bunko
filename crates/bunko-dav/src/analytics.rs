@@ -5,6 +5,7 @@
 
 use crate::paths::{self, Target};
 use crate::personal;
+use std::borrow::Cow;
 
 /// What a WebDAV request addressed, after path-case resolution (the server rewrites a
 /// library path to its on-disk spelling before DAV sees it).
@@ -70,7 +71,7 @@ pub struct ListingInfo {
 /// like a personal correction layer (`.edit[-n].mokuro[.gz]`) is
 /// [`DavTarget::Personal`] (GET/HEAD refine it from the resolved file).
 pub fn dav_target_of(path: &str) -> (DavTarget, Option<String>) {
-    match paths::classify(path) {
+    match paths::classify(&canonical_path(path)) {
         Target::Root => (DavTarget::Root, None),
         Target::ReaderRoot => (DavTarget::ReaderRoot, None),
         Target::Progress(rel) => (DavTarget::Progress, Some(rel)),
@@ -87,6 +88,26 @@ pub fn dav_target_of(path: &str) -> (DavTarget, Option<String>) {
         Target::Inbox => (DavTarget::Inbox, None),
         Target::Other => (DavTarget::Other, None),
     }
+}
+
+/// `path` without its empty and `.` segments: `S//v.cbz`, `S/./v.cbz` and `./S/v.cbz`
+/// all reach `S/v.cbz` on disk, and the accounting must key them as one file of one
+/// series (`..` never gets this far: the path guard refuses it). A leading `/` stays.
+pub fn canonical_path(path: &str) -> Cow<'_, str> {
+    if !path.contains("//") && !path.split('/').any(|s| s == ".") {
+        return Cow::Borrowed(path);
+    }
+    let mut out = String::with_capacity(path.len());
+    if path.starts_with('/') {
+        out.push('/');
+    }
+    for seg in path.split('/').filter(|s| !s.is_empty() && *s != ".") {
+        if !out.is_empty() && !out.ends_with('/') {
+            out.push('/');
+        }
+        out.push_str(seg);
+    }
+    Cow::Owned(out)
 }
 
 /// The `Depth` of a PROPFIND as DAV reads it (`None`: an invalid value, refused 400).
@@ -137,6 +158,25 @@ mod tests {
             dav_target_of("/mokuro-reader/S/v.hayai-nova.mokuro"),
             (DavTarget::Library, Some("S/v.hayai-nova.mokuro".into()))
         );
+        for odd in [
+            "/mokuro-reader/S//v.cbz",
+            "/mokuro-reader/S/./v.cbz",
+            "/mokuro-reader/./S/v.cbz",
+            "//mokuro-reader//S/././v.cbz/.",
+        ] {
+            assert_eq!(
+                dav_target_of(odd),
+                (DavTarget::Library, Some("S/v.cbz".into())),
+                "{odd}"
+            );
+        }
+        assert_eq!(
+            dav_target_of("/mokuro-reader/./positions.json"),
+            (DavTarget::Progress, Some("positions.json".into()))
+        );
+        assert_eq!(canonical_path("/a/b/"), "/a/b/");
+        assert_eq!(canonical_path("a/./b"), "a/b");
+        assert!(matches!(canonical_path("/a/b.cbz"), Cow::Borrowed(_)));
         assert_eq!(dav_target_of("/inbox/x"), (DavTarget::Inbox, None));
         assert_eq!(dav_target_of("/elsewhere"), (DavTarget::Other, None));
         assert_eq!(propfind_depth(None), Some(DavDepth::Infinity));

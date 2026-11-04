@@ -39,7 +39,9 @@ use bunko_core::reader_tree;
 use bunko_core::{Role, StorageLayout};
 use http::{HeaderMap, Request, Response, StatusCode};
 
-pub use analytics::{DavDepth, DavInfo, DavTarget, ListingInfo, Served, dav_target_of};
+pub use analytics::{
+    DavDepth, DavInfo, DavTarget, ListingInfo, Served, canonical_path, dav_target_of,
+};
 pub use bunko_core::reader_tree::Caller;
 pub use cache::{CacheConfig, PropfindCache};
 pub use hooks::{AuditEvent, DavHooks, NoHooks, PutFollowUp};

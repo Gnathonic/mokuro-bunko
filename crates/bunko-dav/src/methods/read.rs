@@ -389,21 +389,35 @@ pub(crate) async fn get(inner: &Arc<Inner>, req: &Req) -> DavResult<Resp> {
     );
 
     if let Some(accel) = accel_path(inner, req, &res) {
-        // nginx serves the bytes (and any Range); Content-Length 0 keeps the upstream
-        // connection reusable.
-        headers.insert(CONTENT_LENGTH, HeaderValue::from_static("0"));
-        response::set_header(&mut resp, "x-accel-redirect", &accel);
-        // What nginx will send: the range it honours, else the whole file.
+        // What nginx will send: the range it honours (an `If-Range` that no longer
+        // holds gets the whole file), else the whole file. A range past the end is
+        // answered 416 here, as without offload: nginx would send no body, and the
+        // accounting must not count one.
+        let honoured = req
+            .header("if-range")
+            .is_none_or(|cond| conditional::if_range_holds(cond, &etag, last_modified));
         let len = match req.header("range") {
-            Some(value) if stat.size > 0 && !head => {
+            Some(value) if stat.size > 0 && !head && honoured => {
                 match conditional::parse_range(value, stat.size) {
                     Ok(RangeOutcome::Partial { start, end }) => end - start + 1,
-                    _ => stat.size,
+                    Ok(RangeOutcome::Full) => stat.size,
+                    Err(e) => {
+                        let mut r =
+                            DavError::new(StatusCode::RANGE_NOT_SATISFIABLE, "").into_response();
+                        response::set_header(&mut r, "content-range", &e.context);
+                        annotate(&mut r, None);
+                        return Ok(r);
+                    }
                 }
             }
             _ if head => 0,
             _ => stat.size,
         };
+        // nginx serves the bytes (and any Range); Content-Length 0 keeps the upstream
+        // connection reusable.
+        let headers = resp.headers_mut();
+        headers.insert(CONTENT_LENGTH, HeaderValue::from_static("0"));
+        response::set_header(&mut resp, "x-accel-redirect", &accel);
         let served = Served {
             size: stat.size,
             len,

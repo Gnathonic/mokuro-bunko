@@ -192,7 +192,7 @@ async fn nginx_offload_estimates_what_nginx_sends() {
                 &[("range", "bytes=0-1")],
                 b"",
             ),
-            ctx,
+            ctx.clone(),
         )
         .await;
     assert_eq!(
@@ -204,6 +204,29 @@ async fn nginx_offload_estimates_what_nginx_sends() {
         })
     );
     assert_eq!(body_len(r).await, 0);
+    // A range past the end (a download manager resuming a file it already has): a
+    // 416 from here, as without offload, not an offloaded "whole file".
+    let r = env
+        .dav
+        .handle(
+            request(
+                "GET",
+                "/mokuro-reader/series/vol1.cbz",
+                &[("range", "bytes=8-")],
+                b"",
+            ),
+            ctx,
+        )
+        .await;
+    assert_eq!(r.status(), 416);
+    assert!(!r.headers().contains_key("x-accel-redirect"));
+    assert_eq!(
+        r.headers()
+            .get("content-range")
+            .and_then(|v| v.to_str().ok()),
+        Some("bytes */8")
+    );
+    assert_eq!(r.extensions().get::<Served>(), None);
 }
 
 #[tokio::test]

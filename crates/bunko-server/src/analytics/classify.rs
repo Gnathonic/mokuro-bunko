@@ -260,7 +260,14 @@ fn propfind_detail(dav: Option<&DavInfo>, depth: Option<&str>) -> &'static str {
 pub fn classify(i: &Input<'_>) -> Class {
     let path = i.path;
     let (target, rel) = match i.dav {
-        Some(info) => (info.target, info.rel.clone()),
+        // DAV canonicalises its rel already; again here so no caller can key one file
+        // (or make up a series) by `//` or `/.` segments.
+        Some(info) => (
+            info.target,
+            info.rel
+                .as_deref()
+                .map(|r| bunko_dav::canonical_path(r).into_owned()),
+        ),
         None if bunko_dav::is_dav_path(path) => bunko_dav::dav_target_of(path),
         None => (DavTarget::Other, None),
     };
