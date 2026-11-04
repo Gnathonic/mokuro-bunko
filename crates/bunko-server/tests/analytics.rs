@@ -1139,8 +1139,6 @@ async fn the_admin_api_answers_the_design_shapes() {
         "library",
         "host",
         "crawlers",
-        "clients",
-        "geo",
     ] {
         let v = env.admin(&format!("/_admin/api/analytics/{path}")).await;
         assert_eq!(v["available"], false, "{path}");

@@ -18,7 +18,7 @@
 //! | [`library`] | `library_scan`, `library_daily`, `archive_pages` |
 //! | [`host`] | `host_minute`, `host_hourly` |
 //! | [`crawl`] | `crawl_episodes` |
-//! | [`clients`] | `clients_daily`, `client_principals`, `origins_daily`, `geo_daily` |
+//! | [`clients`] | `clients_daily`, `client_principals`, `client_mix_principals`, `origins_daily`, `geo_daily` |
 //!
 //! Buckets are UTC integers: `hour` = epoch seconds / 3600, `day` = epoch seconds /
 //! 86400. An area's writes go through [`AnalyticsDb::write`], whose closure gets an
@@ -381,6 +381,7 @@ mod tests {
             "crawl_episodes",
             "clients_daily",
             "client_principals",
+            "client_mix_principals",
             "origins_daily",
             "geo_daily",
         ] {

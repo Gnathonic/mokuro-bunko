@@ -134,8 +134,16 @@ pub(crate) fn write_window(a: &Analytics, w: Window, now: i64) -> bunko_db::Resu
             };
             tx.add_client(*day, &d, *requests, *bytes)?;
         }
-        for (day, app, p) in w.client_principals.keys() {
-            tx.add_client_principal(*day, app, p)?;
+        for (day, ci, protocol, p) in w.client_principals.keys() {
+            tx.add_client_principal(*day, ci.app, p)?;
+            let d = ClientDims {
+                app: ci.app,
+                client: ci.client,
+                browser: ci.browser,
+                os: ci.os,
+                protocol,
+            };
+            tx.add_client_mix_principal(*day, &d, p)?;
         }
         for ((day, origin), n) in &w.origins {
             tx.add_origin(*day, origin, *n)?;
