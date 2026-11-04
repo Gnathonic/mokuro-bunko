@@ -277,7 +277,9 @@
     }
 
     // Ticks from 0 to a clean value at or above `max`. Byte axes step in the
-    // binary unit the maximum reads in (0, 256 MiB, 512 MiB, ...).
+    // binary unit the maximum reads in (0, 256 MiB, 512 MiB, ...). Counts
+    // (requests, episodes, accounts) only come whole: their step is at
+    // least 1, so a small axis reads 0, 1, 2 and never 0.3.
     function ticks(max, kind, count) {
         const n = count || 4;
         if (!(max > 0)) return [0, 1];
@@ -285,7 +287,8 @@
         if (kind === 'bytes') {
             while (max / unit >= 1024) unit *= 1024;
         }
-        const step = niceStep(max / unit / n) * unit;
+        let step = niceStep(max / unit / n) * unit;
+        if (kind === 'count' || kind === 'int' || kind === 'bytes') step = Math.max(1, step);
         const out = [];
         for (let v = 0; v <= max + step * 0.0001; v += step) out.push(v);
         if (out[out.length - 1] < max) out.push(out[out.length - 1] + step);
@@ -393,20 +396,35 @@
 
     // opts: { t, series:[{key,label,values,color?}], granularity, type:
     // 'line'|'area'|'bar', stacked, kind (value format), colorFor(key),
-    // maxSeries, height, label (accessible name), emptyText, totalLabel }
+    // maxSeries, height, label (accessible name), emptyText, totalLabel,
+    // gaps }. With `gaps` (readings, not counts), a null value is "no
+    // reading then": a line breaks there instead of dropping to 0, a 0 is a
+    // reading like any other, and the axis starts at the first reading (a
+    // server that started an hour ago draws its hour, not a day of nothing).
     function timeSeries(opts) {
         const fig = h('figure', { class: 'bc-chart' });
-        const t = opts.t || [];
+        let t = opts.t || [];
         const kind = opts.kind || 'count';
         const fmt = formatter(kind);
+        const gaps = !!opts.gaps;
+        const isGap = (v) => v === null || v === undefined;
+        const value = (v) => (gaps && isGap(v) ? null : num(v));
+        const fmtCell = (v) => (isGap(v) ? '–' : fmt(v));
         const colorFor = opts.colorFor || ((key) => colorScale('default')(key));
-        let series = (opts.series || []).map((sr) => ({ key: sr.key, label: sr.label || sr.key, values: (sr.values || []).map(num), color: sr.color }));
+        let series = (opts.series || []).map((sr) => ({ key: sr.key, label: sr.label || sr.key, values: (sr.values || []).map(value), color: sr.color }));
+        if (gaps) {
+            const first = t.findIndex((_, i) => series.some((sr) => !isGap(sr.values[i])));
+            if (first > 0) {
+                t = t.slice(first);
+                series = series.map((sr) => ({ ...sr, values: sr.values.slice(first) }));
+            }
+        }
         series = series.map((sr) => ({ ...sr, color: sr.color || colorFor(sr.key) }));
         if (series.some((sr) => !sr.color) || series.length > (opts.maxSeries || SLOTS)) {
             // Eight hues and a grey Other: never a ninth hue.
             series = foldSeries(series, (key) => series.find((x) => x.key === key)?.color, opts.maxSeries || SLOTS);
         }
-        const hasData = t.length > 0 && series.some((sr) => sr.values.some((v) => v !== 0));
+        const hasData = t.length > 0 && series.some((sr) => sr.values.some((v) => (gaps ? !isGap(v) : v !== 0)));
         if (!hasData) {
             fig.appendChild(emptyState(opts.emptyText));
             return fig;
@@ -525,6 +543,30 @@
                         }));
                     }
                 });
+            } else if (gaps && !stacked) {
+                // Runs of readings, each its own line; a lone reading is a dot.
+                visible.forEach((sr, si) => {
+                    const runs = [];
+                    let run = [];
+                    for (let i = 0; i < n; i += 1) {
+                        if (isGap(sr.values[i])) {
+                            if (run.length) runs.push(run);
+                            run = [];
+                        } else run.push(i);
+                    }
+                    if (run.length) runs.push(run);
+                    runs.forEach((r) => {
+                        const d = r.map((i, k) => (k ? 'L' : 'M') + x(i).toFixed(1) + ' ' + y(tops[i][si][1]).toFixed(1)).join('');
+                        if (r.length === 1) {
+                            marks.appendChild(s('circle', { cx: x(r[0]), cy: y(tops[r[0]][si][1]), r: 2.5, fill: sr.color, class: 'bc-dot' }));
+                            return;
+                        }
+                        if (visible.length === 1) {
+                            marks.appendChild(s('path', { d: d + 'L' + x(r[r.length - 1]).toFixed(1) + ' ' + y(0) + 'L' + x(r[0]).toFixed(1) + ' ' + y(0) + 'Z', fill: sr.color, class: 'bc-wash' }));
+                        }
+                        marks.appendChild(s('path', { d, stroke: sr.color, class: 'bc-line' }));
+                    });
+                });
             } else {
                 visible.forEach((sr, si) => {
                     let top = '';
@@ -587,7 +629,7 @@
             st.dots.forEach((dot, si) => {
                 dot.setAttribute('cx', cx);
                 dot.setAttribute('cy', st.y(st.tops[i][si][1]));
-                dot.setAttribute('visibility', st.bar ? 'hidden' : 'visible');
+                dot.setAttribute('visibility', st.bar || isGap(st.visible[si].values[i]) ? 'hidden' : 'visible');
             });
             clear(tip);
             tip.appendChild(h('div', { class: 'bc-tip__head', text: fmtTime(t[i], opts.granularity, true) }));
@@ -595,12 +637,14 @@
             let total = 0;
             const words = [];
             rows.forEach((sr) => {
-                const v = sr.values[i] || 0;
+                const raw = sr.values[i];
+                const v = isGap(raw) ? 0 : raw;
                 total += v;
                 const key = h('span', { class: 'bc-tip__key', 'aria-hidden': 'true' });
                 key.style.setProperty('--c', sr.color);
-                tip.appendChild(h('div', { class: 'bc-tip__row' }, [key, h('strong', { text: fmt(v) }), h('span', { text: sr.label })]));
-                words.push(sr.label + ' ' + fmt(v));
+                const shown = isGap(raw) ? 'no reading' : fmt(v);
+                tip.appendChild(h('div', { class: 'bc-tip__row' }, [key, h('strong', { text: shown }), h('span', { text: sr.label })]));
+                words.push(sr.label + ' ' + shown);
             });
             if (stacked && rows.length > 1) {
                 tip.appendChild(h('div', { class: 'bc-tip__row bc-tip__total' }, [h('span', { class: 'bc-tip__key bc-tip__key--none' }), h('strong', { text: fmt(total) }), h('span', { text: opts.totalLabel || 'Total' })]));
@@ -661,7 +705,7 @@
             const headers = [opts.granularity === 'hour' ? 'Time' : 'Day (UTC)'].concat(series.map((sr) => sr.label));
             if (stacked && series.length > 1) headers.push(opts.totalLabel || 'Total');
             const rows = t.map((ts, i) => {
-                const cells = [fmtTime(ts, opts.granularity, true)].concat(series.map((sr) => fmt(sr.values[i] || 0)));
+                const cells = [fmtTime(ts, opts.granularity, true)].concat(series.map((sr) => fmtCell(sr.values[i])));
                 if (stacked && series.length > 1) cells.push(fmt(series.reduce((a, sr) => a + (sr.values[i] || 0), 0)));
                 return cells;
             }).reverse();

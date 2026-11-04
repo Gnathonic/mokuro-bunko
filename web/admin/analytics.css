@@ -1130,3 +1130,12 @@
         transition: none;
     }
 }
+
+/* IP addresses read as one token: no break inside an address. */
+.bc-table .an-col-ip {
+    white-space: nowrap;
+}
+
+.bc-table .an-col-ip .an-mono {
+    overflow-wrap: normal;
+}

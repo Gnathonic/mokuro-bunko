@@ -75,6 +75,11 @@
         return Object.prototype.hasOwnProperty.call(dict, key) ? dict[key] : String(key);
     }
 
+    // "1 reader", "2 readers": a count and its noun.
+    function many(n, word, fmt) {
+        return (fmt || C.fmtInt)(n) + ' ' + (C.num(n) === 1 ? word : word + 's');
+    }
+
     // Identity colours, fixed per entity across every view and range.
     const colors = {
         category: C.colorScale('category', { volume: 1, sidecar: 2, cover: 3, metadata: 4, progress_sync: 5, profile_sync: 6, web: 7, upload: 8, __only: true }),
@@ -490,13 +495,16 @@
         return { t: (data && data.t) || [], series };
     }
 
+    // The unit of a series the server names by what it measures. Exact keys
+    // only: a series keyed by a name (an uploader, a series title such as
+    // "cpuguy" or "tiny_size") is always a count.
+    const UNIT_KEYS = {
+        bytes: 'bytes', size: 'bytes', rss: 'bytes', rss_max: 'bytes', bytes_out: 'bytes', bytes_in: 'bytes',
+        minutes: 'minutes', cpu_pct: 'pct', cpu_max: 'pct',
+    };
     function kindOf(key) {
         const k = String(key || '');
-        if (/bytes|rss|size/.test(k)) return 'bytes';
-        if (/minutes/.test(k)) return 'minutes';
-        if (/pct|cpu/.test(k)) return 'pct';
-        if (/_ms$/.test(k)) return 'ms';
-        return 'count';
+        return Object.prototype.hasOwnProperty.call(UNIT_KEYS, k) ? UNIT_KEYS[k] : 'count';
     }
 
     // A set of series that may mix units: one chart per unit, never two
@@ -540,9 +548,12 @@
 
     function principalCell(row) {
         const kind = row.kind || (String(row.principal || '').startsWith('a:') ? 'anon' : String(row.principal || '').startsWith('p:') ? 'processor' : 'user');
+        const name = row.label || row.principal || '-';
+        // The server's label already says "Anonymous 0b53…": no second badge.
+        const kindName = KIND[kind] || kind;
         return h('span', { class: 'an-principal' }, [
-            h('span', { class: 'an-principal__name', text: row.label || row.principal || '-', title: row.principal || '' }),
-            kind !== 'user' ? badge(KIND[kind] || kind, kind === 'processor' ? 'info' : 'muted') : null,
+            h('span', { class: 'an-principal__name', text: name, title: row.principal || '' }),
+            kind !== 'user' && !name.startsWith(kindName) ? badge(kindName, kind === 'processor' ? 'info' : 'muted') : null,
         ]);
     }
 
@@ -635,10 +646,10 @@
             { label: 'Sent', value: C.fmtBytes(sent(k)), sub: C.num(k.est_bytes_out) > 0 ? 'incl. ' + C.fmtBytes(k.est_bytes_out) + ' estimated' : 'body bytes, all protocols', spark: totals },
             { label: 'Received', value: C.fmtBytes(k.bytes_in), sub: 'uploads and sync' },
             { label: 'Requests', value: C.fmtNum(k.requests), sub: 'WebDAV, web and API' },
-            { label: 'Downloads', value: C.fmtNum(k.downloads), sub: C.fmtNum(k.downloaders) + ' downloaders' },
-            { label: 'Reads', value: C.fmtNum(k.reads), sub: C.fmtNum(k.readers) + ' readers' },
-            { label: 'Reading time', value: C.fmtMinutes(k.minutes_read), sub: C.fmtNum(k.pages_read) + ' pages' },
-            { label: 'Active users today', value: C.fmtNum(k.dau), sub: C.fmtNum(k.wau) + ' this week · ' + C.fmtNum(k.mau) + ' this month' },
+            { label: 'Downloads', value: C.fmtNum(k.downloads), sub: many(k.downloaders, 'downloader', C.fmtNum) },
+            { label: 'Reads', value: C.fmtNum(k.reads), sub: many(k.readers, 'reader', C.fmtNum) },
+            { label: 'Reading time', value: C.fmtMinutes(k.minutes_read), sub: many(k.pages_read, 'page', C.fmtNum) },
+            { label: 'Active today', value: C.fmtNum(k.dau), sub: C.fmtNum(k.wau) + ' this week · ' + C.fmtNum(k.mau) + ' this month (accounts and anonymous visitors)' },
             { label: 'Crawl episodes', value: C.fmtNum(k.crawl_episodes), tone: C.num(k.crawl_episodes) > 0 ? 'warn' : null, sub: C.num(k.crawl_episodes) > 0 ? 'see Crawlers' : 'none detected' },
             { label: 'Server errors (5xx)', value: C.fmtNum(k.errors_5xx), tone: C.num(k.errors_5xx) > 0 ? 'bad' : null },
             { label: 'Failed sign-ins', value: C.fmtNum(k.auth_failures), tone: C.num(k.auth_failures) > 20 ? 'warn' : null },
@@ -662,7 +673,7 @@
             actions: [viewLink('popular', 'Popular')],
             body: C.barList((data.top_series || []).map((r) => ({
                 key: r.series_key, label: r.title || r.series_key, value: r.downloads,
-                sub: C.fmtNum(r.readers) + ' readers · ' + C.fmtMinutes(r.minutes) + ' read',
+                sub: many(r.readers, 'reader', C.fmtNum) + ' · ' + C.fmtMinutes(r.minutes) + ' read',
             })), { kind: 'count', emptyText: 'No downloads in this range.', label: 'Downloads per series', onSelect: (row) => setView('popular', { series: row.key }) }),
         });
         const topPeople = card('Most bandwidth', {
@@ -670,7 +681,7 @@
             actions: [viewLink('users', 'Users')],
             body: C.barList((data.top_principals || []).map((r) => ({
                 key: r.principal, label: r.label || r.principal, value: r.bytes_out, title: r.principal,
-                badge: r.kind && r.kind !== 'user' ? KIND[r.kind] || r.kind : null,
+                badge: r.kind && r.kind !== 'user' && !String(r.label || '').startsWith(KIND[r.kind] || r.kind) ? KIND[r.kind] || r.kind : null,
             })), { kind: 'bytes', emptyText: 'No traffic in this range.', label: 'Bytes sent per visitor' }),
         });
         return stack([tiles].concat(notes, [bandwidth, grid([topSeries, topPeople])]));
@@ -764,7 +775,7 @@
             C.barList(rows.map((r) => ({
                 key: r.method, label: r.method, value: metric === 'requests' ? r.requests : metric === 'bytes_in' ? r.bytes_in : r.bytes_out,
                 color: colors.method(r.method) || C.OTHER,
-                sub: C.fmtInt(r.requests) + ' requests · ' + C.fmtBytes(r.bytes_out) + ' sent · ' + C.fmtBytes(r.bytes_in) + ' received',
+                sub: many(r.requests, 'request') + ' · ' + C.fmtBytes(r.bytes_out) + ' sent · ' + C.fmtBytes(r.bytes_in) + ' received',
             })).sort((a, b) => b.value - a.value), { kind, label: 'WebDAV by method' }),
             C.tableToggle(() => C.dataTable(['Method', 'Requests', 'Sent', 'Received'], rows.map((r) => [r.method, C.fmtInt(r.requests), C.fmtBytes(r.bytes_out), C.fmtBytes(r.bytes_in)]), 'WebDAV by method')),
         ] : C.emptyState('No WebDAV requests in this range.');
@@ -783,7 +794,7 @@
                 ]),
                 C.barList((part.by_detail || []).map((d) => ({
                     key: d.key, label: named(DETAIL, d.key, d.label), value: C.num(d.bytes_out) + C.num(d.bytes_in),
-                    sub: C.fmtInt(d.requests) + ' requests · ' + C.fmtBytes(d.bytes_out) + ' sent · ' + C.fmtBytes(d.bytes_in) + ' received',
+                    sub: many(d.requests, 'request') + ' · ' + C.fmtBytes(d.bytes_out) + ' sent · ' + C.fmtBytes(d.bytes_in) + ' received',
                 })), { kind: 'bytes', label: title + ' by file', emptyText: 'No sync traffic in this range.' }),
             ],
         });
@@ -800,7 +811,7 @@
                 ]),
                 C.barList((meta.by_detail || []).map((d) => ({
                     key: d.key, label: named(DETAIL, d.key, d.label), value: d.bytes_out,
-                    sub: C.fmtInt(d.requests) + ' requests',
+                    sub: many(d.requests, 'request'),
                 })), { kind: 'bytes', label: 'Metadata by kind', emptyText: 'No navigation traffic in this range.' }),
             ],
         });
@@ -885,10 +896,32 @@
         const result = await tryGet('funnel', { series: seriesKey });
         if (seq !== funnelSeq) return;
         clear(panel.body);
+        // A series with nothing recorded (renamed, removed, or a stale link):
+        // said as such, and forgotten so a revisit does not ask again. A 404
+        // is how an older server answers it.
+        const forget = () => {
+            if (state.popular.series === seriesKey) {
+                state.popular.series = '';
+                if (state.view === 'popular') writeHash();
+            }
+        };
+        const unknown = h('div', { class: 'an-state an-state--pending' }, [
+            h('p', { class: 'an-state__title', text: 'Nothing recorded for this series' }),
+            h('p', { text: 'No volume of it is in the library, and nobody downloaded or read one. It may have been renamed or removed.' }),
+        ]);
+        if (result.error && result.error.status === 404) {
+            forget();
+            panel.body.appendChild(unknown);
+            return;
+        }
         panel.body.appendChild(panelFor(result, 'reading progress', (data) => {
             const head = panel.querySelector('.an-card__title');
             if (data.title) head.textContent = 'Completion funnel: ' + data.title;
             const vols = data.volumes || [];
+            if (!vols.length && data.in_library === false) {
+                forget();
+                return unknown;
+            }
             const last = vols.length ? vols[vols.length - 1] : null;
             return stack([
                 C.kpis([
@@ -898,8 +931,23 @@
                     last ? { label: 'Finished the latest', value: C.fmtNum(last.finished), sub: last.title || last.volume_key } : null,
                 ]),
                 C.funnel(vols),
+                stagesCard(data.stages),
             ]);
         }, () => loadFunnel(slot, seriesKey, title, false)));
+    }
+
+    // How far each (person, volume) read got: started, a quarter, half, three
+    // quarters, finished. Each stage holds the ones after it.
+    function stagesCard(stages) {
+        if (!Array.isArray(stages) || !stages.length) return null;
+        const seq = ['var(--an-seq-1)', 'var(--an-seq-2)', 'var(--an-seq-2)', 'var(--an-seq-3)', 'var(--an-seq-3)'];
+        return h('div', { class: 'an-sub' }, [
+            h('h4', { class: 'an-sub__title', text: 'How far reads got' }),
+            C.barList(stages.map((st, i) => ({ key: st.key, label: st.label || st.key, value: st.reads, color: seq[i] || 'var(--an-s1)' })), {
+                kind: 'count', label: 'Reads by how far they got', emptyText: 'Nobody started a volume of this series yet.',
+            }),
+            h('p', { class: 'an-note', text: 'One read is one person and one volume. A volume whose page count is not known counts as started or finished only.' }),
+        ]);
     }
 
     // ------------------------------------------------------------------
@@ -920,10 +968,12 @@
             body: C.timeSeries({ t: data.t, series: [{ key: sr.key, label, values: sr.values, color: 'var(--an-s1)' }], granularity: g, type: g === 'day' && (data.t || []).length <= 120 ? 'bar' : 'line', kind, height: 160, label }),
         });
         const sources = data.sources || {};
+        const totals = data.totals || null;
         return stack([
             C.kpis([
-                { label: 'Reading time', value: C.fmtMinutes(sum(minutes)), spark: minutes.values },
-                { label: 'Pages read', value: C.fmtNum(sum(pages)), spark: pages.values },
+                { label: 'Reading time', value: C.fmtMinutes(totals ? totals.minutes : sum(minutes)), spark: minutes.values },
+                { label: 'Pages read', value: C.fmtNum(totals ? totals.pages : sum(pages)), spark: pages.values },
+                totals ? { label: 'Reads', value: C.fmtNum(totals.reads), sub: many(totals.readers, 'reader', C.fmtNum) } : null,
                 { label: 'Most readers in one day', value: C.fmtNum(Math.max(0, ...(readers.values || []).map(C.num))) },
             ]),
             grid([small(minutes, 'Minutes read', 'minutes'), small(pages, 'Pages read', 'count'), small(readers, 'Readers', 'count')], 'an-grid--3'),
@@ -948,12 +998,34 @@
             ]),
             card('Where the numbers come from', {
                 sub: 'Reads are counted from the reader\'s synced files: positions.json (last page per volume) and the reading-history log (pages and time per session).',
-                body: C.segmented([
-                    { key: 'positions', label: 'From positions.json', value: sources.positions, color: 'var(--an-s1)' },
-                    { key: 'history', label: 'From reading history', value: sources.history, color: 'var(--an-s2)' },
-                ], { kind: 'int', tall: true, label: 'Reads by source', emptyText: 'No reads recorded yet.' }),
+                body: [
+                    C.segmented([
+                        { key: 'positions', label: 'From positions.json', value: sources.positions, color: 'var(--an-s1)' },
+                        { key: 'history', label: 'From reading history', value: sources.history, color: 'var(--an-s2)' },
+                    ], { kind: 'int', tall: true, label: 'Reads by source', emptyText: 'No reads recorded yet.' }),
+                    workerNote(data.worker),
+                ],
             }),
         ]);
+    }
+
+    // Synced files the reading worker could not use, since this server started.
+    function workerNote(w) {
+        if (!w || typeof w !== 'object') return null;
+        const parts = [
+            [w.too_large, 'larger than the reader writes'],
+            [w.unknown_format, 'of a newer format'],
+            [w.malformed, 'malformed or on another device\'s path'],
+            [w.failed, 'unreadable'],
+            [C.num(w.dropped) + C.num(w.pending_dropped), 'dropped while the worker was busy'],
+        ].filter((p) => C.num(p[0]) > 0).map((p) => C.fmtNum(p[0]) + ' ' + p[1]);
+        const late = C.num(w.events_out_of_range);
+        if (!parts.length && !late) {
+            return h('p', { class: 'an-note', text: C.fmtNum(w.files) + ' synced files read since the server started; none skipped.' });
+        }
+        const text = (parts.length ? 'Synced files skipped since the server started: ' + parts.join(', ') + '.' : '') +
+            (late ? (parts.length ? ' ' : '') + C.fmtNum(late) + ' history events with an impossible date (a broken device clock) were left out.' : '');
+        return h('p', { class: 'an-note an-note--warn', text });
     }
 
     // ------------------------------------------------------------------
@@ -967,11 +1039,15 @@
             const rows = data.rows || [];
             const dau = (data.series || []).find((sr) => sr.key === 'dau') || (data.series || [])[0] || { values: [] };
             const g = DAILY;
+            // `accounts` counts every account of the range; the rows stop at
+            // `rows_limit` (an older server sends neither).
+            const seen = typeof data.accounts === 'number' ? data.accounts : rows.length;
+            const capped = seen > rows.length;
             return stack([
                 C.kpis([
                     { label: 'Active this week', value: C.fmtNum(data.wau), sub: 'distinct accounts, last 7 days' },
                     { label: 'Active this month', value: C.fmtNum(data.mau), sub: 'distinct accounts, last 30 days' },
-                    { label: 'Accounts seen', value: C.fmtNum(rows.length), sub: rangeLong() },
+                    { label: 'Accounts seen', value: C.fmtNum(seen), sub: rangeLong() },
                 ]),
                 card('Daily active accounts', {
                     sub: DAILY_NOTE,
@@ -979,13 +1055,16 @@
                     wide: true,
                 }),
                 card('Accounts', {
-                    sub: 'Signed-in use, ' + rangeLong() + '. Devices come from the reader\'s synced files.',
+                    sub: 'Signed-in use, ' + rangeLong() + '. Devices come from the reader\'s synced files.' +
+                        (capped ? ' Listing the ' + C.fmtNum(rows.length) + ' with the most traffic of ' + C.fmtNum(seen) + '.' : ''),
                     body: C.table([
                         { key: 'username', label: 'Account' },
                         { key: 'last_seen', label: 'Last seen', num: true, render: (r) => h('span', { text: C.fmtAgo(r.last_seen), title: C.fmtDateTime(r.last_seen) }) },
                         { key: 'days_active', label: 'Days active', kind: 'int' },
                         { key: 'requests', label: 'Requests', kind: 'int' },
                         { key: 'bytes_out', label: 'Sent', kind: 'bytes' },
+                        { key: 'minutes', label: 'Reading', num: true, sortValue: (r) => C.num(r.minutes), render: readingCell },
+                        { key: 'volumes_completed', label: 'Finished', num: true, sortValue: (r) => C.num(r.volumes_completed), render: finishedCell },
                         { key: 'devices', label: 'Devices', sortValue: (r) => (r.devices || []).length, render: devicesCell },
                         { key: 'clients', label: 'Clients', sortable: false, render: clientsCell },
                     ], { rows, sortKey: 'last_seen', emptyText: 'No account was active in this range.' }),
@@ -1017,6 +1096,23 @@
             });
         }, () => render()));
         return stack(parts);
+    }
+
+    // Time and pages read in the range (older servers send neither).
+    function readingCell(row) {
+        if (row.minutes === undefined && row.pages === undefined) return '-';
+        if (!C.num(row.minutes) && !C.num(row.pages)) return '-';
+        return h('span', { class: 'an-title', title: C.fmtInt(row.volumes_read) + ' volumes read' }, [
+            h('span', { text: C.fmtMinutes(row.minutes) }),
+            h('span', { class: 'an-muted', text: many(row.pages, 'page') }),
+        ]);
+    }
+
+    // Volumes finished of those started (all time, from volume-data.json).
+    function finishedCell(row) {
+        if (row.volumes_started === undefined) return '-';
+        if (!C.num(row.volumes_started) && !C.num(row.volumes_completed)) return '-';
+        return h('span', { text: C.fmtInt(row.volumes_completed) + ' of ' + C.fmtInt(row.volumes_started), title: 'Volumes finished of the volumes started (all time)' });
     }
 
     function devicesCell(row) {
@@ -1063,6 +1159,7 @@
             try {
                 await apiPost('/analytics/library/rescan', {});
                 showToast('Library rescan started; it may take a while on a large library', 'success');
+                setTimeout(() => { if (state.view === 'library') render(); }, 1500);
             } catch (err) {
                 showToast('Could not start the rescan: ' + err.message, 'error');
             } finally {
@@ -1070,15 +1167,25 @@
             }
         });
         const scanned = data.scanned_at ? 'Scanned ' + C.fmtAgo(data.scanned_at) + ' (' + C.fmtDateTime(data.scanned_at) + ')' : 'Not scanned yet';
+        const scan = data.scan || {};
+        const PHASE = { files: 'counting files', pages: 'reading page formats' };
+        const running = data.scanning ? 'scanning now' + (scan.phase && PHASE[scan.phase] ? ' (' + PHASE[scan.phase] + ')' : '') : '';
+        const every = scan.interval_hours ? 'every ' + C.fmtNum(scan.interval_hours) + ' h' : '';
+        const noSidecar = data.no_sidecar || null;
+        const headNotes = [];
+        if (scan.error) headNotes.push(h('p', { class: 'an-note an-note--bad', role: 'alert', text: 'The last scan failed: ' + scan.error }));
+        if (scan.waiting) headNotes.push(h('p', { class: 'an-note', text: 'Waiting: ' + scan.waiting + '.' }));
+        if (C.num(data.loose_archives) > 0) headNotes.push(h('p', { class: 'an-note', text: C.fmtNum(data.loose_archives) + (C.num(data.loose_archives) === 1 ? ' archive sits' : ' archives sit') + ' in the library root, outside any series folder; they are not counted as volumes.' }));
         const head = card('Library', {
-            sub: scanned + (data.cloud ? ' · cloud library (read from the store\'s index, nothing downloaded)' : ''),
+            sub: [scanned, running, every, data.cloud ? 'cloud library (read from the store\'s index, nothing downloaded)' : ''].filter(Boolean).join(' · '),
             actions: [rescan],
-            body: C.kpis([
+            body: [C.kpis([
                 { label: 'Series', value: C.fmtNum(totals.series) },
                 { label: 'Volumes', value: C.fmtNum(totals.volumes) },
-                { label: 'Size', value: C.fmtBytes(totals.bytes) },
+                { label: 'Size', value: C.fmtBytes(totals.bytes), sub: totals.files !== undefined ? many(totals.files, 'file', C.fmtNum) : null },
                 data.dormant ? { label: 'Dormant series', value: C.fmtNum(data.dormant.count), sub: 'no reads or downloads in ' + (data.dormant.days || 90) + ' days' } : null,
-            ]),
+                noSidecar ? { label: 'Without OCR', value: C.fmtNum(noSidecar.count), sub: 'series with no sidecar at all' } : null,
+            ])].concat(headNotes),
             wide: true,
         });
         const kinds = data.by_kind || [];
@@ -1103,7 +1210,19 @@
             sub: 'Which archive formats each series folder holds',
             body: C.barList((data.archive_mix || []).map((m) => ({ key: m.mix, label: m.mix, value: m.series })), { kind: 'count', valueKind: 'count', emptyText: 'Nothing scanned yet.' }),
         });
-        return stack([head, grid([byKind, byExt]), grid([mix, pageFormatsCard(data.page_formats)]), growthCard(data), uploadsCard(data), dormantCard(data.dormant)]);
+        return stack([head, grid([byKind, byExt]), grid([mix, pageFormatsCard(data.page_formats)]), growthCard(data), uploadsCard(data),
+            grid([dormantCard(data.dormant), noSidecarCard(noSidecar)])]);
+    }
+
+    function noSidecarCard(ns) {
+        if (!ns) return null;
+        return card('Series without OCR', {
+            sub: 'Series folders holding no .mokuro sidecar at all',
+            body: C.table([
+                { key: 'title', label: 'Series', render: (r) => h('span', { class: 'an-title', text: r.title || r.series_key, title: r.series_key }) },
+                { key: 'volumes', label: 'Volumes', kind: 'int' },
+            ], { rows: ns.series || [], sortKey: 'volumes', emptyText: 'Every series has OCR.', limit: 200 }),
+        });
     }
 
     function pageFormatsCard(pf) {
@@ -1118,7 +1237,7 @@
         return card('Page image formats', {
             sub: C.fmtNum(pf.scanned) + ' archives read' + (C.num(pf.pending) ? ', ' + C.fmtNum(pf.pending) + ' still to read' : '') + (C.num(pf.unreadable) ? ', ' + C.fmtNum(pf.unreadable) + ' unreadable (not zip)' : ''),
             body: [
-                C.barList(formats.map((f) => ({ key: f.ext, label: String(f.ext).toUpperCase(), value: f.pages, sub: C.fmtNum(f.volumes) + ' volumes' })), { kind: 'count', emptyText: 'No archive read yet.', label: 'Pages by image format' }),
+                C.barList(formats.map((f) => ({ key: f.ext, label: String(f.ext).toUpperCase(), value: f.pages, sub: many(f.volumes, 'volume', C.fmtNum) })), { kind: 'count', emptyText: 'No archive read yet.', label: 'Pages by image format' }),
             ],
         });
     }
@@ -1139,13 +1258,24 @@
         const chart = perUploader
             ? C.timeSeries({ t: up.t, series: series.map((sr) => ({ key: sr.key, label: sr.label || sr.key, values: sr.values })), granularity: DAILY, type: 'bar', kind: 'count', colorFor: colors.generic, height: 180, label: 'Volumes uploaded', emptyText: 'No uploads in this range.' })
             : chartsByUnit(up, data, { type: 'bar', label: 'Uploads', height: 160, granularity: DAILY });
+        const recent = up.recent || [];
         return card('Uploads', {
-            sub: 'Volumes added per day, by uploader',
-            body: [chart, C.table([
-                { key: 'username', label: 'Uploader' },
-                { key: 'volumes', label: 'Volumes', kind: 'int' },
-                { key: 'bytes', label: 'Size', kind: 'bytes' },
-            ], { rows: up.by_uploader || [], sortKey: 'volumes', emptyText: 'No uploads in this range.' })],
+            sub: 'Volumes added per day, by uploader. Sizes are known for uploads since analytics started.',
+            body: [chart, grid([
+                C.table([
+                    { key: 'username', label: 'Uploader' },
+                    { key: 'volumes', label: 'Volumes', kind: 'int' },
+                    { key: 'bytes', label: 'Size', num: true, render: (r) => (C.num(r.bytes) ? C.fmtBytes(r.bytes) : '-') },
+                ], { rows: up.by_uploader || [], sortKey: 'volumes', emptyText: 'No uploads in this range.', caption: 'Uploads by uploader' }),
+                recent.length ? h('div', { class: 'an-sub' }, [
+                    h('h4', { class: 'an-sub__title', text: 'Latest uploads' }),
+                    C.table([
+                        { key: 'volume_key', label: 'Volume', render: (r) => h('span', { class: 'an-title' }, [h('span', { text: String(r.volume_key || '').split('/').pop().replace(/\.cbz$/i, ''), title: r.volume_key }), r.series_title ? h('span', { class: 'an-muted', text: r.series_title }) : null]) },
+                        { key: 'username', label: 'By' },
+                        { key: 'uploaded_at', label: 'When', num: true, render: (r) => h('span', { text: C.fmtAgo(r.uploaded_at), title: C.fmtDateTime(r.uploaded_at) }) },
+                    ], { rows: recent, sortKey: 'uploaded_at', caption: 'Latest uploads' }),
+                ]) : null,
+            ])],
             wide: true,
         });
     }
@@ -1177,7 +1307,7 @@
             const bars = (rows, dict, title, colorFor) => card(title, {
                 body: C.barList((rows || []).map((r) => ({
                     key: r.key, label: named(dict, r.key, r.label), value: r[metric], color: colorFor ? colorFor(r.key) || C.OTHER : undefined,
-                    sub: C.fmtInt(r.requests) + ' requests · ' + C.fmtBytes(r.bytes_out) + ' · ' + C.fmtInt(r.principals) + ' visitors',
+                    sub: many(r.requests, 'request') + ' · ' + C.fmtBytes(r.bytes_out) + ' · ' + many(r.principals, 'visitor'),
                 })).sort((a, b) => C.num(b.value) - C.num(a.value)), { kind, label: title }),
             });
             return stack([
@@ -1216,11 +1346,19 @@
             return card('Geography', { body: [panelFor(result, 'countries', () => null, () => render()), attribution], wide: true });
         }
         const data = result.data;
+        // `geo_enabled` is the lookup's own state (analytics and geography both
+        // on); `enabled` is analytics as a whole, and stood for it before.
+        const geoOn = typeof data.geo_enabled === 'boolean' ? data.geo_enabled : !!data.enabled;
         const refresh = h('button', { type: 'button', class: 'btn btn--secondary btn--sm', text: data.db && data.db.downloaded_at ? 'Refresh database' : 'Download database' });
         refresh.addEventListener('click', async () => {
             refresh.disabled = true;
             try {
-                await apiPost('/analytics/geo/refresh', {});
+                const res = await apiPost('/analytics/geo/refresh', {});
+                if (res && res.started === false) {
+                    showToast('Geography is off: nothing to download', 'info');
+                    refresh.disabled = false;
+                    return;
+                }
                 showToast('Downloading the country database', 'success');
                 setTimeout(() => { if (state.view === 'clients') render(); }, 1500);
             } catch (err) {
@@ -1236,7 +1374,7 @@
         ]);
         const body = [status];
         if (data.status === 'error' && data.error) body.push(h('p', { class: 'an-note an-note--bad', role: 'alert', text: data.error }));
-        if (!data.enabled) {
+        if (!geoOn) {
             body.push(h('div', { class: 'an-state an-state--pending' }, [
                 h('p', { class: 'an-state__title', text: 'Geography is off' }),
                 h('p', { text: 'Turn it on in Analytics settings to look up a country for each client IP. The server then downloads the free DB-IP country database (a few MB) once a month; lookups stay on this server.' }),
@@ -1256,7 +1394,7 @@
         body.push(attribution);
         return card('Geography', {
             sub: 'Rough location of client IPs (country only)',
-            actions: data.enabled ? [refresh] : null,
+            actions: geoOn ? [refresh] : null,
             body,
             wide: true,
         });
@@ -1276,7 +1414,9 @@
         const gzipSaved = Math.max(0, C.num(eff.gzip_raw_bytes) - C.num(eff.gzip_sent_bytes));
         const af = data.auth_failures || {};
         const statusTs = data.status && typeof data.status === 'object' && Array.isArray(data.status.series) ? data.status : { t: data.t, series: data.series };
-        const statusSeries = seriesFrom(statusTs, colors.status, { '2xx': '2xx success', '3xx': '3xx redirect / not modified', '4xx': '4xx client error', '5xx': '5xx server error' });
+        // The server labels its classes "2xx"..."5xx"; these say what they are.
+        const STATUS = { '2xx': '2xx success', '3xx': '3xx redirect / not modified', '4xx': '4xx client error', '5xx': '5xx server error' };
+        const statusSeries = seriesFrom(statusTs, colors.status, STATUS).map((sr) => Object.assign(sr, { label: STATUS[sr.key] || sr.label }));
         return stack([
             card('Responses by status', {
                 sub: granularityNote(data) + ' · all protocols',
@@ -1392,36 +1532,48 @@
         const find = (key) => (data.series || []).find((sr) => sr.key === key);
         const lines = (keys, labels) => keys.map((k, i) => find(k) && { key: k, label: labels[i], values: find(k).values, color: C.slotColor(i + 1) }).filter(Boolean);
         const g = gran(data);
+        // 24h is read per minute, 7d and 30d per hour (`resolution`); both are
+        // in the viewer's local time. A null is no reading (the server was
+        // down): the lines break there.
+        const perMinute = data.resolution === 'minute';
+        const note = perMinute ? 'Per minute, in your local time' : granularityNote(data);
+        const known = (v) => v !== null && v !== undefined;
         const notes = [];
         if (range !== state.range) notes.push(h('p', { class: 'an-note', text: 'Server readings go back 30 days at most here; showing the last 30 days.' }));
         if (ps.rss === false) notes.push(h('p', { class: 'an-note', text: 'This platform does not report process memory.' }));
         if (ps.cpu === false) notes.push(h('p', { class: 'an-note', text: 'This platform does not report CPU time.' }));
-        const hostMem = C.num(now.host_total) ? C.segmented([
+        const lost = C.num(now.reading_dropped) + C.num(now.collector_dropped);
+        if (lost > 0) notes.push(h('p', { class: 'an-note an-note--warn', text: 'Under load, ' + C.fmtNum(lost) + ' events went to overflow counters' + (C.num(now.reading_dropped) ? ' (' + C.fmtNum(now.reading_dropped) + ' synced-file notices were dropped; those files are read on their next write)' : '') + '.' }));
+        // Host memory needs both numbers (macOS reports no cheap "available").
+        const hostKnown = C.num(now.host_total) > 0 && known(now.host_available);
+        const hostMem = hostKnown ? C.segmented([
             { key: 'used', label: 'In use', value: C.num(now.host_total) - C.num(now.host_available), color: 'var(--an-s1)' },
             { key: 'available', label: 'Available', value: now.host_available, color: 'var(--an-track)' },
         ], { kind: 'bytes', label: 'Host memory' }) : null;
+        const cpuNow = ps.cpu === false ? 'n/a' : known(now.cpu_pct) ? C.fmtPct(now.cpu_pct) : '-';
         return stack(notes.concat([
             C.kpis([
-                { label: 'Memory (RSS)', value: ps.rss === false ? 'n/a' : C.fmtBytes(now.rss), sub: ps.rss === false ? null : 'peak ' + C.fmtBytes(now.peak_rss) },
-                { label: 'CPU', value: ps.cpu === false ? 'n/a' : C.fmtPct(now.cpu_pct), sub: 'of one core' },
+                { label: 'Memory (RSS)', value: ps.rss === false || !known(now.rss) ? 'n/a' : C.fmtBytes(now.rss), sub: ps.rss === false || !known(now.peak_rss) ? null : 'peak ' + C.fmtBytes(now.peak_rss) },
+                { label: 'CPU', value: cpuNow, sub: ps.cpu !== false && !known(now.cpu_pct) ? 'measuring (needs two samples)' : 'of one core' },
                 { label: 'Connections', value: C.fmtNum(now.connections), sub: 'open now' },
                 { label: 'In flight', value: C.fmtNum(now.inflight), sub: 'requests being answered' },
-                C.num(now.host_total) ? { label: 'Host memory', value: C.fmtBytes(now.host_available) + ' free', sub: 'of ' + C.fmtBytes(now.host_total) } : null,
+                hostKnown ? { label: 'Host memory', value: C.fmtBytes(now.host_available) + ' free', sub: 'of ' + C.fmtBytes(now.host_total) } : null,
             ]),
             hostMem ? card('Host memory', { body: hostMem }) : null,
             card('Process memory', {
-                sub: granularityNote(data),
-                body: C.timeSeries({ t: data.t, series: lines(['rss', 'rss_max'], ['Average RSS', 'Highest RSS']), granularity: g, type: 'line', kind: 'bytes', label: 'Process memory', emptyText: 'No memory readings in this range.' }),
+                sub: note,
+                body: C.timeSeries({ t: data.t, series: lines(['rss', 'rss_max'], ['Average RSS', 'Highest RSS']), granularity: g, type: 'line', kind: 'bytes', gaps: true, label: 'Process memory', emptyText: 'No memory readings in this range.' }),
                 wide: true,
             }),
             grid([
                 card('CPU', {
-                    sub: 'Percent of one core',
-                    body: C.timeSeries({ t: data.t, series: lines(['cpu_pct'], ['CPU']), granularity: g, type: 'line', kind: 'pct', height: 180, label: 'CPU', emptyText: 'No CPU readings in this range.' }),
+                    sub: 'Percent of one core · ' + note,
+                    // Per minute the highest is the reading itself.
+                    body: C.timeSeries({ t: data.t, series: perMinute ? lines(['cpu_pct'], ['CPU']) : lines(['cpu_pct', 'cpu_max'], ['Average CPU', 'Highest CPU']), granularity: g, type: 'line', kind: 'pct', gaps: true, height: 180, label: 'CPU', emptyText: 'No CPU readings in this range.' }),
                 }),
                 card('Connections and requests in flight', {
-                    sub: 'Highest per interval',
-                    body: C.timeSeries({ t: data.t, series: lines(['connections_max', 'inflight_max'], ['Connections', 'In flight']), granularity: g, type: 'line', kind: 'count', height: 180, label: 'Connections and requests in flight' }),
+                    sub: 'Highest per ' + (perMinute ? 'minute' : 'hour'),
+                    body: C.timeSeries({ t: data.t, series: lines(['connections_max', 'inflight_max'], ['Connections', 'In flight']), granularity: g, type: 'line', kind: 'count', gaps: true, height: 180, label: 'Connections and requests in flight', emptyText: 'No readings in this range.' }),
                 }),
             ]),
         ]).filter(Boolean));
@@ -1440,10 +1592,17 @@
         const perDayTs = tsOf(data, 'episodes_per_day');
         const perDay = perDayTs.series[0] || { values: [] };
         const t = perDayTs.t;
-        const rule = 'An episode opens when one IP touches at least ' + C.fmtNum(th.min_series || 20) + ' series and ' +
-            C.fmtRatio(th.min_coverage === undefined ? 0.25 : th.min_coverage) + ' of the catalog' +
-            (data.catalog_series ? ' (' + C.fmtNum(Math.ceil(C.num(data.catalog_series) * C.num(th.min_coverage === undefined ? 0.25 : th.min_coverage))) + ' of ' + C.fmtNum(data.catalog_series) + ' series)' : '') +
-            ' within ' + C.fmtNum(th.window_hours || 6) + ' hours, by downloads or by metadata (WebDAV folder listings, series.json, catalog). Detected and reported only: nothing is blocked or slowed.';
+        // Both thresholds must hold, so the series an IP needs are the larger
+        // of min_series and the coverage share of the catalog.
+        const minSeries = Math.max(1, C.num(th.min_series === undefined ? 20 : th.min_series));
+        const coverage = th.min_coverage === undefined ? 0.25 : C.num(th.min_coverage);
+        const catalog = C.num(data.catalog_series);
+        const needed = catalog ? Math.max(minSeries, Math.ceil(catalog * coverage - 1e-9)) : minSeries;
+        const rule = 'An episode opens when one IP touches at least ' + C.fmtNum(minSeries) + ' series that are also at least ' +
+            C.fmtRatio(coverage) + ' of the catalog' +
+            (catalog ? ': ' + C.fmtNum(needed) + ' of the ' + C.fmtNum(catalog) + ' series here' + (needed > catalog ? ', more than there are, so none can open' : '') : '') +
+            ', within ' + C.fmtNum(th.window_hours || 6) + ' hours, by downloading volumes or by asking about one series at a time (WebDAV folder listings of a series, the catalog\'s series pages and manifests). ' +
+            'The reader\'s own sync (its one whole-library listing, series.json refreshes, covers) is no signal. Detected and reported only: nothing is blocked or slowed.';
         return stack([
             h('p', { class: 'an-note', text: rule }),
             C.kpis([
@@ -1461,8 +1620,8 @@
                 sub: 'Newest first. Admins are not exempt; the visitor column shows who it was.',
                 body: C.table([
                     { key: 'status', label: 'State', render: (r) => badge(r.status === 'open' ? 'Open' : 'Ended', r.status === 'open' ? 'warning' : 'muted') },
-                    { key: 'ip', label: 'IP', render: (r) => h('span', null, [mono(r.ip), r.country ? h('span', { class: 'an-muted', text: ' ' + countryName(r.country) }) : null]) },
-                    { key: 'principals', label: 'Visitor', sortable: false, render: (r) => ((r.principals || []).length ? h('span', { class: 'an-tags' }, r.principals.slice(0, 3).map((p) => mono(p))) : '-') },
+                    { key: 'ip', label: 'IP', className: 'an-col-ip', render: (r) => h('span', { class: 'an-title' }, [mono(r.ip), r.country ? h('span', { class: 'an-muted', text: countryName(r.country) }) : null]) },
+                    { key: 'principals', label: 'Visitor', sortable: false, render: (r) => ((r.principals || []).length ? h('span', { class: 'an-tags' }, r.principals.slice(0, 3).map((p) => principalCell({ principal: p, label: String(p).startsWith('u:') ? String(p).slice(2) : p }))) : '-') },
                     { key: 'client', label: 'Client', render: (r) => h('span', { text: named(CLIENT, r.client), title: r.user_agent || '' }) },
                     { key: 'kind', label: 'Kind', render: (r) => ({ download: 'Downloads', metadata: 'Metadata', mixed: 'Mixed' }[r.kind] || r.kind || '-') },
                     { key: 'started_at', label: 'Started', num: true, render: (r) => C.fmtDateTime(r.started_at) },
@@ -1478,7 +1637,7 @@
             card('By IP', {
                 sub: 'How often each IP crawled',
                 body: C.table([
-                    { key: 'ip', label: 'IP', render: (r) => mono(r.ip) },
+                    { key: 'ip', label: 'IP', className: 'an-col-ip', render: (r) => mono(r.ip) },
                     { key: 'country', label: 'Country', render: (r) => (r.country ? countryName(r.country) : '-') },
                     { key: 'episodes', label: 'Episodes', kind: 'int' },
                     { key: 'last_at', label: 'Last', num: true, render: (r) => h('span', { text: C.fmtAgo(r.last_at), title: C.fmtDateTime(r.last_at) }) },
@@ -1527,7 +1686,9 @@
             control.setAttribute('aria-describedby', id + '-error');
             return h('div', { class: 'field' }, [labelNode, h('div', { class: 'field__control' }, [ctl, !isCheck && hint ? h('p', { class: 'form-hint', text: hint }) : null, err])]);
         };
-        const numInput = (value, min, max, step) => h('input', { type: 'number', class: 'form-input an-num', value: String(value), min, max, step: step || 1, inputmode: step && step < 1 ? 'decimal' : 'numeric' });
+        // Bounds are AnalyticsConfig::validate's; `above` makes the minimum
+        // exclusive (a share must be above 0).
+        const numInput = (value, min, max, step, above) => h('input', { type: 'number', class: 'form-input an-num', value: String(value), min, max, step: step || 1, inputmode: step && step < 1 ? 'decimal' : 'numeric', 'data-above': above ? 'true' : null });
         const check = (value) => h('input', { type: 'checkbox', checked: !!value });
         const section = (title, desc, rows) => h('section', { class: 'settings-section' }, [
             h('header', { class: 'settings-section__header' }, [h('h3', { text: title }), desc ? h('p', { text: desc }) : null]),
@@ -1545,8 +1706,8 @@
         ]));
         form.appendChild(section('Crawl detection', 'Reported only: a crawler is never blocked or slowed.', [
             field('crawl.window_hours', 'Window', numInput(v.crawl.window_hours, 1, 168), 'Hours an IP\'s activity is gathered over.'),
-            field('crawl.min_series', 'At least', numInput(v.crawl.min_series, 1, 100000), 'Distinct series touched in the window.'),
-            field('crawl.min_coverage', 'And at least', numInput(v.crawl.min_coverage, 0.01, 1, 0.01), 'Share of the catalog (0.25 = a quarter of all series).'),
+            field('crawl.min_series', 'At least', numInput(v.crawl.min_series, 1, 1000000), 'Distinct series touched in the window (downloads, or listings and catalog pages of one series).'),
+            field('crawl.min_coverage', 'And at least', numInput(v.crawl.min_coverage, 0, 1, 0.01, true), 'Share of the catalog, above 0 and at most 1 (0.25 = a quarter of all series).'),
         ]));
         form.appendChild(section('Library scan', 'File types, page formats and growth.', [
             field('library_scan.interval_hours', 'Scan every', numInput(v.library_scan.interval_hours, 1, 720), 'Hours.'),
@@ -1577,7 +1738,9 @@
                 showToast('Analytics settings saved', 'success');
             } catch (err) {
                 status.textContent = '';
-                const path = err.payload && err.payload.field;
+                // The server names the field first: "analytics.crawl.window_hours: ...".
+                const named = /^analytics\.([a-z_.]+):/.exec(String(err.message || ''));
+                const path = (err.payload && err.payload.field) || (named && named[1]);
                 const target = path && (fields[path] || fields[String(path).replace(/^analytics\./, '')]);
                 if (target) showFieldError(target, err.message);
                 showToast(err.message, 'error');
@@ -1611,8 +1774,9 @@
                 value = Number(control.value);
                 const min = Number(control.min);
                 const max = Number(control.max);
-                if (control.value.trim() === '' || !Number.isFinite(value) || value < min || value > max) {
-                    if (!bad) bad = [control, 'Enter a number from ' + control.min + ' to ' + control.max + '.'];
+                const above = control.dataset.above === 'true';
+                if (control.value.trim() === '' || !Number.isFinite(value) || (above ? value <= min : value < min) || value > max) {
+                    if (!bad) bad = [control, above ? 'Enter a number above ' + control.min + ' and at most ' + control.max + '.' : 'Enter a number from ' + control.min + ' to ' + control.max + '.'];
                     return;
                 }
                 if (Number(control.step || 1) >= 1 && !Number.isInteger(value)) {
