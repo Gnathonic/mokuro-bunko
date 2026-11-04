@@ -457,6 +457,14 @@
         return r ? r.long : state.range;
     }
 
+    // Counts read from a daily table (downloads, reads, visitors) cover every
+    // UTC day the range touches: on 24h and 7d that is more than the range.
+    function dayRangeLong() {
+        if (state.range === '24h') return 'today and yesterday (UTC days)';
+        if (state.range === '7d') return 'the last 8 UTC days';
+        return rangeLong();
+    }
+
     function previousPeriod() {
         const r = RANGES.find((x) => x.key === state.range);
         if (!r || r.key === 'all') return null;
@@ -658,6 +666,7 @@
         ]);
         const notes = [];
         if (C.num(k.dropped) > 0) notes.push(h('p', { class: 'an-note an-note--warn', text: C.fmtNum(k.dropped) + ' requests were folded into overflow counters (the per-minute key caps were reached); totals still include them.' }));
+        if (dayRangeLong() !== rangeLong()) notes.push(h('p', { class: 'an-note', text: 'Downloads, reads, reading time and active visitors count whole UTC days: ' + dayRangeLong() + '.' }));
 
         const bandwidth = card('Bandwidth by category', {
             sub: [granularityNote(data), estNote(k.est_bytes_out)].filter(Boolean).join(' · '),
@@ -669,7 +678,7 @@
             wide: true,
         });
         const topSeries = card('Most downloaded series', {
-            sub: rangeLong(),
+            sub: 'Whole downloads, ' + dayRangeLong(),
             actions: [viewLink('popular', 'Popular')],
             body: C.barList((data.top_series || []).map((r) => ({
                 key: r.series_key, label: r.title || r.series_key, value: r.downloads,
@@ -677,7 +686,7 @@
             })), { kind: 'count', emptyText: 'No downloads in this range.', label: 'Downloads per series', onSelect: (row) => setView('popular', { series: row.key }) }),
         });
         const topPeople = card('Most bandwidth', {
-            sub: 'Accounts and anonymous visitors, ' + rangeLong(),
+            sub: 'Accounts and anonymous visitors, ' + dayRangeLong(),
             actions: [viewLink('users', 'Users')],
             body: C.barList((data.top_principals || []).map((r) => ({
                 key: r.principal, label: r.label || r.principal, value: r.bytes_out, title: r.principal,
@@ -867,7 +876,7 @@
         });
         tableNode.querySelectorAll('tbody tr').forEach((tr, i) => { if (rows[i]) tr.dataset.key = rows[i].series_key; });
         const list = card('Series', {
-            sub: rows.length ? 'Top ' + rows.length + ', ' + rangeLong() + (period ? '; arrows compare with ' + period : '') + '. Select a series for its completion funnel.' : rangeLong(),
+            sub: rows.length ? 'Top ' + rows.length + ', ' + dayRangeLong() + (period ? '; arrows compare with ' + period : '') + '. Select a series for its completion funnel.' : rangeLong(),
             body: tableNode,
             wide: true,
         });
@@ -979,7 +988,7 @@
             grid([small(minutes, 'Minutes read', 'minutes'), small(pages, 'Pages read', 'count'), small(readers, 'Readers', 'count')], 'an-grid--3'),
             grid([
                 card('Top readers', {
-                    sub: rangeLong(),
+                    sub: dayRangeLong(),
                     body: C.table([
                         { key: 'username', label: 'Account' },
                         { key: 'minutes', label: 'Time', kind: 'minutes' },
@@ -988,7 +997,7 @@
                     ], { rows: data.top_readers || [], sortKey: 'minutes', emptyText: 'Nobody read in this range.' }),
                 }),
                 card('Most read volumes', {
-                    sub: rangeLong(),
+                    sub: dayRangeLong(),
                     body: C.table([
                         { key: 'title', label: 'Volume', render: (r) => h('span', { class: 'an-title' }, [h('span', { text: r.title || r.volume_key, title: r.volume_key }), r.series_title ? h('span', { class: 'an-muted', text: r.series_title }) : null]) },
                         { key: 'readers', label: 'Readers', kind: 'int' },
@@ -1047,7 +1056,7 @@
                 C.kpis([
                     { label: 'Active this week', value: C.fmtNum(data.wau), sub: 'distinct accounts, last 7 days' },
                     { label: 'Active this month', value: C.fmtNum(data.mau), sub: 'distinct accounts, last 30 days' },
-                    { label: 'Accounts seen', value: C.fmtNum(seen), sub: rangeLong() },
+                    { label: 'Accounts seen', value: C.fmtNum(seen), sub: dayRangeLong() },
                 ]),
                 card('Daily active accounts', {
                     sub: DAILY_NOTE,
@@ -1055,7 +1064,7 @@
                     wide: true,
                 }),
                 card('Accounts', {
-                    sub: 'Signed-in use, ' + rangeLong() + '. Devices come from the reader\'s synced files.' +
+                    sub: 'Signed-in use, ' + dayRangeLong() + '. Devices come from the reader\'s synced files.' +
                         (capped ? ' Listing the ' + C.fmtNum(rows.length) + ' with the most traffic of ' + C.fmtNum(seen) + '.' : ''),
                     body: C.table([
                         { key: 'username', label: 'Account' },
@@ -1075,7 +1084,7 @@
         parts.push(panelFor(principals, 'per-visitor bandwidth', (data) => {
             const tot = data.totals || {};
             return card('Bandwidth by visitor', {
-                sub: 'Accounts, anonymous visitors (a pseudonymous id per IP) and OCR processors, ' + rangeLong() + '. IPs of anonymous visitors are kept for the IP retention period only.',
+                sub: 'Accounts, anonymous visitors (a pseudonymous id per IPv4 address or IPv6 /64, renewed every IP retention period) and OCR processors, ' + dayRangeLong() + '. IPs of anonymous visitors are kept for the IP retention period only.',
                 body: [
                     C.kpis([
                         { label: 'Accounts', value: C.fmtNum(tot.users) },
@@ -1404,6 +1413,15 @@
     // Health
     // ------------------------------------------------------------------
 
+    // The per-IP and per-username rows are kept `ip_days`; the counts forever.
+    function ipRetentionNote(data, ipDays) {
+        const days = C.num(ipDays);
+        const r = data.range || {};
+        if (!days || !r.from || !r.to) return null;
+        if ((C.num(r.to) - C.num(r.from)) / 86400 <= days + 1) return null;
+        return h('p', { class: 'an-note', text: 'IPs and usernames are kept ' + days + ' days (the IP retention): the table shows the last ' + days + ' days; the chart counts the whole range.' });
+    }
+
     async function renderHealth() {
         const data = await get('health');
         if (data.available === false) return notCollected('request health');
@@ -1428,7 +1446,7 @@
                 body: C.kpis([
                     { label: 'Not modified (304)', value: C.fmtNum(eff.not_modified), sub: C.fmtBytes(eff.saved_bytes) + ' not resent' },
                     { label: 'Gzip savings', value: C.fmtBytes(gzipSaved), sub: C.num(eff.gzip_raw_bytes) ? C.fmtRatio(gzipSaved / C.num(eff.gzip_raw_bytes)) + ' of ' + C.fmtBytes(eff.gzip_raw_bytes) + ' listings' : 'no compressed listings' },
-                    { label: 'Aborted downloads', value: C.fmtNum(eff.aborted), sub: C.fmtBytes(eff.aborted_bytes) + ' sent before the abort' },
+                    { label: 'Aborted downloads', value: C.fmtNum(eff.aborted), sub: C.fmtBytes(eff.aborted_bytes) + ' handed to the network before the abort' },
                     { label: 'Resumed downloads', value: C.fmtNum(eff.resumed), sub: 'range requests on volumes' },
                     { label: 'Sent by nginx (estimated)', value: C.fmtBytes(eff.est_bytes_out), sub: C.num(eff.est_bytes_out) ? 'X-Accel-Redirect offload; aborts invisible' : 'offload not in use' },
                 ]),
@@ -1470,6 +1488,7 @@
                             { key: 'count', label: 'Failures', kind: 'int' },
                             { key: 'usernames', label: 'Tried', sortable: false, render: (r) => (r.usernames && r.usernames.length ? r.usernames.slice(0, 4).join(', ') + (r.usernames.length > 4 ? ', …' : '') : '-') },
                         ], { rows: af.top_ips || [], sortKey: 'count', emptyText: 'No failed sign-ins in this range.' }),
+                        ipRetentionNote(data, af.ip_days),
                         (af.top_usernames || []).length ? h('div', { class: 'an-sub' }, [
                             h('h4', { class: 'an-sub__title', text: 'Usernames tried' }),
                             C.barList(af.top_usernames.map((u) => ({ key: u.username, label: u.username || '(no username)', value: u.count })), { kind: 'count', label: 'Usernames tried', limit: 8 }),

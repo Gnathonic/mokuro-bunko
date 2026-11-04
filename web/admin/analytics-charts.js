@@ -269,17 +269,17 @@
     // Scales
     // ------------------------------------------------------------------
 
-    function niceStep(raw) {
+    // 1, 2, 2.5, 5 or 10 times a power of ten; `whole` leaves out 2.5, so an
+    // axis whose labels are whole numbers never gets a step they cannot show.
+    function niceStep(raw, whole) {
         const pow = Math.pow(10, Math.floor(Math.log10(raw)));
         const f = raw / pow;
-        const nice = f <= 1 ? 1 : f <= 2 ? 2 : f <= 2.5 ? 2.5 : f <= 5 ? 5 : 10;
+        const nice = f <= 1 ? 1 : f <= 2 ? 2 : !whole && f <= 2.5 ? 2.5 : f <= 5 ? 5 : 10;
         return nice * pow;
     }
-
-    // Ticks from 0 to a clean value at or above `max`. Byte axes step in the
-    // binary unit the maximum reads in (0, 256 MiB, 512 MiB, ...). Counts
-    // (requests, episodes, accounts) only come whole: their step is at
-    // least 1, so a small axis reads 0, 1, 2 and never 0.3.
+    // Axes labelled in whole numbers: counts, and percent and minutes (their
+    // axis labels have no decimals), so a step under 1 would print 1% twice.
+    const WHOLE_AXES = { count: true, int: true, pct: true, minutes: true };
     function ticks(max, kind, count) {
         const n = count || 4;
         if (!(max > 0)) return [0, 1];
@@ -287,14 +287,15 @@
         if (kind === 'bytes') {
             while (max / unit >= 1024) unit *= 1024;
         }
-        let step = niceStep(max / unit / n) * unit;
-        if (kind === 'count' || kind === 'int' || kind === 'bytes') step = Math.max(1, step);
+        const whole = WHOLE_AXES[kind] === true;
+        let step = niceStep(max / unit / n, whole) * unit;
+        if (whole || kind === 'bytes') step = Math.max(1, step);
         const out = [];
-        for (let v = 0; v <= max + step * 0.0001; v += step) out.push(v);
-        if (out[out.length - 1] < max) out.push(out[out.length - 1] + step);
+        // Multiples, not a running sum: 0.1 + 0.1 + 0.1 is not 0.3.
+        for (let i = 0; i * step <= max + step * 0.0001; i++) out.push(+(i * step).toPrecision(12));
+        if (out[out.length - 1] < max) out.push(+(out.length * step).toPrecision(12));
         return out;
     }
-
     function axisFormat(kind) {
         if (kind === 'bytes') return fmtBytes;
         if (kind === 'pct') return (v) => intFmt.format(v) + '%';
