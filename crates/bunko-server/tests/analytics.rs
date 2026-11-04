@@ -1131,12 +1131,6 @@ async fn the_admin_api_answers_the_design_shapes() {
         "health.efficiency",
     );
 
-    // The areas not built yet answer "not collected" with the common fields.
-    for path in ["clients", "geo"] {
-        let v = env.admin(&format!("/_admin/api/analytics/{path}")).await;
-        assert_eq!(v["available"], false, "{path}");
-        common(&v, "30d", "day");
-    }
     // Admins only, like the rest of the panel.
     let (status, _, _) = env
         .call(

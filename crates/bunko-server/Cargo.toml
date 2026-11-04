@@ -63,6 +63,8 @@ sha2.workspace = true
 hex.workspace = true
 indexmap = "2"
 flate2 = "1"
+# analytics geo: lookups in the DB-IP country database (ISC; MaxMind DB format).
+maxminddb = { version = "0.32", default-features = false }
 zip.workspace = true
 # library module (catalog + metadata runtime): the filesystem watcher
 notify.workspace = true

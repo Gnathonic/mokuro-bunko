@@ -133,6 +133,7 @@ pub(crate) struct RequestRecord {
     /// The client address (canonical; a trusted proxy's text as sent, cut to 64).
     pub ip: Arc<str>,
     pub user_agent: Option<String>,
+    /// `Origin` when it is another origin than this server's (the layer drops its own).
     pub origin: Option<String>,
     pub host: Option<String>,
     /// The request path, percent-decoded.
@@ -206,8 +207,10 @@ pub(crate) struct Window {
     /// The slowest requests (time to headers) per hour, at most [`SLOW_PER_HOUR`].
     pub slow: HashMap<i64, Vec<SlowRequest>>,
     pub clients: HashMap<(i64, ClientInfo, &'static str), (u64, u64), Fx>,
-    /// `(day, app, principal)` membership (a map for its entry API).
-    pub client_principals: HashMap<(i64, &'static str, Arc<str>), ()>,
+    /// `(day, client, protocol, principal)` membership (a map for its entry API): who
+    /// was behind each client mix row (`client_mix_principals`, and per app
+    /// `client_principals`).
+    pub client_principals: HashMap<(i64, ClientInfo, &'static str, Arc<str>), ()>,
     /// At most [`ORIGINS_PER_DAY`] origins per day; the rest count as [`OTHER_ORIGIN`].
     pub origins: HashMap<(i64, String), u64>,
     /// Distinct origins kept per day, [`OTHER_ORIGIN`] aside.
@@ -428,13 +431,16 @@ impl Window {
         }
         let _ = text_slot(
             &mut self.client_principals,
-            (day, client.app, p.clone()),
+            (day, client, c.protocol, p.clone()),
             p_cost,
             "client_principals",
             used,
             drops,
         );
-        if let Some(origin) = &r.origin {
+        // Cross-origin callers only: a browser sends `Origin` on its same-origin writes too.
+        if let Some(origin) = &r.origin
+            && super::clients::cross_origin(origin, r.host.as_deref())
+        {
             fold_origin(
                 &mut self.origins,
                 &mut self.origins_per_day,

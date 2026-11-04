@@ -663,8 +663,8 @@ analytics:
 | `crawl.min_coverage` | number | `0.25` | ...that are at least this share of the catalog's series (above 0, at most 1), for an episode to open. Crawlers are reported only: nothing is blocked or slowed. |
 | `library_scan.interval_hours` | integer | `6` | How often the library's file types are counted (1 to 720); the first scan runs 2 minutes after start, and **Rescan now** (`POST /_admin/api/analytics/library/rescan`) runs one at once. The scan only lists folders and reads file sizes, so on a cloud library it is answered from the store's index and downloads nothing. |
 | `library_scan.page_formats` | boolean | `true` | Also count the page image formats inside archives (a library on this disk only; reads each archive's zip directory, never the pages, at most 20 archives a second). Each archive is read once and again only when its size or modification time changes, so a restart does not read the library again. |
-| `geo.enabled` | boolean | `false` | Opt-in: download DB-IP's free *IP to Country Lite* database (CC BY 4.0, ≤ 64 MiB) to `<storage>/analytics/country.mmdb`, refresh it monthly, and show a rough country per IP. Loopback and private addresses are `LAN`. |
-| `geo.url` | string | the DB-IP download | Where the database comes from; `{year}` and `{month}` are filled in (the current month, else the previous one). |
+| `geo.enabled` | boolean | `false` | Opt-in: download DB-IP's free *IP to Country Lite* database (CC BY 4.0, ≤ 64 MiB compressed and uncompressed) to `<storage>/analytics/country.mmdb`, refresh it monthly, and show a rough country per IP, for WebDAV and web requests alike. Loopback, private, link-local, CGNAT (`100.64.0.0/10`) and unique-local IPv6 addresses are `LAN`; an address the database does not place is `ZZ` (unknown). Lookups stay on this server. Off (or with `enabled: false`), nothing is downloaded and no country is recorded; none is either until a database has loaded, local addresses included. |
+| `geo.url` | string | the DB-IP download | Where the database comes from; `{year}` and `{month}` are filled in (the current month, else the previous one when this month's answers 404). A download is checked (it must open as a MaxMind DB and pass a full verification) before it replaces the stored file, so a failed or damaged one keeps the database there was; a failure is logged, shown in Analytics → Clients & geography, and tried again after 6 hours or on **Refresh database** (`POST /_admin/api/analytics/geo/refresh`). |
 
 The data lives in `analytics.sqlite` beside `mokuro.db` (its own file: it never
 slows the main database, and deleting it resets the analytics). Requests are counted
@@ -721,6 +721,20 @@ container's cgroup memory limit when that is lower. Linux and Android read `/pro
 (Docker and the musl build included), Windows and macOS their system calls; anywhere
 else the panel says the platform does not report them. Four samples make a minute
 (kept `retention.host_minute_days`), minutes make hours (kept `retention.hourly_days`).
+
+The client mix (Analytics → Clients & geography) is read from each request's
+`Origin` and `User-Agent`. A request whose `Origin` is the configured reader
+(`catalog.reader_url`, or the hosted reader of the default `cors.allowed_origins`)
+counts as the hosted Mokuro Reader; another cross-origin browser on WebDAV or
+`/login/api/*` as a reader on another origin; Bunko's own pages as the web UI (its own
+origin is decided as the CSRF check decides it: `Host` or `X-Forwarded-Host`, and a
+`Host` without a port, as `proxy_set_header Host $host` sends it, matches any port;
+a browser on an origin `cors.allowed_origins` refuses is Bunko's page too); WebDAV
+requests from anything that is not a browser as WebDAV clients, named when the user
+agent says which (rclone, davfs2, the Windows mini-redirector, Finder, Cyberduck, GNOME
+Files, Kodi, Nextcloud, WinSCP), with curl, wget, Python, Go and Node.js tools and
+crawler bots told apart too. Distinct visitors per app, client, browser or OS are
+counted only within `retention.ip_days` (an anonymous visitor stands for an IP).
 
 ### Updates
 

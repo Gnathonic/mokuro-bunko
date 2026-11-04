@@ -11,7 +11,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Retention {
     /// Rows with a raw client IP: `ip_daily`, `anon_ips`, `auth_failures`,
-    /// `client_principals`, and `slow_requests` (at most [`SLOW_DAYS`]).
+    /// `client_principals`, `client_mix_principals`, and `slow_requests` (at most
+    /// [`SLOW_DAYS`]).
     pub ip_days: u32,
     /// Hourly traffic, latency, errors and host rows.
     pub hourly_days: u32,
@@ -180,6 +181,10 @@ fn prune(conn: &Connection, now_s: i64, r: &Retention) -> Result<u64> {
     del("DELETE FROM ip_daily WHERE day < ?1", ip_day_cut)?;
     del("DELETE FROM anon_ips WHERE day < ?1", ip_day_cut)?;
     del("DELETE FROM client_principals WHERE day < ?1", ip_day_cut)?;
+    del(
+        "DELETE FROM client_mix_principals WHERE day < ?1",
+        ip_day_cut,
+    )?;
     del("DELETE FROM auth_failures WHERE hour < ?1", ip_day_cut * 24)?;
     del("DELETE FROM slow_requests WHERE at < ?1", slow_cut)?;
     del("DELETE FROM crawl_episodes WHERE last_at < ?1", crawl_cut)?;

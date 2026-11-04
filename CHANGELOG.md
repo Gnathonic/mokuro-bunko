@@ -97,6 +97,20 @@
   principals, user agent, volumes, bytes and requests of each. Mokuro Reader's normal
   sync (its one depth-infinity listing, the `series.json` files it refreshes, covers, a
   few downloads) never opens one. Reported only: nothing is blocked or slowed.
+- **Analytics: client mix and rough geography.** Each request is classified by
+  `Origin` and `User-Agent` (hand-rolled, no UA database): the hosted Mokuro Reader
+  (its configured origin), a reader on another origin, Bunko's own pages, WebDAV
+  clients (rclone, davfs2, the Windows mini-redirector, Finder, Cyberduck, GNOME
+  Files, Kodi, Nextcloud, WinSCP), API tools (curl, wget, Python, Go, Node.js) and
+  crawler bots, with the browser and OS family. `GET /_admin/api/analytics/clients`
+  breaks requests, bytes and distinct visitors down by app, client, browser, OS and
+  protocol, lists the WebDAV clients on their own, and the cross-origin `Origin`s. The
+  opt-in `analytics.geo` downloads DB-IP's free country database (CC BY 4.0) on
+  demand, falls back to last month's while this month's is not out, caps it at 64 MiB,
+  verifies it before it replaces the stored one, refreshes it monthly and on `POST
+  /_admin/api/analytics/geo/refresh`, and answers lookups in memory (`LAN` for local
+  addresses) for WebDAV and web requests alike; `GET /_admin/api/analytics/geo`
+  shows the countries and the database's state. New dependency: `maxminddb` (ISC).
 - **`/login/api/me` says where an account may add files** (`permissions.addFiles`):
   anywhere (`all`), everywhere but the `closedSeries` other accounts own (`open`, an
   uploader), or nowhere (`none`). A reader can tell from it that the server enforces
