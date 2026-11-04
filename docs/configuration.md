@@ -661,8 +661,8 @@ analytics:
 | `crawl.window_hours` | integer | `6` | The window the crawl detector looks at, per client IP (1 to 168). |
 | `crawl.min_series` | integer | `20` | Distinct series an IP must touch in the window (volume downloads, per-series listings, `series.json`, catalog series pages)... |
 | `crawl.min_coverage` | number | `0.25` | ...that are at least this share of the catalog's series (above 0, at most 1), for an episode to open. Crawlers are reported only: nothing is blocked or slowed. |
-| `library_scan.interval_hours` | integer | `6` | How often the library's file types are counted (1 to 720). |
-| `library_scan.page_formats` | boolean | `true` | Also count the page image formats inside archives (a library on this disk only; reads each archive's directory, never the pages). |
+| `library_scan.interval_hours` | integer | `6` | How often the library's file types are counted (1 to 720); the first scan runs 2 minutes after start, and **Rescan now** (`POST /_admin/api/analytics/library/rescan`) runs one at once. The scan only lists folders and reads file sizes, so on a cloud library it is answered from the store's index and downloads nothing. |
+| `library_scan.page_formats` | boolean | `true` | Also count the page image formats inside archives (a library on this disk only; reads each archive's zip directory, never the pages, at most 20 archives a second). Each archive is read once and again only when its size or modification time changes, so a restart does not read the library again. |
 | `geo.enabled` | boolean | `false` | Opt-in: download DB-IP's free *IP to Country Lite* database (CC BY 4.0, ≤ 64 MiB) to `<storage>/analytics/country.mmdb`, refresh it monthly, and show a rough country per IP. Loopback and private addresses are `LAN`. |
 | `geo.url` | string | the DB-IP download | Where the database comes from; `{year}` and `{month}` are filled in (the current month, else the previous one). |
 

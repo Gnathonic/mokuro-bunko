@@ -60,6 +60,20 @@
   and through `MOKURO_ANALYTICS_*`. `analytics.enabled: false` passes requests through
   untouched and writes nothing. The main database gains an index on
   `volume_identities(volume_uuid)`.
+- **The admin's Analytics → Library view: file types, page formats, growth, uploads
+  and dormant series.** A background scan (2 minutes after start, every
+  `analytics.library_scan.interval_hours`, and on `POST
+  /_admin/api/analytics/library/rescan`) counts the library's files by kind (archives,
+  OCR sidecars and layers, covers, `series.json`, ...) and extension, the archive types
+  per series and the series without any sidecar, and keeps one growth snapshot a day.
+  It lists folders and reads sizes only, so a cloud library is counted from its
+  store's index without a download. On a library on this disk it also counts the
+  page image formats inside each archive from the zip directory alone (at most 20
+  archives a second, each read again only when it changes). Uploads per day per
+  uploader come from the counted WebDAV uploads, and from the main database's upload
+  records for the days before analytics; a series with no download and no read in 90
+  days is listed as dormant. Case and spelling variants of a series folder are one
+  series. `GET /_admin/api/analytics/library` serves it all.
 - **`/login/api/me` says where an account may add files** (`permissions.addFiles`):
   anywhere (`all`), everywhere but the `closedSeries` other accounts own (`open`, an
   uploader), or nowhere (`none`). A reader can tell from it that the server enforces

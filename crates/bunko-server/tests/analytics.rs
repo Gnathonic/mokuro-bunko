@@ -1136,7 +1136,6 @@ async fn the_admin_api_answers_the_design_shapes() {
         "funnel?series=series",
         "reading",
         "users",
-        "library",
         "host",
         "crawlers",
         "clients",
