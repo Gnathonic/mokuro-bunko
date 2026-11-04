@@ -51,6 +51,18 @@ pub async fn serve(
     stop: CancellationToken,
     grace: Duration,
 ) -> std::io::Result<()> {
+    serve_with(listener, app, tls, stop, grace, None).await
+}
+
+/// [`serve`], counting open connections in `gauges` (the analytics' host view).
+pub async fn serve_with(
+    listener: TcpListener,
+    app: Router,
+    tls: Option<Arc<rustls::ServerConfig>>,
+    stop: CancellationToken,
+    grace: Duration,
+    gauges: Option<Arc<crate::analytics::Gauges>>,
+) -> std::io::Result<()> {
     let acceptor = tls.map(tokio_rustls::TlsAcceptor::from);
     let tracker = tokio_util::task::TaskTracker::new();
     let conn_stop = CancellationToken::new();
@@ -78,8 +90,10 @@ pub async fn serve(
         let app = app.clone();
         let acceptor = acceptor.clone();
         let conn_stop = conn_stop.clone();
+        let open = gauges.as_ref().map(|g| g.connection());
         tracker.spawn(async move {
             let _permit = permit;
+            let _open = open;
             let svc = hyper::service::service_fn(
                 move |mut req: hyper::Request<hyper::body::Incoming>| {
                     req.extensions_mut().insert(ConnectInfo(peer));

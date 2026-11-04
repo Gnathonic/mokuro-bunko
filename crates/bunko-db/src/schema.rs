@@ -17,8 +17,8 @@
 //!
 //! Version 7 (0.8) adds the series folder owners (`series_folder_owners`, and the
 //! one-row `series_folder_adoption` that says the existing folders were given theirs),
-//! and `idx_volume_uploads_uploader_nocase`. Additive: a 0.7 build opens a version 7
-//! file and ignores both tables and the index.
+//! `idx_volume_uploads_uploader_nocase` and `idx_volume_identities_uuid`. Additive: a 0.7
+//! build opens a version 7 file and ignores both tables and the indexes.
 
 use crate::database::column_exists;
 use crate::error::Result;
@@ -225,6 +225,13 @@ const VOLUME_UPLOADS_UPLOADER_NOCASE_INDEX: &str = "
                 ON volume_uploads(uploader_username COLLATE NOCASE)
             ";
 
+/// Volumes by their uuid (0.8): the analytics reading worker resolves a reader's
+/// volume uuid to its library path (design analytics.md §6).
+const VOLUME_IDENTITIES_UUID_INDEX: &str = "
+                CREATE INDEX IF NOT EXISTS idx_volume_identities_uuid
+                ON volume_identities(volume_uuid)
+            ";
+
 /// Step 6 indexes, in 0.5.2's order. `idx_audit_created_at` is named in an `INDEXED BY`
 /// hint by the audit query, so it must exist under exactly this name.
 const INDEXES: &[&str] = &[
@@ -358,6 +365,7 @@ pub(crate) fn init(conn: &Connection) -> Result<()> {
         )?;
     }
     conn.execute(VOLUME_UPLOADS_UPLOADER_NOCASE_INDEX, [])?;
+    conn.execute(VOLUME_IDENTITIES_UUID_INDEX, [])?;
 
     // 9. Version bookkeeping.
     let current: Option<i64> = conn

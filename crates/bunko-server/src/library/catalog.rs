@@ -444,6 +444,12 @@ async fn serve_cover(deps: &LibraryDeps, cover: &str, headers: &HeaderMap) -> Re
         let mut resp = Response::new(Body::empty());
         *resp.status_mut() = http::StatusCode::NOT_MODIFIED;
         cover_headers(resp.headers_mut(), &found);
+        // For the request accounting: what the 304 did not send.
+        resp.extensions_mut().insert(bunko_dav::Served {
+            size: found.size,
+            len: 0,
+            accel: false,
+        });
         return resp;
     }
     let (file, mut size, content_type) = (found.file.clone(), found.size, found.content_type);
@@ -466,6 +472,11 @@ async fn serve_cover(deps: &LibraryDeps, cover: &str, headers: &HeaderMap) -> Re
     h.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
     h.insert(header::CONTENT_LENGTH, HeaderValue::from(size));
     cover_headers(h, &found);
+    resp.extensions_mut().insert(bunko_dav::Served {
+        size,
+        len: size,
+        accel: false,
+    });
     resp
 }
 
