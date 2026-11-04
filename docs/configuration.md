@@ -621,6 +621,66 @@ dyndns:
 
 `mokuro-bunko dyndns setup` fills these in interactively.
 
+### Analytics
+
+New in 0.8. The admin panel's **Analytics** tab: what is downloaded and read and by
+whom, what each kind of traffic costs, how healthy the server is, and which IPs crawl
+the catalog. WebDAV counts like the web pages and JSON APIs: every request, whatever
+its method (PROPFIND, GET, PUT, MOVE, LOCK, ...), is counted by protocol, method and
+category.
+
+```yaml
+analytics:
+  enabled: true
+  flush_seconds: 60
+  retention:
+    ip_days: 30
+    hourly_days: 90
+    host_minute_days: 7
+    crawl_days: 90
+  crawl:
+    window_hours: 6
+    min_series: 20
+    min_coverage: 0.25
+  library_scan:
+    interval_hours: 6
+    page_formats: true
+  geo:
+    enabled: false
+    url: "https://download.db-ip.com/free/dbip-country-lite-{year}-{month}.mmdb.gz"
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enabled` | boolean | `true` | Count requests. Off, the counting layer passes every request through untouched and nothing is written; what is stored stays viewable in the admin panel. |
+| `flush_seconds` | integer | `60` | How often the in-memory counters are written to the database (5 to 3600). A crash loses at most this much. |
+| `retention.ip_days` | integer | `30` | Days rows with a raw client IP are kept: the per-IP totals, the IPs an anonymous visitor came from, failed sign-ins, and the slowest requests (those at most 7 days). Afterwards only pseudonymous ids remain. |
+| `retention.hourly_days` | integer | `90` | Days the hourly traffic, latency and error rows are kept. Daily totals are kept forever. The last two complete days keep their hourly rows whatever this says, because their daily totals are still being rebuilt from them. |
+| `retention.host_minute_days` | integer | `7` | Days the per-minute memory and CPU samples are kept. |
+| `retention.crawl_days` | integer | `90` | Days a crawl episode is kept after its last request. |
+| `crawl.window_hours` | integer | `6` | The window the crawl detector looks at, per client IP (1 to 168). |
+| `crawl.min_series` | integer | `20` | Distinct series an IP must touch in the window (volume downloads, per-series listings, `series.json`, catalog series pages)... |
+| `crawl.min_coverage` | number | `0.25` | ...that are at least this share of the catalog's series (above 0, at most 1), for an episode to open. Crawlers are reported only: nothing is blocked or slowed. |
+| `library_scan.interval_hours` | integer | `6` | How often the library's file types are counted (1 to 720). |
+| `library_scan.page_formats` | boolean | `true` | Also count the page image formats inside archives (a library on this disk only; reads each archive's directory, never the pages). |
+| `geo.enabled` | boolean | `false` | Opt-in: download DB-IP's free *IP to Country Lite* database (CC BY 4.0, ≤ 64 MiB) to `<storage>/analytics/country.mmdb`, refresh it monthly, and show a rough country per IP. Loopback and private addresses are `LAN`. |
+| `geo.url` | string | the DB-IP download | Where the database comes from; `{year}` and `{month}` are filled in (the current month, else the previous one). |
+
+The data lives in `analytics.sqlite` beside `mokuro.db` (its own file: it never
+slows the main database, and deleting it resets the analytics). Requests are counted
+in memory and written in one transaction per `flush_seconds`; complete days are
+rolled into daily totals once an hour. An account's traffic is attributed to the
+account (`u:<name>`); an OCR processor's (`p:<name>`) counts as bandwidth but not as
+downloads, reading, active users or crawling; an anonymous request is attributed to a
+pseudonymous id, the start of a salted SHA-256 of its client IP (`a:<12 hex>`), so a
+visitor can be counted once without long-lived rows keeping the address. The client
+IP is the one the server resolves, so `server.trusted_proxies` applies. Byte counts
+are response and request **body** bytes (headers and TLS are not counted); behind the
+image's nginx (`MOKURO_NGINX_ACCEL=1`) the archives nginx sends are counted from the
+file's size as estimates. Every key is also editable in the admin panel (Analytics →
+Settings, `PUT /_admin/api/settings/analytics`) and through `MOKURO_ANALYTICS_*`
+variables, dots as underscores (`MOKURO_ANALYTICS_RETENTION_IP_DAYS=14`).
+
 ### Updates
 
 ```yaml
@@ -1461,6 +1521,8 @@ MOKURO_REGISTRATION_MODE=invite
 MOKURO_SSL_ENABLED=true
 MOKURO_OCR_LOCAL_PROCESSING=false
 MOKURO_UPDATE_CHECK=false
+MOKURO_ANALYTICS_ENABLED=false
+MOKURO_ANALYTICS_RETENTION_IP_DAYS=14
 MOKURO_OCR_GENERATIONS='[{"name":"hayai-nova","engine":"hayai-nova","primary":true}]'
 ```
 

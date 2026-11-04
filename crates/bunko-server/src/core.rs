@@ -181,6 +181,11 @@ where
                     })
             }
         };
+        // The request accounting's slot (outside every authenticating layer): the
+        // identity, once. No behaviour hangs on it.
+        if let Some(slot) = parts.extensions.get::<crate::analytics::AnalyticsSlot>() {
+            slot.fill(&ctx);
+        }
         parts.extensions.insert(ctx.clone());
         Ok(ctx)
     }

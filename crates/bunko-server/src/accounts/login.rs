@@ -108,7 +108,7 @@ async fn check(
     }
     let key = client.limiter_key(username);
     if let Err(retry) = d.core.login_limiter.allow(&key) {
-        return json_error(429, &limited_message(retry));
+        return attempted(json_error(429, &limited_message(retry)), username);
     }
     let (db, u, p) = (d.db.clone(), username.to_string(), password.to_string());
     let user = match blocking(move || db.authenticate_user(&u, &p)).await {
@@ -126,9 +126,17 @@ async fn check(
         }
         None => {
             d.core.login_limiter.record_failure(&key);
-            json_error(401, "Invalid credentials")
+            attempted(json_error(401, "Invalid credentials"), username)
         }
     }
+}
+
+/// A refused sign-in names its account for the request accounting (failed logins per
+/// IP and username); a response extension, never on the wire.
+fn attempted(mut resp: Response, username: &str) -> Response {
+    resp.extensions_mut()
+        .insert(crate::analytics::LoginAttempt(username.to_string()));
+    resp
 }
 
 /// `POST /login/api/token` (§15.2): a password (JSON body or Basic header) buys a
@@ -182,7 +190,7 @@ async fn issue_token(
         if kind == TokenKind::Processor {
             report_processor_refusal(&d, username, &client.ip);
         }
-        return json_error(429, &limited_message(retry));
+        return attempted(json_error(429, &limited_message(retry)), username);
     }
     let (db, u, p) = (d.db.clone(), username.to_string(), password.to_string());
     let issued = blocking(move || -> bunko_db::Result<Option<(User, String, f64)>> {
@@ -210,7 +218,7 @@ async fn issue_token(
             if kind == TokenKind::Processor {
                 report_processor_refusal(&d, username, &client.ip);
             }
-            json_error(401, "Invalid credentials")
+            attempted(json_error(401, "Invalid credentials"), username)
         }
         Some((user, token, expires_at)) => {
             d.core.login_limiter.record_success(&key);
