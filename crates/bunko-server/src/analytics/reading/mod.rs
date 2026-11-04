@@ -221,6 +221,12 @@ impl Reading {
         self.queued.load(Ordering::Relaxed)
     }
 
+    /// Events waiting in the queue now, not yet taken by the worker (files taken and
+    /// waiting their debounce are [`ReadingStats::pending`]).
+    pub fn queue_depth(&self) -> u64 {
+        self.tx.max_capacity().saturating_sub(self.tx.capacity()) as u64
+    }
+
     /// Events dropped (queue full) since start.
     pub fn dropped(&self) -> u64 {
         self.dropped.load(Ordering::Relaxed)

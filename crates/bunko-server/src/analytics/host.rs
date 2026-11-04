@@ -502,7 +502,9 @@ pub mod api {
             }
         };
         let now = a.host().now();
-        let (queued, reading_dropped) = (a.reading().queued(), a.reading().dropped());
+        let reading = a.reading();
+        let (queue, queued_total, reading_dropped) =
+            (reading.queue_depth(), reading.queued(), reading.dropped());
         let db = a.db().clone();
         let (step, from, to) = if minute {
             (60, q.range.from.div_euclid(60), q.now.div_euclid(60))
@@ -605,7 +607,8 @@ pub mod api {
                     "inflight": now.inflight,
                     "host_total": now.host_total,
                     "host_available": now.host_available,
-                    "reading_queue": queued,
+                    "reading_queue": queue,
+                    "reading_queued_total": queued_total,
                     "reading_dropped": reading_dropped,
                     "collector_dropped": dropped,
                 },

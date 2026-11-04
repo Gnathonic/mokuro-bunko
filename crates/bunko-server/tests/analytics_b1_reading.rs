@@ -1012,6 +1012,29 @@ async fn overlapping_views_credit_each_page_once_per_pass() {
     assert_eq!(v["top_volumes"][0]["pages"], 7, "{v}");
 }
 
+/// The server view's `reading_queue` is how many written files wait for the worker
+/// now; `reading_queued_total` counts them since start.
+#[tokio::test]
+async fn the_reading_queue_is_its_depth_now() {
+    let env = Env::new();
+    let now = base_ms();
+    for i in 0..3 {
+        let body = positions(&[(U1, now - 60_000 + i, 5 + i, 100, DEVICE)]);
+        assert!(
+            env.reader_put("reader", "positions.json", &body)
+                .await
+                .is_success()
+        );
+    }
+    let v = env.admin("/_admin/api/analytics/host?range=24h").await;
+    assert_eq!(v["now"]["reading_queue"], 3, "{}", v["now"]);
+    env.settle().await;
+    let after = env.admin("/_admin/api/analytics/host?range=24h").await;
+    assert_eq!(after["now"]["reading_queue"], 0, "{}", after["now"]);
+    assert_eq!(v["now"]["reading_queued_total"], 3);
+    assert_eq!(after["now"]["reading_queued_total"], 3);
+}
+
 /// More accounts than the users view lists: `accounts` still counts them all, and the
 /// rows are the ones with the most traffic.
 #[tokio::test]
