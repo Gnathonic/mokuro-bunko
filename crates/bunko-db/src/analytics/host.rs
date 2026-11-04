@@ -64,17 +64,20 @@ fn minute_row(r: &Row<'_>) -> rusqlite::Result<HostMinute> {
 }
 
 impl AnalyticsTx<'_> {
-    /// Write the minute (replacing what an earlier sample of it wrote) and recompute
-    /// its hour from that hour's minutes.
+    /// Write the minute (its average and CPU replace what an earlier sample of it
+    /// wrote; its peaks only grow, so a restart within the minute keeps the earlier
+    /// process's) and recompute its hour from that hour's minutes.
     pub fn put_host_minute(&self, m: &HostMinute) -> Result<()> {
         self.conn
             .prepare_cached(
                 "INSERT INTO host_minute (minute, rss_avg, rss_max, cpu_pct, connections_max, \
                  inflight_max) VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
                  ON CONFLICT (minute) DO UPDATE SET rss_avg = excluded.rss_avg, \
-                 rss_max = excluded.rss_max, cpu_pct = excluded.cpu_pct, \
-                 connections_max = excluded.connections_max, \
-                 inflight_max = excluded.inflight_max",
+                 rss_max = CASE WHEN rss_max IS NULL THEN excluded.rss_max \
+                 WHEN excluded.rss_max IS NULL THEN rss_max \
+                 ELSE MAX(rss_max, excluded.rss_max) END, cpu_pct = excluded.cpu_pct, \
+                 connections_max = MAX(connections_max, excluded.connections_max), \
+                 inflight_max = MAX(inflight_max, excluded.inflight_max)",
             )?
             .execute(params![
                 m.minute,
@@ -226,5 +229,39 @@ mod tests {
         );
         let (_d2, empty) = temp_db();
         assert!(empty.host_latest_minute().unwrap().is_none());
+    }
+
+    /// A restart within a minute: the new process's first sample (fresh peaks) keeps
+    /// the old process's peaks for that minute and its hour.
+    #[test]
+    fn a_restart_in_the_same_minute_keeps_the_earlier_peaks() {
+        let (_dir, db) = temp_db();
+        let m = 500_000i64 * 60 + 7;
+        db.write(|tx| {
+            tx.put_host_minute(&HostMinute {
+                minute: m,
+                rss_avg: Some(400),
+                rss_max: Some(500),
+                cpu_pct: Some(9.0),
+                connections_max: 40,
+                inflight_max: 12,
+            })?;
+            tx.put_host_minute(&HostMinute {
+                minute: m,
+                rss_avg: Some(60),
+                rss_max: Some(60),
+                cpu_pct: Some(1.0),
+                connections_max: 0,
+                inflight_max: 0,
+            })
+        })
+        .unwrap();
+        let row = db.host_minutes(m, m).unwrap()[0];
+        assert_eq!(
+            (row.rss_max, row.connections_max, row.inflight_max),
+            (Some(500), 40, 12)
+        );
+        let hour = db.host_hours(m / 60, m / 60).unwrap()[0];
+        assert_eq!((hour.rss_max, hour.connections_max), (Some(500), 40));
     }
 }
