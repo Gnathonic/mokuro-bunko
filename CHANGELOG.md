@@ -49,7 +49,11 @@
   raw client IPs are kept only `analytics.retention.ip_days` (30). It costs no I/O on
   the request path: counters live in memory and are written every
   `analytics.flush_seconds` (60) to their own `analytics.sqlite` beside `mokuro.db`,
-  rolled into daily totals hourly and pruned by retention. The admin API serves them
+  rolled into daily totals hourly and pruned by retention. Memory is bounded even
+  when every request comes from a new address: what a window keeps per client (its
+  address, anonymous id, origin, a refused username cut to 64 characters) shares a
+  10 MiB budget, origins stop at 500 a day (the rest count as `(other)`), and what
+  does not fit is counted as dropped. The admin API serves them
   under `/_admin/api/analytics/` (`overview`, `traffic`, `principals`, `series`,
   `health`; the other views answer `{"available": false}` until they collect), and the
   new `analytics:` config section is editable at `PUT /_admin/api/settings/analytics`

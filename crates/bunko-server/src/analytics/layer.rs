@@ -93,7 +93,10 @@ pub async fn layer(State(a): State<Analytics>, mut req: Request, next: Next) -> 
     let dav = resp.extensions_mut().remove::<DavInfo>();
     let served = resp.extensions().get::<Served>().copied();
     let listing = resp.extensions().get::<ListingInfo>().copied();
-    let login_attempt = resp.extensions_mut().remove::<LoginAttempt>().map(|l| l.0);
+    let login_attempt = resp
+        .extensions_mut()
+        .remove::<LoginAttempt>()
+        .map(|l| principal::attempted_username_text(&l.0));
     let accel = served.is_some_and(|s| s.accel) || resp.headers().contains_key("x-accel-redirect");
     let declared = resp
         .headers()

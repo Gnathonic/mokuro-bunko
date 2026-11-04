@@ -159,8 +159,11 @@ fn prune(conn: &Connection, now_s: i64, r: &Retention) -> Result<u64> {
     let today = now_s.div_euclid(DAY);
     let now_hour = now_s.div_euclid(3600);
     let rolled: i64 = super::traffic::rolled_through(conn)?;
-    // Hourly rows of a day not rolled up yet are never pruned (their day would vanish).
-    let hour_cut = (now_hour - i64::from(r.hourly_days) * 24).min((rolled + 1) * 24);
+    // The next rollup rebuilds its days from `rolled - 1` on, from their hourly rows:
+    // those hours are never pruned, or a short `hourly_days` (1 or 2) would rebuild a
+    // day from what is left of it and lose the rest. Neither are a not-yet-rolled
+    // day's (it would vanish).
+    let hour_cut = (now_hour - i64::from(r.hourly_days) * 24).min((rolled - 1) * 24);
     let ip_day_cut = today - i64::from(r.ip_days);
     let slow_cut = now_s - i64::from(r.ip_days.min(SLOW_DAYS)) * DAY;
     let crawl_cut = now_s - i64::from(r.crawl_days) * DAY;
@@ -312,6 +315,64 @@ mod tests {
             .traffic(&span, None, false, &TrafficFilter::default())
             .unwrap();
         assert_eq!(total[0].counts.requests, 1);
+    }
+
+    /// The hourly upkeep, as the flush task runs it, under every short retention: a
+    /// rolled day keeps its whole total (it used to be rebuilt from the hours pruning
+    /// had left of it).
+    #[test]
+    fn short_hourly_retention_never_erodes_a_rolled_day() {
+        for hourly_days in [1u32, 2, 3] {
+            let (_d, db) = temp_db();
+            let day = 20_000i64;
+            let k = KindDims {
+                protocol: "dav",
+                method: "GET",
+                category: "volume",
+            };
+            let mut h = [0u64; LATENCY_BUCKETS];
+            h[2] = 1;
+            db.write(|tx| {
+                for hour in 0..24 {
+                    tx.add_traffic(day * 24 + hour, &D, &c(1))?;
+                    tx.add_latency(day * 24 + hour, &k, &h, &h)?;
+                }
+                Ok(())
+            })
+            .unwrap();
+            let r = Retention {
+                hourly_days,
+                ..Retention::default()
+            };
+            let one_day = Span {
+                granularity: Granularity::Day,
+                from: day,
+                to: day,
+            };
+            for hour in (day + 1) * 24..(day + 6) * 24 {
+                db.maintain(hour * 3600 + 60, &r).unwrap();
+                let total = db
+                    .traffic(&one_day, None, false, &TrafficFilter::default())
+                    .unwrap()
+                    .first()
+                    .map_or(0, |t| t.counts.requests);
+                assert_eq!(total, 24, "hourly_days={hourly_days}, at hour {hour}");
+                let lat = db.latency(&one_day).unwrap();
+                assert_eq!(lat[0].total[2], 24, "latency, hourly_days={hourly_days}");
+            }
+            // The day's hours do go in the end: retention is only stretched to the two
+            // days the rollup may still rebuild.
+            let left: i64 = db
+                .read(|c| {
+                    Ok(c.query_row(
+                        "SELECT COUNT(*) FROM traffic_hourly WHERE hour < ?1",
+                        [(day + 1) * 24],
+                        |r| r.get(0),
+                    )?)
+                })
+                .unwrap();
+            assert_eq!(left, 0, "hourly_days={hourly_days}");
+        }
     }
 
     #[test]

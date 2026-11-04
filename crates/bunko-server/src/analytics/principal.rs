@@ -58,6 +58,16 @@ pub fn canonical_ip_text(text: &str) -> String {
     }
 }
 
+/// Most characters of an attempted username kept for a refused sign-in (accounts are
+/// 3 to 32 bytes; a refused credential may name anything, of any length).
+pub const USERNAME_TEXT_MAX: usize = 64;
+
+/// A refused sign-in's attempted username as stored: cut to [`USERNAME_TEXT_MAX`]
+/// characters.
+pub fn attempted_username_text(name: &str) -> String {
+    name.chars().take(USERNAME_TEXT_MAX).collect()
+}
+
 /// `a:` + the first 12 hex digits of `sha256(salt || ip)` (`ip` canonical).
 pub fn anon_id(salt: &[u8; 32], ip: &str) -> String {
     let mut h = Sha256::new();
@@ -138,5 +148,10 @@ mod tests {
         assert_eq!(canonical_ip_text("::ffff:192.0.2.1"), "192.0.2.1");
         assert_eq!(canonical_ip_text(" proxy-name "), "proxy-name");
         assert_eq!(canonical_ip_text(&"x".repeat(100)).len(), IP_TEXT_MAX);
+        assert_eq!(
+            attempted_username_text(&"é".repeat(1000)).chars().count(),
+            USERNAME_TEXT_MAX
+        );
+        assert_eq!(attempted_username_text("alice"), "alice");
     }
 }

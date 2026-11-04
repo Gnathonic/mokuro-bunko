@@ -655,7 +655,7 @@ analytics:
 | `enabled` | boolean | `true` | Count requests. Off, the counting layer passes every request through untouched and nothing is written; what is stored stays viewable in the admin panel. |
 | `flush_seconds` | integer | `60` | How often the in-memory counters are written to the database (5 to 3600). A crash loses at most this much. |
 | `retention.ip_days` | integer | `30` | Days rows with a raw client IP are kept: the per-IP totals, the IPs an anonymous visitor came from, failed sign-ins, and the slowest requests (those at most 7 days). Afterwards only pseudonymous ids remain. |
-| `retention.hourly_days` | integer | `90` | Days the hourly traffic, latency and error rows are kept. Daily totals are kept forever. |
+| `retention.hourly_days` | integer | `90` | Days the hourly traffic, latency and error rows are kept. Daily totals are kept forever. The last two complete days keep their hourly rows whatever this says, because their daily totals are still being rebuilt from them. |
 | `retention.host_minute_days` | integer | `7` | Days the per-minute memory and CPU samples are kept. |
 | `retention.crawl_days` | integer | `90` | Days a crawl episode is kept after its last request. |
 | `crawl.window_hours` | integer | `6` | The window the crawl detector looks at, per client IP (1 to 168). |

@@ -1,7 +1,9 @@
 //! The in-memory window (design §4.4, §4.5): every finished request folds into a
 //! handful of maps under one `parking_lot` lock, no I/O; [`super::flush`] swaps the
-//! window out and writes it. Each map holds at most [`MAP_CAP`] keys per window; past
-//! that a record's share of the map is dropped and counted.
+//! window out and writes it. Each map holds at most [`MAP_CAP`] keys per window, and
+//! the maps keyed by text a client chooses (its address, its anonymous id, a refused
+//! username, an origin) share a [`TEXT_BUDGET`] of memory; past either, a record's
+//! share of that map is dropped and counted.
 
 use super::classify::{Class, category};
 use super::clients::{ClientInfo, ClientRequest};
@@ -10,18 +12,28 @@ use super::geo::Country;
 use super::principal::{Principal, PrincipalKind};
 use super::reading::FileWritten;
 use bunko_dav::{DavTarget, ListingInfo, Served};
+use bunko_db::analytics::clients::{ORIGINS_PER_DAY, OTHER_ORIGIN};
 use bunko_db::analytics::traffic::{
     Histogram, IP_PRINCIPALS_MAX, PrincipalCounts, SLOW_PER_HOUR, SlowRequest, TrafficCounts,
     latency_bucket,
 };
 use parking_lot::Mutex;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::hash_map::Entry;
+use std::collections::{BTreeMap, HashMap};
 use std::hash::{BuildHasherDefault, Hash, Hasher};
 use std::net::IpAddr;
 use std::sync::Arc;
 
 /// Most keys one map keeps per flush window.
 pub const MAP_CAP: usize = 100_000;
+/// Most bytes (estimated: table slots at their worst load, plus the text each key
+/// owns) the client-keyed maps of one window hold together. Any client with an IPv6
+/// /64 can make every request a new address, a new anonymous id, a new origin; this
+/// keeps such a flood to a bounded share of the design's 32 MB (§2): a window being
+/// written and the one filling meanwhile are 2 x 10 MiB at most. The fixed-key maps
+/// (traffic, latency, errors, clients, geo, slow) are keyed by the server's own names,
+/// statuses and hours, and stay small.
+pub const TEXT_BUDGET: usize = 10 << 20;
 /// Longest path kept for a slow request.
 pub const SLOW_PATH_MAX: usize = 256;
 
@@ -79,6 +91,24 @@ impl Hasher for FxHasher {
 }
 
 type Fx = BuildHasherDefault<FxHasher>;
+
+/// A new entry's share of its map's table: hashbrown keeps a table at most 7/8 full
+/// and doubles it, so up to 16/7 slots (plus a control byte each) per entry.
+const fn entry_cost<K, V>() -> usize {
+    (std::mem::size_of::<(K, V)>() + 1) * 16 / 7
+}
+
+/// A heap `String` of `len` bytes, with the allocator's overhead.
+const fn string_cost(len: usize) -> usize {
+    len + 16
+}
+
+/// An `Arc<str>` of `len` bytes: its two counts and the allocator's overhead. Charged
+/// in every map that keeps one (a key shared with another map is counted twice, which
+/// errs on the safe side).
+const fn arc_cost(len: usize) -> usize {
+    len + 32
+}
 
 /// One finished request (design §4.1).
 #[derive(Debug, Clone)]
@@ -176,12 +206,18 @@ pub(crate) struct Window {
     /// The slowest requests (time to headers) per hour, at most [`SLOW_PER_HOUR`].
     pub slow: HashMap<i64, Vec<SlowRequest>>,
     pub clients: HashMap<(i64, ClientInfo, &'static str), (u64, u64), Fx>,
-    pub client_principals: HashSet<(i64, &'static str, Arc<str>)>,
+    /// `(day, app, principal)` membership (a map for its entry API).
+    pub client_principals: HashMap<(i64, &'static str, Arc<str>), ()>,
+    /// At most [`ORIGINS_PER_DAY`] origins per day; the rest count as [`OTHER_ORIGIN`].
     pub origins: HashMap<(i64, String), u64>,
+    /// Distinct origins kept per day, [`OTHER_ORIGIN`] aside.
+    pub origins_per_day: BTreeMap<i64, i64>,
     pub uploads: HashMap<(i64, Arc<str>), (u64, u64)>,
     pub geo: HashMap<(i64, Country), (u64, u64), Fx>,
     /// Records a full map could not keep, per map.
     pub dropped: BTreeMap<&'static str, u64>,
+    /// Bytes charged against [`TEXT_BUDGET`].
+    pub text_bytes: usize,
 }
 
 /// The value for `key`, unless the map is full and `key` new (then counted dropped).
@@ -198,6 +234,31 @@ fn slot<'m, K: Hash + Eq, V: Default, S: std::hash::BuildHasher>(
     Some(map.entry(key).or_default())
 }
 
+/// Like [`slot`], for a map keyed by client-chosen text: a new key also needs room in
+/// [`TEXT_BUDGET`] for its entry and the `heap` bytes it owns, and is charged for them.
+fn text_slot<'m, K: Hash + Eq, V: Default, S: std::hash::BuildHasher>(
+    map: &'m mut HashMap<K, V, S>,
+    key: K,
+    heap: usize,
+    name: &'static str,
+    used: &mut usize,
+    dropped: &mut BTreeMap<&'static str, u64>,
+) -> Option<&'m mut V> {
+    let full = map.len() >= MAP_CAP;
+    match map.entry(key) {
+        Entry::Occupied(o) => Some(o.into_mut()),
+        Entry::Vacant(v) => {
+            let cost = entry_cost::<K, V>() + heap;
+            if full || *used + cost > TEXT_BUDGET {
+                *dropped.entry(name).or_default() += 1;
+                return None;
+            }
+            *used += cost;
+            Some(v.insert(V::default()))
+        }
+    }
+}
+
 impl Window {
     pub fn dropped_total(&self) -> u64 {
         self.dropped.values().sum()
@@ -212,6 +273,7 @@ impl Window {
         let error = r.status >= 400;
         self.first_at = Some(self.first_at.map_or(at, |f| f.min(at)));
         let drops = &mut self.dropped;
+        let used = &mut self.text_bytes;
 
         let tk = TrafficKey {
             hour,
@@ -256,27 +318,42 @@ impl Window {
             *n += 1;
         }
         let p = &r.principal.id;
+        let p_cost = arc_cost(p.len());
+        let ip_cost = arc_cost(r.ip.len());
         let pk = (day, p.clone(), c.category);
-        if let Some(pc) = slot(&mut self.principals, pk, "principals", drops) {
+        if let Some(pc) = text_slot(&mut self.principals, pk, p_cost, "principals", used, drops) {
             pc.requests += 1;
             pc.bytes_out += out_total;
             pc.bytes_in += r.bytes_in;
         }
-        if let Some((first, last)) = slot(&mut self.seen, p.clone(), "principals", drops) {
+        if let Some((first, last)) =
+            text_slot(&mut self.seen, p.clone(), p_cost, "principals", used, drops)
+        {
             *first = if *first == 0 { at } else { (*first).min(at) };
             *last = (*last).max(at);
         }
         if r.principal.kind == PrincipalKind::Anon
-            && let Some(n) = slot(
+            && let Some(n) = text_slot(
                 &mut self.anon_ips,
                 (day, p.clone(), r.ip.clone()),
+                p_cost + ip_cost,
                 "anon_ips",
+                used,
                 drops,
             )
         {
             *n += 1;
         }
-        if let Some(ip) = slot(&mut self.ips, (day, r.ip.clone()), "ips", drops) {
+        // Its address, and room for the principals it may list.
+        let ip_heap = ip_cost + string_cost(IP_PRINCIPALS_MAX * std::mem::size_of::<Arc<str>>());
+        if let Some(ip) = text_slot(
+            &mut self.ips,
+            (day, r.ip.clone()),
+            ip_heap,
+            "ips",
+            used,
+            drops,
+        ) {
             ip.requests += 1;
             ip.bytes_out += out_total;
             ip.errors += u64::from(error);
@@ -284,8 +361,18 @@ impl Window {
             if ip.principals.len() < IP_PRINCIPALS_MAX && !ip.principals.contains(p) {
                 ip.principals.push(p.clone());
             }
-            if r.user_agent.is_some() {
-                ip.user_agent.clone_from(&r.user_agent);
+            if let Some(ua) = &r.user_agent {
+                // The address's last agent: only its growth is charged, and with no room
+                // left the one it has stays.
+                let had = ip
+                    .user_agent
+                    .as_ref()
+                    .map_or(0, |u| string_cost(u.capacity()));
+                let grow = string_cost(ua.len()).saturating_sub(had);
+                if *used + grow <= TEXT_BUDGET {
+                    *used += grow;
+                    ip.user_agent.clone_from(&r.user_agent);
+                }
             }
             if country.is_some() {
                 ip.country = country;
@@ -297,10 +384,16 @@ impl Window {
             && matches!(r.principal.kind, PrincipalKind::User | PrincipalKind::Anon);
         if downloads
             && let Some(vk) = &c.volume_key
-            && let Some(d) = slot(
+            && let Some(d) = text_slot(
                 &mut self.downloads,
                 (day, p.clone(), vk.clone()),
+                p_cost
+                    + string_cost(vk.len())
+                    + c.series
+                        .as_ref()
+                        .map_or(0, |s| string_cost(s.key.len()) + string_cost(s.title.len())),
                 "downloads",
+                used,
                 drops,
             )
         {
@@ -312,10 +405,12 @@ impl Window {
             d.size = d.size.max(r.served.map_or(0, |s| s.size));
         }
         if let Some(user) = &r.auth_failure
-            && let Some(n) = slot(
+            && let Some(n) = text_slot(
                 &mut self.auth_failures,
                 (hour, r.ip.clone(), user.clone()),
+                ip_cost + string_cost(user.len()),
                 "auth_failures",
+                used,
                 drops,
             )
         {
@@ -331,18 +426,22 @@ impl Window {
             n.0 += 1;
             n.1 += out_total;
         }
-        if self.client_principals.len() < MAP_CAP {
-            self.client_principals.insert((day, client.app, p.clone()));
-        } else if !self
-            .client_principals
-            .contains(&(day, client.app, p.clone()))
-        {
-            *drops.entry("client_principals").or_default() += 1;
-        }
-        if let Some(origin) = &r.origin
-            && let Some(n) = slot(&mut self.origins, (day, origin.clone()), "origins", drops)
-        {
-            *n += 1;
+        let _ = text_slot(
+            &mut self.client_principals,
+            (day, client.app, p.clone()),
+            p_cost,
+            "client_principals",
+            used,
+            drops,
+        );
+        if let Some(origin) = &r.origin {
+            fold_origin(
+                &mut self.origins,
+                &mut self.origins_per_day,
+                day,
+                origin,
+                used,
+            );
         }
         let archive_upload = r.method == "PUT"
             && c.category == category::UPLOAD
@@ -351,7 +450,14 @@ impl Window {
         if archive_upload
             && r.principal.kind == PrincipalKind::User
             && let Some(user) = &r.principal.username
-            && let Some(u) = slot(&mut self.uploads, (day, user.clone()), "uploads", drops)
+            && let Some(u) = text_slot(
+                &mut self.uploads,
+                (day, user.clone()),
+                arc_cost(user.len()),
+                "uploads",
+                used,
+                drops,
+            )
         {
             u.0 += 1;
             u.1 += r.bytes_in;
@@ -363,6 +469,34 @@ impl Window {
             g.1 += out_total;
         }
     }
+}
+
+/// Count a request from `origin` (design §4.5): a day keeps [`ORIGINS_PER_DAY`]
+/// distinct origins, the rest (and any the [`TEXT_BUDGET`] has no room for) count as
+/// [`OTHER_ORIGIN`], so nothing is dropped.
+fn fold_origin(
+    origins: &mut HashMap<(i64, String), u64>,
+    per_day: &mut BTreeMap<i64, i64>,
+    day: i64,
+    origin: &str,
+    used: &mut usize,
+) {
+    let kept = per_day.entry(day).or_default();
+    let slot = match origins.entry((day, origin.to_string())) {
+        Entry::Occupied(o) => o.into_mut(),
+        Entry::Vacant(v) => {
+            let cost = entry_cost::<(i64, String), u64>() + string_cost(origin.len());
+            if *kept < ORIGINS_PER_DAY && *used + cost <= TEXT_BUDGET {
+                *kept += 1;
+                *used += cost;
+                v.insert(0)
+            } else {
+                // One `(other)` per day: not charged, it cannot multiply.
+                origins.entry((day, OTHER_ORIGIN.to_string())).or_default()
+            }
+        }
+    };
+    *slot += 1;
 }
 
 /// Keep `r` if it is among the hour's [`SLOW_PER_HOUR`] slowest (time to headers: the
@@ -600,6 +734,81 @@ mod tests {
         w.fold(&r, ClientInfo::UNKNOWN, None);
         assert_eq!(w.dropped.get("ips"), Some(&1));
         assert_eq!(w.dropped_total(), 1);
+    }
+
+    /// A flood where every request is a new address (so a new anonymous id), with long
+    /// client text: the client-keyed maps stop at the budget and count drops, while
+    /// the fixed-key totals still count every request and no origin request is lost.
+    #[test]
+    fn client_keyed_maps_share_one_budget() {
+        let mut w = Window::default();
+        let mut r = record("GET", "/robots.txt", 200, "a:000000000000");
+        let n = 40_000usize;
+        for i in 0..n {
+            r.ip = format!("2001:db8:{:x}:{:x}::1", i >> 16, i & 0xffff).into();
+            r.principal = Principal {
+                id: format!("a:{i:012x}").into(),
+                kind: PrincipalKind::Anon,
+                username: None,
+            };
+            r.user_agent = Some(format!("{}{i}", "u".repeat(250)));
+            r.origin = Some(format!("https://{}{i}.example.com", "o".repeat(200)));
+            r.auth_failure = Some(format!("{}{i}", "n".repeat(60)));
+            w.fold(&r, ClientInfo::UNKNOWN, None);
+        }
+        assert!(
+            w.text_bytes <= TEXT_BUDGET,
+            "{} > {TEXT_BUDGET}",
+            w.text_bytes
+        );
+        assert!(w.text_bytes > TEXT_BUDGET * 9 / 10, "the budget was used");
+        for map in [
+            "ips",
+            "anon_ips",
+            "principals",
+            "auth_failures",
+            "client_principals",
+        ] {
+            assert!(
+                w.dropped.get(map).is_some_and(|&d| d > 0),
+                "{map}: {:?}",
+                w.dropped
+            );
+        }
+        assert!(w.ips.len() < n / 2, "{}", w.ips.len());
+        assert_eq!(
+            w.traffic.values().map(|t| t.requests).sum::<u64>(),
+            n as u64
+        );
+        // Origins: 500 a day, the rest as `(other)`, every request counted.
+        assert_eq!(w.origins.len(), ORIGINS_PER_DAY as usize + 1);
+        assert_eq!(w.origins.values().sum::<u64>(), n as u64);
+        let other = w.origins.iter().find(|((_, o), _)| o == OTHER_ORIGIN);
+        assert_eq!(other.map(|(_, n)| *n), Some(n as u64 - 500));
+        assert_eq!(w.dropped.get("origins"), None);
+    }
+
+    #[test]
+    fn a_known_origin_keeps_counting_past_the_day_cap() {
+        let mut w = Window::default();
+        let mut r = record("GET", "/robots.txt", 200, "u:alice");
+        for i in 0..(ORIGINS_PER_DAY + 10) {
+            r.origin = Some(format!("https://o{i}.example.com"));
+            w.fold(&r, ClientInfo::UNKNOWN, None);
+        }
+        r.origin = Some("https://o0.example.com".into());
+        w.fold(&r, ClientInfo::UNKNOWN, None);
+        let day = r.at().div_euclid(86400);
+        assert_eq!(w.origins[&(day, "https://o0.example.com".to_string())], 2);
+        assert_eq!(w.origins[&(day, OTHER_ORIGIN.to_string())], 10);
+        // The next day has its own 500.
+        r.at_ms += 86_400_000;
+        r.origin = Some("https://late.example.com".into());
+        w.fold(&r, ClientInfo::UNKNOWN, None);
+        assert_eq!(
+            w.origins[&(day + 1, "https://late.example.com".to_string())],
+            1
+        );
     }
 
     #[test]

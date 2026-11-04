@@ -614,6 +614,53 @@ async fn webdav_methods_are_each_counted() {
     assert_eq!(dav[0], "GET", "listed in method order");
 }
 
+/// A refused credential may name an account of any length (a Basic header can carry
+/// hundreds of KB): only its first 64 characters are kept, in memory and on disk.
+#[tokio::test]
+async fn over_long_attempted_usernames_are_cut() {
+    let env = Env::new();
+    let long_dav = "d".repeat(30_000);
+    let mut req = env.request(
+        None,
+        "PROPFIND",
+        "/mokuro-reader/",
+        &[("depth", "0")],
+        b"",
+        IP_B,
+    );
+    req.headers_mut().insert(
+        "authorization",
+        {
+            use base64::Engine;
+            format!(
+                "Basic {}",
+                base64::engine::general_purpose::STANDARD.encode(format!("{long_dav}:wrong"))
+            )
+        }
+        .parse()
+        .unwrap(),
+    );
+    let resp = env.send(req).await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    drop(resp);
+    let long_login = "\u{e9}".repeat(1_000);
+    let (status, _, _) = env
+        .call(
+            None,
+            "POST",
+            "/login/api/check",
+            &[("content-type", "application/json")],
+            format!(r#"{{"username": "{long_login}", "password": "nope"}}"#).as_bytes(),
+            IP_B,
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    env.flush().await;
+    let rows =
+        env.text_rows("SELECT attempted_username FROM auth_failures ORDER BY attempted_username");
+    assert_eq!(rows, ["d".repeat(64), "\u{e9}".repeat(64)]);
+}
+
 #[tokio::test]
 async fn failed_sign_ins_are_counted_per_ip_and_username() {
     let env = Env::new();

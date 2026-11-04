@@ -67,7 +67,11 @@ impl AnalyticsSlot {
             role: ctx.identity.role(),
             client_ip: ctx.client_ip.clone(),
             auth_error: ctx.identity.error.clone(),
-            attempted_username: ctx.identity.attempted_username.clone(),
+            attempted_username: ctx
+                .identity
+                .attempted_username
+                .as_deref()
+                .map(principal::attempted_username_text),
         });
     }
 
