@@ -66,7 +66,10 @@ pub async fn layer(State(a): State<Analytics>, mut req: Request, next: Next) -> 
         .flatten();
     let range = headers.contains_key(header::RANGE);
     let user_agent = header_text(headers, header::USER_AGENT);
-    let origin = header_text(headers, header::ORIGIN);
+    // Bunko's own origin (the CSRF rule: `Host` or `X-Forwarded-Host`, a port-less
+    // `Host` matching any port) counts as none: only cross-origin callers are kept.
+    let origin = header_text(headers, header::ORIGIN)
+        .filter(|o| !crate::http::csrf::is_own_origin(o, headers));
     let host = header_text(headers, header::HOST);
     let destination_rel = (method == "MOVE")
         .then(|| per_user_destination(headers))

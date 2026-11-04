@@ -419,3 +419,89 @@ async fn distinct_visitors_follow_the_ip_retention() {
     // The daily totals are kept forever.
     assert_eq!(env.int("SELECT SUM(requests) FROM clients_daily"), 12);
 }
+
+/// Bunko's own sign-in and account calls behind the reverse proxies the docs describe
+/// are Bunko's pages, never a reader on another origin: the CSRF rule decides what
+/// "same origin" means (a port-dropping `Host $host`, an `X-Forwarded-Host`), and a
+/// proxy that hides both still leaves a browser on a CORS-disallowed origin, which only
+/// Bunko's own page can be.
+#[tokio::test]
+async fn bunko_sign_in_behind_a_proxy_is_bunko_web() {
+    let env = Env::new();
+    let send = |host: &str, xfh: Option<&str>, origin: &str, method: &str, path: &str| {
+        let mut b = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("host", host)
+            .header("origin", origin)
+            .header("user-agent", FIREFOX);
+        if let Some(x) = xfh {
+            b = b.header("x-forwarded-host", x);
+        }
+        let body: &[u8] = if method == "POST" {
+            br#"{"username":"reader","password":"pass1234"}"#
+        } else {
+            b""
+        };
+        if !body.is_empty() {
+            b = b
+                .header("content-type", "application/json")
+                .header("content-length", body.len().to_string());
+        }
+        let mut req = b.body(Body::from(body.to_vec())).unwrap();
+        req.extensions_mut().insert(ConnectInfo(SocketAddr::new(
+            "192.0.2.80".parse().unwrap(),
+            40000,
+        )));
+        let app = env.app.clone();
+        async move { app.oneshot(req).await.unwrap().status() }
+    };
+    // nginx's `proxy_set_header Host $host` drops a non-default port.
+    let own_port = "https://bunko.example.net:8443";
+    let s = send(HOST, None, own_port, "POST", "/login/api/token").await;
+    assert_eq!(
+        s,
+        StatusCode::OK,
+        "the CSRF rule lets Bunko's own sign-in in"
+    );
+    send(HOST, None, own_port, "GET", "/login/api/me").await;
+    // A proxy that rewrites Host and says where the page is in X-Forwarded-Host.
+    let fwd = Some("bunko.example.com");
+    let s = send(
+        "127.0.0.1:8080",
+        fwd,
+        "https://bunko.example.com",
+        "POST",
+        "/login/api/token",
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    // One that hides both: a browser on an origin CORS refuses.
+    send(
+        "127.0.0.1:8080",
+        None,
+        "https://bunko.example.com",
+        "GET",
+        "/login/api/me",
+    )
+    .await;
+    env.services.analytics.flush_now().await.unwrap();
+
+    assert_eq!(
+        env.int("SELECT SUM(requests) FROM clients_daily WHERE app='bunko-web'"),
+        4
+    );
+    assert_eq!(
+        env.int("SELECT COUNT(*) FROM clients_daily WHERE app='reader-other'"),
+        0
+    );
+    // Bunko's own origin is not a cross-origin caller; only the hidden one is listed.
+    let v = env.admin("/_admin/api/analytics/clients?range=24h").await;
+    let origins: Vec<&str> = v["origins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o["origin"].as_str().unwrap())
+        .collect();
+    assert_eq!(origins, ["https://bunko.example.com"], "{}", v["origins"]);
+}

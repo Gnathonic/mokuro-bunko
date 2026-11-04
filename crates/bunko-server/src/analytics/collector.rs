@@ -133,6 +133,7 @@ pub(crate) struct RequestRecord {
     /// The client address (canonical; a trusted proxy's text as sent, cut to 64).
     pub ip: Arc<str>,
     pub user_agent: Option<String>,
+    /// `Origin` when it is another origin than this server's (the layer drops its own).
     pub origin: Option<String>,
     pub host: Option<String>,
     /// The request path, percent-decoded.

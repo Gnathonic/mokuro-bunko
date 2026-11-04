@@ -269,14 +269,17 @@ fn cross_origin_app(
     if is_hosted_reader(origin, reader_url) {
         return app::READER_HOSTED;
     }
-    if r.protocol == super::classify::PROTOCOL_DAV || reader_api_path(r.path) {
+    if r.protocol == super::classify::PROTOCOL_DAV {
         return app::READER_OTHER;
     }
-    // A browser on Bunko's own pages and APIs from an origin CORS does not allow: no
-    // other web app can read those answers, so this is Bunko's own page behind a proxy
-    // that rewrote `Host`.
+    // A browser on Bunko's own pages and APIs (its sign-in included) from an origin CORS
+    // does not allow: no other web app can read those answers, so this is Bunko's own
+    // page behind a proxy that rewrote `Host` and sent no `X-Forwarded-Host`.
     if agent.client == client::BROWSER && !cors.is_origin_allowed(origin) {
         return app::BUNKO_WEB;
+    }
+    if reader_api_path(r.path) {
+        return app::READER_OTHER;
     }
     app::API_CLIENT
 }
@@ -293,31 +296,12 @@ fn local_app(r: &ClientRequest<'_>, agent: &Agent) -> &'static str {
 }
 
 /// Is `origin` (`scheme://host[:port]`) another origin than the `Host` the request
-/// came to? No `Host` (or an opaque `null` origin): yes.
+/// came to? The CSRF rule ([`crate::http::csrf::origin_names_host`]): a `Host` without
+/// a port (a proxy's `proxy_set_header Host $host`) matches any port of that name. The
+/// layer has already dropped an `Origin` naming `X-Forwarded-Host`. No `Host` (or an
+/// opaque `null` origin): yes.
 pub fn cross_origin(origin: &str, host: Option<&str>) -> bool {
-    let Some(host) = host.map(str::trim).filter(|h| !h.is_empty()) else {
-        return true;
-    };
-    let Some((scheme, authority)) = origin.trim().split_once("://") else {
-        return true;
-    };
-    let authority = authority.trim_end_matches('/');
-    if authority.eq_ignore_ascii_case(host) {
-        return false;
-    }
-    let default_port = if scheme.eq_ignore_ascii_case("https") {
-        ":443"
-    } else {
-        ":80"
-    };
-    let bare = |a: &str| -> String {
-        let a = a.to_ascii_lowercase();
-        match a.strip_suffix(default_port) {
-            Some(s) => s.to_string(),
-            None => a,
-        }
-    };
-    bare(authority) != bare(host)
+    !host.is_some_and(|h| crate::http::csrf::origin_names_host(origin.trim(), h))
 }
 
 /// `scheme://authority` of a URL (the origin a browser would send), without a path.
@@ -891,9 +875,19 @@ mod tests {
             Some("example.com:443")
         ));
         assert!(!cross_origin("http://example.com:80", Some("example.com")));
-        assert!(cross_origin(
+        // A proxy's `Host $host` drops the port: any port of that name is this server,
+        // as the CSRF rule has it.
+        assert!(!cross_origin(
             "https://example.com:8443",
             Some("example.com")
+        ));
+        assert!(cross_origin(
+            "https://example.com:8443",
+            Some("example.com:8080")
+        ));
+        assert!(!cross_origin(
+            "http://[2001:db8::1]:8080",
+            Some("[2001:db8::1]")
         ));
         assert!(cross_origin("http://example.com", Some("example.net")));
         assert!(cross_origin("null", Some("example.com")));
@@ -1001,6 +995,14 @@ mod tests {
             app(Some(FIREFOX), elsewhere, "api", "/_admin/api/status"),
             app::BUNKO_WEB
         );
+        // Bunko's own sign-in and account calls (nav.js, setup.js, account.js): from its
+        // own origin on another port behind a port-dropping proxy, and from an origin a
+        // Host-rewriting proxy hid, they are Bunko's pages, not a reader.
+        let own_port = Some("https://bunko.example.net:8443");
+        for path in ["/login/api/token", "/login/api/me"] {
+            assert_eq!(app(Some(FIREFOX), own_port, "api", path), app::BUNKO_WEB);
+            assert_eq!(app(Some(FIREFOX), elsewhere, "api", path), app::BUNKO_WEB);
+        }
         // WebDAV clients, named or not, and with no user agent.
         for ua in [
             Some("rclone/v1.66.0"),

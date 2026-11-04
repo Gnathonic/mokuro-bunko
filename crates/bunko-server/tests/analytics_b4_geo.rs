@@ -130,11 +130,16 @@ impl Env {
     }
 
     fn at(dir: tempfile::TempDir, geo_url: Option<&str>) -> Env {
+        Self::build(dir, geo_url, true)
+    }
+
+    fn build(dir: tempfile::TempDir, geo_url: Option<&str>, analytics_on: bool) -> Env {
         let storage = dir.path().join("storage");
         std::fs::create_dir_all(storage.join("library/series")).unwrap();
         std::fs::write(storage.join("library/series/vol1.cbz"), vec![7u8; 2048]).unwrap();
         let mut config = Config::default();
         config.storage.base_path = storage.clone();
+        config.analytics.enabled = analytics_on;
         if let Some(url) = geo_url {
             config.analytics.geo.enabled = true;
             config.analytics.geo.url = url.to_string();
@@ -238,9 +243,9 @@ async fn previous_month_fallback_then_webdav_and_web_traffic_get_countries() {
     let env = Env::new(Some(&format!(
         "{base}/dbip-country-lite-{{year}}-{{month}}.mmdb.gz"
     )));
-    // Enabled but nothing loaded: only the LAN is known.
+    // Enabled but nothing loaded: nothing is known, the LAN included.
     assert_eq!(env.country("203.0.113.10"), None);
-    assert_eq!(env.country("192.168.1.5").as_deref(), Some("LAN"));
+    assert_eq!(env.country("192.168.1.5"), None);
     let g = env.services.analytics.geo();
     g.update_now(&env.services.analytics, false).await.unwrap();
     // This month's answered 404, then last month's was fetched.
@@ -310,6 +315,7 @@ async fn previous_month_fallback_then_webdav_and_web_traffic_get_countries() {
     let v = env
         .admin("GET", "/_admin/api/analytics/geo?range=7d", b"")
         .await;
+    assert_eq!(v["geo_enabled"], true);
     assert_eq!(v["enabled"], true);
     assert_eq!(v["status"], "ready");
     assert_eq!(v["db"]["version"], prev.as_str());
@@ -462,9 +468,15 @@ async fn off_by_default_nothing_is_downloaded_and_settings_turn_it_on() {
             .is_empty()
     );
     let v = env.admin("GET", "/_admin/api/analytics/geo", b"").await;
+    // `enabled` is the common analytics flag every endpoint sends (the global banner
+    // reads it); geography's own is `geo_enabled`.
     assert_eq!(
-        (v["enabled"].clone(), v["status"].clone()),
-        (json!(false), json!("off"))
+        (
+            v["enabled"].clone(),
+            v["geo_enabled"].clone(),
+            v["status"].clone()
+        ),
+        (json!(true), json!(false), json!("off"))
     );
     assert_eq!(v["db"], Value::Null);
     let r = env
@@ -501,6 +513,111 @@ async fn off_by_default_nothing_is_downloaded_and_settings_turn_it_on() {
     assert_eq!(a.geo().status().status, "off");
     stop.cancel();
     assert_eq!(Country::new("jp"), Country::new("JP"));
+}
+
+/// Between turning geo on and the first database that loads (here: every download
+/// fails), nothing is counted: not public addresses, and not LAN ones either, so the
+/// card never shows a day of "Local network" only.
+#[tokio::test]
+async fn nothing_is_counted_before_a_database_loads_lan_included() {
+    let (files, base) = file_server().await;
+    let (cur, _) = months();
+    let env = Env::new(Some(&format!("{base}/db-{{year}}-{{month}}.mmdb.gz")));
+    let a = &env.services.analytics;
+    let err = a.geo().update_now(a, false).await.unwrap_err();
+    assert!(err.contains("404"), "{err}");
+    for ip in ["192.168.1.5", "127.0.0.1", "203.0.113.10", "2001:db8::5"] {
+        env.call(None, "PROPFIND", "/mokuro-reader/", RCLONE, b"", ip)
+            .await;
+        env.call(None, "GET", "/", FIREFOX, b"", ip).await;
+    }
+    a.flush_now().await.unwrap();
+    assert!(
+        env.sql_rows("SELECT country, requests FROM geo_daily")
+            .is_empty()
+    );
+    let v = env.admin("GET", "/_admin/api/analytics/geo", b"").await;
+    assert_eq!(v["status"], "error");
+    assert_eq!(v["countries"], json!([]));
+
+    // Once one loads, LAN and public addresses both count.
+    files
+        .paths
+        .lock()
+        .insert(format!("/db-{cur}.mmdb.gz"), Answer::Bytes(db_v1()));
+    a.geo().update_now(a, true).await.unwrap();
+    env.call(
+        None,
+        "PROPFIND",
+        "/mokuro-reader/",
+        RCLONE,
+        b"",
+        "192.168.1.5",
+    )
+    .await;
+    env.call(None, "GET", "/", FIREFOX, b"", "203.0.113.10")
+        .await;
+    a.flush_now().await.unwrap();
+    assert_eq!(
+        env.sql_rows("SELECT country, requests FROM geo_daily ORDER BY country"),
+        [("JP".to_string(), 1), ("LAN".to_string(), 1)]
+    );
+}
+
+/// `analytics.enabled: false` records nothing, so geo downloads nothing either, even
+/// with `analytics.geo.enabled: true`; turning analytics on starts it.
+#[tokio::test]
+async fn analytics_off_keeps_geo_off_and_offline() {
+    let (files, base) = file_server().await;
+    let (cur, _) = months();
+    files
+        .paths
+        .lock()
+        .insert(format!("/db-{cur}.mmdb.gz"), Answer::Bytes(db_v1()));
+    let url = format!("{base}/db-{{year}}-{{month}}.mmdb.gz");
+    let env = Env::build(tempfile::tempdir().unwrap(), Some(&url), false);
+    let a = &env.services.analytics;
+    assert!(a.config().geo.enabled && !a.config().enabled);
+    let stop = CancellationToken::new();
+    a.start(stop.clone());
+    a.geo().update_now(a, true).await.unwrap();
+    let r = env
+        .admin("POST", "/_admin/api/analytics/geo/refresh", b"{}")
+        .await;
+    assert_eq!(r["started"], false);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(files.hits.load(Ordering::SeqCst), 0);
+    assert!(!env.mmdb().exists());
+    assert_eq!(env.country("203.0.113.1"), None);
+    let v = env.admin("GET", "/_admin/api/analytics/geo", b"").await;
+    assert_eq!(
+        (
+            v["enabled"].clone(),
+            v["geo_enabled"].clone(),
+            v["status"].clone()
+        ),
+        (json!(false), json!(false), json!("off"))
+    );
+
+    // Analytics on (geo was already on): the task downloads.
+    env.admin(
+        "PUT",
+        "/_admin/api/settings/analytics",
+        json!({"enabled": true}).to_string().as_bytes(),
+    )
+    .await;
+    wait_for(|| env.country("203.0.113.1").as_deref() == Some("JP")).await;
+    assert!(files.hits.load(Ordering::SeqCst) > 0);
+    // And off again: the database leaves memory, lookups answer nothing.
+    env.admin(
+        "PUT",
+        "/_admin/api/settings/analytics",
+        json!({"enabled": false}).to_string().as_bytes(),
+    )
+    .await;
+    assert_eq!(env.country("203.0.113.1"), None);
+    wait_for(|| a.geo().status().db.is_none()).await;
+    stop.cancel();
 }
 
 async fn wait_for(mut ok: impl FnMut() -> bool) {

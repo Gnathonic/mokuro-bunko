@@ -5,8 +5,9 @@
 //!   memory: loopback, private, link-local, CGNAT and ULA addresses are [`Country::LAN`]
 //!   without a lookup; the rest go through a bounded two-generation cache in front of
 //!   the `maxminddb` reader (ISC). An address the database does not place is
-//!   [`Country::UNKNOWN`] (`ZZ`, as DB-IP itself spells it). Off, or before a database
-//!   is loaded, every answer is `None`.
+//!   [`Country::UNKNOWN`] (`ZZ`, as DB-IP itself spells it). Off (`analytics.enabled`
+//!   or `analytics.geo.enabled` false), or before a database is loaded, every answer is
+//!   `None`, LAN addresses included.
 //! - **The database** lives at `<storage base>/analytics/country.mmdb`. A background
 //!   task (never on the startup path) loads it, and downloads `analytics.geo.url` with
 //!   `{year}`/`{month}` filled in when it is missing or not this month's: the current
@@ -208,7 +209,10 @@ pub struct GeoStatus {
 
 impl Geo {
     pub fn new(core: Core) -> Geo {
-        let geo = core.config.read().analytics.geo.clone();
+        let (on, url) = {
+            let cfg = core.config.read();
+            (geo_on(&cfg.analytics), cfg.analytics.geo.url.clone())
+        };
         let client = reqwest::Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(DOWNLOAD_TIMEOUT)
@@ -222,8 +226,8 @@ impl Geo {
         Geo {
             core,
             shared: Arc::new(Shared {
-                enabled: AtomicBool::new(geo.enabled),
-                url: Mutex::new(geo.url),
+                enabled: AtomicBool::new(on),
+                url: Mutex::new(url),
                 db: RwLock::new(None),
                 generation: AtomicU64::new(0),
                 cache: Mutex::new(Cache::default()),
@@ -255,11 +259,13 @@ impl Geo {
         if !self.shared.enabled.load(Ordering::Relaxed) {
             return None;
         }
+        // Nothing is counted until a database is loaded, LAN addresses included: a day
+        // of LAN-only countries would read as if all traffic were local.
+        let db = self.shared.db.read().clone()?;
         let ip = canonical(*ip);
         if is_lan(&ip) {
             return Some(Country::LAN);
         }
-        let db = self.shared.db.read().clone()?;
         {
             let mut cache = self.shared.cache.lock();
             if cache.generation == db.generation
@@ -289,7 +295,8 @@ impl Geo {
 
     /// `analytics.geo` changed (enabled toggled, URL): start or stop accordingly.
     pub fn settings_changed(&self, cfg: &AnalyticsConfig) {
-        let was = self.shared.enabled.swap(cfg.geo.enabled, Ordering::Relaxed);
+        let on = geo_on(cfg);
+        let was = self.shared.enabled.swap(on, Ordering::Relaxed);
         let url_changed = {
             let mut url = self.shared.url.lock();
             let changed = *url != cfg.geo.url;
@@ -298,10 +305,10 @@ impl Geo {
             }
             changed
         };
-        if cfg.geo.enabled && url_changed {
+        if on && url_changed {
             self.shared.force.store(true, Ordering::Relaxed);
         }
-        if was != cfg.geo.enabled || url_changed {
+        if was != on || url_changed {
             self.shared.wake.notify_one();
         }
     }
@@ -617,7 +624,7 @@ async fn load_stored(shared: &Arc<Shared>, a: &Analytics) {
 /// One pass: load what is stored, then download when due (or `force`d). Records the
 /// outcome for the admin view and when to look next.
 async fn pass(shared: &Arc<Shared>, a: &Analytics, force: bool) -> Result<(), String> {
-    if !a.config().geo.enabled {
+    if !geo_on(&a.config()) {
         return Ok(());
     }
     load_stored(shared, a).await;
@@ -772,11 +779,17 @@ async fn download(
     Ok(info)
 }
 
+/// Geo runs only while analytics itself is on: off, nothing is recorded, so nothing is
+/// downloaded either.
+fn geo_on(cfg: &AnalyticsConfig) -> bool {
+    cfg.enabled && cfg.geo.enabled
+}
+
 /// The background task: a pass at start, then whenever it is due, refreshed or the
 /// settings change; off, the database is dropped from memory.
 async fn run(shared: Arc<Shared>, a: Analytics, stop: CancellationToken) {
     loop {
-        let enabled = a.config().geo.enabled;
+        let enabled = geo_on(&a.config());
         shared.enabled.store(enabled, Ordering::Relaxed);
         let wait = if enabled {
             let force = shared.force.swap(false, Ordering::Relaxed);
@@ -844,8 +857,7 @@ pub mod api {
             a,
             q,
             json!({
-                "analytics_enabled": a.config().enabled,
-                "enabled": st.enabled,
+                "geo_enabled": st.enabled,
                 "status": st.status,
                 "error": st.error,
                 "db": db_info,
