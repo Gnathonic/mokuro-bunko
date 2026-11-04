@@ -189,7 +189,12 @@ pub fn cloud_library(a: &Analytics) -> bool {
 fn read_archive(q: &Queued, now: i64) -> Option<ArchivePages> {
     let mut f = bunko_store::fs::File::open(&q.path).ok()?;
     let meta = f.metadata().ok()?;
-    let (pages, formats) = match pages::count_pages(&mut f) {
+    // A panic on a hostile archive marks that archive unreadable instead of stopping
+    // the page phase at it on every pass.
+    let counted =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| pages::count_pages(&mut f)))
+            .unwrap_or_else(|_| Err(std::io::Error::other("the zip reader panicked")));
+    let (pages, formats) = match counted {
         Ok(c) => (i64::try_from(c.pages).unwrap_or(i64::MAX), c.formats_json()),
         Err(e) => {
             tracing::debug!(

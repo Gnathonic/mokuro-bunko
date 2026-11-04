@@ -94,6 +94,18 @@ fn bad(msg: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg)
 }
 
+/// The 56-byte zip64 end record at `at`, if one is there.
+fn zip64_end<R: Read + Seek>(r: &mut R, at: u64) -> io::Result<Option<[u8; 56]>> {
+    r.seek(SeekFrom::Start(at))?;
+    let mut rec = [0u8; 56];
+    match r.read_exact(&mut rec) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(e) => return Err(e),
+    }
+    Ok((u32_at(&rec, 0) == u64::from(ZIP64_EOCD_SIG)).then_some(rec))
+}
+
 /// Where the central directory is: `(its offset in the file, its size, entries, the
 /// offset every recorded offset is shifted by)`. The shift is non-zero for an archive
 /// with data in front of it (a self-extractor), whose recorded offsets start at 0.
@@ -114,22 +126,33 @@ fn locate<R: Read + Seek>(r: &mut R) -> io::Result<(u64, u64, u64, u64)> {
     let mut entries = u16_at(&tail, eocd + 10);
     let mut cd_size = u32_at(&tail, eocd + 12);
     let mut cd_offset = u32_at(&tail, eocd + 16);
+    // The directory ends where the end record that describes it starts.
     let mut cd_end = eocd_pos;
-    if (entries == 0xFFFF || cd_size == 0xFFFF_FFFF || cd_offset == 0xFFFF_FFFF)
-        && eocd >= 20
-        && u32_at(&tail, eocd - 20) == u64::from(ZIP64_LOCATOR_SIG)
-    {
-        let z64_pos = u64_at(&tail, eocd - 20 + 8);
-        r.seek(SeekFrom::Start(z64_pos))?;
-        let mut rec = [0u8; 56];
-        r.read_exact(&mut rec)?;
-        if u32_at(&rec, 0) != u64::from(ZIP64_EOCD_SIG) {
-            return Err(bad("bad zip64 end record"));
+    let saturated = entries == 0xFFFF || cd_size == 0xFFFF_FFFF || cd_offset == 0xFFFF_FFFF;
+    // A zip64 locator, when there is one, is used whether or not the plain record's
+    // fields overflowed (APPNOTE lets a writer add the zip64 records anyway).
+    if eocd >= 20 && u32_at(&tail, eocd - 20) == u64::from(ZIP64_LOCATOR_SIG) {
+        let recorded = u64_at(&tail, eocd - 20 + 8);
+        // The recorded offset is shifted by any data in front of the archive (a
+        // self-extractor); the record is then found right before its locator.
+        let found = match zip64_end(r, recorded)? {
+            Some(rec) => Some((recorded, rec)),
+            None => match eocd_pos.checked_sub(20 + 56) {
+                Some(at) => zip64_end(r, at)?.map(|rec| (at, rec)),
+                None => None,
+            },
+        };
+        match found {
+            Some((at, rec)) => {
+                entries = u64_at(&rec, 32);
+                cd_size = u64_at(&rec, 40);
+                cd_offset = u64_at(&rec, 48);
+                cd_end = at;
+            }
+            None if saturated => return Err(bad("bad zip64 end record")),
+            // The plain record still holds every value.
+            None => {}
         }
-        entries = u64_at(&rec, 32);
-        cd_size = u64_at(&rec, 40);
-        cd_offset = u64_at(&rec, 48);
-        cd_end = z64_pos;
     }
     let cd_start = cd_end
         .checked_sub(cd_size)
@@ -234,8 +257,13 @@ pub fn count_pages<R: Read + Seek>(r: &mut R) -> io::Result<PageCount> {
                 }
                 i += 4 + size;
             }
+            // A hostile offset past the end of any file is not sniffed (and cannot
+            // overflow).
+            let Some(local_offset) = local_offset.checked_add(shift) else {
+                continue;
+            };
             sniffs.push(Sniff {
-                local_offset: local_offset + shift,
+                local_offset,
                 method,
                 compressed,
             });
@@ -432,6 +460,107 @@ mod tests {
         let c = count(buf.into_inner()).unwrap();
         assert_eq!(c.pages, 66_001);
         assert_eq!(c.formats.get("png"), Some(&1));
+    }
+
+    /// `z` (a zip without a comment) with zip64 end records added before its end
+    /// record, the way a writer may add them although nothing overflowed; `saturate`
+    /// also marks the plain record's fields as "see zip64".
+    fn with_zip64_end(mut z: Vec<u8>, saturate: bool) -> Vec<u8> {
+        let eocd = z.len() - 22;
+        let entries = u16_at(&z, eocd + 10);
+        let cd_size = u32_at(&z, eocd + 12);
+        let cd_offset = u32_at(&z, eocd + 16);
+        let mut rec = Vec::new();
+        rec.extend(ZIP64_EOCD_SIG.to_le_bytes());
+        rec.extend(44u64.to_le_bytes());
+        rec.extend(45u16.to_le_bytes());
+        rec.extend(45u16.to_le_bytes());
+        rec.extend(0u32.to_le_bytes());
+        rec.extend(0u32.to_le_bytes());
+        rec.extend(entries.to_le_bytes());
+        rec.extend(entries.to_le_bytes());
+        rec.extend(cd_size.to_le_bytes());
+        rec.extend(cd_offset.to_le_bytes());
+        rec.extend(ZIP64_LOCATOR_SIG.to_le_bytes());
+        rec.extend(0u32.to_le_bytes());
+        rec.extend((eocd as u64).to_le_bytes());
+        rec.extend(1u32.to_le_bytes());
+        let mut end = z.split_off(eocd);
+        if saturate {
+            end[10..12].copy_from_slice(&[0xFF; 2]);
+            end[12..20].copy_from_slice(&[0xFF; 8]);
+        }
+        z.extend(rec);
+        z.extend(end);
+        z
+    }
+
+    #[test]
+    fn zip64_end_records_are_used_when_nothing_overflowed() {
+        let plain = zip_of(&[
+            ("a.png", PNG, CompressionMethod::Stored),
+            ("b", JPEG, CompressionMethod::Deflated),
+        ]);
+        let c = count(with_zip64_end(plain.clone(), false)).unwrap();
+        assert_eq!(c.formats, BTreeMap::from([("jpeg", 1), ("png", 1)]));
+        let c = count(with_zip64_end(plain, true)).unwrap();
+        assert_eq!(c.formats, BTreeMap::from([("jpeg", 1), ("png", 1)]));
+    }
+
+    #[test]
+    fn a_zip64_archive_with_data_in_front_of_it() {
+        let z = with_zip64_end(
+            zip_of(&[
+                ("a.webp", WEBP, CompressionMethod::Stored),
+                ("b", PNG, CompressionMethod::Stored),
+            ]),
+            true,
+        );
+        for prefixed in [false, true] {
+            let mut file = if prefixed {
+                b"MZ self-extractor stub ....".to_vec()
+            } else {
+                Vec::new()
+            };
+            file.extend(&z);
+            let c = count(file).unwrap();
+            assert_eq!(
+                c.formats,
+                BTreeMap::from([("png", 1), ("webp", 1)]),
+                "prefixed {prefixed}"
+            );
+        }
+    }
+
+    /// A directory entry whose zip64 extra field puts its data at `u64::MAX`, in an
+    /// archive with data in front of it: no overflow, the entry is not sniffed.
+    #[test]
+    fn a_hostile_local_offset_cannot_overflow() {
+        let mut cd = Vec::new();
+        cd.extend(CENTRAL_SIG.to_le_bytes());
+        cd.extend([20, 0, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        cd.extend(0u32.to_le_bytes()); // compressed
+        cd.extend(0u32.to_le_bytes()); // uncompressed
+        cd.extend(1u16.to_le_bytes()); // name
+        cd.extend(12u16.to_le_bytes()); // extra
+        cd.extend(0u16.to_le_bytes()); // comment
+        cd.extend([0u8; 8]);
+        cd.extend(0xFFFF_FFFFu32.to_le_bytes()); // local offset: see zip64
+        cd.push(b'b');
+        cd.extend(1u16.to_le_bytes());
+        cd.extend(8u16.to_le_bytes());
+        cd.extend(u64::MAX.to_le_bytes());
+        let mut file = b"XX".to_vec();
+        file.extend(&cd);
+        file.extend(EOCD_SIG.to_le_bytes());
+        file.extend([0u8; 4]);
+        file.extend(1u16.to_le_bytes());
+        file.extend(1u16.to_le_bytes());
+        file.extend((cd.len() as u32).to_le_bytes());
+        file.extend(0u32.to_le_bytes());
+        file.extend(0u16.to_le_bytes());
+        let c = count(file).unwrap();
+        assert_eq!(c.pages, 0);
     }
 
     #[test]
