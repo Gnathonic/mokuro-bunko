@@ -681,6 +681,28 @@ file's size as estimates. Every key is also editable in the admin panel (Analyti
 Settings, `PUT /_admin/api/settings/analytics`) and through `MOKURO_ANALYTICS_*`
 variables, dots as underscores (`MOKURO_ANALYTICS_RETENTION_IP_DAYS=14`).
 
+**Crawl detection** counts, per client IP, the distinct series it touched in the
+window: by downloading a volume (a `GET` answered 200 or 206), or by asking about one
+series (a WebDAV `PROPFIND` of a series folder with `Depth: 1` or `infinity`, its
+`series.json`, `/catalog/api/series?name=`, a manifest). Mokuro Reader's normal sync
+does not count: its one `Depth: infinity` listing of the whole library, the covers it
+shows, the `HEAD` before each download and its own progress files are not signals, so
+reading a few series never opens an episode, while an rclone or davfs2 mirror, a
+metadata walk over WebDAV or a script walking the catalog does. An episode is
+`download` when the downloads alone cross the thresholds, `metadata` when nothing was
+downloaded, `mixed` otherwise; it ends after a whole window without a request from
+that IP. Detection is per IP (a crawl split over many addresses, each under
+`min_series`, is not seen). At most 4,096 IPs are tracked (least recently used go
+first, an open episode last) and their touches are capped at 300,000 (about 6 MiB).
+
+**Server readings** are sampled every 15 s: the process's memory (RSS and peak), its
+CPU time as a percent of one core (two busy cores read 200 %), open connections and
+requests in flight (their highest per interval), and the machine's memory, or the
+container's cgroup memory limit when that is lower. Linux and Android read `/proc`
+(Docker and the musl build included), Windows and macOS their system calls; anywhere
+else the panel says the platform does not report them. Four samples make a minute
+(kept `retention.host_minute_days`), minutes make hours (kept `retention.hourly_days`).
+
 ### Updates
 
 ```yaml

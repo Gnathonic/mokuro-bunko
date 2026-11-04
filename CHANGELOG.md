@@ -60,6 +60,18 @@
   and through `MOKURO_ANALYTICS_*`. `analytics.enabled: false` passes requests through
   untouched and writes nothing. The main database gains an index on
   `volume_identities(volume_uuid)`.
+- **Analytics: server readings and crawl detection.** The Server view
+  (`/_admin/api/analytics/host?range=24h|7d|30d`) charts the process's memory (RSS and
+  peak), CPU, open connections and requests in flight, per minute for a day and per
+  hour beyond, sampled every 15 s on Linux, Android, Windows and macOS (Docker and musl
+  included; in a container the cgroup memory limit is the host memory shown). The
+  Crawlers view (`/_admin/api/analytics/crawlers`) lists episodes of one IP touching
+  `analytics.crawl.min_series` series and `min_coverage` of the catalog within
+  `window_hours`, over WebDAV or HTTP: volume downloads (`download`), per-series
+  folder listings, `series.json` and catalog pages (`metadata`), or both (`mixed`),
+  with the principals, user agent, volumes, bytes and requests of each. Mokuro
+  Reader's normal sync (its one depth-infinity listing, covers, a few downloads) never
+  opens one. Reported only: nothing is blocked or slowed.
 - **`/login/api/me` says where an account may add files** (`permissions.addFiles`):
   anywhere (`all`), everywhere but the `closedSeries` other accounts own (`open`, an
   uploader), or nowhere (`none`). A reader can tell from it that the server enforces

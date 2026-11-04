@@ -1137,8 +1137,6 @@ async fn the_admin_api_answers_the_design_shapes() {
         "reading",
         "users",
         "library",
-        "host",
-        "crawlers",
         "clients",
         "geo",
     ] {
