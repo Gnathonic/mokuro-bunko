@@ -681,6 +681,21 @@ file's size as estimates. Every key is also editable in the admin panel (Analyti
 Settings, `PUT /_admin/api/settings/analytics`) and through `MOKURO_ANALYTICS_*`
 variables, dots as underscores (`MOKURO_ANALYTICS_RETENTION_IP_DAYS=14`).
 
+**Reading** is counted from the files Mokuro Reader syncs, whichever WebDAV client
+writes them: about ten seconds after an account's `positions.json`,
+`history/<device>/*.events` or `volume-data.json` is written (a PUT, or a MOVE into
+place), the server reads the file back from that account's own tree and compares it
+with what it saw before, so a file uploaded twice, another device's merged copy, or
+the reader's DELETE-then-PUT never counts twice. A new reading position is a *read*
+of that volume on that day (a position first seen more than 48 hours old is not); the
+reading history adds the pages read and the time spent (one page view counts for 15
+minutes at most). `volume-data.json` gives each account's progress and finished
+volumes for the completion funnel, and the device names the reader shows. Volumes
+are matched to the library's series by their volume id, else by the series the
+reader names; a volume of no known series is shown as `(unknown)`. Files larger than
+the reader writes (4 MiB for `positions.json`, 16 MiB for a history file, 32 MiB for
+`volume-data.json`) and history files of a newer format are skipped.
+
 ### Updates
 
 ```yaml

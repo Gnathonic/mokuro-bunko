@@ -1132,16 +1132,7 @@ async fn the_admin_api_answers_the_design_shapes() {
     );
 
     // The areas not built yet answer "not collected" with the common fields.
-    for path in [
-        "funnel?series=series",
-        "reading",
-        "users",
-        "library",
-        "host",
-        "crawlers",
-        "clients",
-        "geo",
-    ] {
+    for path in ["library", "host", "crawlers", "clients", "geo"] {
         let v = env.admin(&format!("/_admin/api/analytics/{path}")).await;
         assert_eq!(v["available"], false, "{path}");
         common(&v, "30d", "day");

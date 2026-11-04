@@ -60,6 +60,17 @@
   and through `MOKURO_ANALYTICS_*`. `analytics.enabled: false` passes requests through
   untouched and writes nothing. The main database gains an index on
   `volume_identities(volume_uuid)`.
+- **Analytics: reading, active accounts and the completion funnel.** The files Mokuro
+  Reader syncs over WebDAV (any client writing them counts the same) are read back
+  after they are written: `positions.json` for who opened which volume when, the
+  reading history (`history/<device>/*.events`, decoded with the reader's own segment
+  format) for pages and time read, `volume-data.json` for progress and finished
+  volumes. Re-uploads, other devices' merged copies and the reader's DELETE-then-PUT
+  never count twice. The admin API's `reading` (minutes, pages and readers per day,
+  top readers and volumes), `users` (active accounts per day, the week's and month's,
+  each account's devices, apps, traffic and reading) and `funnel` (per volume of a
+  series in library order: downloaded, started, finished; or every series) views now
+  answer.
 - **`/login/api/me` says where an account may add files** (`permissions.addFiles`):
   anywhere (`all`), everywhere but the `closedSeries` other accounts own (`open`, an
   uploader), or nowhere (`none`). A reader can tell from it that the server enforces
