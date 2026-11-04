@@ -10,15 +10,27 @@
 //! libjpeg-turbo by ±1..5 on 0.5–5 % of the pixels (measured on the bench pages),
 //! which flipped 3 of 721 golden lines; with the `libjpeg` feature, YCbCr and
 //! greyscale JPEGs go through libjpeg-turbo's decoder (mozjpeg, ISLOW IDCT, fancy
-//! upsampling — Pillow's settings) and decode bit-identically. AVIF is not decoded
+//! upsampling — Pillow's settings) and decode bit-identically. JPEG XL (bare
+//! codestream or container) goes through jxl-rs, the decoder Chromium and Firefox
+//! ship, which `register_jxl` hooks into the `image` crate. AVIF is not decoded
 //! (no permissively licensed pure-Rust decoder); such a page fails decode and takes
 //! the blank-page path, as a corrupt page does.
 
 use super::BgrImage;
 use crate::error::{Error, Result};
 
+/// Teach the `image` crate JPEG XL, once per process. The hook is process-wide;
+/// registering it again (another crate's decoder got there first) is a no-op.
+fn register_jxl() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        jxl_image_rs_integration::register_image_decoding_hook();
+    });
+}
+
 /// Decode an image file's bytes into BGR.
 pub fn decode_bgr(bytes: &[u8]) -> Result<BgrImage> {
+    register_jxl();
     #[cfg(feature = "libjpeg")]
     if bytes.starts_with(&[0xFF, 0xD8])
         && let Some(img) = decode_libjpeg(bytes)
@@ -65,10 +77,90 @@ fn decode_libjpeg(bytes: &[u8]) -> Option<BgrImage> {
 
 /// `(width, height)` from the image header only (what a blank page record needs).
 pub fn decode_size(bytes: &[u8]) -> Result<(u32, u32)> {
+    register_jxl();
     let reader = ::image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
         .map_err(|e| Error::Decode(e.to_string()))?;
     reader
         .into_dimensions()
         .map_err(|e| Error::Decode(e.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture(name: &str) -> Vec<u8> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/jxl")
+            .join(name);
+        std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+    }
+
+    /// The pixels of `page-rgb.jxl` and `page-container.jxl`, in BGR (see the fixtures'
+    /// README).
+    fn rgb_fixture_bgr() -> Vec<u8> {
+        let mut out = Vec::new();
+        for y in 0..16u8 {
+            for x in 0..24u8 {
+                let blue = if (x + y) % 2 == 0 { 200 } else { 40 };
+                out.extend([blue, 15 * y, 10 * x]);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn decodes_a_lossless_jxl_codestream() {
+        let img = decode_bgr(&fixture("page-rgb.jxl")).unwrap();
+        assert_eq!((img.width, img.height), (24, 16));
+        assert_eq!(img.data, rgb_fixture_bgr());
+    }
+
+    #[test]
+    fn decodes_a_jxl_container() {
+        let img = decode_bgr(&fixture("page-container.jxl")).unwrap();
+        assert_eq!((img.width, img.height), (24, 16));
+        assert_eq!(img.data, rgb_fixture_bgr());
+    }
+
+    #[test]
+    fn decodes_a_greyscale_jxl_to_three_equal_channels() {
+        let img = decode_bgr(&fixture("page-grey.jxl")).unwrap();
+        assert_eq!((img.width, img.height), (24, 16));
+        let mut want = Vec::new();
+        for y in 0..16u8 {
+            for x in 0..24u8 {
+                want.extend([10 * x + y; 3]);
+            }
+        }
+        assert_eq!(img.data, want);
+    }
+
+    /// A JPEG transcoded to JPEG XL decodes to the JPEG's own pixels, give or take the
+    /// rounding of a different IDCT.
+    #[test]
+    fn decodes_a_jpeg_transcoded_jxl_like_its_jpeg() {
+        let jxl = decode_bgr(&fixture("page-from-jpeg.jxl")).unwrap();
+        let jpeg = decode_bgr(&fixture("page.jpg")).unwrap();
+        assert_eq!((jxl.width, jxl.height), (64, 48));
+        assert_eq!((jxl.width, jxl.height), (jpeg.width, jpeg.height));
+        let worst = jxl
+            .data
+            .iter()
+            .zip(&jpeg.data)
+            .map(|(a, b)| a.abs_diff(*b))
+            .max()
+            .unwrap();
+        assert!(worst <= 3, "pixels differ by up to {worst}");
+    }
+
+    #[test]
+    fn reads_a_jxl_size_from_its_header() {
+        assert_eq!(decode_size(&fixture("page-rgb.jxl")).unwrap(), (24, 16));
+        assert_eq!(
+            decode_size(&fixture("page-container.jxl")).unwrap(),
+            (24, 16)
+        );
+    }
 }

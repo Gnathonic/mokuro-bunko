@@ -113,7 +113,7 @@ pub fn sample_pages(archive: &Path) -> Result<Vec<String>, String> {
         .filter(|n| {
             let lower = n.to_ascii_lowercase();
             [
-                ".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff",
+                ".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff", ".jxl",
             ]
             .iter()
             .any(|s| lower.ends_with(s))
@@ -1432,6 +1432,24 @@ mod tests {
             6,
             "never below the derivation"
         );
+    }
+
+    /// The server can pick a volume of JPEG XL pages as the sample: its pages count.
+    #[test]
+    fn jxl_sample_pages() {
+        let dir = tempfile::tempdir().unwrap();
+        let sample = dir.path().join("s.cbz");
+        {
+            let mut w = zip::ZipWriter::new(std::fs::File::create(&sample).unwrap());
+            let o = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            for name in ["v/10.jxl", "v/2.JXL", "v/info.txt"] {
+                w.start_file(name, o).unwrap();
+                w.write_all(name.as_bytes()).unwrap();
+            }
+            w.finish().unwrap();
+        }
+        assert_eq!(sample_pages(&sample).unwrap(), ["v/2.JXL", "v/10.jxl"]);
     }
 
     #[test]

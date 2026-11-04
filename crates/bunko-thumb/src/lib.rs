@@ -12,6 +12,7 @@
 //! libwebp (BSD-3-Clause) through the `webp` crate (MIT/Apache-2.0); the `image`
 //! crate only writes lossless WebP. Byte-equality with Pillow's file is not a goal
 //! (Pillow wraps the same libwebp encoder, but container details differ by version).
+//! Covers decode with the `image` crate's decoders plus jxl-rs for JPEG XL.
 //!
 //! Memory: [`make_thumbnail_limited`] refuses images whose decode would allocate more
 //! than a caller-given budget (a hostile or broken "cover" cannot blow up a 1 GB
@@ -189,6 +190,15 @@ pub fn make_thumbnail(image_bytes: &[u8]) -> Result<Vec<u8>> {
     make_thumbnail_limited(image_bytes, DEFAULT_MAX_ALLOC, DEFAULT_MAX_SIDE)
 }
 
+/// Teach the `image` crate JPEG XL, once per process. The hook is process-wide;
+/// registering it again (another crate's decoder got there first) is a no-op.
+fn register_jxl() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        jxl_image_rs_integration::register_image_decoding_hook();
+    });
+}
+
 /// [`make_thumbnail`] with a decode budget: images needing more than `max_alloc`
 /// bytes of buffers, or wider/taller than `max_side`, are refused before decoding.
 pub fn make_thumbnail_limited(
@@ -196,6 +206,7 @@ pub fn make_thumbnail_limited(
     max_alloc: u64,
     max_side: u32,
 ) -> Result<Vec<u8>> {
+    register_jxl();
     let mut limits = ::image::Limits::default();
     limits.max_alloc = Some(max_alloc);
     limits.max_image_width = Some(max_side);
@@ -247,6 +258,38 @@ mod tests {
         assert!(out.iter().all(|&v| v == 200));
         let up = resize_lanczos_rgb(&src, 40, 30, 90, 70);
         assert!(up.iter().all(|&v| v == 200));
+    }
+    /// The JPEG XL page fixture of `bunko-ocr` (24×16, lossless).
+    fn jxl_page() -> Vec<u8> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../bunko-ocr/tests/fixtures/jxl/page-rgb.jxl");
+        std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+    }
+
+    /// Regression: a volume of JPEG XL pages got no cover; its first page would not
+    /// decode.
+    #[test]
+    fn thumbnail_of_a_jxl_page() {
+        let webp = make_thumbnail(&jxl_page()).expect("thumbnail");
+        assert_eq!(&webp[0..4], b"RIFF");
+        let back = ::image::load_from_memory(&webp).expect("decode");
+        assert_eq!(
+            (back.width(), back.height()),
+            contain_size(24, 16, THUMBNAIL_BOX)
+        );
+    }
+
+    #[test]
+    fn a_jxl_cover_over_the_budget_is_refused() {
+        assert!(matches!(
+            make_thumbnail_limited(&jxl_page(), DEFAULT_MAX_ALLOC, 20),
+            Err(ThumbError::Decode(_))
+        ));
+        assert!(matches!(
+            make_thumbnail_limited(&jxl_page(), 100, DEFAULT_MAX_SIDE),
+            Err(ThumbError::Decode(_))
+        ));
+        assert!(make_thumbnail_limited(&jxl_page(), 1024 * 1024, 24).is_ok());
     }
 }
 

@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.7.5] - 2026-11-04
+
+Volumes of JPEG XL pages get OCR and covers.
+
+### Added
+- **JPEG XL pages.** A volume whose pages are `.jxl` is now read like any other:
+  the OCR reads its pages and the server makes its cover. That covers bare codestreams
+  and containers, lossless and lossy, and JPEGs transcoded to JPEG XL. Until now
+  nothing counted `.jxl` images as pages, so every OCR attempt failed with "no page
+  images found". The volume kept its "OCR pending" badge and was retried every hour,
+  and a volume without a cover of its own got a `.nocover` marker. Pages decode with jxl-rs (`jxl` 0.8, BSD-3-Clause), the decoder Chromium
+  and Firefox ship. Lossless and transcoded pages read the same text as their source
+  images. A processor needs 0.7.5 to read these volumes; with automatic updates on,
+  it follows the library.
+
+### Fixed
+- **Covers for JPEG XL volumes an older server gave up on.** On start, the server
+  removes the `.nocover` marker of every archive that holds a `.jxl` image, so the
+  next scan makes its cover.
+
+### Changed
+- The minimum supported Rust is 1.89 (jxl-rs needs it).
+
 ## [0.7.4] - 2026-11-02
 
 OCR sessions no longer leak their model's weights, so a GPU processor keeps reading on

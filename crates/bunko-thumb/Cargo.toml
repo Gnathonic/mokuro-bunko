@@ -9,6 +9,8 @@ repository.workspace = true
 
 [dependencies]
 image = { workspace = true }
+# JPEG XL covers (jxl-rs, BSD-3-Clause).
+jxl-image-rs-integration = { workspace = true }
 thiserror = { workspace = true }
 # libwebp (BSD-3-Clause) for the lossy encoder; the `image` crate writes lossless WebP only.
 webp = { version = "0.3", default-features = false }
