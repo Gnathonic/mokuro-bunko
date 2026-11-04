@@ -1,7 +1,7 @@
 //! Crawl episodes (design §8): one row per episode of a client IP touching a large part
 //! of the catalog. The foundation creates the table (pruned by `retention.crawl_days`
 //! on `last_at`); the detector (bunko-server `analytics::crawl`) writes it through the
-//! statements here, inside the collector's flush transaction (`Detector::flush_into`).
+//! statements here, inside the collector's flush transaction (`Detector::begin_flush`).
 
 use super::{AnalyticsDb, AnalyticsTx, int, uint};
 use crate::error::Result;
@@ -9,8 +9,11 @@ use rusqlite::{Row, params};
 
 pub(crate) const DDL: &[&str] = &[
     // `principals`: JSON array; `kind`: download | metadata | mixed; `status`: open | closed.
+    // AUTOINCREMENT: a committed id is never handed out again, even once its row is
+    // pruned. (A rolled-back insert's id can be: the detector keeps an id only once its
+    // flush committed.)
     "CREATE TABLE IF NOT EXISTS crawl_episodes (
-        id INTEGER PRIMARY KEY, ip TEXT NOT NULL, country TEXT, principals TEXT NOT NULL DEFAULT '[]',
+        id INTEGER PRIMARY KEY AUTOINCREMENT, ip TEXT NOT NULL, country TEXT, principals TEXT NOT NULL DEFAULT '[]',
         client TEXT, user_agent TEXT, kind TEXT NOT NULL, started_at INTEGER NOT NULL,
         last_at INTEGER NOT NULL, series INTEGER NOT NULL DEFAULT 0,
         volumes INTEGER NOT NULL DEFAULT 0, catalog_series INTEGER NOT NULL DEFAULT 0,
@@ -88,8 +91,9 @@ fn episode_row(r: &Row<'_>) -> rusqlite::Result<EpisodeRow> {
 }
 
 impl AnalyticsTx<'_> {
-    /// Write `e`: a new row when `e.id` is 0 or that row is gone (a rolled-back flush,
-    /// pruning), else replace that row's values. Returns the row's id.
+    /// Write `e`: replace the values of row `e.id` when it is there and of the same IP,
+    /// else (`e.id` 0, the row pruned, or not that IP's) insert a new row. Returns the
+    /// row's id.
     pub fn put_crawl_episode(&self, e: &EpisodeRow) -> Result<i64> {
         let principals = principals_json(&e.principals);
         let counts = [
@@ -125,7 +129,7 @@ impl AnalyticsTx<'_> {
                     "UPDATE crawl_episodes SET ip = ?1, country = ?2, principals = ?3, \
                      client = ?4, user_agent = ?5, kind = ?6, started_at = ?7, last_at = ?8, \
                      series = ?9, volumes = ?10, catalog_series = ?11, coverage = ?12, \
-                     bytes_out = ?13, requests = ?14, status = ?15 WHERE id = ?16",
+                     bytes_out = ?13, requests = ?14, status = ?15 WHERE id = ?16 AND ip = ?1",
                 )?
                 .execute(with_id.as_slice())?;
             if changed > 0 {

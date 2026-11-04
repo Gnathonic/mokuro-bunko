@@ -3,8 +3,8 @@
 //! back from `crawl_episodes` and `GET /_admin/api/analytics/crawlers`.
 //!
 //! The false positives matter most: Mokuro Reader's normal sync (one depth-infinity
-//! listing of the whole library, covers for what it shows, a few downloads, its own
-//! files) must never open an episode, while an rclone-style mirror, a metadata walk
+//! listing of the whole library, every series.json on a first sync, covers for what it
+//! shows, a few downloads, its own files) must never open an episode, while an rclone-style mirror, a metadata walk
 //! over WebDAV and a scraper walking the catalog JSON must.
 
 // Fixtures are set up and checked with std::fs on purpose.
@@ -265,6 +265,21 @@ async fn reader_sync(env: &Env, ip: &str) {
         )
         .await;
     assert_eq!(s.as_u16(), 207);
+    // Every series.json whose size or date it has not cached: all of them on a first
+    // sync, after a parser bump, or after the server rewrote them (refreshSeriesIndexes).
+    for i in 0..SERIES {
+        let (s, _) = env
+            .call(
+                Some("reader"),
+                "GET",
+                &format!("/mokuro-reader/{}/series.json", enc(&series_name(i))),
+                &h,
+                b"",
+                ip,
+            )
+            .await;
+        assert_eq!(s, StatusCode::OK);
+    }
     // Covers for every card the catalog scrolls past: the whole library.
     for i in 0..SERIES {
         let (s, _) = env
@@ -427,6 +442,8 @@ async fn an_rclone_mirror_over_webdav_is_a_download_episode() {
 async fn a_metadata_walk_over_webdav_is_a_metadata_episode() {
     let env = Env::new().await;
     // davfs2 listing every folder and reading every series.json, downloading nothing.
+    // The listings alone make it an episode (series.json GETs are no signal: the
+    // reader's own sync reads them all).
     env.walk(None, RCLONE_IP, DAVFS_UA, 0..30, false).await;
     for i in 0..30 {
         let (s, _) = env
@@ -654,4 +671,56 @@ async fn analytics_off_detects_nothing() {
     env.walk(None, RCLONE_IP, RCLONE_UA, 0..SERIES, true).await;
     env.flush().await;
     assert_eq!(env.episodes(), 0);
+}
+
+/// A flush that rolls back loses nothing of the episodes, and the detector keeps no id
+/// of it: the next flush writes them as new rows, each under its own id.
+#[tokio::test]
+async fn a_rolled_back_flush_writes_the_episodes_at_the_next_one() {
+    let env = Env::new().await;
+    let sql = || rusqlite::Connection::open(env.storage.join("analytics.sqlite")).unwrap();
+    // The first flush makes the table; the next one fails after inserting one of two
+    // episodes (the trigger refuses the second IP's), and rolls everything back.
+    env.flush().await;
+    sql()
+        .execute_batch(
+            "CREATE TRIGGER refuse BEFORE INSERT ON crawl_episodes \
+             WHEN NEW.ip = '203.0.113.22' BEGIN SELECT RAISE(ABORT, 'refused'); END",
+        )
+        .unwrap();
+    env.walk(None, "203.0.113.21", RCLONE_UA, 0..20, true).await;
+    env.walk(None, "203.0.113.22", RCLONE_UA, 20..40, true)
+        .await;
+    assert!(env.services.analytics.flush_now().await.is_err());
+    assert_eq!(env.episodes(), 0);
+    sql().execute_batch("DROP TRIGGER refuse").unwrap();
+    // Nothing new happened, yet the next flush writes both.
+    env.flush().await;
+    let v = env.crawlers("24h").await;
+    let eps = v["episodes"].as_array().unwrap();
+    assert_eq!(eps.len(), 2, "{v:#}");
+    for e in eps {
+        assert_eq!(e["status"], "open");
+        assert_eq!(e["series"], 20);
+        assert_eq!(e["requests"], (20 * (1 + VOLUMES_PER_SERIES)) as u64);
+    }
+    let ids: Vec<i64> = eps.iter().map(|e| e["id"].as_i64().unwrap()).collect();
+    assert_ne!(ids[0], ids[1]);
+    // Both go on and are updated in place; a third crawler gets a row of its own.
+    env.walk(None, "203.0.113.21", RCLONE_UA, 0..2, true).await;
+    env.walk(None, "203.0.113.22", RCLONE_UA, 20..22, true)
+        .await;
+    env.walk(None, RCLONE_IP, RCLONE_UA, 0..SERIES, true).await;
+    env.flush().await;
+    assert_eq!(env.episodes(), 3);
+    let v = env.crawlers("24h").await;
+    for e in v["episodes"].as_array().unwrap() {
+        let want = if e["ip"] == RCLONE_IP {
+            (SERIES * (1 + VOLUMES_PER_SERIES)) as u64
+        } else {
+            (1 + 22 * (1 + VOLUMES_PER_SERIES)) as u64
+        };
+        assert_eq!(e["requests"], want, "{e}");
+        assert_eq!(e["status"], "open");
+    }
 }

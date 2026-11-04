@@ -683,12 +683,16 @@ variables, dots as underscores (`MOKURO_ANALYTICS_RETENTION_IP_DAYS=14`).
 
 **Crawl detection** counts, per client IP, the distinct series it touched in the
 window: by downloading a volume (a `GET` answered 200 or 206), or by asking about one
-series (a WebDAV `PROPFIND` of a series folder with `Depth: 1` or `infinity`, its
-`series.json`, `/catalog/api/series?name=`, a manifest). Mokuro Reader's normal sync
-does not count: its one `Depth: infinity` listing of the whole library, the covers it
-shows, the `HEAD` before each download and its own progress files are not signals, so
-reading a few series never opens an episode, while an rclone or davfs2 mirror, a
-metadata walk over WebDAV or a script walking the catalog does. An episode is
+series (a WebDAV `PROPFIND` of a series folder with `Depth: 1` or `infinity`,
+`/catalog/api/series?name=`, a manifest). Mokuro Reader's normal sync does not count:
+its one `Depth: infinity` listing of the whole library, the `series.json` files it
+refreshes (every one on a first sync), the covers it shows, the `HEAD` before each
+download and its own progress files are not signals, so reading a few series never
+opens an episode, while an rclone or davfs2 mirror, a metadata walk over WebDAV or a
+script walking the catalog does. One known false positive: when the reader's
+`Depth: infinity` listing fails with an unexpected error (a timeout or a server error
+on a large library), it lists that sync folder by folder instead, and that walk is
+reported as a `metadata` episode. An episode is
 `download` when the downloads alone cross the thresholds, `metadata` when nothing was
 downloaded, `mixed` otherwise; it ends after a whole window without a request from
 that IP. Detection is per IP (a crawl split over many addresses, each under

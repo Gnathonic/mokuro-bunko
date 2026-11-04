@@ -7,12 +7,22 @@
 //! the catalog's download link alike). *Metadata*: a request addressing ONE series
 //! and answered 2xx or 304: a WebDAV `PROPFIND` of a series folder with `Depth: 1` or
 //! `infinity` (what rclone, davfs2, gvfs and the Windows redirector send to walk a
-//! tree), a `series.json`, `/catalog/api/series?name=` or a manifest. Deliberately not
-//! signals, because Mokuro Reader's normal sync sends them: the one depth-infinity
-//! `PROPFIND` of `/mokuro-reader` (the whole library in one cached listing, attributed
-//! to no series), covers (fetched for every card the reader scrolls past), `HEAD`s
+//! tree), `/catalog/api/series?name=` or a manifest. Deliberately not signals, because
+//! Mokuro Reader's normal sync sends them: the one depth-infinity `PROPFIND` of
+//! `/mokuro-reader` (the whole library in one cached listing, attributed to no series),
+//! `series.json` GETs (after a listing the reader fetches every one whose size or date
+//! changed: all of them on its first sync, after a parser bump, or after the server
+//! rewrote them), covers (fetched for every card the reader scrolls past), `HEAD`s
 //! (sent before every download), sidecars, a `Depth: 0` stat, and anything refused.
-//! Every request of a tracked IP still counts toward its episode's requests and bytes.
+//! A walk that lists folders is still caught by its `Depth: 1` listings, and a mirror
+//! by its downloads. Every request of a tracked IP still counts toward its episode's
+//! requests and bytes.
+//!
+//! **Known false positive.** When the reader's depth-infinity listing fails with an
+//! error it does not recognise as "unsupported" (a timeout or a 5xx on a large
+//! library), it falls back to one `Depth: 1` listing per folder for that sync, and
+//! that walk is a metadata episode like davfs2's. Telling the two apart needs the
+//! client (Mokuro Reader) or the failed listing just before; neither is used yet.
 //! Once the catalog's series are known ([`Detector::refresh_catalog_from`], each minute
 //! from the host sampler) only a touch of one of them counts: listing a folder that is
 //! no series (the server's own `thumbnails/`, a made-up path) does not.
@@ -22,7 +32,7 @@
 //! the current or the previous one, so an IP is judged on between half a window and a
 //! whole window of activity.
 //!
-//! **Episodes.** Judged at every flush ([`Detector::flush_into`], so the catalog size
+//! **Episodes.** Judged at every flush ([`Detector::begin_flush`], so the catalog size
 //! and thresholds are read off the request path): an episode opens when the series
 //! touched in the window reach `min_series` and `min_coverage` of the catalog
 //! (`LibraryCounts::total_series`). While open, every touch is kept, so its counters
@@ -105,7 +115,7 @@ pub struct Observation<'a> {
 pub enum Signal {
     /// A volume download.
     Content,
-    /// Per-series metadata (a folder listing, `series.json`, the catalog's series).
+    /// Per-series metadata (a folder listing, the catalog's series, a manifest).
     Metadata,
 }
 
@@ -118,7 +128,7 @@ pub fn signal_of(o: &Observation<'_>) -> Option<Signal> {
             if ((200..300).contains(&o.status) || o.status == 304)
                 && matches!(
                     o.detail,
-                    "propfind_1" | "propfind_inf" | "series_json" | "catalog_api" | "manifest"
+                    "propfind_1" | "propfind_inf" | "catalog_api" | "manifest"
                 ) =>
         {
             Some(Signal::Metadata)
@@ -503,7 +513,8 @@ impl State {
 
     /// Judge every tracker as of `now`: open, update and close episodes, forget what
     /// fell out of the window. Returns the rows to write (in the flush transaction,
-    /// outside the lock), then [`State::written`] takes their ids.
+    /// outside the lock); once it commits [`State::committed`] takes their ids, and if
+    /// it rolls back [`State::rolled_back`] queues them again.
     pub(crate) fn evaluate(&mut self, now: i64, th: &Thresholds, catalog: u64) -> Vec<Pending> {
         let mut out = std::mem::take(&mut self.orphans);
         if th.half_s() != self.half_s {
@@ -610,17 +621,49 @@ impl State {
         out
     }
 
-    /// The rows were written: keep the ids of the episodes still open.
-    pub(crate) fn written(&mut self, ids: &[(Arc<str>, u64, i64)]) {
-        for (ip, serial, id) in ids {
-            if let Some(e) = self
-                .trackers
-                .get_mut(ip)
-                .and_then(|t| t.episode.as_mut())
-                .filter(|e| e.serial == *serial)
-            {
-                e.id = *id;
+    /// The flush that wrote `rows` (each with the id it was written as) committed: the
+    /// episodes still open take their ids. One that left memory meanwhile (evicted while
+    /// its row was being written) is closed at the next flush, under that id.
+    pub(crate) fn committed(&mut self, rows: Vec<(Pending, i64)>) {
+        for (mut p, id) in rows {
+            if p.row.status != STATUS_OPEN {
+                continue;
             }
+            match self
+                .trackers
+                .get_mut(&p.ip)
+                .and_then(|t| t.episode.as_mut())
+                .filter(|e| e.serial == p.serial)
+            {
+                Some(e) => e.id = id,
+                // Unless its eviction already queued that (newer) closing row.
+                None if self.orphans.iter().any(|o| o.row.id == id) => {}
+                None => {
+                    p.row.id = id;
+                    p.row.status = STATUS_CLOSED.into();
+                    self.orphans.push(p);
+                }
+            }
+        }
+    }
+
+    /// The flush that was to write `rows` rolled back: nothing of it happened. Closed
+    /// rows are written at the next flush; open episodes are written again (with the
+    /// ids they had, so a new one is inserted again).
+    pub(crate) fn rolled_back(&mut self, rows: Vec<Pending>) {
+        for p in rows {
+            if p.row.status != STATUS_OPEN {
+                self.orphans.push(p);
+            } else if let Some(e) = self
+                .trackers
+                .get_mut(&p.ip)
+                .and_then(|t| t.episode.as_mut())
+                .filter(|e| e.serial == p.serial)
+            {
+                e.dirty = true;
+            }
+            // Else it was evicted meanwhile: with an id, eviction queued its closing row;
+            // without one, nothing of it was ever committed.
         }
     }
 
@@ -677,6 +720,8 @@ pub struct Detector {
     state: Mutex<State>,
     /// The previous run's open episodes were closed (the first flush does it).
     resumed: AtomicBool,
+    /// Held by the flush in progress ([`Detector::begin_flush`]).
+    flushing: Mutex<()>,
 }
 
 impl Detector {
@@ -689,6 +734,7 @@ impl Detector {
             catalog_at: AtomicI64::new(0),
             state: Mutex::new(State::new(&th)),
             resumed: AtomicBool::new(false),
+            flushing: Mutex::new(()),
         }
     }
 
@@ -750,38 +796,114 @@ impl Detector {
         self.state.lock().observe(o, catalog);
     }
 
-    /// Write open episodes' rows (`crawl_episodes`) inside the flush transaction, as of
-    /// `now` (epoch seconds); close the ones idle for a window.
-    pub fn flush_into(&self, tx: &AnalyticsTx<'_>, now: i64) -> bunko_db::Result<()> {
+    /// Start writing the episodes (`crawl_episodes`) as of `now` (epoch seconds), in
+    /// the collector's flush transaction: [`CrawlFlush::write`] inside it, then
+    /// [`CrawlFlush::finish`] with whether it committed. What the detector learns from
+    /// the write (new rows' ids, closed and evicted episodes gone) is applied only once
+    /// it committed; a rolled-back flush leaves everything to the next one. Flushes take
+    /// turns (the returned value holds the detector's flush lock; take it before the
+    /// database's writer).
+    pub fn begin_flush(&self, now: i64) -> CrawlFlush<'_> {
+        let gate = self.flushing.lock();
         if now - self.catalog_at.load(Ordering::Relaxed) >= CATALOG_TTL_S {
             // Normally the sampler keeps it fresh; this covers a server without one.
             self.refresh_catalog(now);
         }
-        let th = self.thresholds();
-        let catalog = self.catalog.load(Ordering::Relaxed);
+        CrawlFlush {
+            detector: self,
+            _gate: gate,
+            now,
+            resumed: false,
+            written: Vec::new(),
+            unwritten: Vec::new(),
+            settled: false,
+        }
+    }
+}
+
+/// One flush of the crawl episodes ([`Detector::begin_flush`]).
+pub struct CrawlFlush<'a> {
+    detector: &'a Detector,
+    _gate: parking_lot::MutexGuard<'a, ()>,
+    now: i64,
+    /// This flush closed the episodes a previous run left open.
+    resumed: bool,
+    /// Rows written, with their ids.
+    written: Vec<(Pending, i64)>,
+    /// Rows judged but not written (an error stopped the write).
+    unwritten: Vec<Pending>,
+    settled: bool,
+}
+
+impl CrawlFlush<'_> {
+    /// Judge the trackers and write the episodes' rows, inside the flush transaction:
+    /// open ones updated, idle ones closed.
+    pub fn write(&mut self, tx: &AnalyticsTx<'_>) -> bunko_db::Result<()> {
+        let d = self.detector;
+        let th = d.thresholds();
+        let catalog = d.catalog.load(Ordering::Relaxed);
         let (pending, open) = {
-            let mut s = self.state.lock();
-            (s.evaluate(now, &th, catalog), s.open_ids())
+            let mut s = d.state.lock();
+            (s.evaluate(self.now, &th, catalog), s.open_ids())
         };
-        if !self.resumed.swap(true, Ordering::Relaxed) {
-            let closed = tx.close_crawl_episodes_except(&open)?;
-            if closed > 0 {
-                tracing::debug!(
+        if !d.resumed.swap(true, Ordering::Relaxed) {
+            self.resumed = true;
+            match tx.close_crawl_episodes_except(&open) {
+                Ok(0) => {}
+                Ok(closed) => tracing::debug!(
                     "[ANALYTICS] closed {closed} crawl episode(s) a previous run left open"
-                );
+                ),
+                Err(e) => {
+                    self.unwritten = pending;
+                    return Err(e);
+                }
             }
         }
-        let mut ids = Vec::with_capacity(pending.len());
-        for p in &pending {
-            let id = tx.put_crawl_episode(&p.row)?;
-            if p.row.status == STATUS_OPEN {
-                ids.push((p.ip.clone(), p.serial, id));
+        let mut rows = pending.into_iter();
+        for p in rows.by_ref() {
+            match tx.put_crawl_episode(&p.row) {
+                Ok(id) => self.written.push((p, id)),
+                Err(e) => {
+                    self.unwritten.push(p);
+                    self.unwritten.extend(rows);
+                    return Err(e);
+                }
             }
-        }
-        if !ids.is_empty() {
-            self.state.lock().written(&ids);
         }
         Ok(())
+    }
+
+    /// The flush transaction `committed`, or rolled back.
+    pub fn finish(mut self, committed: bool) {
+        self.settle(committed);
+    }
+
+    fn settle(&mut self, committed: bool) {
+        if std::mem::replace(&mut self.settled, true) {
+            return;
+        }
+        let d = self.detector;
+        let mut s = d.state.lock();
+        if committed {
+            s.committed(std::mem::take(&mut self.written));
+        } else {
+            let mut rows: Vec<Pending> = std::mem::take(&mut self.written)
+                .into_iter()
+                .map(|(p, _)| p)
+                .collect();
+            rows.append(&mut self.unwritten);
+            s.rolled_back(rows);
+            if self.resumed {
+                d.resumed.store(false, Ordering::Relaxed);
+            }
+        }
+    }
+}
+
+impl Drop for CrawlFlush<'_> {
+    /// Never finished (a panic in the flush): nothing is known to have committed.
+    fn drop(&mut self) {
+        self.settle(false);
     }
 }
 
@@ -1035,13 +1157,7 @@ mod tests {
             s(req(0, ip, "GET", "volume", "full").series("a").status(404)),
             None
         );
-        for d in [
-            "propfind_1",
-            "propfind_inf",
-            "series_json",
-            "catalog_api",
-            "manifest",
-        ] {
+        for d in ["propfind_1", "propfind_inf", "catalog_api", "manifest"] {
             assert_eq!(
                 s(req(0, ip, "GET", "metadata", d).series("a").status(207)),
                 Some(Signal::Metadata),
@@ -1049,11 +1165,20 @@ mod tests {
             );
         }
         assert_eq!(
-            s(req(0, ip, "GET", "metadata", "series_json")
+            s(req(0, ip, "GET", "metadata", "manifest")
                 .series("a")
                 .status(304)),
             Some(Signal::Metadata)
         );
+        // series.json: the reader refreshes every one on its first sync.
+        for status in [200, 304] {
+            assert_eq!(
+                s(req(0, ip, "GET", "metadata", "series_json")
+                    .series("a")
+                    .status(status)),
+                None
+            );
+        }
         // A stat, the library-wide listing (no series), covers, sidecars: no signal.
         assert_eq!(
             s(req(0, ip, "PROPFIND", "metadata", "propfind_0").series("a")),
@@ -1101,7 +1226,7 @@ mod tests {
         assert_eq!(r.status, STATUS_OPEN);
         assert_eq!(r.client.as_deref(), Some("rclone"));
         assert_eq!(r.country.as_deref(), Some("LAN"));
-        s.written(&[(rows[0].ip.clone(), rows[0].serial, 7)]);
+        s.committed(vec![(rows[0].clone(), 7)]);
         // Nothing new: nothing to write.
         assert!(s.evaluate(T0 + 120, &TH, 40).is_empty());
         // It goes on: the same row, updated.
@@ -1157,6 +1282,10 @@ mod tests {
             .status(207)
             .feed(&mut s, 40);
         for i in 0..40 {
+            // Its first sync refreshes every series.json.
+            req(T0, ip, "GET", "metadata", "series_json")
+                .series(&format!("series {i}"))
+                .feed(&mut s, 40);
             req(T0, ip, "GET", "cover", "")
                 .series(&format!("series {i}"))
                 .feed(&mut s, 40);
@@ -1240,7 +1369,7 @@ mod tests {
             download(&mut s, T0, crawler, i, 40);
         }
         let rows = s.evaluate(T0 + 1, &TH, 40);
-        s.written(&[(rows[0].ip.clone(), rows[0].serial, 1)]);
+        s.committed(vec![(rows[0].clone(), 1)]);
         let ips: Vec<&'static str> = (0..10_000)
             .map(|i| &*Box::leak(format!("2001:db8::{i:x}").into_boxed_str()))
             .collect();
@@ -1287,7 +1416,7 @@ mod tests {
             download(&mut s, T0, "203.0.113.1", i, 40);
         }
         let rows = s.evaluate(T0 + 1, &TH, 40);
-        s.written(&[(rows[0].ip.clone(), rows[0].serial, 11)]);
+        s.committed(vec![(rows[0].clone(), 11)]);
         // Force it out: every other tracker has an episode too, and it is the oldest.
         s.evict(None);
         assert!(!s.is_tracked("203.0.113.1"));
@@ -1302,7 +1431,7 @@ mod tests {
             download(&mut s, T0 + 3, "203.0.113.2", i, 40);
         }
         let rows = s.evaluate(T0 + 4, &TH, 40);
-        s.written(&[(rows[0].ip.clone(), rows[0].serial, 12)]);
+        s.committed(vec![(rows[0].clone(), 12)]);
         let wider = Thresholds {
             window_hours: 12,
             ..TH
@@ -1439,6 +1568,59 @@ mod tests {
         assert_eq!((rows[0].row.series, rows[0].row.volumes), (20, 20));
         // The listings came first: no tracker yet, so not counted.
         assert_eq!(rows[0].row.requests, 20);
+    }
+
+    #[test]
+    fn a_rolled_back_flush_leaves_everything_to_the_next_one() {
+        let mut s = State::new(&TH);
+        for i in 0..30 {
+            download(&mut s, T0, "203.0.113.1", i, 40);
+        }
+        // Opened, but the flush rolled back: written again, still as a new row.
+        let rows = s.evaluate(T0 + 1, &TH, 40);
+        assert_eq!((rows.len(), rows[0].row.id), (1, 0));
+        s.rolled_back(rows);
+        let rows = s.evaluate(T0 + 2, &TH, 40);
+        assert_eq!((rows.len(), rows[0].row.id), (1, 0));
+        assert_eq!(rows[0].row.status, STATUS_OPEN);
+        // Committed: the id is kept.
+        s.committed(vec![(rows[0].clone(), 5)]);
+        assert!(s.evaluate(T0 + 3, &TH, 40).is_empty());
+        // Closed after a quiet window, rolled back: the closing row comes again.
+        let quiet = T0 + TH.window_s();
+        let rows = s.evaluate(quiet, &TH, 40);
+        assert_eq!(
+            (rows[0].row.id, rows[0].row.status.as_str()),
+            (5, STATUS_CLOSED)
+        );
+        s.rolled_back(rows);
+        let rows = s.evaluate(quiet + 1, &TH, 40);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            (rows[0].row.id, rows[0].row.status.as_str()),
+            (5, STATUS_CLOSED)
+        );
+        s.committed(vec![(rows[0].clone(), 5)]);
+        assert!(s.evaluate(quiet + 2, &TH, 40).is_empty());
+    }
+
+    #[test]
+    fn an_episode_evicted_while_its_row_is_written_is_closed_under_its_new_id() {
+        let mut s = State::new(&TH);
+        for i in 0..30 {
+            download(&mut s, T0, "203.0.113.1", i, 40);
+        }
+        let rows = s.evaluate(T0 + 1, &TH, 40);
+        // Evicted before the flush committed (it had no id then: no closing row).
+        s.evict(None);
+        assert!(s.evaluate(T0 + 2, &TH, 40).is_empty());
+        s.committed(vec![(rows[0].clone(), 9)]);
+        let rows = s.evaluate(T0 + 3, &TH, 40);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            (rows[0].row.id, rows[0].row.status.as_str()),
+            (9, STATUS_CLOSED)
+        );
     }
 
     #[test]
