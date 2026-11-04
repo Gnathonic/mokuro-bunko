@@ -46,7 +46,10 @@
 //!
 //! **Bounds** (design §4.5): at most [`MAX_IPS`] trackers, evicted least recently used
 //! in batches (an IP with an open episode last); at most [`MAX_ENTRIES`] series and
-//! volume touches over all trackers (about 6 MiB at worst); per tracker at most the
+//! volume touches over all trackers (about 6 MiB at worst). A full touch budget evicts
+//! only trackers without an open episode, and a crawl's new series then takes the room
+//! of one of its own volumes (series coverage is what the episodes report), so
+//! concurrent mirrors are never cut short; per tracker at most the
 //! catalog's series count (plus slack) and [`MAX_VOLUMES`] volumes. Only an IP that
 //! sends a signal gets a tracker; the hot path is one short lock and a few hash
 //! lookups, no I/O and no allocation for an IP already tracked.
@@ -70,9 +73,15 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 
 /// Most client IPs tracked at once.
 pub const MAX_IPS: usize = 4096;
-/// Trackers dropped at once when [`MAX_IPS`] or [`MAX_ENTRIES`] is reached (so the
-/// least-recently-used search runs once per this many new IPs).
+/// Trackers dropped at once when [`MAX_IPS`] is reached (so the least-recently-used
+/// search runs once per this many new IPs).
 const EVICT_BATCH: usize = 512;
+/// A full touch budget frees this much of [`MAX_ENTRIES`] at once (from trackers
+/// without an open episode), so the search runs rarely.
+const ROOM_TARGET: usize = MAX_ENTRIES / 10 * 9;
+/// Requests between two room searches that found nothing to free (every touch held
+/// by open episodes): the hot path does not search on every dropped touch.
+const ROOM_RETRY: u64 = 4096;
 /// Most series and volume touches kept over every tracker. An entry is a `u32` hash
 /// and two `u16` half stamps (or one, for a volume): at hashbrown's worst load about
 /// 21 bytes, so about 6 MiB.
@@ -348,6 +357,8 @@ pub(crate) struct State {
     catalog_keys: Option<HashSet<u32, Fx>>,
     /// Touches not kept for lack of room (all time).
     pub dropped: u64,
+    /// No room search before this clock (the last one found nothing to free).
+    room_retry_at: u64,
     /// Trackers evicted (all time).
     pub evicted: u64,
 }
@@ -437,6 +448,17 @@ impl State {
             let s = stamp(t.halves[1].half);
             if let Some(k) = series {
                 let known = t.series.contains_key(&k);
+                if !known
+                    && t.series.len() < series_cap
+                    && self.entries >= MAX_ENTRIES
+                    && let Some(&v) = t.volumes.keys().next()
+                {
+                    // No room left: a series of its own counts more than a volume of its
+                    // own (coverage is in series), so the series takes that room.
+                    t.volumes.remove(&v);
+                    self.entries -= 1;
+                    self.dropped += 1;
+                }
                 if known || (t.series.len() < series_cap && self.entries < MAX_ENTRIES) {
                     let touch = t.series.entry(k).or_default();
                     match signal {
@@ -466,16 +488,40 @@ impl State {
                 }
             }
         }
-        if need_room {
-            // Make room for later touches (this one is lost): the least recently used
-            // trackers other than this one go.
-            self.evict(Some(o.ip));
+        if need_room && clock >= self.room_retry_at {
+            // Make room for later touches (this one is lost).
+            self.make_room(o.ip);
+        }
+    }
+
+    /// Free touches down to [`ROOM_TARGET`]: the least recently used trackers without
+    /// an open episode (never `keep`) go. An open episode is never evicted for room: a
+    /// crawl cut short would be reported as two smaller ones.
+    fn make_room(&mut self, keep: &str) {
+        let mut candidates: Vec<(u64, Arc<str>)> = self
+            .trackers
+            .iter()
+            .filter(|(ip, t)| t.episode.is_none() && &***ip != keep && t.entries() > 0)
+            .map(|(ip, t)| (t.used, ip.clone()))
+            .collect();
+        candidates.sort_unstable();
+        for (_, ip) in candidates {
+            if self.entries <= ROOM_TARGET {
+                break;
+            }
+            if let Some(t) = self.trackers.remove(&ip) {
+                self.entries = self.entries.saturating_sub(t.entries());
+                self.evicted += 1;
+            }
+        }
+        if self.entries > ROOM_TARGET {
+            self.room_retry_at = self.clock + ROOM_RETRY;
         }
     }
 
     /// Drop the [`EVICT_BATCH`] least recently used trackers (never `keep`), those
-    /// without an open episode first; an evicted open episode is closed at the next
-    /// flush.
+    /// without an open episode first, to make room for a new IP; an evicted open
+    /// episode is closed at the next flush.
     fn evict(&mut self, keep: Option<&str>) {
         let mut candidates: Vec<(bool, u64, Arc<str>)> = self
             .trackers
@@ -1444,6 +1490,69 @@ mod tests {
             (12, STATUS_CLOSED)
         );
         assert_eq!((s.tracked(), s.entries()), (0, 0));
+    }
+
+    /// More concurrent full-library mirrors than the touch budget holds the volumes of
+    /// (20 x (2000 series + 20,000 volumes) > MAX_ENTRIES): each is still one episode
+    /// that reaches the whole catalog. A full budget used to evict every other tracker,
+    /// open episodes and all, splitting each crawl in two at about two-thirds coverage.
+    #[test]
+    fn concurrent_mirrors_past_the_touch_budget_stay_one_whole_episode_each() {
+        const MIRRORS: usize = 20;
+        const SERIES: usize = 2000;
+        const VOLUMES: usize = 10;
+        let catalog = SERIES as u64;
+        let mut s = State::new(&TH);
+        let ips: Vec<&'static str> = (0..MIRRORS)
+            .map(|i| &*Box::leak(format!("2001:db8:7::{:x}", i + 1).into_boxed_str()))
+            .collect();
+        let total = MIRRORS * SERIES * VOLUMES;
+        let mut next_id = 0i64;
+        let mut episodes: HashMap<&str, HashSet<i64>> = HashMap::new();
+        let mut best: HashMap<&str, f64> = HashMap::new();
+        let mut flush = |s: &mut State, now: i64| {
+            let rows = s.evaluate(now, &TH, catalog);
+            let mut done = Vec::new();
+            for p in rows {
+                let id = if p.row.id > 0 {
+                    p.row.id
+                } else {
+                    next_id += 1;
+                    next_id
+                };
+                let ip = ips.iter().find(|i| **i == &*p.ip).copied().unwrap();
+                episodes.entry(ip).or_default().insert(id);
+                let b = best.entry(ip).or_default();
+                *b = b.max(p.row.coverage);
+                done.push((p, id));
+            }
+            s.committed(done);
+        };
+        let mut n = 0usize;
+        for series in 0..SERIES {
+            let name = format!("series {series}");
+            for v in 0..VOLUMES {
+                let vol = format!("{name}/v{v}.cbz");
+                for ip in &ips {
+                    let at = T0 + (n * 7200 / total) as i64;
+                    req(at, ip, "GET", "volume", "full")
+                        .series(&name)
+                        .volume(&vol)
+                        .feed(&mut s, catalog);
+                    n += 1;
+                    if n.is_multiple_of(total / 120) {
+                        flush(&mut s, at);
+                    }
+                }
+            }
+            assert!(s.entries() <= MAX_ENTRIES);
+        }
+        flush(&mut s, T0 + 7201);
+        assert_eq!(s.evicted, 0, "no open episode is evicted for touch room");
+        for ip in &ips {
+            assert_eq!(episodes[ip].len(), 1, "{ip}: {:?}", episodes[ip]);
+            assert_eq!(best[ip], 1.0, "{ip}");
+        }
     }
 
     /// The worst a flood can make the trackers hold: every IP slot taken and the touch
