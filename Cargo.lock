@@ -609,7 +609,6 @@ dependencies = [
  "flate2",
  "hex",
  "image",
- "jxl-image-rs-integration",
  "mozjpeg",
  "ort",
  "parking_lot",
@@ -748,6 +747,7 @@ version = "0.7.5"
 dependencies = [
  "base64 0.22.1",
  "image",
+ "jxl",
  "jxl-image-rs-integration",
  "serde_json",
  "thiserror 2.0.21",

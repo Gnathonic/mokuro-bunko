@@ -27,7 +27,6 @@ nnapi = ["ort/nnapi"]
 [dependencies]
 ort = { workspace = true, features = ["std", "ndarray", "download-binaries", "copy-dylibs", "tracing", "tls-rustls", "api-24"] }
 image = { workspace = true }
-jxl-image-rs-integration = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

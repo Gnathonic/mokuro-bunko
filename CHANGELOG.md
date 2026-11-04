@@ -8,12 +8,16 @@ Volumes of JPEG XL pages get OCR and covers.
 - **JPEG XL pages.** A volume whose pages are `.jxl` is now read like any other:
   the OCR reads its pages and the server makes its cover. That covers bare codestreams
   and containers, lossless and lossy, and JPEGs transcoded to JPEG XL. Until now
-  nothing counted `.jxl` images as pages, so every OCR attempt failed with "no page
-  images found". The volume kept its "OCR pending" badge and was retried every hour,
+  the catalog counted `.jxl` images as pages but the OCR did not, so every OCR attempt
+  failed with "no page images found". The volume kept its "OCR pending" badge and was retried every hour,
   and a volume without a cover of its own got a `.nocover` marker. Pages decode with jxl-rs (`jxl` 0.8, BSD-3-Clause), the decoder Chromium
   and Firefox ship. Lossless and transcoded pages read the same text as their source
   images. A processor needs 0.7.5 to read these volumes; with automatic updates on,
   it follows the library.
+- **JPEG XL decodes stay within the decode budget.** Before decoding, the headers of
+  the image and every frame are read, and a file whose decoder buffers would exceed
+  the budget is refused like any oversized image. A decoder that panics on a broken
+  image now fails only that page or cover.
 
 ### Fixed
 - **Covers for JPEG XL volumes an older server gave up on.** On start, the server

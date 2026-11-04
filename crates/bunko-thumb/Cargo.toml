@@ -9,7 +9,9 @@ repository.workspace = true
 
 [dependencies]
 image = { workspace = true }
-# JPEG XL covers (jxl-rs, BSD-3-Clause).
+# JPEG XL covers (jxl-rs, BSD-3-Clause): the `image` hook, and jxl itself for the
+# header scan that keeps a decode within budget.
+jxl = { workspace = true }
 jxl-image-rs-integration = { workspace = true }
 thiserror = { workspace = true }
 # libwebp (BSD-3-Clause) for the lossy encoder; the `image` crate writes lossless WebP only.
