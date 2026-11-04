@@ -58,7 +58,10 @@ pub(crate) fn write_window(a: &Analytics, w: Window, now: i64) -> bunko_db::Resu
                 .join(", ")
         );
     }
-    a.db().write(|tx| {
+    // The crawl episodes ride this transaction; the detector applies what it wrote only
+    // once it commits.
+    let mut crawl = a.crawl().begin_flush(now);
+    let out = a.db().write(|tx| {
         for (k, c) in &w.traffic {
             let d = TrafficDims {
                 protocol: k.protocol,
@@ -155,6 +158,8 @@ pub(crate) fn write_window(a: &Analytics, w: Window, now: i64) -> bunko_db::Resu
                 i64::try_from(dropped).unwrap_or(i64::MAX),
             )?;
         }
-        a.crawl().flush_into(tx, now)
-    })
+        crawl.write(tx)
+    });
+    crawl.finish(out.is_ok());
+    out
 }

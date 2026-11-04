@@ -830,6 +830,7 @@ dependencies = [
  "image",
  "indexmap",
  "ipnet",
+ "libc",
  "notify",
  "parking_lot",
  "percent-encoding",
@@ -852,6 +853,7 @@ dependencies = [
  "tower",
  "tracing",
  "which",
+ "windows-sys 0.60.2",
  "x509-parser",
  "zip 2.4.2",
 ]

@@ -71,6 +71,13 @@ bunko-store = { workspace = true, features = ["watch", "tokio"] }
 # Runtime)
 bunko-thumb = { path = "../bunko-thumb" }
 
+# analytics::host: the process's memory and CPU time and the host's memory (Linux and
+# Android read /proc, no dependency).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.60", features = ["Win32_Foundation", "Win32_System_ProcessStatus", "Win32_System_SystemInformation", "Win32_System_Threading"] }
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 # admin::update tests: the automatic update's quiet-moment polling in paused time.
 tokio = { workspace = true, features = ["test-util"] }
