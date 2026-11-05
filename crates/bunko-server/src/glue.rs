@@ -60,6 +60,11 @@ impl OcrStatusSource for OcrGlue {
         );
         Some(doc)
     }
+
+    /// From the failing volumes the scheduler publishes: never waits on the scheduler.
+    fn volume_failure(&self, series: &str, volume: &str) -> Option<String> {
+        self.0.failing_volume(&format!("{series}/{volume}.cbz"))
+    }
 }
 
 impl ArchiveEvents for OcrGlue {

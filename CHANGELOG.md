@@ -2,7 +2,17 @@
 
 ## [0.7.7] - 2026-11-05
 
-A volume is offered only to machines whose release reads its pages.
+A volume is offered only to machines whose release reads its pages, and the catalog
+says when a volume's OCR keeps failing.
+
+### Added
+- **"OCR failed" in the catalog.** A volume whose OCR has a live failure record shows
+  an "OCR failed" badge instead of "OCR pending", with the kind of failure as its hover
+  text: "This volume has no pages that could be decoded.", "The archive is damaged or
+  is not a valid zip file.", or "OCR failed; it will be tried again later." The text
+  names the kind of failure only, never the error itself (which can name a
+  processor's paths or settings). A replaced archive clears it. The series API adds
+  `ocr_failed` and `ocr_failure` to such a volume only; every other entry is unchanged.
 
 ### Fixed
 - **Volumes a processor's release cannot read.** The library handed a volume to any

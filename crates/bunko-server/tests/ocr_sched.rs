@@ -439,6 +439,45 @@ fn returned_claims_open_the_breaker() {
     assert!(volumes(&p.drain()).is_empty());
 }
 
+/// The catalog's "OCR failed" badge: a volume whose primary row has a live failure
+/// record, with the public text of its kind (never the error, which names a
+/// processor's paths). A replaced archive makes the record void: pending again.
+#[test]
+fn failing_volumes_carry_the_public_text_of_their_failure() {
+    let mut h = harness(vec![primary()]);
+    h.add("A/V1.cbz", 2);
+    h.at(0.0);
+    let mut p = h.connect("box", 1);
+    let ops = p.drain();
+    let sid = opened(&ops)[0].clone();
+    let claim = volumes(&ops)[0].1.clone();
+    h.event(&p, ready(&sid));
+    h.event(
+        &p,
+        Event::VolumeFailed {
+            sid: sid.clone(),
+            id: claim,
+            error: "no page images found in V1.cbz".into(),
+        },
+    );
+    let failing = h.s.failing_volumes();
+    assert_eq!(
+        failing.get("a/v1.cbz").map(String::as_str),
+        Some("This volume has no pages that could be decoded."),
+        "{failing:?}"
+    );
+    // A new archive in its place: the record no longer speaks for it.
+    let cbz = h.add("A/V1.cbz", 3);
+    let later = std::time::UNIX_EPOCH + std::time::Duration::from_secs_f64(h.t0 + 5.0);
+    std::fs::File::options()
+        .write(true)
+        .open(&cbz)
+        .unwrap()
+        .set_modified(later)
+        .unwrap();
+    assert!(h.s.failing_volumes().is_empty());
+}
+
 #[test]
 fn failure_backoff_waits_the_retry_delay() {
     let mut h = harness(vec![primary()]);
