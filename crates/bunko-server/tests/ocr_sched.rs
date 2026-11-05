@@ -478,6 +478,74 @@ fn failing_volumes_carry_the_public_text_of_their_failure() {
     assert!(h.s.failing_volumes().is_empty());
 }
 
+/// A failure of the volume itself (nothing in it decodes) is parked: no backoff
+/// brings it back to the release that failed it, however long it waits; a machine of a
+/// release that has not tried it gets it at once.
+#[test]
+fn a_failure_of_the_volume_is_parked_until_another_release_can_try() {
+    let mut h = harness(vec![primary()]);
+    h.add("A/V1.cbz", 2);
+    h.at(0.0);
+    let mut p = h.connect_version("box", 1, "0.7.6");
+    let ops = p.drain();
+    let sid = opened(&ops)[0].clone();
+    let claim = volumes(&ops)[0].1.clone();
+    h.event(&p, ready(&sid));
+    h.event(
+        &p,
+        Event::VolumeFailed {
+            sid: sid.clone(),
+            id: claim,
+            error: "no page images found in V1.cbz".into(),
+        },
+    );
+    let rec = &h.s.failures["A/V1.cbz"];
+    assert_eq!(rec["tried_by"], serde_json::json!(["0.7.6"]));
+    assert_eq!(rec["library_version"], "0.7.0-test");
+    h.event(&p, exit(&sid, Some(0)));
+    h.at(365.0 * 86400.0);
+    assert!(
+        volumes(&p.drain()).is_empty(),
+        "retried by the release that failed it"
+    );
+    let mut newer = h.connect_version("newer", 1, "0.7.7");
+    assert_eq!(names(&volumes(&newer.drain())), vec!["A/V1.cbz"]);
+}
+
+/// An admin's "retry": the failure records go (one volume's, or all), so a parked
+/// volume is offered again at once, even to the release that failed it.
+#[test]
+fn an_admin_retry_brings_a_parked_volume_back() {
+    let mut h = harness(vec![primary()]);
+    h.add("A/V1.cbz", 2);
+    h.add("B/V2.cbz", 2);
+    h.at(0.0);
+    let mut p = h.connect_version("box", 2, "0.7.6");
+    let ops = p.drain();
+    let sid = opened(&ops)[0].clone();
+    h.event(&p, ready(&sid));
+    for (_, claim, _) in volumes(&ops) {
+        h.event(
+            &p,
+            Event::VolumeFailed {
+                sid: sid.clone(),
+                id: claim,
+                error: "no page images found".into(),
+            },
+        );
+    }
+    h.event(&p, exit(&sid, Some(0)));
+    assert_eq!(h.s.failures.len(), 2);
+    h.at(86400.0);
+    assert!(volumes(&p.drain()).is_empty());
+    assert_eq!(h.s.retry_failed(Some("A/V1.cbz")), 1);
+    assert!(h.s.failures.contains_key("B/V2.cbz"));
+    h.at(86401.0);
+    assert_eq!(names(&volumes(&p.drain())), vec!["A/V1.cbz"]);
+    assert_eq!(h.s.retry_failed(None), 1);
+    assert!(h.s.failures.is_empty());
+}
+
 #[test]
 fn failure_backoff_waits_the_retry_delay() {
     let mut h = harness(vec![primary()]);
@@ -493,7 +561,7 @@ fn failure_backoff_waits_the_retry_delay() {
         Event::VolumeFailed {
             sid: sid.clone(),
             id: claim,
-            error: "every page failed".into(),
+            error: "CUDA out of memory".into(),
         },
     );
     let rec =
