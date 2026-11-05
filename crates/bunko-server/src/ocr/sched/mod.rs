@@ -300,6 +300,11 @@ pub struct Scheduler {
     pub returned_by: HashMap<Job, HashSet<String>>,
     pub eft_deadlines: EftDeadlines<Job>,
     pub left_logged: HashSet<(Job, String)>,
+    /// Page suffixes of the volumes looked into for a processor of an older release
+    /// (`machine_reads`): rel → (size, mtime_ns, suffixes).
+    pub page_suffixes: HashMap<String, (u64, i128, Arc<[String]>)>,
+    /// `(job, machine)` already logged as a volume that machine's release cannot read.
+    pub unreadable_logged: HashSet<(Job, String)>,
     pub cards: IndexMap<Job, Map<String, Value>>,
     /// Invalidates the cached pending list (`_queue_generation`).
     pub queue_generation: u64,
@@ -376,6 +381,8 @@ impl Scheduler {
             returned_by: HashMap::new(),
             eft_deadlines: EftDeadlines::new(),
             left_logged: HashSet::new(),
+            page_suffixes: HashMap::new(),
+            unreadable_logged: HashSet::new(),
             cards: IndexMap::new(),
             queue_generation: 0,
             page_version: 1,
@@ -703,6 +710,7 @@ impl Scheduler {
         if now - self.scan_reset_at >= self.settings.poll_interval {
             self.scan_reset_at = now;
             self.left_logged.clear();
+            self.unreadable_logged.clear();
             self.stopped.clear();
             self.strikes.clear();
             self.autobench.asked.clear();
