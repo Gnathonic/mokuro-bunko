@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.7.6] - 2026-11-05
+
+Processors that have both a libtorch pack and the Vulkan pack update themselves again.
+
+### Fixed
+- **Automatic updates of a processor with two OCR backend packs.** A processor with a
+  libtorch pack (cu130, rocm7.1 or cpu) and the Vulkan pack beside it could not update
+  itself. During the update the new release lists the installed packs, which all belong
+  to the old release. It read each pack's kind through its own release check, which every
+  one of them fails, so it judged them by folder name: the Vulkan pack passed for a
+  libtorch one and sorted first. The update staged the Vulkan pack instead of the
+  libtorch one, stopped on "no compiled hayai-nova package for cpu (cpu)", and tried
+  again every 10 minutes, so the processor stayed on its old release. A pack's kind now
+  comes from its manifest whatever its release, so the update brings the libtorch pack
+  along, and the Vulkan pack of the new release follows at the restart, as at any start.
+  The fix is in the release being installed, so a processor stuck this way updates to
+  0.7.6 by itself once its library runs 0.7.6.
+
 ## [0.7.5] - 2026-11-04
 
 Volumes of JPEG XL pages get OCR and covers.
