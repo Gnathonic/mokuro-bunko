@@ -22,8 +22,12 @@ const BOARD_EVERY: Duration = Duration::from_millis(250);
 /// never makes a status request wait.
 pub type RunningJobs = Arc<RwLock<Arc<Vec<Map<String, Value>>>>>;
 
+/// The failing volumes ([`Scheduler::failing_volumes`]) as last published (each tick),
+/// for the catalog's "OCR failed" badge: casefolded relative path → public text.
+pub type FailingVolumes = Arc<RwLock<Arc<std::collections::HashMap<String, String>>>>;
+
 /// Run the scheduler until `Msg::Stop` (or every sender is gone).
-pub fn run(mut sched: Scheduler, rx: Receiver<Msg>, board: RunningJobs) {
+pub fn run(mut sched: Scheduler, rx: Receiver<Msg>, board: RunningJobs, failing: FailingVolumes) {
     let mut next_tick = Instant::now() + TICK;
     let mut published: Option<Instant> = None;
     loop {
@@ -49,6 +53,10 @@ pub fn run(mut sched: Scheduler, rx: Receiver<Msg>, board: RunningJobs) {
         if ticked {
             sched.handle(Msg::Tick);
             next_tick = Instant::now() + TICK;
+            let now = sched.failing_volumes();
+            if **failing.read() != now {
+                *failing.write() = Arc::new(now);
+            }
         }
         if ticked || published.is_none_or(|at| at.elapsed() >= BOARD_EVERY) {
             *board.write() = Arc::new(sched.running_jobs());
@@ -56,6 +64,7 @@ pub fn run(mut sched: Scheduler, rx: Receiver<Msg>, board: RunningJobs) {
         }
     }
     *board.write() = Arc::new(Vec::new());
+    *failing.write() = Arc::default();
 }
 
 /// Start the thread.
@@ -63,10 +72,11 @@ pub fn spawn(
     sched: Scheduler,
     rx: Receiver<Msg>,
     board: RunningJobs,
+    failing: FailingVolumes,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     std::thread::Builder::new()
         .name("ocr-scheduler".into())
-        .spawn(move || run(sched, rx, board))
+        .spawn(move || run(sched, rx, board, failing))
 }
 
 /// A channel pair for the scheduler.

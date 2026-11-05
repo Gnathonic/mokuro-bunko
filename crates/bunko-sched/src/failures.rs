@@ -111,6 +111,42 @@ pub fn eligibility(
     }
 }
 
+/// What a failure record's error means, as far as anyone browsing the library needs to
+/// know: the catalog shows [`FailureKind::public_text`], never the error itself (it can
+/// name a processor's paths, devices and settings).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FailureKind {
+    /// The archive holds no page the OCR could decode.
+    NoReadablePages,
+    /// The archive could not be opened as a zip.
+    DamagedArchive,
+    /// Anything else (a machine's trouble, a timeout, ...).
+    Other,
+}
+
+impl FailureKind {
+    /// The kind of a record's `error`, from the messages the OCR reports.
+    pub fn of(error: &str) -> FailureKind {
+        let e = error.trim();
+        if e.starts_with("no page images found") || e == "every page failed" {
+            FailureKind::NoReadablePages
+        } else if e.starts_with("archive ") || e.contains("not a zip file") {
+            FailureKind::DamagedArchive
+        } else {
+            FailureKind::Other
+        }
+    }
+
+    /// One sentence for the catalog's hover text.
+    pub fn public_text(self) -> &'static str {
+        match self {
+            FailureKind::NoReadablePages => "This volume has no pages that could be decoded.",
+            FailureKind::DamagedArchive => "The archive is damaged or is not a valid zip file.",
+            FailureKind::Other => "OCR failed; it will be tried again later.",
+        }
+    }
+}
+
 /// `_pending_entry`'s `attempts`: shown only for a record not made void by
 /// a replaced archive.
 pub fn pending_attempts(record: Option<&Object>, archive_mtime: Option<f64>) -> Option<i64> {
@@ -379,6 +415,38 @@ pub fn failure_log_line(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What the catalog may show anyone: the kind of failure only, never the error text
+    /// (which names a processor's paths).
+    #[test]
+    fn failure_kinds_and_their_public_text() {
+        use FailureKind::*;
+        for (error, kind) in [
+            ("no page images found in Vol 1.cbz", NoReadablePages),
+            ("every page failed", NoReadablePages),
+            (
+                "archive /proc/self/fd/7: no end of central directory",
+                DamagedArchive,
+            ),
+            ("File is not a zip file", DamagedArchive),
+            ("CUDA out of memory", Other),
+            ("", Other),
+        ] {
+            assert_eq!(FailureKind::of(error), kind, "{error:?}");
+        }
+        assert_eq!(
+            NoReadablePages.public_text(),
+            "This volume has no pages that could be decoded."
+        );
+        assert_eq!(
+            DamagedArchive.public_text(),
+            "The archive is damaged or is not a valid zip file."
+        );
+        assert_eq!(
+            Other.public_text(),
+            "OCR failed; it will be tried again later."
+        );
+    }
 
     #[test]
     fn backoff_schedule() {

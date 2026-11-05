@@ -73,6 +73,13 @@ pub trait OcrStatusSource: Send + Sync {
     /// The progress object, or `None` when nothing runs. `/catalog/api/ocr-status`
     /// returns it verbatim when its `active` is truthy, else `{"active": false}`.
     fn progress(&self) -> Option<Map<String, Value>>;
+
+    /// Why `series/volume`'s OCR keeps failing, in words fit for anyone browsing the
+    /// catalog (the kind of failure only); None when it is not failing.
+    fn volume_failure(&self, series: &str, volume: &str) -> Option<String> {
+        let _ = (series, volume);
+        None
+    }
 }
 
 /// A volume's OCR outlook for its manifest (0.5.2 `control.volume_pending` +
