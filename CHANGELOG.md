@@ -2,10 +2,27 @@
 
 ## [0.7.7] - 2026-11-05
 
-A volume is offered only to machines whose release reads its pages, and the catalog
-says when a volume's OCR keeps failing.
+A volume is offered only to machines whose release reads its pages, the catalog says
+when a volume's OCR keeps failing, and a failure of the volume itself is no longer
+retried every hour forever.
+
+### Changed
+- **Failures of the volume itself are parked.** A volume whose archive has no page that
+  can be decoded, or does not open as a zip, failed the same way every hour, forever.
+  It now waits until something could change the outcome: its archive is replaced, the
+  library runs another release, a machine of a release that has not tried it connects
+  (and only that machine is offered it; each record lists the releases that tried it in
+  `tried_by`), or an admin retries it. A failure recorded by an older server is tried
+  once more after the update. A machine's trouble (out of memory, a timeout, a lost
+  connection or download) keeps the hourly cap; an error nothing recognizes backs off
+  further from the 7th attempt: 6 hours, a day, then a week.
+- The queue page says "no decodable pages" or "damaged archive", "waits for a new
+  archive or release", for a parked volume instead of "failed — will retry".
 
 ### Added
+- **Retry failed volumes.** The admin panel's OCR section has a "Retry failed volumes"
+  button (`POST /api/ocr/failures/retry`, optionally `{"volume": "<series>/<volume>.cbz"}`):
+  the failure records go and those volumes are tried again at once.
 - **"OCR failed" in the catalog.** A volume whose OCR has a live failure record shows
   an "OCR failed" badge instead of "OCR pending", with the kind of failure as its hover
   text: "This volume has no pages that could be decoded.", "The archive is damaged or

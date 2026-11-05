@@ -108,7 +108,8 @@ impl Scheduler {
                 job.file_name()
             ));
         } else if self.settings.rows.iter().any(|r| r.id == row.id) {
-            self.record_failure(job, &row, failure.as_deref());
+            let release = self.release_of(&claim.pid);
+            self.record_failure(job, &row, failure.as_deref(), &release);
         } else {
             self.log(format!(
                 "Skipped {} for {}: the generation is no longer configured",
@@ -129,6 +130,7 @@ impl Scheduler {
         job: &Job,
         row: &bunko_core::generations::Generation,
         error: Option<&str>,
+        machine_release: &str,
     ) {
         let key = self.failure_key_of(job, row);
         let failure = NewFailure {
@@ -142,6 +144,11 @@ impl Scheduler {
         };
         let now = self.now();
         let record = record_failure(&mut self.failures, &key, &failure, now);
+        // Which releases tried it, and the library's: what may bring a parked failure back.
+        let library = self.deps.version.clone();
+        if let Some(stored) = self.failures.get_mut(&key).and_then(Value::as_object_mut) {
+            bunko_sched::failures::stamp_versions(stored, &library, machine_release);
+        }
         self.log(failure_log_line(
             &row.name,
             &job.rel,
@@ -150,6 +157,51 @@ impl Scheduler {
             &record.error,
         ));
         self.save_failures();
+    }
+
+    /// An admin's "retry": drop the failure records of `rel` (every row's, any case) or
+    /// of every volume, so they are offered again at once, parked or not. Returns how
+    /// many volumes it cleared.
+    pub fn retry_failed(&mut self, rel: Option<&str>) -> usize {
+        let wanted = rel.map(bunko_library::pyunicode::casefold);
+        let keys: Vec<String> = self
+            .failures
+            .keys()
+            .filter(|key| {
+                let Some(want) = &wanted else { return true };
+                let k = bunko_library::pyunicode::casefold(key);
+                k == *want || k.starts_with(&format!("{want}@"))
+            })
+            .cloned()
+            .collect();
+        let mut volumes: std::collections::HashSet<(String, String)> =
+            std::collections::HashSet::new();
+        for key in &keys {
+            if let Some(record) = self.failures.shift_remove(key) {
+                let field = |k: &str| {
+                    record
+                        .get(k)
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string()
+                };
+                volumes.insert((field("series"), field("volume")));
+            }
+        }
+        if !keys.is_empty() {
+            self.save_failures();
+            self.log(format!(
+                "Cleared the OCR failures of {} volume(s) ({}): retry asked by an admin",
+                volumes.len(),
+                rel.unwrap_or("every failed volume")
+            ));
+            self.bump_page();
+            // Asked for now: a scan starts at once, as when a volume arrives between polls.
+            if !self.stopping {
+                self.start_scan();
+            }
+        }
+        volumes.len()
     }
 
     /// `release_ocr_job`: give the claim back, recording nothing.
