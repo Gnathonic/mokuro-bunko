@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.7.7] - 2026-11-05
+
+A volume is offered only to machines whose release reads its pages.
+
+### Fixed
+- **Volumes a processor's release cannot read.** The library handed a volume to any
+  processor, whatever release it ran. A processor older than 0.7.5 was given volumes of
+  JPEG XL pages; it failed each with "no page images found", and the failure held the
+  volume back an hour for every machine, so a library whose fastest processors were
+  older kept a volume failing while a machine that could read it stood idle. The
+  library now judges each processor by the version it registered with
+  (`bunko_proto::PAGE_FORMATS_SINCE`: JPEG XL from 0.7.5) and offers it only volumes
+  its release reads. The earliest-finish walk and the warm-session handoff no longer
+  leave a volume to a machine that cannot read it, and a volume no connected machine
+  can read waits for one, unrecorded, instead of failing. This server's own OCR reads
+  everything. Only a processor older than some page format costs a look into the
+  volume's zip directory, kept while the archive is unchanged.
+- **The benchmark sample keeps to pages every release reads.** Every machine
+  benchmarks with the same sample, which could hold JPEG XL pages a processor older
+  than 0.7.5 cannot read. It now takes volumes of other formats first, and a library of
+  JPEG XL volumes only still benchmarks with them.
+
 ## [0.7.6] - 2026-11-05
 
 Processors that have both a libtorch pack and the Vulkan pack update themselves again.

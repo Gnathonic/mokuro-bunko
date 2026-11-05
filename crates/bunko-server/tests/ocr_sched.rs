@@ -177,6 +177,94 @@ fn eft_lets_the_slow_lane_take_what_the_fast_lane_cannot_finish_sooner() {
     assert!(!s.is_empty(), "the slow lane took nothing: fast {f:?}");
 }
 
+/// Regression: a processor older than the release that taught the OCR a page format
+/// (JPEG XL: 0.7.5) was handed volumes of those pages, failed every one with "no page
+/// images found", and each failure held the volume back an hour for everyone. It is
+/// offered only volumes it can read; the others wait, unrecorded, for one that can.
+#[test]
+fn a_processor_is_never_offered_pages_its_release_cannot_read() {
+    let mut h = harness(vec![primary()]);
+    h.add("A/V1.cbz", 3);
+    h.add_jxl("B/J1.cbz", 3);
+    h.at(0.0);
+    let mut old = h.connect_version("old", 2, "0.7.4");
+    let got = names(&volumes(&old.drain()));
+    assert_eq!(got, vec!["A/V1.cbz"], "0.7.4 cannot read JPEG XL pages");
+    assert!(h.s.failures.is_empty());
+    let mut new = h.connect_version("new", 1, "0.7.5");
+    assert_eq!(names(&volumes(&new.drain())), vec!["B/J1.cbz"]);
+}
+
+/// Regression: the earliest-finish walk left a JPEG XL volume to a faster lane whose
+/// release cannot read it, so the lane that could kept stepping aside.
+#[test]
+fn eft_never_leaves_a_volume_to_a_lane_that_cannot_read_it() {
+    let mut h = harness(vec![primary()]);
+    h.add_jxl("A/J1.cbz", 100);
+    h.at(0.0);
+    for _ in 0..2 {
+        h.s.rates().record_volume("g-1@able", 100.0, 100.0, false);
+        h.s.rates()
+            .record_volume("g-1@fast-old", 100.0, 10.0, false);
+    }
+    h.run(|s| s.hold_queue("able"));
+    h.run(|s| s.hold_queue("fast-old"));
+    let mut able = h.connect_version("able", 1, "0.7.5");
+    let mut fast_old = h.connect_version("fast-old", 1, "0.7.4");
+    h.run(|s| {
+        s.release_queue("able");
+        s.release_queue("fast-old");
+    });
+    assert!(
+        volumes(&fast_old.drain()).is_empty(),
+        "0.7.4 cannot read it"
+    );
+    assert_eq!(
+        names(&volumes(&able.drain())),
+        vec!["A/J1.cbz"],
+        "the lane that can read it stepped aside for one that cannot"
+    );
+}
+
+/// Regression: a row's last volume was left to a warm session on a faster machine whose
+/// release cannot read it.
+#[test]
+fn a_warm_session_that_cannot_read_the_last_volume_does_not_keep_it() {
+    /// Page counts from the zip directory (what the metadata cache gives a server): the
+    /// warm-session handoff needs one.
+    struct ZipFacts;
+    impl LibraryFacts for ZipFacts {
+        fn missing_pages(&self, cbz: &std::path::Path) -> i64 {
+            LibraryFacts::missing_pages(&bunko_server::ocr::types::FileFacts, cbz)
+        }
+        fn page_count(&self, cbz: &std::path::Path) -> Option<i64> {
+            bunko_server::ocr::owed::archive_pages(cbz)
+        }
+    }
+    let mut h = harness_with(vec![primary()], Arc::new(ZipFacts));
+    h.add("A/V1.cbz", 100);
+    h.add_jxl("B/J1.cbz", 100);
+    h.at(0.0);
+    for _ in 0..2 {
+        h.s.rates().record_volume("g-1@able", 100.0, 100.0, false);
+        h.s.rates()
+            .record_volume("g-1@fast-old", 100.0, 10.0, false);
+    }
+    let mut fast_old = h.connect_version("fast-old", 1, "0.7.4");
+    let ops = fast_old.drain();
+    assert_eq!(names(&volumes(&ops)), vec!["A/V1.cbz"]);
+    let sid = opened(&ops)[0].clone();
+    let claim = volumes(&ops)[0].1.clone();
+    h.event(&fast_old, ready(&sid));
+    h.event(&fast_old, started(&sid, &claim, 100));
+    let mut able = h.connect_version("able", 1, "0.7.5");
+    assert_eq!(
+        names(&volumes(&able.drain())),
+        vec!["B/J1.cbz"],
+        "the last volume waited for a warm session that cannot read it"
+    );
+}
+
 #[test]
 fn two_dead_sessions_stop_the_row_on_that_machine() {
     let mut h = harness(vec![primary()]);
