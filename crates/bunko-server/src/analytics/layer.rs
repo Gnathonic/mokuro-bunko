@@ -9,7 +9,7 @@ use super::body::{CountingBody, CountingReqBody, Pending};
 use super::classify::{self, Input};
 use super::collector::RequestRecord;
 use super::principal::{self, PrincipalKind};
-use super::{Analytics, AnalyticsSlot, LoginAttempt};
+use super::{Analytics, AnalyticsSlot, LoginAttempt, SignedIn};
 use axum::body::Body;
 use axum::extract::{ConnectInfo, Request, State};
 use axum::middleware::Next;
@@ -119,13 +119,16 @@ pub async fn layer(State(a): State<Analytics>, mut req: Request, next: Next) -> 
             .unwrap_or(&ip_text),
     )
     .into();
+    // A sign-in carries its credentials in the body, so it resolves no identity: the
+    // login endpoint names the account that signed in.
+    let signed_in = resp.extensions_mut().remove::<SignedIn>();
     let principal = (!preflight).then(|| {
-        principal::principal_of(
-            ident.and_then(|i| i.username.as_deref()),
-            ident.map_or(bunko_core::Role::Anonymous, |i| i.role),
-            &ip,
-            &a.db().salt(),
-        )
+        let (username, role) = match (&signed_in, ident) {
+            (Some(s), _) => (Some(s.username.as_str()), s.role),
+            (None, Some(i)) => (i.username.as_deref(), i.role),
+            (None, None) => (None, bunko_core::Role::Anonymous),
+        };
+        principal::principal_of(username, role, &ip, &a.db().salt())
     });
     let class = classify::classify(&Input {
         method,

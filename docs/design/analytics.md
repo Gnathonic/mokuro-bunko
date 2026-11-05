@@ -118,6 +118,12 @@ any change to what the reader sends.
   `client_mix_principals` row, adds no principal to its `ip_daily` row, counts toward
   no visitor (dau/wau/mau, users, clients) and is no crawl signal; a slow one is listed
   with an empty principal (the Health view says `preflight`).
+- **A successful sign-in** (`POST /login/api/token` or `/login/api/check` answering
+  200) is attributed to the **account that signed in**. **Built:** its password is in
+  the body, so the request resolves no identity of its own; the login endpoint puts a
+  `SignedIn` response extension on its 200 (never on the wire), as it puts
+  `LoginAttempt` on a refusal. Without it every sign-in would be one more anonymous
+  visitor at the reader's IP.
 - The client IP is the server's own resolved client IP (`Core.proxies`,
   `RequestCtx.client_ip`), so trusted proxies / tunnels are honoured. When the identity
   was never resolved for a request (it was answered before the auth layer: `GET /`,
@@ -512,7 +518,11 @@ account. Skipped and refused files are counted (`reading.worker` in the API).
   `series_uuid`, `series_title`, `volume_title`, `deletedOn` (see the reader's
   `src/lib/settings/volume-data.ts`). Parse with serde into a minimal struct (ignore
   every other field, especially `recentPageTurns`/`sessions`). Replace the user's
-  `volume_progress` rows (delete rows that vanished or carry `deletedOn`).
+  `volume_progress` rows (delete rows that vanished or carry `deletedOn`). **Built:**
+  a volume counts as `completed` when its current pass is, or when any pass "restart
+  series" archived (`archivedReads`, checked as the reader's `isArchivedRead` checks
+  them) finished: it was read to the end, even though reading began again. Its
+  `completed_at` is the current pass's stamp, else the last archived one.
 - **uuid → series**: resolve `volume_uuid` to a library `volume_key` through the main
   DB's `volume_identities` (add an index on `volume_uuid` in the main schema; index
   only, no version bump needed beyond what the main schema already does), then the

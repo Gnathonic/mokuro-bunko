@@ -85,6 +85,15 @@ impl AnalyticsSlot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoginAttempt(pub String);
 
+/// A response extension a login endpoint puts on its 200: the account that just signed
+/// in. Its credentials were in the body, so the request resolved no identity; the
+/// accounting layer attributes it to this account, not to an anonymous visitor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignedIn {
+    pub username: String,
+    pub role: bunko_core::Role,
+}
+
 /// What the analytics need from the rest of the server.
 #[derive(Clone)]
 pub struct AnalyticsDeps {

@@ -426,6 +426,28 @@ pub struct VolumeRecord {
     pub volume_title: Option<String>,
     /// A `deletedOn` tombstone: the reader dropped this volume.
     pub deleted: bool,
+    /// An earlier pass, archived by "restart series" (`archivedReads`), finished: the
+    /// volume was read to the end even though the current pass starts again.
+    pub archived_completed: bool,
+    /// The `completedAt` of the last finished archived pass that kept one.
+    pub archived_completed_at: Option<String>,
+}
+
+impl VolumeRecord {
+    /// Finished in any pass, the current one or an archived one (what the funnel's
+    /// "finished" means: read to the end at least once).
+    pub fn finished(&self) -> bool {
+        self.completed || self.archived_completed
+    }
+
+    /// When it was finished: the current pass's stamp, else the last archived one.
+    pub fn finished_at(&self) -> Option<&str> {
+        match (&self.completed_at, &self.archived_completed_at) {
+            (Some(c), _) if self.completed => Some(c),
+            (_, Some(a)) if self.archived_completed => Some(a),
+            (c, _) => c.as_deref(),
+        }
+    }
 }
 
 /// What `volume-data.json` holds for the analytics.
@@ -522,6 +544,12 @@ impl<'de> Visitor<'de> for RecordSeed {
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
         let mut r = VolumeRecord::default();
         while let Some(key) = map.next_key::<std::borrow::Cow<'de, str>>()? {
+            if key.as_ref() == "archivedReads" {
+                let (done, at) = map.next_value_seed(ArchivedSeed)?;
+                r.archived_completed = done;
+                r.archived_completed_at = at;
+                continue;
+            }
             let field = match key.as_ref() {
                 "progress" | "chars" | "completed" | "completedAt" | "timeReadInMinutes"
                 | "lastProgressUpdate" | "series_uuid" | "series_title" | "volume_title"
@@ -545,6 +573,131 @@ impl<'de> Visitor<'de> for RecordSeed {
             }
         }
         Ok(Some(r))
+    }
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        while seq.next_element::<IgnoredAny>()?.is_some() {}
+        Ok(None)
+    }
+    fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+        Ok(None)
+    }
+    fn visit_bool<E: de::Error>(self, _: bool) -> Result<Self::Value, E> {
+        Ok(None)
+    }
+    fn visit_i64<E: de::Error>(self, _: i64) -> Result<Self::Value, E> {
+        Ok(None)
+    }
+    fn visit_u64<E: de::Error>(self, _: u64) -> Result<Self::Value, E> {
+        Ok(None)
+    }
+    fn visit_f64<E: de::Error>(self, _: f64) -> Result<Self::Value, E> {
+        Ok(None)
+    }
+    fn visit_str<E: de::Error>(self, _: &str) -> Result<Self::Value, E> {
+        Ok(None)
+    }
+}
+
+/// A record's `archivedReads` (the passes "restart series" archived): whether any
+/// valid one finished, and the `completedAt` of the last finished one that kept it.
+/// Entries are checked as the reader's `isArchivedRead` checks them; nothing else of
+/// them is kept.
+struct ArchivedSeed;
+
+impl<'de> DeserializeSeed<'de> for ArchivedSeed {
+    type Value = (bool, Option<String>);
+    fn deserialize<D: de::Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
+        d.deserialize_any(self)
+    }
+}
+
+impl<'de> Visitor<'de> for ArchivedSeed {
+    type Value = (bool, Option<String>);
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("the archived reads")
+    }
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        let (mut done, mut at) = (false, None);
+        while let Some(read) = seq.next_element_seed(ArchivedReadSeed)? {
+            if let Some((true, stamp)) = read {
+                done = true;
+                if stamp.is_some() {
+                    at = stamp;
+                }
+            }
+        }
+        Ok((done, at))
+    }
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+        Ok((false, None))
+    }
+    fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+        Ok((false, None))
+    }
+    fn visit_bool<E: de::Error>(self, _: bool) -> Result<Self::Value, E> {
+        Ok((false, None))
+    }
+    fn visit_i64<E: de::Error>(self, _: i64) -> Result<Self::Value, E> {
+        Ok((false, None))
+    }
+    fn visit_u64<E: de::Error>(self, _: u64) -> Result<Self::Value, E> {
+        Ok((false, None))
+    }
+    fn visit_f64<E: de::Error>(self, _: f64) -> Result<Self::Value, E> {
+        Ok((false, None))
+    }
+    fn visit_str<E: de::Error>(self, _: &str) -> Result<Self::Value, E> {
+        Ok((false, None))
+    }
+}
+
+/// One archived read: `Some((completed, completedAt))` when it is valid
+/// (`isArchivedRead`: `at`, `pages`, `chars` numbers, `completed` a boolean,
+/// `completedAt` absent or a string), else `None`.
+struct ArchivedReadSeed;
+
+impl<'de> DeserializeSeed<'de> for ArchivedReadSeed {
+    type Value = Option<(bool, Option<String>)>;
+    fn deserialize<D: de::Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
+        d.deserialize_any(self)
+    }
+}
+
+impl<'de> Visitor<'de> for ArchivedReadSeed {
+    type Value = Option<(bool, Option<String>)>;
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("an archived read")
+    }
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let (mut at, mut pages, mut chars) = (Val::Absent, Val::Absent, Val::Absent);
+        let (mut completed, mut completed_at) = (Val::Absent, Val::Absent);
+        while let Some(key) = map.next_key::<std::borrow::Cow<'de, str>>()? {
+            let slot = match key.as_ref() {
+                "at" => &mut at,
+                "pages" => &mut pages,
+                "chars" => &mut chars,
+                "completed" => &mut completed,
+                "completedAt" => &mut completed_at,
+                _ => {
+                    map.next_value::<IgnoredAny>()?;
+                    continue;
+                }
+            };
+            *slot = map.next_value_seed(ValSeed)?;
+        }
+        let numbers = [&at, &pages, &chars]
+            .iter()
+            .all(|v| matches!(v, Val::Num(_)));
+        let Val::Bool(completed) = completed else {
+            return Ok(None);
+        };
+        match completed_at {
+            _ if !numbers => Ok(None),
+            Val::Absent => Ok(Some((completed, None))),
+            Val::Str(_) => Ok(Some((completed, completed_at.text()))),
+            _ => Ok(None),
+        }
     }
     fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
         while seq.next_element::<IgnoredAny>()?.is_some() {}
@@ -977,6 +1130,45 @@ mod tests {
         let r = &v.records[1];
         assert_eq!((r.progress, r.completed, r.deleted), (0.0, false, true));
         assert!(parse_volume_data(b"[]").is_err());
+    }
+
+    #[test]
+    fn a_pass_archived_by_restart_series_still_counts_as_finished() {
+        // u1: finished, then "restart series" archived the pass and reading began
+        // again. u2: its only archived pass did not finish. u3: entries the reader's
+        // isArchivedRead refuses (a string count, a non-boolean completed, a numeric
+        // completedAt) do not count. u4: finished now and before; the current stamp wins.
+        let text = r#"{
+          "u1": {"progress": 3, "completed": false,
+                 "archivedReads": [
+                   {"at": 1793000000000, "pages": 40, "chars": 9000, "completed": true,
+                    "completedAt": "2026-10-01T10:00:00.000Z"},
+                   {"at": 1793500000000, "pages": 40, "chars": 9000, "completed": true,
+                    "completedAt": "2026-11-01T10:00:00.000Z", "extra": [1, 2]}]},
+          "u2": {"progress": 0, "archivedReads": [
+                   {"at": 1793000000000, "pages": 12, "chars": 900, "completed": false}]},
+          "u3": {"progress": 0, "archivedReads": [
+                   {"at": 1793000000000, "pages": "40", "chars": 9000, "completed": true},
+                   {"at": 1793000000000, "pages": 40, "chars": 9000, "completed": 1},
+                   {"at": 1793000000000, "pages": 40, "chars": 9000, "completed": true,
+                    "completedAt": 5}, 7, null]},
+          "u4": {"progress": 40, "completed": true, "completedAt": "2026-11-03T10:00:00.000Z",
+                 "archivedReads": [{"at": 1793000000000, "pages": 40, "chars": 9000,
+                                    "completed": true, "completedAt": "2026-10-01T10:00:00.000Z"}]},
+          "u5": {"progress": 2, "archivedReads": {"not": "an array"}}
+        }"#;
+        let v = parse_volume_data(text.as_bytes()).unwrap();
+        let by = |id: &str| v.records.iter().find(|r| r.volume_uuid == id).unwrap();
+        let u1 = by("u1");
+        assert!(!u1.completed && u1.finished());
+        assert_eq!(u1.finished_at(), Some("2026-11-01T10:00:00.000Z"));
+        assert!(!by("u2").finished());
+        assert!(!by("u3").finished());
+        let u4 = by("u4");
+        assert!(u4.finished());
+        assert_eq!(u4.finished_at(), Some("2026-11-03T10:00:00.000Z"));
+        assert!(!by("u5").finished());
+        assert_eq!(by("u5").progress, 2.0);
     }
 
     #[test]

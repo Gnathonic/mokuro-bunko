@@ -119,9 +119,12 @@ async fn check(
     match user {
         Some(user) => {
             d.core.login_limiter.record_success(&key);
-            json_response(
-                200,
-                json!({"success": true, "user": {"username": user.username, "role": user.role.as_str()}}),
+            signed_in(
+                json_response(
+                    200,
+                    json!({"success": true, "user": {"username": user.username, "role": user.role.as_str()}}),
+                ),
+                &user,
             )
         }
         None => {
@@ -136,6 +139,16 @@ async fn check(
 fn attempted(mut resp: Response, username: &str) -> Response {
     resp.extensions_mut()
         .insert(crate::analytics::LoginAttempt(username.to_string()));
+    resp
+}
+
+/// A sign-in that succeeded names its account for the request accounting, so the
+/// sign-in counts for that account and not for an anonymous visitor at its IP.
+fn signed_in(mut resp: Response, user: &User) -> Response {
+    resp.extensions_mut().insert(crate::analytics::SignedIn {
+        username: user.username.clone(),
+        role: user.role,
+    });
     resp
 }
 
@@ -227,15 +240,18 @@ async fn issue_token(
                 // The account page then offers to set its first password.
                 who["has_password"] = json!(false);
             }
-            json_response(
-                200,
-                json!({
-                    "token": token,
-                    "token_type": "Bearer",
-                    "kind": kind.as_str(),
-                    "expires_at": expires_at,
-                    "user": who,
-                }),
+            signed_in(
+                json_response(
+                    200,
+                    json!({
+                        "token": token,
+                        "token_type": "Bearer",
+                        "kind": kind.as_str(),
+                        "expires_at": expires_at,
+                        "user": who,
+                    }),
+                ),
+                &user,
             )
         }
     }

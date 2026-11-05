@@ -842,6 +842,48 @@ async fn a_preflight_is_traffic_but_no_visitor() {
     assert_eq!(u["visitors"]["dau"], 1, "{u}");
 }
 
+/// A sign-in carries its password in the body, so it resolves no identity of its own:
+/// a successful one counts for the account that signed in, never for an anonymous
+/// visitor at its IP (a failed one stays anonymous).
+#[tokio::test]
+async fn a_successful_sign_in_counts_for_its_account() {
+    let env = Env::new();
+    for path in ["/login/api/token", "/login/api/check"] {
+        let (status, _, _) = env
+            .call(
+                None,
+                "POST",
+                path,
+                &[("content-type", "application/json")],
+                br#"{"username": "reader", "password": "pass1234"}"#,
+                IP_B,
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{path}");
+    }
+    env.flush().await;
+    assert_eq!(
+        env.text_rows("SELECT DISTINCT principal FROM principal_daily ORDER BY 1"),
+        ["u:reader"]
+    );
+    assert_eq!(
+        env.text_rows("SELECT principal FROM principal_seen ORDER BY 1"),
+        ["u:reader"]
+    );
+    assert_eq!(
+        env.int("SELECT requests FROM principal_daily WHERE principal = 'u:reader' AND category = 'auth'"),
+        2
+    );
+    assert_eq!(env.int("SELECT COUNT(*) FROM anon_ips"), 0);
+    assert_eq!(env.int("SELECT COUNT(*) FROM auth_failures"), 0);
+    assert_eq!(
+        env.text_rows(&format!(
+            "SELECT principals FROM ip_daily WHERE ip = '{IP_B}'"
+        )),
+        [r#"["u:reader"]"#]
+    );
+}
+
 /// The same requests with analytics on and off answer byte for byte the same, and off
 /// writes nothing.
 #[tokio::test]

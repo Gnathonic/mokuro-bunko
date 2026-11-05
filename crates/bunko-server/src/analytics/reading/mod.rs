@@ -782,8 +782,10 @@ fn volume_data(a: &Analytics, username: &str, bytes: &[u8]) -> bunko_db::Result<
                 attribution,
                 progress: clamp_count(r.progress),
                 chars: clamp_count(r.chars),
-                completed: r.completed,
-                completed_at: r.completed_at.as_deref().and_then(files::iso_seconds),
+                // Finished in any pass: "restart series" archives a finished pass
+                // and starts the volume again, but it was still read to the end.
+                completed: r.finished(),
+                completed_at: r.finished_at().and_then(files::iso_seconds),
                 time_read_min: if r.time_read_min.is_finite() {
                     r.time_read_min.max(0.0)
                 } else {
