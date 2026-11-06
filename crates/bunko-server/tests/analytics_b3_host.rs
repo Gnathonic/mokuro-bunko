@@ -16,7 +16,7 @@ use axum::body::Body;
 use axum::extract::ConnectInfo;
 use bunko_core::{Config, Role};
 use bunko_db::UserStatus;
-use bunko_server::analytics::host::{SUPPORTS_CPU, SUPPORTS_RSS};
+use bunko_server::analytics::host::{SUPPORTS_CPU, SUPPORTS_HOST_AVAILABLE, SUPPORTS_RSS};
 use bunko_server::app::{ServeOptions, Services, assemble};
 use http::{Request, StatusCode};
 use http_body_util::BodyExt;
@@ -173,8 +173,15 @@ async fn samples_become_minutes_hours_and_the_host_view() {
         assert!(v["now"]["rss"].as_u64().unwrap() > 1 << 20);
         assert!(v["now"]["peak_rss"].as_u64().unwrap() >= v["now"]["rss"].as_u64().unwrap() / 2);
         assert!(v["now"]["host_total"].as_u64().unwrap() > v["now"]["rss"].as_u64().unwrap());
-        assert!(v["now"]["host_available"].as_u64().is_some());
     }
+    // Free memory where the platform reads it; never a made-up figure elsewhere (macOS
+    // reports the total only).
+    assert_eq!(
+        v["now"]["host_available"].as_u64().is_some(),
+        SUPPORTS_HOST_AVAILABLE,
+        "{:#}",
+        v["now"]
+    );
     if SUPPORTS_CPU {
         assert!(v["now"]["cpu_pct"].as_f64().is_some(), "{:#}", v["now"]);
         assert!(values(&v, "cpu_pct").iter().any(Value::is_f64));

@@ -50,6 +50,10 @@ pub struct HostNow {
 /// What this build can read (`platform_supported`).
 pub const SUPPORTS_RSS: bool = platform::RSS;
 pub const SUPPORTS_CPU: bool = platform::CPU;
+/// Whether this build reads the host's available memory (`host_available`). macOS
+/// has no one figure like Linux's `MemAvailable` or Windows' `ullAvailPhys`, so it
+/// reports the total only and the Server view leaves the free-memory tile out.
+pub const SUPPORTS_HOST_AVAILABLE: bool = platform::HOST_AVAILABLE;
 
 /// One reading of the process and the host.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -320,6 +324,7 @@ mod platform {
 
     pub const RSS: bool = true;
     pub const CPU: bool = true;
+    pub const HOST_AVAILABLE: bool = true;
 
     fn text(path: &str) -> Option<String> {
         bunko_store::fs::read_to_string(path).ok()
@@ -365,6 +370,7 @@ mod platform {
 
     pub const RSS: bool = true;
     pub const CPU: bool = true;
+    pub const HOST_AVAILABLE: bool = true;
 
     fn filetime_s(t: &FILETIME) -> f64 {
         // 100 ns units.
@@ -408,6 +414,7 @@ mod platform {
 
     pub const RSS: bool = true;
     pub const CPU: bool = true;
+    pub const HOST_AVAILABLE: bool = false;
 
     fn timeval_s(t: &libc::timeval) -> f64 {
         t.tv_sec as f64 + f64::from(t.tv_usec) / 1e6
@@ -464,6 +471,7 @@ mod platform {
 
     pub const RSS: bool = false;
     pub const CPU: bool = false;
+    pub const HOST_AVAILABLE: bool = false;
 
     pub fn read() -> Reading {
         Reading::default()
