@@ -115,6 +115,33 @@ pub(crate) fn resolve_existing(base: &Path, relative: &str, top_reserved: bool) 
     resolve(base, relative, None, top_reserved)
 }
 
+/// The library entry `relative` (a stored path, below the library root `library`) leads
+/// to through the listings, in its listed spelling: each segment the winner of the names
+/// that fold like it ([`on_disk_name`]). `None` when a segment names nothing, or is
+/// spelled exactly like a listed entry another spelling shadows (the path is that hidden
+/// entry's, never the winner's). No probe: the same on every host.
+pub(crate) fn listed_entry(library: &Path, relative: &str) -> Option<String> {
+    let mut parent = library.to_path_buf();
+    let mut out: Vec<String> = Vec::new();
+    for (position, segment) in relative.split('/').filter(|s| !s.is_empty()).enumerate() {
+        if segment == "." || segment == ".." {
+            return None;
+        }
+        let winner = on_disk_name(&parent, segment, position == 0)?;
+        if winner != segment
+            && fs::read_dir(&parent)
+                .ok()?
+                .flatten()
+                .any(|e| e.file_name().to_str() == Some(segment))
+        {
+            return None;
+        }
+        parent.push(&winner);
+        out.push(winner);
+    }
+    Some(out.join("/"))
+}
+
 fn resolve(base: &Path, relative: &str, keep: Option<&str>, top_reserved: bool) -> String {
     let mut parts: Vec<String> = relative.split('/').map(str::to_string).collect();
     if parts.iter().any(|p| p == "." || p == "..") {

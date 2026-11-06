@@ -267,6 +267,33 @@ async fn put_inner(inner: &Arc<Inner>, req: &Req, body: Body) -> Result<Resp, Pu
         )
         .into());
     };
+    // A brand-new library name whose other spelling was created since PathCase resolved
+    // this request (a racing upload that held this folded lock before it): that entry
+    // is this name, and Bunko never creates a second spelling of it. Refused, so a retry
+    // resolves to it and is judged as a write to that existing file.
+    if res.is_none() && kind == Some(FileKind::Library) {
+        let (dest2, library) = (dest.clone(), inner.roots.library.clone());
+        let appeared = super::blocking(move || {
+            let (Some(parent), Some(name)) =
+                (dest2.parent(), dest2.file_name().and_then(|n| n.to_str()))
+            else {
+                return false;
+            };
+            crate::path_case::on_disk_name(parent, name, parent == library)
+                .is_some_and(|listed| listed != name)
+        })
+        .await?;
+        if appeared {
+            return Err(Rejection::new(
+                409,
+                "case-variant",
+                "Another spelling of this name was just created here; Bunko keeps one \
+                 spelling per name: send the request again.",
+                true,
+            )
+            .into());
+        }
+    }
     // One history writer per account from the measure to the publish, so the room
     // left is never handed to two files at once.
     let history_base = history

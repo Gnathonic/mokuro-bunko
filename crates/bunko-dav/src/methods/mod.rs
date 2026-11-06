@@ -80,6 +80,9 @@ pub(crate) async fn dispatch(inner: Arc<Inner>, req: Request<Body>, ctx: DavCont
         ctx,
         if_header,
     };
+    if let Some(resp) = per_user_spelled_otherwise(&inner, &r).await {
+        return resp;
+    }
     let result = match r.method.as_str() {
         "OPTIONS" => read::options(&inner, &r).await,
         "PROPFIND" => read::propfind(&inner, &r, body).await,
@@ -345,6 +348,79 @@ pub(crate) fn write_lock_conflict(
     )
 }
 
+/// The cloud-root owner's per-user entries carry their canonical names in the cloud
+/// folder (`history/`, `goals.json`), shared with a reader that reads it directly. While
+/// that folder lists the name only in another spelling (`History/`, `Goals.json`, from
+/// 0.7 or a cloud app), that entry is the name: Bunko never writes the canonical
+/// spelling beside it. A write there (or a COPY/MOVE onto it) is refused with 409 until
+/// it is renamed (doctor names it). Reads find nothing there. Every other account's
+/// tree is `users/<u>/` and never meets this.
+async fn per_user_spelled_otherwise(inner: &Arc<Inner>, r: &Req) -> Option<Resp> {
+    if !matches!(
+        r.method.as_str(),
+        "PUT" | "DELETE" | "MKCOL" | "COPY" | "MOVE" | "PROPPATCH" | "LOCK"
+    ) {
+        return None;
+    }
+    let caller = r.caller()?;
+    if !caller.owns_cloud_root {
+        return None;
+    }
+    let mut targets = vec![r.path.clone()];
+    if matches!(r.method.as_str(), "COPY" | "MOVE")
+        && let Ok(dest) = write::destination_path(r)
+    {
+        targets.push(dest);
+    }
+    let names: Vec<&'static str> = targets
+        .iter()
+        .filter_map(|p| match paths::classify(p) {
+            paths::Target::Progress(rel) => bunko_core::reader_tree::canonical_per_user_rel(&rel),
+            _ => None,
+        })
+        .filter_map(|rel| {
+            let first = rel.split('/').next().unwrap_or("").to_string();
+            bunko_core::reader_tree::PER_USER_FILES
+                .iter()
+                .chain(bunko_core::reader_tree::PER_USER_DIRS.iter())
+                .find(|n| **n == first)
+                .copied()
+        })
+        .collect();
+    if names.is_empty() {
+        return None;
+    }
+    let library = inner.roots.library.clone();
+    let listed = blocking(move || -> Option<(String, String)> {
+        let entries: Vec<String> = bunko_store::fs::read_dir(&library)
+            .ok()?
+            .flatten()
+            .filter_map(|e| e.file_name().into_string().ok())
+            .collect();
+        names.iter().find_map(|canonical| {
+            if entries.iter().any(|n| n == canonical) {
+                return None;
+            }
+            entries
+                .iter()
+                .find(|n| crate::fold_name(n) == crate::fold_name(canonical))
+                .map(|n| (n.clone(), canonical.to_string()))
+        })
+    })
+    .await
+    .ok()
+    .flatten()?;
+    let (listed, canonical) = listed;
+    Some(response::status_page(
+        StatusCode::CONFLICT,
+        &format!(
+            "The cloud folder holds {listed:?} where your {canonical:?} belongs, and Bunko \
+             keeps one spelling per name: rename it to {canonical:?} (doctor and the \
+             startup log name it), then try again."
+        ),
+    ))
+}
+
 /// 0.5.2 `_forget_ocr_records`.
 pub(crate) fn forget_ocr_records(req: &Req, rel: Option<&str>, archive_too: bool) {
     let Some(rel) = rel else { return };
@@ -364,10 +440,27 @@ pub(crate) fn primary_leaving(inner: &Inner, req: &Req, phys: &Path) {
         return;
     };
     let name = paths::file_name(phys);
-    let Some(stem) = crate::sidecars::primary_sidecar_stem(&name) else {
+    if crate::sidecars::primary_sidecar_stem(&name).is_none() {
+        return;
+    }
+    // The primary of a listed archive (rule v1 over the folder's listing: `v.mokuro` is
+    // `V.CBZ`'s), never a constructed archive name opened on the host.
+    let Some(dir) = phys.parent() else { return };
+    let Ok(entries) = bunko_store::fs::read_dir(dir) else {
         return;
     };
-    if bunko_store::fs::is_file(phys.with_file_name(format!("{stem}.cbz"))) {
+    let names: Vec<String> = entries
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| !t.is_dir()))
+        .filter_map(|e| e.file_name().into_string().ok())
+        .collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    let folder = bunko_core::sidecar_names::Folder::new(&names);
+    if names
+        .iter()
+        .filter(|n| bunko_core::sidecar_names::cbz_stem(n).is_some())
+        .any(|archive| folder.primary_of(archive) == Some(name.as_str()))
+    {
         req.ctx.hooks.primary_sidecar_leaving(&rel, phys);
     }
 }

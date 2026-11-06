@@ -686,6 +686,148 @@ async fn a_reserved_name_in_any_spelling_is_the_per_user_entry() {
     assert!(!listing.text().contains("History"), "{}", listing.text());
 }
 
+// --- One rule on every host (review round 3) ------------------------------------------
+
+/// A COPY of a folder onto an existing folder pairs members by name in any case, as a
+/// case-insensitive disk does: an existing member in another spelling receives the
+/// copy (keeping its spelling), nothing that a source member folds like is pruned, and
+/// the hooks see the members that are really there. The same listing and the same
+/// hook paths on every host.
+#[tokio::test]
+async fn a_folder_copy_pairs_members_in_any_case() {
+    let env = Env::new();
+    std::fs::create_dir_all(env.lib("A/Sub")).unwrap();
+    std::fs::write(env.lib("A/Sub/x.cbz"), b"new x").unwrap();
+    std::fs::write(env.lib("A/V.cbz"), b"new v").unwrap();
+    std::fs::create_dir_all(env.lib("B/sub")).unwrap();
+    std::fs::write(env.lib("B/sub/x.cbz"), b"old x").unwrap();
+    std::fs::write(env.lib("B/v.cbz"), b"old v").unwrap();
+    std::fs::write(env.lib("B/gone.cbz"), b"gone").unwrap();
+    let d = dest("/mokuro-reader/B");
+    let r = req(
+        &env,
+        Some("admin"),
+        "COPY",
+        "/mokuro-reader/A",
+        &[
+            ("destination", &d),
+            ("overwrite", "T"),
+            ("depth", "infinity"),
+        ],
+        b"",
+    )
+    .await;
+    assert_eq!(r.code(), 204, "{}", r.text());
+    assert_eq!(names(&env.lib("B")), ["sub", "v.cbz"]);
+    assert_eq!(names(&env.lib("B/sub")), ["x.cbz"]);
+    assert_eq!(std::fs::read(env.lib("B/v.cbz")).unwrap(), b"new v");
+    assert_eq!(std::fs::read(env.lib("B/sub/x.cbz")).unwrap(), b"new x");
+    let mut forgotten: Vec<String> = env
+        .hooks
+        .calls()
+        .into_iter()
+        .filter(|c| c.starts_with("forget_volume_upload"))
+        .collect();
+    forgotten.sort();
+    assert_eq!(
+        forgotten,
+        [
+            "forget_volume_upload B/gone.cbz",
+            "forget_volume_upload B/sub/x.cbz",
+            "forget_volume_upload B/v.cbz",
+        ]
+    );
+}
+
+/// A case-fixing MOVE never hands the name to a shadowed spelling: while the folder
+/// lists another spelling besides the source (a case-sensitive disk only), it is
+/// refused, and the name keeps reaching the source's content on every host.
+#[tokio::test]
+async fn a_case_fix_beside_a_shadowed_spelling_is_refused() {
+    let env = Env::new();
+    std::fs::create_dir(env.lib("Kingdom")).unwrap();
+    std::fs::write(env.lib("Kingdom/a.cbz"), b"a").unwrap();
+    let _ = std::fs::create_dir(env.lib("kINGDOM"));
+    std::fs::write(env.lib("kINGDOM/b.cbz"), b"b").unwrap();
+    let two = holds_two_spellings(&env.lib(""), "Kingdom", "kINGDOM");
+    let d = dest("/mokuro-reader/kingdom/");
+    let r = req(
+        &env,
+        Some("admin"),
+        "MOVE",
+        "/mokuro-reader/Kingdom/",
+        &[("destination", &d), ("depth", "infinity")],
+        b"",
+    )
+    .await;
+    if two {
+        assert_eq!(r.code(), 409, "{}", r.text());
+        assert!(holds_two_spellings(&env.lib(""), "Kingdom", "kINGDOM"));
+    } else {
+        assert_eq!(r.code(), 201, "{}", r.text());
+    }
+    let got = req(&env, None, "GET", "/mokuro-reader/kingdom/a.cbz", &[], b"").await;
+    assert_eq!((got.code(), got.body), (200, b"a".to_vec()));
+}
+
+/// A PUT of a new name that another spelling has taken since the request was resolved
+/// (a racing upload; here the request skips the rewrite) never makes a second
+/// spelling: the folder lists one entry for the name on every host.
+#[tokio::test]
+async fn a_put_never_makes_a_second_spelling() {
+    let env = Env::new();
+    std::fs::write(env.lib("series/vol 2.cbz"), b"first").unwrap();
+    let r = env
+        .req(
+            Some("admin"),
+            "PUT",
+            "/mokuro-reader/series/Vol%202.cbz",
+            &[],
+            b"second",
+        )
+        .await;
+    let spellings: Vec<String> = names(&env.lib("series"))
+        .into_iter()
+        .filter(|n| n.eq_ignore_ascii_case("vol 2.cbz"))
+        .collect();
+    assert_eq!(spellings.len(), 1, "{spellings:?}");
+    if spellings == ["vol 2.cbz"] && r.code() == 409 {
+        assert_eq!(
+            std::fs::read(env.lib("series/vol 2.cbz")).unwrap(),
+            b"first"
+        );
+    } else {
+        assert_eq!(r.code(), 204, "{}", r.text());
+    }
+}
+
+/// The temporary name an interrupted case-only rename leaves is Bunko's own: never
+/// listed, so no client deletes it as junk (doctor reports it).
+#[tokio::test]
+async fn a_case_rename_leftover_is_never_listed() {
+    let env = Env::new();
+    let leftover = format!("{}abc-Series", bunko_store::fs::CASE_RENAME_PREFIX);
+    std::fs::create_dir_all(env.lib(&leftover)).unwrap();
+    std::fs::write(env.lib(&format!("{leftover}/v.cbz")), b"v").unwrap();
+    for depth in ["1", "infinity"] {
+        let listing = req(
+            &env,
+            None,
+            "PROPFIND",
+            "/mokuro-reader/",
+            &[("depth", depth)],
+            b"",
+        )
+        .await;
+        assert_eq!(listing.code(), 207);
+        assert!(
+            !listing.text().contains(".bunko-case-"),
+            "{}",
+            listing.text()
+        );
+    }
+}
+
 /// `Thumbnails` is a series like any, on every store: no cover folder is made in the
 /// library (a second spelling of it), and a request for it reaches the series.
 #[tokio::test]

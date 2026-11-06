@@ -301,6 +301,45 @@ fn create_series_folder(inner: &Inner, req: &Req, dir: &Path) -> DavResult<()> {
     Ok(())
 }
 
+/// A MOVE that only changes the case of `src`'s name (to `dest`) is refused (409)
+/// while its folder lists another spelling of that name besides `src` (a shadowed case
+/// variant, which only a case-sensitive disk or a remote store holds): the name would
+/// pass to that other entry, and every request for it would reach the wrong one.
+/// Checked under the move's write locks, from the listing alone. Blocking.
+fn case_fix_allowed(src: &Path, dest: &Path) -> DavResult<()> {
+    let (Some(parent), Some(src_name), Some(dest_name)) = (
+        src.parent(),
+        src.file_name().and_then(|n| n.to_str()),
+        dest.file_name().and_then(|n| n.to_str()),
+    ) else {
+        return Ok(());
+    };
+    if dest.parent() != Some(parent)
+        || src_name == dest_name
+        || crate::fold_name(src_name) != crate::fold_name(dest_name)
+    {
+        return Ok(());
+    }
+    let folded = crate::fold_name(src_name);
+    let other = fs::read_dir(parent).is_ok_and(|entries| {
+        entries.flatten().any(|e| {
+            e.file_name().to_str().is_some_and(|n| {
+                n != src_name
+                    && crate::fold_name(n) == folded
+                    && !(n == dest_name && crate::path_case::same_file(src, &parent.join(n)))
+            })
+        })
+    });
+    if other {
+        return Err(DavError::new(
+            StatusCode::CONFLICT,
+            "Another spelling of this name already exists here; Bunko keeps one spelling \
+             per name: merge them first.",
+        ));
+    }
+    Ok(())
+}
+
 /// Another spelling of `dir`'s name is listed beside it now: a concurrent request made
 /// it after PathCase resolved this one. That entry is this name (one name is one entry
 /// on every host), so nothing is made: the MKCOL ends as one that found its folder there
@@ -314,7 +353,7 @@ fn other_spelling_listed(dir: &Path, top: bool) -> bool {
 }
 
 /// The `Destination` header as a decoded path (WsgiDAV rules; spec §8.3.7).
-fn destination_path(req: &Req) -> DavResult<String> {
+pub(crate) fn destination_path(req: &Req) -> DavResult<String> {
     let raw = req.header("destination").ok_or_else(|| {
         DavError::new(
             StatusCode::BAD_REQUEST,
@@ -716,6 +755,7 @@ fn move_file(
     let Some(_guard) = inner.write_locks.try_lock_all(&[src, dest]) else {
         return Err(write_lock_conflict(req, target, "move", Some(dest_v)));
     };
+    case_fix_allowed(src, dest)?;
     let old_rel = inner.roots.library_rel(src);
     let new_rel = inner.roots.library_rel(dest);
     primary_leaving(inner, req, src);
@@ -859,6 +899,7 @@ fn move_folder(
     let Some(_guard) = inner.write_locks.try_lock_all(&[src, dest]) else {
         return Err(write_lock_conflict(req, target, "move", Some(dest_v)));
     };
+    case_fix_allowed(src, dest)?;
     let old_prefix = inner.roots.library_rel(src);
     let new_prefix = inner.roots.library_rel(dest);
     let volumes = cbz_under(src);
@@ -966,12 +1007,23 @@ fn copy_folder(
         };
         let mut entries: Vec<_> = entries.flatten().collect();
         entries.sort_by_key(|e| e.file_name());
+        // A source member another listed spelling shadows is never reached, so never
+        // copied (its content stays its own).
+        let names: Vec<String> = entries
+            .iter()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        let hidden = crate::path_case::shadowed(&from, names.iter().map(String::as_str));
         for e in entries {
             let name = e.file_name().to_string_lossy().into_owned();
-            if paths::is_staging_name(&name) {
+            if paths::is_staging_name(&name) || hidden.contains(&name) {
                 continue;
             }
-            let (f, t, v) = (e.path(), to.join(&name), format!("{vto}/{name}"));
+            // The destination member is the entry already there in any spelling (the
+            // one a request reaches), as on a case-insensitive disk: never a second
+            // spelling beside it.
+            let at = crate::path_case::on_disk_name(&to, &name, false).unwrap_or(name);
+            let (f, t, v) = (e.path(), to.join(&at), format!("{vto}/{at}"));
             match fs::metadata(&f) {
                 Ok(m) if m.is_dir() => {
                     // Never descend into a symlink leading out of the library.
@@ -1010,13 +1062,27 @@ fn prune_unmatched(
         let Ok(entries) = fs::read_dir(&d) else {
             continue;
         };
-        for e in entries.flatten() {
-            let name = e.file_name();
-            let (sp, dp, vp) = (
-                s.join(&name),
-                e.path(),
-                format!("{v}/{}", name.to_string_lossy()),
-            );
+        let entries: Vec<_> = entries.flatten().collect();
+        let names: Vec<String> = entries
+            .iter()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        // A shadowed destination member is never reached: it is never deleted.
+        let hidden = crate::path_case::shadowed(&d, names.iter().map(String::as_str));
+        for (e, name) in entries.into_iter().zip(names) {
+            if paths::is_staging_name(&name) || hidden.contains(&name) {
+                continue;
+            }
+            // Matched by a source member in any spelling (the one a request reaches
+            // there), as on a case-insensitive disk.
+            let Some(sp) = crate::path_case::on_disk_name(&s, &name, false)
+                .filter(|listed| !paths::is_staging_name(listed))
+                .map(|listed| s.join(listed))
+            else {
+                prune_one(inner, req, e.path(), format!("{v}/{name}"), effects)?;
+                continue;
+            };
+            let (dp, vp) = (e.path(), format!("{v}/{name}"));
             let d_is_dir = fs::metadata(&dp).map(|m| m.is_dir()).unwrap_or(false);
             let s_meta = fs::metadata(&sp).ok();
             match s_meta {
@@ -1025,29 +1091,41 @@ fn prune_unmatched(
                         stack.push((sp, dp, vp));
                     }
                 }
-                _ => {
-                    let stat = fs::metadata(&dp).map(|m| crate::resource::Stat::from_meta(&m));
-                    if let Ok(stat) = stat {
-                        let res = if d_is_dir {
-                            Resource::Folder {
-                                path: vp,
-                                phys: dp,
-                                stat,
-                                kind: FileKind::Library,
-                            }
-                        } else {
-                            Resource::File {
-                                path: vp,
-                                phys: dp,
-                                stat,
-                                kind: FileKind::Library,
-                            }
-                        };
-                        delete_resource(inner, req, &res, effects)?;
-                    }
-                }
+                _ => prune_one(inner, req, dp, vp, effects)?,
             }
         }
     }
     Ok(())
+}
+
+/// Delete one destination member [`prune_unmatched`] found unmatched, by its listed
+/// path (the hooks get the rel of the entry that goes).
+fn prune_one(
+    inner: &Inner,
+    req: &Req,
+    dp: PathBuf,
+    vp: String,
+    effects: &mut Effects,
+) -> DavResult<()> {
+    let Ok(meta) = fs::metadata(&dp) else {
+        return Ok(());
+    };
+    let d_is_dir = meta.is_dir();
+    let stat = crate::resource::Stat::from_meta(&meta);
+    let res = if d_is_dir {
+        Resource::Folder {
+            path: vp,
+            phys: dp,
+            stat,
+            kind: FileKind::Library,
+        }
+    } else {
+        Resource::File {
+            path: vp,
+            phys: dp,
+            stat,
+            kind: FileKind::Library,
+        }
+    };
+    delete_resource(inner, req, &res, effects)
 }

@@ -383,7 +383,7 @@ impl Roots {
         if caller.owns_cloud_root {
             self.library_member(&self.library, rel)
         } else {
-            personal::overlay_path(&self.users, caller.username, rel)
+            personal::overlay_path(&self.library, &self.users, caller.username, rel)
         }
     }
 
@@ -642,7 +642,9 @@ impl Roots {
         vpath: &str,
         stems: &std::collections::HashSet<String>,
     ) -> Vec<Resource> {
-        let Some(dir) = personal::overlay_path(&self.users, caller.username, folder_rel) else {
+        let Some(dir) =
+            personal::overlay_path(&self.library, &self.users, caller.username, folder_rel)
+        else {
             return Vec::new();
         };
         let Ok(entries) = fs::read_dir(&dir) else {
@@ -680,9 +682,12 @@ impl Roots {
     /// Blocking.
     pub fn overlays_under(&self, caller: Caller<'_>, folder_rel: &str) -> Vec<Resource> {
         let mut out = Vec::new();
+        let mut folders = std::collections::BTreeSet::new();
         let mut stack = vec![folder_rel.trim_matches('/').to_string()];
         while let Some(rel) = stack.pop() {
-            let Some(dir) = personal::overlay_path(&self.users, caller.username, &rel) else {
+            let Some(dir) =
+                personal::overlay_path(&self.library, &self.users, caller.username, &rel)
+            else {
                 continue;
             };
             let Ok(entries) = fs::read_dir(&dir) else {
@@ -704,6 +709,15 @@ impl Roots {
             if !has_files {
                 continue;
             }
+            // The overlay folder's library folder, in the spelling the listing shows (a
+            // folder respelled outside Bunko or in the cloud included; a shadowed
+            // folder's overlays are its own, never shown), each listed once.
+            let Some(library_rel) = crate::path_case::listed_entry(&self.library, &rel) else {
+                continue;
+            };
+            folders.insert(library_rel);
+        }
+        for rel in folders {
             let Some(folder) = self.library_member(&self.library, &rel) else {
                 continue;
             };

@@ -311,10 +311,14 @@ fn lexical_normpath(path: &str) -> String {
     format!("/{}", out.join("/"))
 }
 
-/// The staging files of in-flight uploads (`.<name>.upload-<random>.tmp`); hidden from
-/// listings (spec Q3).
+/// Bunko's own temporary names, hidden from listings and never walked: the staging
+/// files of in-flight uploads (`.<name>.upload-<random>.tmp`, spec Q3) and the name a
+/// case-only rename passes through (`.bunko-case-...`,
+/// [`bunko_store::fs::CASE_RENAME_PREFIX`]; one an interrupted rename left behind is
+/// doctor's to report, never a client's to delete).
 pub fn is_staging_name(name: &str) -> bool {
-    name.starts_with('.') && name.ends_with(".tmp") && name.contains(".upload-")
+    (name.starts_with('.') && name.ends_with(".tmp") && name.contains(".upload-"))
+        || name.starts_with(bunko_store::fs::CASE_RENAME_PREFIX)
 }
 
 #[cfg(test)]
