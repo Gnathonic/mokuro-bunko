@@ -734,6 +734,24 @@ its summed bytes among the accounts. It opens (collapsed by default; the choice 
 per browser in `localStorage`) to the individual visitors, heaviest first, with their
 IPs: up to 100 in Users, 10 in the Overview. Nothing else is grouped.
 
+**Built (catalog: Popular):** the public catalog's sort menu (`web/catalog/`) has a
+**Popular** order: series by whole downloads over the last 30 UTC days (today and the 29
+before it), the completed `volume_downloads` rows of accounts and anonymous visitors
+summed per series (a volume downloaded again on another day counts again), processors
+never. `/catalog/api/library` adds `popular_rank` (an integer, 1 = the most downloaded;
+equal counts share a rank and the catalog orders them by title) to each series it lists
+that has any; a series without downloads has no field and sorts after the ranked ones,
+by title. Ranks are dense over the listed series only, so they say nothing of folders
+the listing leaves out, and no count ever leaves the server. Series are matched by
+`fold_series_title_key` of the folder name, so every spelling of a folder is one series.
+The counts are kept in memory (`analytics::popular::Popularity`, an `Arc` swapped whole)
+and computed on a blocking thread from `analytics.sqlite`: at start, after each flush
+that wrote downloads, when the UTC day turns, and with the hourly upkeep; the catalog
+request reads the snapshot and never touches the analytics database. The endpoint has
+no ETag or `Last-Modified` (each request builds its answer), so a new ranking is served
+by the next request. While `analytics.enabled` is false no series has a rank and the
+catalog does not offer the option (a saved "popular" choice sorts by title).
+
 Settings: the `analytics:` section is editable through the existing admin settings flow
 (`admin/settings.rs`: an `analytics` editor like the others, live, saved to config).
 

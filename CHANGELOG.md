@@ -64,6 +64,13 @@
   `analytics.enabled: false` passes requests through untouched and writes nothing
   (no library scan, no geography download either). The main database gains an index
   on `volume_identities(volume_uuid)`.
+- **A "Popular" order in the public catalog.** The catalog's sort menu ranks series by
+  whole downloads over the last 30 days (accounts and anonymous visitors, a repeat on
+  another day counting again, OCR processors never). `/catalog/api/library` gives each
+  ranked series a `popular_rank` (1 = the most downloaded) and nothing more: no count
+  leaves the server. The ranking is kept in memory and refreshed in the background, so
+  the catalog never reads the analytics database. With analytics off there are no
+  ranks and the option is not offered.
 - **An Analytics tab in the admin panel.** Overview, Traffic (by category, protocol,
   method or detail, WebDAV by method, the bytes progress and profile sync and
   navigation cost), Popular (most downloaded and read series, against the previous

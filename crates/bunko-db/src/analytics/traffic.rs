@@ -1359,6 +1359,27 @@ impl AnalyticsDb {
         })
     }
 
+    /// Whole downloads per series in days `from..=to`: completed (day, principal,
+    /// volume) rows of accounts and anonymous visitors (never a processor's), so a
+    /// volume downloaded again on another day counts again. Series with none are
+    /// left out, and so are volumes of no series (`series_key ''`). What the public
+    /// catalog's "Popular" order ranks by.
+    pub fn series_download_counts(&self, from_day: i64, to_day: i64) -> Result<Vec<(String, u64)>> {
+        self.read(|c| {
+            let mut stmt = c.prepare_cached(
+                "SELECT series_key, COUNT(*) FROM volume_downloads \
+                 WHERE day >= ?1 AND day <= ?2 AND completed AND series_key != '' \
+                 AND substr(principal, 1, 2) != 'p:' GROUP BY series_key",
+            )?;
+            let rows = stmt
+                .query_map(params![from_day, to_day], |r| {
+                    Ok((r.get(0)?, uint(r.get(1)?)))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
+        })
+    }
+
     /// Auth failures over `span` (see [`AnalyticsDb::auth_failure_series`]).
     pub fn auth_failure_total(&self, span: &Span) -> Result<u64> {
         Ok(self.auth_failure_series(span)?.iter().map(|(_, n)| n).sum())
@@ -1705,6 +1726,41 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn series_download_counts_are_whole_downloads_of_people() {
+        let (_d, db) = temp_db();
+        db.write(|tx| {
+            let row = |day, principal, volume_key, series_key, bytes| DownloadRow {
+                day,
+                principal,
+                volume_key,
+                series_key,
+                series_title: "",
+                bytes,
+                size: 100,
+            };
+            for r in [
+                row(10, "u:alice", "A/1.cbz", "a", 100),
+                // Again on another day: another download.
+                row(11, "u:alice", "A/1.cbz", "a", 100),
+                row(10, "a:000000000001", "A/2.cbz", "a", 100),
+                row(10, "a:000000000002", "B/1.cbz", "b", 100),
+                // A probe, a processor, no series, out of range: none.
+                row(10, "u:bob", "B/1.cbz", "b", 1),
+                row(10, "p:ocr", "B/2.cbz", "b", 100),
+                row(10, "u:bob", "loose.cbz", "", 100),
+                row(9, "u:bob", "C/1.cbz", "c", 100),
+            ] {
+                tx.add_download(&r)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        let mut counts = db.series_download_counts(10, 11).unwrap();
+        counts.sort();
+        assert_eq!(counts, [("a".to_string(), 3), ("b".to_string(), 1)]);
     }
 
     /// The heaviest principals with their per-category split: the cost does not grow

@@ -8,7 +8,8 @@
 //! - [`flush`] writes the window to `analytics.sqlite` ([`bunko_db::analytics`]) every
 //!   `analytics.flush_seconds`, and rolls up and prunes once an hour;
 //! - the areas ([`reading`], [`library`], [`host`], [`crawl`], [`clients`], [`geo`])
-//!   hang off the [`Analytics`] handle; the admin API is [`api`].
+//!   hang off the [`Analytics`] handle; the admin API is [`api`];
+//! - [`popular`] keeps the public catalog's "Popular" order in memory.
 //!
 //! `analytics.enabled: false` makes the layer pass requests through untouched; what is
 //! stored stays viewable.
@@ -25,6 +26,7 @@ pub mod geo;
 pub mod host;
 mod layer;
 pub mod library;
+pub mod popular;
 pub mod principal;
 pub mod reading;
 
@@ -125,6 +127,8 @@ pub(crate) struct Inner {
     pub crawl: crawl::Detector,
     pub clients: clients::Clients,
     pub geo: geo::Geo,
+    /// The catalog's "Popular" order, refreshed off the request path.
+    pub popular: popular::Popularity,
     /// The flush task, its stop token, and whether `stop` ran.
     task: Mutex<Option<(CancellationToken, tokio::task::JoinHandle<()>)>>,
 }
@@ -257,6 +261,7 @@ impl Analytics {
             crawl: crawl::Detector::new(deps.core.clone(), counts),
             clients: clients::Clients::new(deps.core.clone()),
             geo: geo::Geo::new(deps.core.clone()),
+            popular: popular::Popularity::default(),
             collector: collector::Collector::default(),
             db: Arc::new(db),
             enabled: AtomicBool::new(enabled),
@@ -340,6 +345,23 @@ impl Analytics {
         &self.0.geo
     }
 
+    /// The catalog's "Popular" order (what `/catalog/api/library` ranks by).
+    pub fn popularity(&self) -> &popular::Popularity {
+        &self.0.popular
+    }
+
+    /// Compute the "Popular" order again now (start, the hourly upkeep, a new UTC
+    /// day; tests). A failure keeps the order there was.
+    pub async fn refresh_popular(&self) {
+        let a = self.clone();
+        let done = tokio::task::spawn_blocking(move || a.0.popular.refresh(&a.0.db, now_s())).await;
+        match done {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::warn!("[ANALYTICS] popular series not refreshed: {e}"),
+            Err(e) => tracing::warn!("[ANALYTICS] popular series task failed: {e}"),
+        }
+    }
+
     /// Start the flush task and the areas' workers (beside `services.updates.start`,
     /// never inside the library services, which may wait for a cloud store).
     pub fn start(&self, stop: CancellationToken) {
@@ -372,11 +394,20 @@ impl Analytics {
     /// Write the current window now (the periodic flush; tests).
     pub async fn flush_now(&self) -> anyhow::Result<()> {
         let window = self.0.collector.take();
+        // New downloads can change the catalog's "Popular" order.
+        let downloads = !window.downloads.is_empty();
         let a = self.clone();
-        tokio::task::spawn_blocking(move || flush::write_window(&a, window, now_s()))
-            .await
-            .map_err(|e| anyhow::anyhow!("flush task: {e}"))?
-            .map_err(anyhow::Error::from)
+        tokio::task::spawn_blocking(move || {
+            let now = now_s();
+            flush::write_window(&a, window, now)?;
+            if downloads && let Err(e) = a.0.popular.refresh(&a.0.db, now) {
+                tracing::warn!("[ANALYTICS] popular series not refreshed: {e}");
+            }
+            Ok::<_, bunko_db::DbError>(())
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("flush task: {e}"))?
+        .map_err(anyhow::Error::from)
     }
 
     /// Roll up and prune as of `now_s` (the hourly upkeep; tests pass a future time).

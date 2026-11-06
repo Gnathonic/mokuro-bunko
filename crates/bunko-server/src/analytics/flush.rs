@@ -24,6 +24,7 @@ pub const MAINTAIN_EVERY: Duration = Duration::from_secs(3600);
 /// The flush task: until `stop` (whose final flush is [`Analytics::stop`]'s).
 pub(crate) async fn run(a: Analytics, stop: CancellationToken) {
     maintain(&a).await;
+    a.refresh_popular().await;
     let mut maintained = Instant::now();
     let mut flushed = Instant::now();
     loop {
@@ -50,6 +51,10 @@ pub(crate) async fn run(a: Analytics, stop: CancellationToken) {
         if maintained.elapsed() >= MAINTAIN_EVERY {
             maintain(&a).await;
             maintained = Instant::now();
+            a.refresh_popular().await;
+        } else if a.popularity().day() != Some(super::now_s().div_euclid(86400)) {
+            // A new UTC day: the oldest day leaves the order's window.
+            a.refresh_popular().await;
         }
     }
 }

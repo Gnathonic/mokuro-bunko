@@ -1106,6 +1106,7 @@ pub fn assemble(services: &Services, opts: &ServeOptions) -> Router {
         services.db.clone(),
         services.library.clone(),
     );
+    library.popular = Some(services.analytics.popularity().clone());
     let glue = Arc::new(crate::glue::OcrGlue(ocr.clone()));
     library.ocr_status = Some(glue.clone());
     library.outlook = Some(glue);
