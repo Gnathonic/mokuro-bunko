@@ -23,8 +23,8 @@
 use std::path::{Path, PathBuf};
 
 use bunko_core::reader_tree;
-use std::fs;
 use http::{Uri, request::Parts};
+use std::fs;
 use unicode_normalization::UnicodeNormalization;
 
 use crate::paths::{self, READER_ROOT};

@@ -136,7 +136,12 @@ pub struct Rejection {
 }
 
 impl Rejection {
-    pub(crate) fn new(status: u16, reason: &'static str, detail: impl Into<String>, retry: bool) -> Self {
+    pub(crate) fn new(
+        status: u16,
+        reason: &'static str,
+        detail: impl Into<String>,
+        retry: bool,
+    ) -> Self {
         Self {
             status,
             reason,
