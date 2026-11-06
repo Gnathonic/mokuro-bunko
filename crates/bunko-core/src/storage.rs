@@ -103,11 +103,18 @@ impl StorageLayout {
 
     /// Every start before 0.8 made an empty `library/thumbnails/` (0.5.2's cover cache;
     /// covers have long lived beside their archives). Left alone it would be an empty
-    /// series folder in every reader. Removed when the library lists exactly that name
-    /// and it is an empty folder; one holding anything, or any other spelling (a series
-    /// `Thumbnails/`), is an ordinary folder and stays. From the listing, never by
-    /// opening the name, so every host answers alike.
+    /// series folder in every reader. The first start of 0.8 on this storage removes
+    /// it when the library lists exactly that name and it is an empty folder; one
+    /// holding anything, or any other spelling (a series `Thumbnails/`), is an ordinary
+    /// folder and stays. Only that once (the marker [`Self::LEGACY_COVERS_CHECKED`] in the
+    /// storage base): after it, `thumbnails` is a name like any other, and an empty
+    /// series folder a user makes with that name stays, as it does in a cloud library.
+    /// From the listing, never by opening the name, so every host answers alike.
     fn drop_legacy_cover_folder(&self) {
+        let marker = self.base.join(Self::LEGACY_COVERS_CHECKED);
+        if marker.exists() {
+            return;
+        }
         let library = self.library();
         let listed = std::fs::read_dir(&library).is_ok_and(|entries| {
             entries
@@ -118,7 +125,11 @@ impl StorageLayout {
         if listed && std::fs::read_dir(&folder).is_ok_and(|mut e| e.next().is_none()) {
             let _ = std::fs::remove_dir(&folder);
         }
+        let _ = std::fs::write(&marker, b"");
     }
+
+    /// The file in the storage base that says the 0.7 cover folder was looked for.
+    pub const LEGACY_COVERS_CHECKED: &'static str = ".legacy-thumbnails-checked";
 
     /// Fail unless `path` is an existing directory we can create files in.
     pub fn assert_writable_dir(path: &Path, label: &str) -> Result<(), String> {
@@ -280,30 +291,52 @@ mod tests {
         let layout = StorageLayout::new(dir.path().join("data"));
         assert!(!layout.cloud_library());
         layout.ensure_directories().unwrap();
-        assert_eq!(names(&layout.base), ["inbox", "library", "users"]);
+        assert_eq!(
+            names(&layout.base),
+            [
+                StorageLayout::LEGACY_COVERS_CHECKED,
+                "inbox",
+                "library",
+                "users"
+            ]
+        );
         assert!(names(&layout.library()).is_empty());
         std::fs::create_dir_all(layout.library().join("Thumbnails")).unwrap();
         layout.ensure_directories().unwrap();
         assert_eq!(names(&layout.library()), ["Thumbnails"]);
     }
 
-    /// An earlier start's empty `thumbnails/` goes; one that holds anything, or a
-    /// series spelled otherwise, stays (an ordinary folder).
+    /// The first 0.8 start removes 0.7's empty `thumbnails/`; one that holds anything,
+    /// or a series spelled otherwise, stays (an ordinary folder). After that first start
+    /// `thumbnails` is a name like any other: an empty series folder of that name stays,
+    /// as in a cloud library.
     #[test]
-    fn an_empty_legacy_cover_folder_goes() {
-        let dir = tempfile::tempdir().unwrap();
-        let layout = StorageLayout::new(dir.path().join("data"));
+    fn an_empty_legacy_cover_folder_goes_at_the_first_start_only() {
+        let first = |prepare: &dyn Fn(&Path)| {
+            let dir = tempfile::tempdir().unwrap();
+            let layout = StorageLayout::new(dir.path().join("data"));
+            prepare(&layout.library());
+            layout.ensure_directories().unwrap();
+            (names(&layout.library()), dir, layout)
+        };
+        let (left, _dir, layout) = first(&|lib| {
+            std::fs::create_dir_all(lib.join("thumbnails")).unwrap();
+            std::fs::create_dir_all(lib.join("Empty")).unwrap();
+        });
+        assert_eq!(left, ["Empty"]);
+        // A user's own empty `thumbnails/` series, made after that start, stays.
         std::fs::create_dir_all(layout.library().join("thumbnails")).unwrap();
         layout.ensure_directories().unwrap();
-        assert!(names(&layout.library()).is_empty());
-        std::fs::create_dir_all(layout.library().join("thumbnails")).unwrap();
-        std::fs::write(layout.library().join("thumbnails/v.cbz"), b"x").unwrap();
-        layout.ensure_directories().unwrap();
-        assert_eq!(names(&layout.library()), ["thumbnails"]);
-        std::fs::remove_dir_all(layout.library().join("thumbnails")).unwrap();
-        std::fs::create_dir_all(layout.library().join("Thumbnails")).unwrap();
-        layout.ensure_directories().unwrap();
-        assert_eq!(names(&layout.library()), ["Thumbnails"]);
+        assert_eq!(names(&layout.library()), ["Empty", "thumbnails"]);
+        let (left, _dir, _) = first(&|lib| {
+            std::fs::create_dir_all(lib.join("thumbnails")).unwrap();
+            std::fs::write(lib.join("thumbnails/v.cbz"), b"x").unwrap();
+        });
+        assert_eq!(left, ["thumbnails"]);
+        let (left, _dir, _) = first(&|lib| {
+            std::fs::create_dir_all(lib.join("Thumbnails")).unwrap();
+        });
+        assert_eq!(left, ["Thumbnails"]);
     }
 
     /// A cloud library never gets `library/` on disk; the rest is still created.

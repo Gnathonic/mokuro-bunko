@@ -86,9 +86,16 @@ pub fn sibling(cbz_path: &Path, suffix: &str) -> Option<PathBuf> {
 /// [`sibling`] over `names`, the archive folder's file names (listed once by a caller
 /// that resolves several).
 ///
-/// Of several listed spellings that are all the archive's, the one a request reaches
-/// (the store's case winner, else the byte-smallest; the rule PathCase serves by), so
-/// what Bunko reads, writes and serves is one file on every host.
+/// The listed names that are `<stem><suffix>` by the filename fold
+/// ([`sidecar_names::fold`]) are that one name: a new file there would be a second
+/// spelling of it. Only those rule v1 gives to this archive ([`Folder::volume_files`]
+/// over the whole listing, shadowed archives included) are its own; of several, the one
+/// a request reaches (the store's case winner, else the byte-smallest). When every
+/// listed spelling is another archive's, or no archive's by rule v1 (`V.FAST.mokuro`,
+/// whose layer id rule v1 matches exactly; `STRASSE.mokuro` beside `Straße.cbz`, whose
+/// stems rule v1 tells apart), nothing may be written for it: `None`.
+///
+/// [`Folder::volume_files`]: sidecar_names::Folder::volume_files
 pub fn sibling_in(cbz_path: &Path, suffix: &str, names: &[String]) -> Option<PathBuf> {
     let name = cbz_path.file_name()?.to_str()?;
     let directory = cbz_path.parent().unwrap_or_else(|| Path::new(""));
@@ -106,20 +113,21 @@ pub fn sibling_in(cbz_path: &Path, suffix: &str, names: &[String]) -> Option<Pat
     if candidates.is_empty() {
         return Some(directory.join(wanted));
     }
-    // Another archive whose stem is spelled exactly like a candidate's owns it (rule
-    // v1). A shadowed one too: it is hidden, never disowned, and its files are never
-    // written for the archive that shadows it.
-    let other_stems: Vec<&str> = names
-        .iter()
-        .filter(|n| n.as_str() != name)
-        .filter_map(|n| sidecar_names::cbz_stem(n))
+    // Rule v1 over the whole listing (the archive itself counted even when a caller
+    // asks for one that is not listed yet).
+    let mut listing: Vec<&str> = names.iter().map(String::as_str).collect();
+    if !listing.contains(&name) {
+        listing.push(name);
+    }
+    let folder = sidecar_names::Folder::new(&listing);
+    let own: Vec<&str> = folder
+        .volume_files(name)
+        .into_iter()
+        .map(|(n, _)| n)
         .collect();
     let ours: Vec<String> = candidates
         .into_iter()
-        .filter(|c| {
-            let cut = c.len().saturating_sub(suffix.len());
-            !c.is_char_boundary(cut) || !other_stems.contains(&&c[..cut])
-        })
+        .filter(|c| own.contains(&c.as_str()))
         .cloned()
         .collect();
     crate::fsutil::pick_winner(directory, &fold, ours).map(|c| directory.join(c))

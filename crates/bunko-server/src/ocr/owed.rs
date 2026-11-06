@@ -133,16 +133,14 @@ pub fn listed_sidecar_paths_in(
     })
 }
 
-/// `needs_sidecar`, the other way round: the row's sidecar or its `.gz` exists, in any
-/// spelling of the volume's stem (sidecar names rule v1: `V.MOKURO`, `v.fast.mokuro`
-/// on a case-sensitive disk; generating it again would put a second copy beside it).
-/// `folder`: the archive's folder when a walk has listed it; else it is listed here,
-/// and only when the exact names are missing.
+/// `needs_sidecar`, the other way round: rule v1 finds the row's sidecar or its `.gz`
+/// in the archive's folder listing, in any spelling of the volume's stem (`V.MOKURO`,
+/// `v.fast.mokuro` on a case-sensitive disk), the layer id exact. Decided from the
+/// listing alone, never by opening a built name, so every host answers alike; the
+/// writer ([`listed_sidecar_paths`]) declines what rule v1 does not give the archive, so
+/// a row is never owed for a file that cannot be its own (`V.FAST.mokuro`).
+/// `folder`: the archive's folder when a walk has listed it; else it is listed here.
 pub fn row_done(cbz: &Path, row: &Generation, folder: Option<&Folder>) -> bool {
-    let (plain, gz) = sidecar_paths(cbz, &row.sidecar_suffix());
-    if fs::exists(&plain) || fs::exists(&gz) {
-        return true;
-    }
     let listed_in = |folder: &Folder| {
         if row.primary {
             sidecar::primary_sidecar_in(cbz, folder).is_some()
@@ -582,6 +580,40 @@ mod tests {
         assert!(!still_owed(lib, "S/V1.cbz", &rows()[0], false));
         assert!(!still_owed(lib, "S/V2.cbz", &rows()[1], false));
         assert!(still_owed(lib, "S/X.cbz", &rows()[0], false));
+    }
+
+    /// A layer file whose id is spelled in another case (`Vol.FAST.mokuro.gz`) is no
+    /// layer of the volume by rule v1 (the id exact), and it is the layer's name by the
+    /// filename fold: the walk owes nothing a write could not fill (it would be a second
+    /// spelling of that file), so the row is neither done nor owed again and again, and
+    /// the same on every host (decided from the listing, never by opening a built name).
+    #[test]
+    fn a_layer_id_in_another_case_is_never_owed() {
+        for other in ["Vol.FAST.mokuro.gz", "Vol.Fast.mokuro"] {
+            let dir = tempfile::tempdir().unwrap();
+            let lib = dir.path();
+            let s = lib.join("S");
+            std::fs::create_dir_all(&s).unwrap();
+            for name in ["Vol.cbz", "Vol.mokuro", other] {
+                std::fs::write(s.join(name), b"{}").unwrap();
+            }
+            let cbz = s.join("Vol.cbz");
+            let layer = &rows()[1];
+            assert!(!row_done(&cbz, layer, None), "{other}");
+            assert_eq!(listed_sidecar_paths(&cbz, ".fast.mokuro"), None, "{other}");
+            let index = walk(lib, &rows(), &FileFacts, None, &KnownPages::new());
+            assert!(index.volumes.is_empty(), "{other}: {:?}", index.volumes);
+            assert!(!still_owed(lib, "S/Vol.cbz", layer, false), "{other}");
+            let mut listed: Vec<String> = sidecar::list_names(&s).unwrap();
+            listed.sort();
+            let mut want = vec![
+                "Vol.cbz".to_string(),
+                "Vol.mokuro".to_string(),
+                other.to_string(),
+            ];
+            want.sort();
+            assert_eq!(listed, want);
+        }
     }
 
     /// A result goes to the spelling the folder lists, on every host: a reader's

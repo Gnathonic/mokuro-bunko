@@ -149,7 +149,19 @@ impl MadeCovers {
         let Some((cover, size)) = Self::take_left(&mut made, from) else {
             return;
         };
-        let dest = cover_path(to);
+        // The cover `to` may have, as Bunko writes it (the listed spelling, else the
+        // archive's): none when every listed spelling is another archive's (a hidden
+        // case variant's own cover). Then the made cover goes: a second spelling is
+        // never made beside that file.
+        let Some(dest) = bunko_library::sidecar::sibling(to, ".webp") else {
+            if let Err(e) = fs::remove_file(&cover) {
+                warn!(
+                    "could not remove the cover of a moved archive {}: {e}",
+                    cover.display()
+                );
+            }
+            return;
+        };
         // A case-only rename (`vol 1.cbz` to `Vol 1.cbz`): the cover is the one the new
         // name resolves to. It is respelled like the archive, never removed.
         if dest == cover || fs::same_file(&cover, &dest) {
@@ -162,7 +174,7 @@ impl MadeCovers {
             made.insert(Self::key(&at), (size, Instant::now()));
             return;
         }
-        if !fs::exists(&dest) && fs::rename(&cover, &dest).is_ok() {
+        if !listed_exactly(&dest) && fs::rename(&cover, &dest).is_ok() {
             made.insert(Self::key(&dest), (size, Instant::now()));
             return;
         }
@@ -211,8 +223,10 @@ fn is_cbz(p: &Path) -> bool {
         .is_some_and(|e| e.to_string_lossy().eq_ignore_ascii_case("cbz"))
 }
 
-/// `<stem>.webp`, in the spelling the folder lists (`V.WEBP`): Bunko never writes a
-/// second spelling of a name ([`bunko_library::sidecar::sibling`]).
+/// `<stem>.webp`, in the spelling the folder lists (`V.WEBP`). For reads only: where
+/// [`bunko_library::sidecar::sibling`] gives nothing (the name is another archive's,
+/// a hidden case variant's included) this is the built name, which must never be
+/// written; every writer asks `sibling` itself and writes nothing on `None`.
 pub fn cover_path(cbz: &Path) -> PathBuf {
     bunko_library::sidecar::sibling(cbz, ".webp").unwrap_or_else(|| cbz.with_extension("webp"))
 }
@@ -1610,6 +1624,51 @@ mod tests {
         bunko_store::fs::rename(&to, &renamed).unwrap();
         made.archive_moved(&to, &renamed);
         assert_eq!(names_in(&lib.join("S")), ["Vol 2.cbz", "Vol 2.webp"]);
+    }
+
+    /// An archive Bunko made a cover for moves onto a name whose cover is a hidden case
+    /// variant's own (`v.webp` beside the hidden `v.cbz`): the made cover goes, and no
+    /// second spelling (`V.webp`) is written beside the hidden one's. Where the disk
+    /// keeps one spelling, `v.webp` is the moved archive's own and stays as it was.
+    #[test]
+    fn a_moved_archive_never_gets_a_cover_beside_a_hidden_ones() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lib = std::fs::canonicalize(tmp.path()).unwrap();
+        std::fs::create_dir_all(lib.join("S")).unwrap();
+        std::fs::create_dir_all(lib.join("A")).unwrap();
+        std::fs::write(lib.join("S/v.cbz"), b"hidden").unwrap();
+        std::fs::write(lib.join("S/v.webp"), b"hidden cover").unwrap();
+        let from = lib.join("A/Vol.cbz");
+        cbz(&from, &[("a.png", &png(10, 10))]);
+        let webp =
+            bunko_thumb::make_thumbnail_limited(&png(10, 10), MAX_DECODE_BYTES, MAX_SIDE).unwrap();
+        let made = MadeCovers::default();
+        assert!(publish_cover(&from, &webp, &|_| false, &made).unwrap());
+        let to = lib.join("S/V.cbz");
+        let two = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&to)
+            .is_ok();
+        let two = two && names_in(&lib.join("S")).contains(&"v.cbz".to_string());
+        if two {
+            std::fs::remove_file(&to).unwrap();
+            bunko_store::fs::rename(&from, &to).unwrap();
+        } else {
+            std::fs::remove_file(lib.join("S/v.cbz")).unwrap();
+            bunko_store::fs::rename(&from, &to).unwrap();
+        }
+        made.archive_moved(&from, &to);
+        if two {
+            assert_eq!(names_in(&lib.join("S")), ["V.cbz", "v.cbz", "v.webp"]);
+        } else {
+            assert_eq!(names_in(&lib.join("S")), ["V.cbz", "v.webp"]);
+        }
+        assert_eq!(
+            std::fs::read(lib.join("S/v.webp")).unwrap(),
+            b"hidden cover"
+        );
+        assert_eq!(names_in(&lib.join("A")), Vec::<String>::new());
     }
 
     /// The record of covers made is pruned as covers are made too, not only when an
