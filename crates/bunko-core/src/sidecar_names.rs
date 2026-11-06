@@ -487,9 +487,15 @@ pub fn governing_archives<'a>(name: &str, names: &[&'a str]) -> Vec<&'a str> {
 /// `s` when an archive stem is `<s>.<id>` with `<id>` (folded) a layer id of a
 /// reserved class: the archive whose primary would be `s`'s layer `<id>`.
 fn hidden_layer_of(stem: &str) -> Option<&str> {
+    hidden_layer_class(stem).map(|(s, _)| s)
+}
+
+/// [`hidden_layer_of`], with the reserved class of the layer the archive would hide.
+fn hidden_layer_class(stem: &str) -> Option<(&str, LayerClass)> {
     let (s, id) = stem.rsplit_once('.')?;
     let id = stem_fold(id);
-    (!s.is_empty() && is_layer_id(&id) && layer_class(&id) != LayerClass::Other).then_some(s)
+    let class = layer_class(&id);
+    (!s.is_empty() && is_layer_id(&id) && class != LayerClass::Other).then_some((s, class))
 }
 
 /// Would a NEW archive `name` hide a layer of a listed volume? `V.edit.cbz` beside
@@ -665,9 +671,17 @@ pub fn reserved_layer_of(name: &str, names: &[&str]) -> Option<LayerClass> {
 /// can only ever shadow those layers: a request for an account's own correction, or for
 /// the shared curated layer, would reach it. Bunko creates no such name (a WebDAV write
 /// of one answers 409), and a request for the layer itself is never sent to one
-/// (`bunko_dav::PathCase`). A listed archive's own primary (`V.EDIT.mokuro` beside
-/// `V.EDIT.cbz`) is that volume's file, never such a name.
+/// (`bunko_dav::PathCase`). A listed archive's own primary is that volume's file, never
+/// such a name, when rule v1 itself reads the layer in it (`V.EDIT.mokuro` beside
+/// `V.EDIT.cbz`, rule 4); not when only the filename fold does (`V.ed\u{200B}it.mokuro`
+/// beside a `V.ed\u{200B}it.cbz` made by hand).
+///
+/// The same for an archive ([`shadowing_archive`]): `V.ed\u{200B}it.cbz`, whose primary
+/// could only be such a name.
 pub fn shadows_reserved_layer(name: &str, names: &[&str]) -> Option<LayerClass> {
+    if let Some(class) = shadowing_archive(name) {
+        return Some(class);
+    }
     let target = fold(name);
     let (_, id, _) = split_layer(&target)?;
     let class = layer_class(id);
@@ -680,10 +694,30 @@ pub fn shadows_reserved_layer(name: &str, names: &[&str]) -> Option<LayerClass> 
     if matches!(
         classify(name, &volume_stems(names.iter().copied())),
         SidecarClass::Primary { .. }
-    ) {
+    ) && split_layer(&stem_fold(name)).is_some_and(|(_, id, _)| layer_class(id) == class)
+    {
         return None;
     }
     Some(class)
+}
+
+/// The reserved layer class (personal, curated, `curated-<n>`) an archive `name` would
+/// hide by the filename fold ([`fold`]) only: `<s>.<id>.cbz` once folded, `<id>` a layer
+/// id of a reserved class, while rule v1's stem fold reads no such id in it
+/// (`V.ed\u{200B}it.cbz`, `V.ed\u{131}t.cbz`, `V.e\u{34F}dit.cbz`, `V.edit-\u{200B}2.cbz`,
+/// `V.cura\u{200B}ted.cbz`), for every stem, `<s>.cbz` listed or not. Its primary would
+/// be one name with `<s>`'s layer on every host, without being it: Bunko creates no such
+/// archive. Where rule v1 reads the layer too (`V.EDIT.cbz`, rule 4) this is `None`:
+/// that archive is governed by [`hides_reserved_layer`], as it always was.
+pub fn shadowing_archive(name: &str) -> Option<LayerClass> {
+    let stem = cbz_stem(name)?;
+    if hidden_layer_class(stem).is_some() {
+        return None;
+    }
+    let target = fold(name);
+    cbz_stem(&target)
+        .and_then(hidden_layer_class)
+        .map(|(_, class)| class)
 }
 
 #[cfg(test)]
@@ -1228,11 +1262,60 @@ mod tests {
         ] {
             assert_eq!(shadows_reserved_layer(name, &["X.cbz"]), None, "{name:?}");
         }
-        // A dotted volume's own primary.
+        // A dotted volume's own primary, when rule v1 reads the layer in it too (rule 4);
+        // not one only the filename fold ties to the layer.
         assert_eq!(
             shadows_reserved_layer("V.EDIT.mokuro", &["V.EDIT.cbz"]),
             None
         );
+        assert_eq!(
+            shadows_reserved_layer("V.Edit.mokuro.gz", &["V.Edit.cbz", "V.cbz"]),
+            None
+        );
+        for (stray, archive, class) in [
+            ("V.ed\u{200B}it.mokuro", "V.ed\u{200B}it.cbz", personal),
+            ("V.ed\u{131}t.mokuro", "V.ed\u{131}t.cbz", personal),
+            ("V.cura\u{200B}ted.mokuro", "V.cura\u{200B}ted.cbz", curated),
+        ] {
+            assert_eq!(
+                shadows_reserved_layer(stray, &[archive]),
+                class,
+                "{stray:?}"
+            );
+            assert_eq!(
+                shadows_reserved_layer(stray, &[archive, "V.cbz"]),
+                class,
+                "{stray:?}"
+            );
+        }
+        // An archive only the filename fold makes `<s>.<reserved id>.cbz`: its primary
+        // could only shadow `<s>`'s layer, `<s>.cbz` listed or not. Rule v1's own reading
+        // (`V.EDIT.cbz`, rule 4) is governed as it always was.
+        for (name, class) in [
+            ("X.ed\u{200B}it.cbz", personal),
+            ("X.ed\u{131}t.cbz", personal),
+            ("X.e\u{34F}dit.cbz", personal),
+            ("X.edit\u{200B}.CBZ", personal),
+            ("X.edit-\u{200B}2.cbz", personal),
+            ("X.cura\u{200B}ted.cbz", curated),
+            ("X.curated-\u{200B}2.cbz", reserved),
+        ] {
+            assert_eq!(shadowing_archive(name), class, "{name:?}");
+            assert_eq!(shadows_reserved_layer(name, &[]), class, "{name:?}");
+            assert_eq!(shadows_reserved_layer(name, &["X.cbz"]), class, "{name:?}");
+        }
+        for name in [
+            "X.cbz",
+            "X.edit.cbz",
+            "X.EDIT.cbz",
+            "X.Curated-2.cbz",
+            "X.gcv.cbz",
+            "X.ed\u{200B}it.zip",
+            "X.ed\u{200B}itor.cbz",
+            "Stra\u{df}e.cbz",
+        ] {
+            assert_eq!(shadowing_archive(name), None, "{name:?}");
+        }
         assert_eq!(reserved_layer_of("V.edit.mokuro", &["V.edit.cbz"]), None);
         assert_eq!(reserved_layer_of("V.edit.mokuro", &["V.cbz"]), personal);
         assert_eq!(reserved_layer_of("V.curated.mokuro", &[]), curated);

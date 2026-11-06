@@ -516,11 +516,15 @@ async fn frozen_refusal(inner: &Arc<Inner>, r: &Req) -> Option<Resp> {
 ///
 /// Also refused: a name the fold makes one with a personal or curated layer name while
 /// it is no such layer ([`bunko_core::sidecar_names::shadows_reserved_layer`]:
-/// `X.ed\u{200B}it.mokuro`, `X.EDIT.mokuro`), its volume listed or not. A write of the
-/// layer itself beside such a listed stray is never judged as the stray: an account's
-/// own correction goes to its overlay (nothing in the library is written), and the
-/// shared layer, or the cloud-root owner's correction (written in the library), answers
-/// 409 naming the stray.
+/// `X.ed\u{200B}it.mokuro`, `X.EDIT.mokuro`), its volume listed or not, and an archive
+/// whose OCR file could only be such a name (`X.ed\u{200B}it.cbz`,
+/// [`bunko_core::sidecar_names::shadowing_archive`]), `X.cbz` listed or not.
+///
+/// An account's own correction (an `edit`/`edit-<n>` layer name, written to its copy
+/// under `users/`) is never refused here, whatever the library lists: nothing in the
+/// library is written. A write of the shared layer, or of the cloud-root owner's
+/// correction (written in the library), beside a listed stray that is one name with it
+/// is never judged as the stray: it answers 409 naming the stray.
 async fn disputed_refusal(inner: &Arc<Inner>, r: &Req) -> Option<Resp> {
     let target = match r.method.as_str() {
         "PUT" | "MKCOL" | "PROPPATCH" | "LOCK" => r.path.clone(),
@@ -552,6 +556,18 @@ async fn disputed_refusal(inner: &Arc<Inner>, r: &Req) -> Option<Resp> {
             roots.library_member(&library, &resolved_dir(dir))?
         };
         let mut files = crate::personal::names_in(&parent);
+        {
+            let refs: Vec<&str> = files.iter().map(String::as_str).collect();
+            if !owns_cloud_root
+                && bunko_core::sidecar_names::reserved_layer_of(name, &refs)
+                    == Some(bunko_core::sidecar_names::LayerClass::Personal)
+            {
+                // An account's own correction, written to its copy under `users/`
+                // ([`crate::resource::Roots::personal_path`]): nothing in the library is
+                // written, so nothing listed there can dispute it.
+                return None;
+            }
+        }
         let folded = crate::fold_name(name);
         let respelled = source.as_deref().and_then(|src| {
             let src = src.trim_end_matches('/');
@@ -582,21 +598,13 @@ async fn disputed_refusal(inner: &Arc<Inner>, r: &Req) -> Option<Resp> {
                     if bunko_core::sidecar_names::reserved_layer_of(&other, &refs)
                         != Some(class) =>
                 {
-                    if class == bunko_core::sidecar_names::LayerClass::Personal && !owns_cloud_root
-                    {
-                        // The account's own copy, under `users/`: nothing in the library
-                        // is written.
-                        files.retain(|n| *n != other);
-                        name.to_string()
-                    } else {
-                        return Some(format!(
-                            "{other:?} is listed here, and is one name with {name:?} on \
-                             every host (Bunko joins names as the case-insensitive \
-                             filesystems do), but it is no such layer: Bunko writes no \
-                             second spelling of a name. Rename or delete {other:?} first \
-                             (doctor names it)."
-                        ));
-                    }
+                    return Some(format!(
+                        "{other:?} is listed here, and is one name with {name:?} on \
+                         every host (Bunko joins names as the case-insensitive \
+                         filesystems do), but it is no such layer: Bunko writes no \
+                         second spelling of a name. Rename or delete {other:?} first \
+                         (doctor names it)."
+                    ));
                 }
                 (listed, _) => listed.unwrap_or_else(|| name.to_string()),
             }
@@ -605,6 +613,17 @@ async fn disputed_refusal(inner: &Arc<Inner>, r: &Req) -> Option<Resp> {
         let disputed = bunko_core::sidecar_names::fold_disputed(&spelled, &refs);
         if disputed.is_empty() {
             let class = bunko_core::sidecar_names::shadows_reserved_layer(&spelled, &refs)?;
+            if bunko_core::sidecar_names::shadowing_archive(&spelled).is_some() {
+                return Some(format!(
+                    "{spelled:?} is, on every host (Bunko joins names as the case-insensitive \
+                     filesystems do), one name with an archive whose OCR file would be an \
+                     account's own correction or the curated layer of the volume of the \
+                     shorter stem, but the sidecar naming rule Mokuro Reader shares reads \
+                     no such layer in it: its OCR file could only ever stand in that \
+                     layer's place, so Bunko creates or writes no such archive. Choose \
+                     another name."
+                ));
+            }
             let layer = match class {
                 bunko_core::sidecar_names::LayerClass::Personal => {
                     "an account's own correction (edit, edit-<n>)"

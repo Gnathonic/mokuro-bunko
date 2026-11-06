@@ -1231,3 +1231,148 @@ async fn a_name_the_fold_joins_with_a_reserved_layer_never_stands_in_for_it() {
         );
     }
 }
+
+/// An archive only the filename fold makes `<s>.<layer>.cbz` (`X.ed\u{200B}it.cbz`,
+/// `X.ed\u{131}t.cbz`, `X.cura\u{200B}ted.cbz`): whoever uploads it first, every
+/// account's own correction of `X`, and the curated publish of its controller, are
+/// written once `X.cbz` is there, as before such names were looked at.
+#[tokio::test]
+async fn an_archive_the_fold_ties_to_a_layer_never_blocks_that_layer() {
+    let env = Env::new();
+    let cases = [
+        ("X.ed\u{200B}it.cbz", "X.edit.mokuro"),
+        ("X.ed\u{131}t.cbz", "X.edit.mokuro"),
+        ("X.e\u{34F}dit.cbz", "X.edit.mokuro"),
+        ("X.edit-\u{200B}2.cbz", "X.edit-2.mokuro"),
+        ("X.cura\u{200B}ted.cbz", "X.curated.mokuro"),
+    ];
+    for (i, (archive, layer)) in cases.iter().enumerate() {
+        // A shared folder, made by hand: anyone may add to it.
+        let folder = format!("U{i}");
+        std::fs::create_dir_all(env.lib(&folder)).unwrap();
+        let r = env
+            .put("bob", &format!("/mokuro-reader/{folder}/{archive}"), cbz(1))
+            .await;
+        assert!(
+            r.status == 201 || r.status == 409,
+            "bob PUT {archive:?}: {} {}",
+            r.status,
+            r.text()
+        );
+        let r = env
+            .put("alice", &format!("/mokuro-reader/{folder}/X.cbz"), cbz(1))
+            .await;
+        assert_eq!(
+            r.status,
+            201,
+            "alice PUT X.cbz beside {archive:?}: {}",
+            r.text()
+        );
+        let path = format!("/mokuro-reader/{folder}/{layer}");
+        let users: &[&str] = if layer.contains("curated") {
+            &["alice"]
+        } else {
+            &["reader", "alice", "bob"]
+        };
+        for user in users {
+            let mine = format!(r#"{{"pages":[],"by":"{user}"}}"#).into_bytes();
+            let r = env.put(user, &path, mine.clone()).await;
+            assert!(
+                r.status == 201 || r.status == 204,
+                "{user} PUT {path:?} after {archive:?}: {} {}",
+                r.status,
+                r.text()
+            );
+            let r = env.send(user, "GET", &path, &[], Vec::new()).await;
+            assert_eq!(r.status, 200, "{user} GET {path:?}: {}", r.text());
+            assert_eq!(r.body, mine, "{user} GET {path:?} after {archive:?}");
+        }
+    }
+    // Such an archive is created by nobody, its volume listed or not.
+    std::fs::create_dir_all(env.lib("N")).unwrap();
+    for (archive, _) in cases {
+        // (Beside `U0/X.cbz`, bob does not control `X`: only the editor gets this far.)
+        for (folder, users) in [("N", &["bob", "editor"][..]), ("U0", &["editor"][..])] {
+            let path = format!("/mokuro-reader/{folder}/{archive}");
+            for user in users {
+                let r = env.put(user, &path, cbz(1)).await;
+                assert_eq!(r.status, 409, "{user} PUT {path:?}: {}", r.text());
+                assert_eq!(r.json()["reason"], "ambiguous-name", "{user} {path:?}");
+            }
+        }
+        // Nor by a MOVE, nor its primary beside one made by hand.
+        let r = env.put("alice", "/mokuro-reader/N/Y.cbz", cbz(1)).await;
+        assert!(r.status == 201 || r.status == 204, "{}", r.text());
+        let to = format!("/mokuro-reader/N/{}", archive.replacen('X', "Y", 1));
+        let r = env.mv("editor", "/mokuro-reader/N/Y.cbz", &to).await;
+        assert_eq!(r.status, 409, "MOVE to {to:?}: {}", r.text());
+    }
+    assert_eq!(names(&env.lib("N")), ["Y.cbz"]);
+    std::fs::write(env.lib("N/Z.ed\u{200B}it.cbz"), cbz(1)).unwrap();
+    let r = env
+        .put(
+            "editor",
+            "/mokuro-reader/N/Z.ed\u{200B}it.mokuro",
+            br#"{"pages":[]}"#.to_vec(),
+        )
+        .await;
+    assert_eq!(r.status, 409, "{}", r.text());
+    assert_eq!(r.json()["reason"], "ambiguous-name");
+}
+
+/// Beside such an archive made by hand (outside Bunko, or before 0.8), each account's
+/// own correction still goes to its own copy: nothing in the library is written, so
+/// nothing listed there refuses it.
+#[tokio::test]
+async fn a_hand_made_archive_the_fold_ties_to_a_layer_never_blocks_corrections() {
+    let env = Env::new();
+    let cases = [
+        ("X.ed\u{200B}it.cbz", "X.edit.mokuro"),
+        ("X.ed\u{131}t.cbz", "X.edit.mokuro"),
+        ("X.e\u{34F}dit.cbz", "X.edit.mokuro"),
+        ("X.edit\u{200B}.cbz", "X.edit.mokuro"),
+        ("X.edit-\u{200B}2.cbz", "X.edit-2.mokuro"),
+    ];
+    for (i, (archive, layer)) in cases.iter().enumerate() {
+        let folder = format!("H{i}");
+        std::fs::create_dir_all(env.lib(&folder)).unwrap();
+        std::fs::write(env.lib(&format!("{folder}/{archive}")), cbz(1)).unwrap();
+        // Its OCR file too, made by hand: no request for the layer reaches it.
+        let primary = archive.replace(".cbz", ".mokuro");
+        std::fs::write(env.lib(&format!("{folder}/{primary}")), b"{\"hand\":1}").unwrap();
+        let r = env
+            .put("alice", &format!("/mokuro-reader/{folder}/X.cbz"), cbz(1))
+            .await;
+        assert_eq!(
+            r.status,
+            201,
+            "alice PUT X.cbz beside {archive:?}: {}",
+            r.text()
+        );
+        let path = format!("/mokuro-reader/{folder}/{layer}");
+        for user in ["reader", "alice", "bob"] {
+            let mine = format!(r#"{{"pages":[],"by":"{user}"}}"#).into_bytes();
+            let r = env.put(user, &path, mine.clone()).await;
+            assert!(
+                r.status == 201 || r.status == 204,
+                "{user} PUT {path:?} beside {archive:?}: {} {}",
+                r.status,
+                r.text()
+            );
+            let r = env.send(user, "GET", &path, &[], Vec::new()).await;
+            assert_eq!(r.status, 200, "{user} GET {path:?}: {}", r.text());
+            assert_eq!(r.body, mine, "{user} GET {path:?} beside {archive:?}");
+        }
+        let mut want = vec![archive.to_string(), primary.clone(), "X.cbz".to_string()];
+        want.sort();
+        assert_eq!(
+            names(&env.lib(&folder)),
+            want,
+            "nothing written in the library"
+        );
+        assert_eq!(
+            std::fs::read(env.lib(&format!("{folder}/{primary}"))).unwrap(),
+            b"{\"hand\":1}"
+        );
+    }
+}

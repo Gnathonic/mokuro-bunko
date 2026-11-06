@@ -883,3 +883,83 @@ async fn a_large_file_changed_behind_the_index_is_a_retry_before_any_header() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
+
+/// In a cloud library too: an archive only the filename fold makes `X.<layer>.cbz`
+/// (`X.ed\u{200B}it.cbz`) is created by nobody, so once `X.cbz` is there every account's
+/// correction of `X` (the cloud-root owner's in the cloud folder, the others' here) and
+/// its controller's curated publish are written. Beside one made in the cloud, the
+/// accounts whose corrections stay on this disk are never refused for it either.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_archive_the_fold_ties_to_a_layer_never_blocks_that_layer_in_the_cloud() {
+    fn enc(path: &str) -> String {
+        const SET: &percent_encoding::AsciiSet = &percent_encoding::CONTROLS.add(b' ');
+        percent_encoding::utf8_percent_encode(path, SET).to_string()
+    }
+    let cases = [
+        ("X.ed\u{200B}it.cbz", "X.edit.mokuro"),
+        ("X.ed\u{131}t.cbz", "X.edit.mokuro"),
+        ("X.edit-\u{200B}2.cbz", "X.edit-2.mokuro"),
+        ("X.cura\u{200B}ted.cbz", "X.curated.mokuro"),
+    ];
+    let fake = library_fake();
+    // Shared folders, made in the cloud: anyone may add to them.
+    for i in 0..cases.len() {
+        fake.reader_put(&format!("{ROOT}/U{i}/notes.txt"), b"shared");
+    }
+    fake.reader_put(&format!("{ROOT}/H/X.ed\u{200B}it.cbz"), &cbz(1));
+    let e = env(LibraryBackend::GDrive, Some(fake.clone())).await;
+    for name in ["alice", "bob"] {
+        e.services
+            .db
+            .create_user(name, "pass1234", Role::Uploader, UserStatus::Active, "")
+            .unwrap();
+    }
+    let put = |user: &'static str, path: String, body: Vec<u8>| {
+        let e = &e;
+        async move {
+            let (status, body) = e.req(Some(user), "PUT", &enc(&path), &[], &body).await;
+            (status, String::from_utf8_lossy(&body).into_owned())
+        }
+    };
+    for (i, (archive, layer)) in cases.iter().enumerate() {
+        let folder = format!("/mokuro-reader/U{i}");
+        let (status, body) = put("bob", format!("{folder}/{archive}"), cbz(1)).await;
+        assert_eq!(status, 409, "bob PUT {archive:?}: {body}");
+        assert!(body.contains("ambiguous-name"), "{body}");
+        let (status, body) = put("alice", format!("{folder}/X.cbz"), cbz(1)).await;
+        assert_eq!(status, 201, "alice PUT X.cbz: {body}");
+        let path = format!("{folder}/{layer}");
+        let users: &[&'static str] = if layer.contains("curated") {
+            &["alice"]
+        } else {
+            &["owner", "other", "alice", "bob"]
+        };
+        for user in users {
+            let mine = format!(r#"{{"pages":[],"by":"{user}"}}"#).into_bytes();
+            let (status, body) = put(user, path.clone(), mine.clone()).await;
+            assert!(
+                matches!(status, 201 | 204),
+                "{user} PUT {path:?} after {archive:?}: {status} {body}"
+            );
+            assert_eq!(
+                e.get(user, &enc(&path)).await,
+                (200, mine),
+                "{user} {path:?}"
+            );
+        }
+    }
+    // Beside one made in the cloud: the corrections kept on this disk.
+    let (status, body) = put("alice", "/mokuro-reader/H/X.cbz".into(), cbz(1)).await;
+    assert_eq!(status, 201, "alice PUT H/X.cbz: {body}");
+    for user in ["other", "alice", "bob"] {
+        let mine = format!(r#"{{"pages":[],"by":"{user}"}}"#).into_bytes();
+        let path = "/mokuro-reader/H/X.edit.mokuro".to_string();
+        let (status, body) = put(user, path.clone(), mine.clone()).await;
+        assert!(
+            matches!(status, 201 | 204),
+            "{user} PUT {path:?}: {status} {body}"
+        );
+        assert_eq!(e.get(user, &path).await, (200, mine), "{user}");
+        assert!(e.users(&format!("{user}/edits/H/X.edit.mokuro")).exists());
+    }
+}

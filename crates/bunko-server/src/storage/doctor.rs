@@ -207,8 +207,9 @@ pub fn reserved_series_rows(library: &Path, cloud_folder: Option<&str>) -> Vec<R
 /// volume in its place) or that only the fold gives a volume file suffix
 /// ([`bunko_core::sidecar_names::fold_disputed`]), and one the fold makes one name with
 /// a personal or curated layer name while it is no such layer (`X.ed\u{200B}it.mokuro`,
-/// its volume listed or not: [`bunko_core::sidecar_names::shadows_reserved_layer`]). Walks folders only (no file is
-/// read). A remote store merges its own case variants (spec §5.9): not for it.
+/// its volume listed or not: [`bunko_core::sidecar_names::shadows_reserved_layer`]), or
+/// an archive whose OCR file could only be such a name (`X.ed\u{200B}it.cbz`). Walks
+/// folders only (no file is read). A remote store merges its own case variants (spec §5.9): not for it.
 pub fn case_variant_rows(library: &Path) -> Vec<Row> {
     let mut out = Vec::new();
     let mut todo = vec![String::new()];
@@ -344,11 +345,16 @@ pub fn case_variant_rows(library: &Path) -> Vec<Row> {
             let path = dir.join(name);
             if disputed.is_empty() {
                 if bunko_core::sidecar_names::shadows_reserved_layer(name, &files).is_some() {
+                    let what = if bunko_core::sidecar_names::shadowing_archive(name).is_some() {
+                        "an archive whose OCR file would be an account's correction or the curated layer of the volume of the shorter stem, but its OCR file is no such layer by the sidecar naming rule Mokuro Reader shares"
+                    } else {
+                        "an account's correction or the curated layer of a volume of that stem, but no such layer by the sidecar naming rule Mokuro Reader shares: requests for those layers never reach it"
+                    };
                     out.push(row(
                         Verdict::Warn,
                         "Ambiguous name",
                         format!(
-                            "{} is one name on every host (Bunko joins names as case-insensitive filesystems do) with an account's correction or the curated layer of a volume of that stem, but no such layer by the sidecar naming rule Mokuro Reader shares: requests for those layers never reach it, and Bunko writes no such name",
+                            "{} is one name on every host (Bunko joins names as case-insensitive filesystems do) with {what}, and Bunko writes no such name",
                             child(name)
                         ),
                         Some(format!("Delete {} or rename it apart.", path.display())),
@@ -735,6 +741,7 @@ mod tests {
             "STRASSE.mokuro",
             "W.mo\u{212A}uro",
             "X.ed\u{200B}it.mokuro",
+            "Y.cura\u{200B}ted.cbz",
             "Notes.txt",
         ] {
             bunko_store::fs::write(library.join("S").join(name), "x").unwrap();
@@ -745,7 +752,14 @@ mod tests {
             .collect();
         rows.sort_by(|a, b| a.detail.cmp(&b.detail));
         let details: Vec<&str> = rows.iter().map(|r| r.detail.as_str()).collect();
-        assert_eq!(rows.len(), 4, "{details:?}");
+        assert_eq!(rows.len(), 5, "{details:?}");
+        // An archive whose OCR file could only stand in for `Y`'s curated layer.
+        assert!(
+            details.iter().any(|d| d.starts_with(
+                "S/Y.cura\u{200B}ted.cbz is one name on every host (Bunko joins names as case-insensitive filesystems do) with an archive"
+            )),
+            "{details:?}"
+        );
         // One name with an account's correction of a volume `X`, listed or not.
         assert!(
             details

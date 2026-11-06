@@ -131,11 +131,17 @@
   for every account, before the volume exists too (where before it was written, and
   then, once the volume came, every account's request for its own `V.edit.mokuro` read
   and wrote that file: readers got its maker's bytes and their saves were refused). A
-  dotted volume's own primary (`V.EDIT.mokuro` beside `V.EDIT.cbz`) is not such a name.
-  One already there (by hand, or from an earlier release) never stands in for the
-  layer: a request for `V.edit.mokuro` is each account's own correction, a request for
-  `V.curated.mokuro` never reads it, and a curated publish beside it answers 409 naming
-  it; on a local library `doctor` names it ("Ambiguous name"). The other ids reserved
+  dotted volume's own primary (`V.EDIT.mokuro` beside `V.EDIT.cbz`, rule 4) is not such
+  a name. Nor is an archive written whose OCR file could only be one, `V.cbz` listed or
+  not (`V.ed` + a zero width space + `it.cbz`, `V.edıt.cbz`, `V.cura` + a zero width
+  space + `ted.cbz`; nor that OCR file beside one made by hand); `V.EDIT.cbz` is
+  governed as before. One already there (by hand, or from an earlier release) never
+  stands in for the layer: a request for `V.edit.mokuro` is each account's own
+  correction, written to its own copy and never refused for what the library lists, a
+  request for `V.curated.mokuro` never reads it, and a curated publish beside it (or,
+  on a cloud library, the progress user's own correction, which is the cloud folder's
+  file) answers 409 naming it; on a local library `doctor` names it ("Ambiguous
+  name"). The other ids reserved
   for OCR generations (`original`, `gcv`, `updated-ocr`, `tr-*`) are ordinary layer
   files to WebDAV, as before.
 - **The OCR queue file and the cloud lease marker are recognised in every spelling the

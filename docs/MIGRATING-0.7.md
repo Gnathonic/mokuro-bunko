@@ -306,12 +306,15 @@ admin or editor, on every host.
 A file the wider fold makes one name with an account's correction or the curated layer
 of any volume (`V.EDIT.mokuro`, `V.Curated.mokuro`, `V.edit.mokuro` with a zero width
 space or a dotless `ı` in the id), while rule v1 reads no such layer in it, is no
-longer written either, its volume listed or not (409 `ambiguous-name`). One made by
-hand or by an earlier release is never what a request for `V.edit.mokuro` or
-`V.curated.mokuro` reaches: corrections stay each account's own, and a curated publish
-beside it answers 409 naming it. On a local library doctor names it; delete it (or
-rename it apart). A dotted volume's own primary (`V.EDIT.mokuro` beside `V.EDIT.cbz`) is
-not such a file.
+longer written either, its volume listed or not (409 `ambiguous-name`), nor an archive
+whose OCR file could only be such a file (`V.edit.cbz` with a zero width space or a
+dotless `ı` in `edit`, `V.curated.cbz` with a zero width space), `V.cbz` listed or not.
+One made by hand or by an earlier release is never what a request for `V.edit.mokuro`
+or `V.curated.mokuro` reaches: each account's correction goes to its own copy and is
+never refused for it, while a curated publish beside it (and, on a cloud library, the
+progress user's correction, which is the cloud folder's own file) answers 409 naming
+it. On a local library doctor names it; delete it (or rename it apart). A dotted
+volume's own primary (`V.EDIT.mokuro` beside `V.EDIT.cbz`) is not such a file.
 
 Series folders spelled like a reader's per-user name (`history`, `History`,
 `goals.json`, `Goals.json`, `volume-data.json`, ...) are hidden in 0.8, from WebDAV
