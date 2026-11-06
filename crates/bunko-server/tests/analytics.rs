@@ -1565,6 +1565,8 @@ fn files_named(dir: &std::path::Path, prefix: &str) -> Vec<String> {
 /// A healthy file that cannot be opened now (here: read-only) keeps its place and
 /// its history; the run counts in memory. It used to be renamed `.broken-*` and the
 /// history dropped out of view, its `-shm` left behind to break the new file too.
+/// Unix only: a read-only mode bit is how the test makes the file unopenable.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_healthy_file_that_cannot_be_opened_is_left_in_place() {
     use std::os::unix::fs::PermissionsExt;
@@ -1671,6 +1673,9 @@ async fn a_damaged_file_is_moved_aside_and_a_new_one_made() {
 
 /// A settings change whose save fails changes nothing: the config, the settings view
 /// and what the layer does agree (it used to say off while still counting).
+/// Unix only: a read-only directory (mode bits) is how the test makes the save fail;
+/// Windows' read-only attribute does not stop files being created in a directory.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_settings_change_that_cannot_be_saved_changes_nothing() {
     use std::os::unix::fs::PermissionsExt;
