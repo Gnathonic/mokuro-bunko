@@ -757,6 +757,165 @@ fn rename_moves_by_id_including_case_only_renames() {
     }
 }
 
+/// Holds every upload at its start until opened (or dropped, so a failing test never
+/// leaves the worker stuck); `entered` hears of each upload that started.
+struct UploadGate {
+    shut: Arc<(Mutex<bool>, parking_lot::Condvar)>,
+    entered: std::sync::mpsc::Receiver<()>,
+}
+
+impl UploadGate {
+    fn shut(fake: &FakeBackend) -> UploadGate {
+        let shut = Arc::new((Mutex::new(true), parking_lot::Condvar::new()));
+        let (tx, entered) = std::sync::mpsc::channel();
+        let (tx, held) = (Mutex::new(tx), shut.clone());
+        fake.set_call_hook(Some(Arc::new(move |op| {
+            if op != FakeOp::Upload {
+                return;
+            }
+            let _ = tx.lock().send(());
+            let mut shut = held.0.lock();
+            while *shut {
+                held.1.wait(&mut shut);
+            }
+        })));
+        UploadGate { shut, entered }
+    }
+
+    /// The worker has taken an op and its upload has begun: it is on its way.
+    fn wait_entered(&self) {
+        self.entered.recv_timeout(WAIT).expect("an upload starts");
+    }
+
+    fn open(&self) {
+        *self.shut.0.lock() = false;
+        self.shut.1.notify_all();
+    }
+}
+
+impl Drop for UploadGate {
+    fn drop(&mut self) {
+        self.open();
+    }
+}
+
+/// What a thread doing a move or a delete reached first: the store's `settle`
+/// failpoint (it waits for a write on its way), or its own end.
+fn first_of_settle_or_done(
+    t: &T,
+    op: impl FnOnce() -> std::io::Result<()> + Send + 'static,
+) -> (&'static str, std::thread::JoinHandle<std::io::Result<()>>) {
+    let (tx, rx) = std::sync::mpsc::channel::<&'static str>();
+    let settle = Mutex::new(tx.clone());
+    t.s().set_failpoint(Some(Arc::new(move |at: &str| {
+        if at == "settle" {
+            let _ = settle.lock().send("settle");
+        }
+        false
+    })));
+    let worker = std::thread::spawn(move || {
+        let r = op();
+        let _ = tx.send("done");
+        r
+    });
+    let first = rx.recv_timeout(WAIT).expect("the call settles or ends");
+    (first, worker)
+}
+
+/// A remove of a file whose Deferred write the worker has on its way (taken, its upload
+/// under way) waits for that write and then removes what it left. It used to return at
+/// once, leaving the write pending: the file came back when the upload finished (a
+/// WebDAV DELETE answered 204 for it), and a cover hook that removed Bunko's cover there
+/// to free the name deleted the cover moving in instead.
+#[test]
+fn removing_a_file_whose_write_is_on_its_way_removes_what_lands() {
+    let t = T::new(FakeBackend::drive_like(), &[("S/", b"")]);
+    t.wait_steady();
+    let gate = UploadGate::shut(&t.fake);
+    t.publish(
+        "S/v.webp",
+        b"a cover",
+        deferred(Origin::Thumbs, Mode::CreateNew),
+    );
+    gate.wait_entered();
+    let p = t.abs("S/v.webp");
+    let (first, remover) = first_of_settle_or_done(&t, move || fs::remove_file(&p));
+    assert_eq!(
+        first, "settle",
+        "the remove waits for the upload on its way"
+    );
+    gate.open();
+    remover.join().unwrap().unwrap();
+    assert!(!fs::exists(t.abs("S/v.webp")));
+    t.idle();
+    assert!(t.remote_named("S", "v.webp").is_empty());
+    assert_eq!(t.fake.upload_log(), ["v.webp"]);
+    // Bunko's own version: deleted for good, not trashed.
+    assert_eq!(t.fake.deleted_log().len(), 1, "{:?}", t.fake.trashed_log());
+}
+
+/// A rename of a file whose Deferred write is on its way waits for it, then moves the
+/// node it left by id. It used to move the op instead, too late for the upload, which
+/// landed under the old name: a cover moved along with its archive was left beside
+/// nothing.
+#[test]
+fn renaming_a_file_whose_write_is_on_its_way_moves_what_lands() {
+    let t = T::new(FakeBackend::drive_like(), &[("S/", b"")]);
+    t.wait_steady();
+    let gate = UploadGate::shut(&t.fake);
+    t.publish(
+        "S/v.webp",
+        b"a cover",
+        deferred(Origin::Thumbs, Mode::CreateNew),
+    );
+    gate.wait_entered();
+    let (from, to) = (t.abs("S/v.webp"), t.abs("S/w.webp"));
+    let (first, renamer) = first_of_settle_or_done(&t, move || fs::rename(&from, &to));
+    assert_eq!(
+        first, "settle",
+        "the rename waits for the upload on its way"
+    );
+    gate.open();
+    renamer.join().unwrap().unwrap();
+    t.idle();
+    let landed = t.remote_named("S", "w.webp");
+    assert_eq!(landed.len(), 1, "{landed:?}");
+    assert!(t.remote_named("S", "v.webp").is_empty());
+    assert_eq!(t.fake.upload_log(), ["v.webp"], "uploaded once, then moved");
+    assert_eq!(fs::read(t.abs("S/w.webp")).unwrap(), b"a cover");
+    assert!(!fs::exists(t.abs("S/v.webp")));
+}
+
+/// A Deferred write whose preflight failed and that waits to try again has sent
+/// nothing: a remove of its file cancels it, as one that never left.
+#[test]
+fn removing_a_file_whose_write_waits_to_try_again_cancels_it() {
+    fn slow_retries(c: &mut RemoteStoreConfig) {
+        c.retry_base = Duration::from_secs(600);
+    }
+    let t = T::with(FakeBackend::drive_like(), &[("S/", b"")], slow_retries);
+    t.wait_steady();
+    t.fake.fail_next(
+        FakeOp::FindNamed,
+        bunko_remote::BErr::Transient("blip".into()),
+    );
+    t.publish(
+        "S/v.webp",
+        b"a cover",
+        deferred(Origin::Thumbs, Mode::CreateNew),
+    );
+    wait_until("the preflight failed", || {
+        t.s()
+            .outbox()
+            .first()
+            .is_some_and(|o| o.state == "PREFLIGHT" && o.last_error.is_some())
+    });
+    fs::remove_file(t.abs("S/v.webp")).unwrap();
+    assert!(!fs::exists(t.abs("S/v.webp")));
+    assert!(t.s().outbox().is_empty(), "{:?}", t.s().outbox());
+    assert_eq!(t.fake.calls(FakeOp::Upload), 0);
+}
+
 #[test]
 fn a_feed_poll_between_an_own_move_and_its_commit_still_sees_an_echo() {
     // The provider applied the move (or trash) but answers slowly, and a feed poll

@@ -608,8 +608,9 @@ async fn a_bridge_move_answers_with_bunkos_cover_moved_along() {
 }
 
 /// The hook that takes Bunko's cover along finds a cover Bunko made at the new name.
-/// Here the MOVE replaces another volume Bunko had covered; on Windows the cover
-/// worker, woken by the archive's arrival, covers the new name before the hook runs
+/// Here the MOVE replaces another volume Bunko had covered. It is the state the
+/// Windows race left too, before the MOVE's notice kept the cover worker off the new
+/// name: the worker, woken by the archive's arrival, covered it before the hook ran
 /// (`a_bridge_move_answers_with_bunkos_cover_moved_along` failed there: the moved
 /// cover was deleted, and the new name's uploaded as a new node). The moved cover's
 /// node takes the name, and the other cover goes.

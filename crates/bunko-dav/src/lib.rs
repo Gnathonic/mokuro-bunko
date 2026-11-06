@@ -40,7 +40,7 @@ use http::{HeaderMap, Request, Response, StatusCode};
 
 pub use bunko_core::reader_tree::Caller;
 pub use cache::{CacheConfig, PropfindCache};
-pub use hooks::{AuditEvent, DavHooks, NoHooks, PutFollowUp};
+pub use hooks::{AuditEvent, DavHooks, HookGuard, NoHooks, PutFollowUp};
 pub use path_case::{LibraryPathCanonicalizer, PathCase, fold_name, is_case_sensitive};
 pub use personal::{EDITS_DIR, MAX_LAYER_BYTES, PersonalOverlays};
 pub use upload::{DamageMemory, DigestAlgo, parse_content_digest};

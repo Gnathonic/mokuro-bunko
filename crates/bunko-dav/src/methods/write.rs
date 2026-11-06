@@ -689,10 +689,14 @@ fn move_file(
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent)?;
     }
+    let volume = is_cbz(src) && is_cbz(dest) && old_rel.is_some() && new_rel.is_some();
+    // Told before the rename and kept until its hook ran: a failed rename drops it here.
+    let moving = volume.then(|| req.ctx.hooks.archive_moving(src, dest));
     fs::rename(src, dest)?;
-    if is_cbz(src) && is_cbz(dest) && old_rel.is_some() && new_rel.is_some() {
+    if volume {
         req.ctx.hooks.archive_moved(src, dest);
     }
+    drop(moving);
     if is_cbz(src) {
         effects.note_removed(inner, src);
     }
