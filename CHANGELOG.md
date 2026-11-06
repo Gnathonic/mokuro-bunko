@@ -327,6 +327,12 @@
   every record: a volume in which nothing decodes was offered again, at once, to the
   release that had just failed it, the backoff never grew, and the catalog never marked
   the volume as failing. The archive is now looked for in the cloud library's index.
+- **Checking a cloud volume's page formats no longer holds up the OCR queue.** Whether a
+  processor older than a page format (JPEG XL before 0.7.5) can read a volume is
+  decided from the archive's page names. In a cloud library they are now read on a
+  helper thread, not by the scheduler itself, which could wait on a download of the
+  archive while every other processor waited too; the volume waits for that answer
+  before it is offered to such a processor.
 - **A new account cannot take an existing name in other letter case.** `ALICE` could
   register beside `alice`; on a Windows or macOS disk, which ignore case, both then
   read and wrote one `users/alice/` folder (progress, reading history, corrections),

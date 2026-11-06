@@ -19,7 +19,7 @@ mod session;
 mod settle;
 mod status;
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -39,7 +39,7 @@ use serde_json::{Map, Value};
 use tokio::sync::{mpsc, oneshot};
 use tracing::info;
 
-use super::owed::{OwedIndex, OwedVolume};
+use super::owed::{OwedIndex, OwedVolume, PageSuffixes};
 use super::profiles::Profiles;
 use super::types::{Job, LibraryFacts, PathLocks};
 
@@ -196,6 +196,16 @@ pub enum Msg {
         stamp: Option<super::types::Stamp>,
         entry: Option<OwedVolume>,
     },
+    /// Page suffixes read on a helper thread for `machine_reads` (spec §8: on a remote
+    /// store the actor reads no archive): per volume, its version when read and what
+    /// the read gave (`Err`: could not be read now; tried again after the next walk).
+    PageSuffixesRead(
+        Vec<(
+            String,
+            Option<super::types::Stamp>,
+            Result<PageSuffixes, String>,
+        )>,
+    ),
     /// A local claim's archive was spooled from a remote store (spec §8, `spooling`).
     Spooled {
         sid: String,
@@ -237,6 +247,7 @@ impl std::fmt::Debug for Msg {
             Msg::ArchiveArrived(_) => "ArchiveArrived",
             Msg::ArchiveRemoved(_) => "ArchiveRemoved",
             Msg::ArrivalJudged { .. } => "ArrivalJudged",
+            Msg::PageSuffixesRead(_) => "PageSuffixesRead",
             Msg::Spooled { .. } => "Spooled",
             Msg::BenchSample { .. } => "BenchSample",
             Msg::Apply { .. } => "Apply",
@@ -346,9 +357,13 @@ pub struct Scheduler {
     pub returned_by: HashMap<Job, HashSet<String>>,
     pub eft_deadlines: EftDeadlines<Job>,
     pub left_logged: HashSet<(Job, String)>,
-    /// Page suffixes of the volumes looked into for a processor of an older release
-    /// (`machine_reads`): rel → (size, mtime_ns, suffixes).
-    pub page_suffixes: HashMap<String, (u64, i128, Arc<[String]>)>,
+    /// Volumes whose page suffixes `machine_reads` wants read on a helper thread (a
+    /// remote store; they are kept on the owed volume, [`OwedVolume::page_suffixes`]).
+    pub suffixes_wanted: BTreeSet<String>,
+    /// A helper is reading page suffixes ([`Msg::PageSuffixesRead`]).
+    pub suffixes_reading: bool,
+    /// Volumes whose suffixes could not be read; asked again after the next walk.
+    pub suffixes_failed: HashSet<String>,
     /// `(job, machine)` already logged as a volume that machine's release cannot read.
     pub unreadable_logged: HashSet<(Job, String)>,
     pub cards: IndexMap<Job, Map<String, Value>>,
@@ -433,7 +448,9 @@ impl Scheduler {
             returned_by: HashMap::new(),
             eft_deadlines: EftDeadlines::new(),
             left_logged: HashSet::new(),
-            page_suffixes: HashMap::new(),
+            suffixes_wanted: BTreeSet::new(),
+            suffixes_reading: false,
+            suffixes_failed: HashSet::new(),
             unreadable_logged: HashSet::new(),
             cards: IndexMap::new(),
             queue_generation: 0,
@@ -624,6 +641,7 @@ impl Scheduler {
             Msg::ArchiveArrived(path) => self.archive_arrived(&path),
             Msg::ArchiveRemoved(path) => self.archive_removed(&path),
             Msg::ArrivalJudged { rel, stamp, entry } => self.arrival_judged(rel, stamp, entry),
+            Msg::PageSuffixesRead(read) => self.page_suffixes_read(read),
             Msg::Spooled { sid, job, result } => self.spooled(&sid, &job, result),
             Msg::BenchSample {
                 machine,
@@ -729,7 +747,18 @@ impl Scheduler {
             self.start_walk();
             return;
         }
+        let mut index = index;
+        // Page suffixes already read stay with their volume while its version does.
+        for (rel, v) in &mut index.volumes {
+            if let Some(old) = self.owed.volumes.get(rel)
+                && let Some((stamp, read)) = &old.page_suffixes
+                && *stamp == (v.size, v.mtime_ns)
+            {
+                v.page_suffixes = Some((*stamp, read.clone()));
+            }
+        }
         self.owed = index;
+        self.suffixes_failed.clear();
         self.last_walk_at = Some(self.mono());
         self.walks += 1;
         self.bump();
@@ -916,6 +945,10 @@ impl Scheduler {
         if !self.claims.is_empty() || !self.autobench.inflight.is_empty() {
             return;
         }
+        // A volume waits for its page suffixes: the lanes look again when they come.
+        if self.suffixes_reading || !self.suffixes_wanted.is_empty() {
+            return;
+        }
         if self.holds.values().any(|n| *n > 0) {
             return;
         }
@@ -974,6 +1007,7 @@ impl Scheduler {
             }
         }
         self.drain_autobench_requests();
+        self.start_suffix_reads();
         self.maybe_end_scan();
     }
 

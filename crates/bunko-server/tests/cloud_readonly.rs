@@ -5,8 +5,9 @@
 //! reports the store, a rename made in the cloud carries the DB rows along, a store
 //! that needs a sign-in holds the queue, and a local OCR claim reads a spooled copy of
 //! the archive and installs into the cloud (or, refused, goes back to the queue
-//! unrecorded). The scheduler keeps a cloud volume's failure records across scans.
-//! The whole server's write side is `cloud_e2e.rs`.
+//! unrecorded). The scheduler keeps a cloud volume's failure records across scans,
+//! and learns its page formats on a helper thread. The whole server's write side is
+//! `cloud_e2e.rs`.
 
 // Fixtures are checked with std::fs on purpose (the spool is a real local file).
 #![allow(clippy::disallowed_methods)]
@@ -1203,5 +1204,142 @@ fn a_cloud_volumes_failure_record_goes_with_its_archive() {
         sched.failures.is_empty(),
         "the record of a removed archive is pruned: {:?}",
         sched.failures
+    );
+}
+
+/// A `.cbz` of `pages` stored members named `NNN.<suffix>`.
+fn cbz_of(pages: usize, suffix: &str) -> Vec<u8> {
+    let mut z = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let opts =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    for i in 0..pages {
+        z.start_file(format!("{:03}.{suffix}", i + 1), opts)
+            .unwrap();
+        z.write_all(b"not really an image").unwrap();
+    }
+    z.finish().unwrap().into_inner()
+}
+
+/// Page counts without opening an archive (what the metadata cache gives a server), so
+/// nothing but the page-format check reads one.
+struct CachedCounts;
+impl LibraryFacts for CachedCounts {
+    fn missing_pages(&self, cbz: &std::path::Path) -> i64 {
+        LibraryFacts::missing_pages(&FileFacts, cbz)
+    }
+    fn page_count(&self, _cbz: &std::path::Path) -> Option<i64> {
+        Some(3)
+    }
+}
+
+/// Spec §8 with the page-format rule (0.7.6): whether an older processor's release
+/// reads a cloud volume's pages is learnt from its zip directory on a helper thread,
+/// never on the actor; until then the volume waits. A volume of JPEG XL pages is then
+/// not offered to a release older than 0.7.5, and is offered to one that reads them.
+#[test]
+fn a_cloud_volumes_page_formats_are_read_off_the_actor() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let c = cloud_sched();
+    let fake = c.remote.backend().clone();
+    fake.reader_put(&format!("{ROOT}/Series/Vol 3.cbz"), &cbz_of(3, "jxl"));
+    c.remote.feed().poll_now();
+    let vol3 = c.layout.library().join("Series/Vol 3.cbz");
+    eventually_sync("the new archive in the index", || {
+        bunko_store::fs::is_file(&vol3)
+    });
+    // A read the actor makes while it handles a message would hold the actor here
+    // (the helper's reads wait until it is done): it is recorded, never waited out.
+    let on_actor = Arc::new(AtomicBool::new(false));
+    let read_on_actor = Arc::new(AtomicBool::new(false));
+    let hook = {
+        let (on_actor, read_on_actor) = (on_actor.clone(), read_on_actor.clone());
+        Arc::new(move |op: bunko_remote::fake::FakeOp| {
+            if op != bunko_remote::fake::FakeOp::Read {
+                return;
+            }
+            let until = Instant::now() + Duration::from_secs(2);
+            while on_actor.load(Ordering::SeqCst) {
+                if Instant::now() > until {
+                    read_on_actor.store(true, Ordering::SeqCst);
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        })
+    };
+    fake.set_call_hook(Some(hook));
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (mut sched, _clock) = sched_with(&c.layout, Exec::Threads(tx), Arc::new(CachedCounts));
+    let mut handle = |sched: &mut Scheduler, msg: Msg| {
+        on_actor.store(true, Ordering::SeqCst);
+        sched.handle(msg);
+        on_actor.store(false, Ordering::SeqCst);
+    };
+    // Take helper messages until `done` holds.
+    let helpers = |sched: &mut Scheduler,
+                   handle: &mut dyn FnMut(&mut Scheduler, Msg),
+                   done: &dyn Fn(&Scheduler) -> bool| {
+        while !done(sched) {
+            let msg = rx
+                .recv_timeout(Duration::from_secs(20))
+                .expect("a helper's answer");
+            handle(sched, msg);
+        }
+    };
+    handle(&mut sched, Msg::Tick);
+    helpers(&mut sched, &mut handle, &|s| s.walks > 0);
+    let owed: Vec<&String> = sched.owed.volumes.keys().collect();
+    assert_eq!(owed, ["Series/Vol 2.cbz", "Series/Vol 3.cbz"]);
+    fake.reset_calls();
+
+    // 0.7.4 reads no JPEG XL: offered nothing until the formats are known, then only
+    // the volume of JPEG pages.
+    on_actor.store(true, Ordering::SeqCst);
+    let (_, mut old) = connect(&mut sched, "old", 2, "0.7.4");
+    on_actor.store(false, Ordering::SeqCst);
+    assert!(
+        volume_ops(&drain(&mut old)).is_empty(),
+        "offered before its pages were known"
+    );
+    helpers(&mut sched, &mut handle, &|s| {
+        s.owed.volumes["Series/Vol 3.cbz"].page_suffixes.is_some()
+    });
+    let got: Vec<String> = volume_ops(&drain(&mut old))
+        .into_iter()
+        .map(|(_, _, rel)| rel)
+        .collect();
+    assert_eq!(got, ["Series/Vol 2.cbz"], "0.7.4 cannot read JPEG XL pages");
+    let (_, read) = sched.owed.volumes["Series/Vol 3.cbz"]
+        .page_suffixes
+        .clone()
+        .unwrap();
+    assert_eq!(
+        read,
+        bunko_server::ocr::owed::PageSuffixes::Read(Arc::from(vec![".jxl".to_string()]))
+    );
+    let vol3_pid = fake
+        .node_at(&format!("{ROOT}/Series/Vol 3.cbz"))
+        .unwrap()
+        .pid;
+    assert!(
+        fake.read_log().iter().any(|r| r.pid == vol3_pid),
+        "a helper read the archive: {:?}",
+        fake.read_log()
+    );
+    assert!(sched.failures.is_empty());
+
+    // A release that reads them is offered it at once (nothing more to read).
+    on_actor.store(true, Ordering::SeqCst);
+    let (_, mut new) = connect(&mut sched, "new", 1, "0.7.5");
+    on_actor.store(false, Ordering::SeqCst);
+    let got: Vec<String> = volume_ops(&drain(&mut new))
+        .into_iter()
+        .map(|(_, _, rel)| rel)
+        .collect();
+    assert_eq!(got, ["Series/Vol 3.cbz"]);
+    fake.set_call_hook(None);
+    assert!(
+        !read_on_actor.load(Ordering::SeqCst),
+        "the actor read an archive"
     );
 }
