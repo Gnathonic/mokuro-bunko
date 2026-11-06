@@ -79,5 +79,14 @@ codegen-units = 4
 strip = "symbols"
 panic = "unwind"
 
+# Dev and test builds keep line tables only: panics and backtraces still show file:line
+# for our crates (dependency frames show function names). Full debuginfo was ~89% of every
+# test binary. Without it, bunko-server's 50 test binaries take 6.8 GB instead of 29.4 GB, and
+# an edit-and-relink round drops from ~22 s to ~9 s. For a debugger session, build with
+# `--config 'profile.dev.debug=true'`.
+[profile.dev]
+debug = "line-tables-only"
+
 [profile.dev.package."*"]
 opt-level = 2
+debug = false
