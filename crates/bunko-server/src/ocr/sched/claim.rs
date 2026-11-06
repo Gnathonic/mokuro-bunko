@@ -3,22 +3,46 @@
 //! (earliest-finish, warm sessions, backoffs, autobench gating), phase C takes.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::Arc;
 
 use bunko_core::generations::Generation;
 use bunko_proto::{PoolsSpec, RowSpec};
 use bunko_sched::breaker::{BackoffState, backoff_state};
 use bunko_sched::eft::{
-    EftLane, EftParams, InflightCard, WarmMachine, earliest_finish_claim, lane_free_in,
+    EftLane, EftParams, InflightCard, WarmMachine, earliest_finish_claim_where, lane_free_in,
     single_volume_rows, warm_session_wins,
 };
-use bunko_sched::failures::{Eligibility, eligibility, failure_key};
+use bunko_sched::failures::{Eligibility, Fleet, eligibility_in, failure_key};
 use bunko_sched::job_order::{JobKey, order_jobs};
 use bunko_sched::plan::{LanePricing, MachineBench, Pricing};
 use serde_json::{Map, Value};
 
-use super::{Claimed, Lane, Scheduler};
+use super::{Claimed, Lane, Msg, Scheduler};
+use crate::ocr::owed::{PageSuffixes, read_page_suffixes};
 use crate::ocr::profiles::{Formats, RowProfile, machine_pools, profile_key, runner_pools};
-use crate::ocr::types::{Job, LOCAL, stamp_of};
+use crate::ocr::types::{Job, LOCAL, Stamp, stamp_of};
+
+/// What `machine_reads` knows of a volume's page formats.
+enum Suffixes {
+    Known(Arc<[String]>),
+    /// Not readable (gone, damaged, an I/O error on a local disk): the claim's own
+    /// checks decide, as for any machine.
+    Unknown,
+    /// Being read on a helper (remote store): offered once known.
+    Wait,
+}
+
+impl From<&PageSuffixes> for Suffixes {
+    fn from(read: &PageSuffixes) -> Self {
+        match read {
+            PageSuffixes::Read(suffixes) => Suffixes::Known(suffixes.clone()),
+            PageSuffixes::Unreadable => Suffixes::Unknown,
+        }
+    }
+}
+
+/// The most page-suffix reads asked of a helper at a time (remote store).
+pub const SUFFIX_BATCH: usize = 8;
 
 /// The pseudo row id upgrade jobs are ordered under: after every real row.
 pub const UPGRADE_ORDER_KEY: &str = "\u{10FFFF}upgrade";
@@ -223,6 +247,15 @@ impl Scheduler {
         let now = self.now();
         let poll = self.settings.poll_interval;
         let primary = self.primary().map(|p| p.id.clone());
+        let library_version = self.deps.version.clone();
+        let fleet = Fleet {
+            library_version: &library_version,
+            machine_versions: self
+                .machines
+                .keys()
+                .map(|pid| self.release_of(pid))
+                .collect(),
+        };
         let mut jobs = Vec::new();
         let mut stale: Vec<String> = Vec::new();
         for (rel, vol) in &self.owed.volumes {
@@ -247,8 +280,8 @@ impl Scheduler {
                 };
                 let key = self.failure_key_of(&job, row);
                 let record = self.failures.get(&key).and_then(Value::as_object);
-                match eligibility(record, Some(vol.mtime), now, poll) {
-                    Eligibility::BackedOff => continue,
+                match eligibility_in(record, Some(vol.mtime), now, poll, &fleet) {
+                    Eligibility::BackedOff | Eligibility::Parked => continue,
                     Eligibility::Replaced => stale.push(key),
                     _ => {}
                 }
@@ -304,6 +337,189 @@ impl Scheduler {
             .map(|p| p.pools)
             .unwrap_or_default();
         runner_pools(&machine_pools(&stored, &row.pools.to_value()))
+    }
+
+    /// The page suffixes of `rel`'s volume, kept on its owed entry while its size and
+    /// mtime stay ([`crate::ocr::owed::OwedVolume::page_suffixes`]). On a local library
+    /// a miss is read here; on a remote one (spec §8: the actor reads no archive) it is
+    /// asked of a helper ([`Self::start_suffix_reads`]) and the volume waits.
+    fn page_suffixes(&mut self, rel: &str) -> Suffixes {
+        let path = self.library().join(rel);
+        let Some(stamp) = stamp_of(&path) else {
+            return Suffixes::Unknown;
+        };
+        if let Some(v) = self.owed.volumes.get(rel)
+            && let Some((at, read)) = &v.page_suffixes
+            && *at == stamp
+        {
+            return Suffixes::from(read);
+        }
+        if self.remote_library() {
+            // Only an owed volume keeps them: anything else would be asked for again
+            // and again.
+            // At most a batch is asked for at a time, in the order the volumes were
+            // looked at (claim priority): an older processor facing a long backlog of
+            // unknown volumes is offered the first it reads after one batch, not after
+            // the whole backlog; the next pass asks for the next ones.
+            if self.suffixes_wanted.len() < SUFFIX_BATCH
+                && self.owed.volumes.contains_key(rel)
+                && !self.suffixes_failed.contains(rel)
+            {
+                self.suffixes_wanted.insert(rel.to_string());
+            }
+            return Suffixes::Wait;
+        }
+        let Ok(read) = read_page_suffixes(&path) else {
+            return Suffixes::Unknown;
+        };
+        let out = Suffixes::from(&read);
+        if let Some(v) = self.owed.volumes.get_mut(rel) {
+            v.page_suffixes = Some((stamp, read));
+        }
+        out
+    }
+
+    /// Read the page suffixes `machine_reads` asked for, on a helper thread (one batch
+    /// of at most [`SUFFIX_BATCH`] at a time, in the order asked; called at the end of
+    /// every pump). Each batch answers on its own, so the lanes look again after it.
+    pub(super) fn start_suffix_reads(&mut self) {
+        if self.suffixes_reading || self.suffixes_wanted.is_empty() || self.stopping {
+            return;
+        }
+        self.suffixes_reading = true;
+        let library = self.library();
+        let n = self.suffixes_wanted.len().min(SUFFIX_BATCH);
+        let rels: Vec<String> = self.suffixes_wanted.drain(..n).collect();
+        self.run_background(Box::new(move || {
+            let read = rels
+                .into_iter()
+                .map(|rel| {
+                    let path = library.join(&rel);
+                    let stamp = stamp_of(&path);
+                    // A panic on a malformed archive must still answer, or no read
+                    // would start again and the scan would never end: the volume is
+                    // then judged by the claim's own checks, as a damaged one is.
+                    let read = std::panic::catch_unwind(|| read_page_suffixes(&path))
+                        .unwrap_or_else(|_| {
+                            tracing::warn!("reading the page formats of {rel} panicked");
+                            Ok(PageSuffixes::Unreadable)
+                        })
+                        .map_err(|e| e.to_string());
+                    (rel, stamp, read)
+                })
+                .collect();
+            Msg::PageSuffixesRead(read)
+        }));
+    }
+
+    /// A helper's page suffixes: kept on each volume still owed, and every lane looks
+    /// again. One that could not be read waits for the next walk.
+    pub(super) fn page_suffixes_read(
+        &mut self,
+        read: Vec<(String, Option<Stamp>, Result<PageSuffixes, String>)>,
+    ) {
+        self.suffixes_reading = false;
+        for (rel, stamp, result) in read {
+            match (stamp, result) {
+                (Some(stamp), Ok(read)) => {
+                    if let Some(v) = self.owed.volumes.get_mut(&rel) {
+                        v.page_suffixes = Some((stamp, read));
+                    }
+                }
+                (_, Err(e)) => {
+                    tracing::warn!("could not read the page formats of {rel}: {e}");
+                    self.suffixes_failed.insert(rel);
+                }
+                // Gone meanwhile: its removal follows.
+                (None, Ok(_)) => {}
+            }
+        }
+        self.bump();
+        if self.processing_hold().is_none() {
+            self.maybe_start_scan();
+        }
+    }
+
+    /// Whether machine `pid`'s release reads every page of `job`'s volume. This server's
+    /// own OCR does; a processor is judged by the version it registered with
+    /// ([`bunko_proto::PAGE_FORMATS_SINCE`]), so a volume is looked into only for a
+    /// processor older than some page format. A volume it cannot read waits for one
+    /// that can instead of failing there; so does one whose pages are not known yet
+    /// (being read on a helper, remote store).
+    pub fn machine_reads(&mut self, pid: &str, job: &Job) -> bool {
+        let Some(machine) = self.machines.get(pid) else {
+            return false;
+        };
+        if machine.local || bunko_proto::release_reads_every_page_format(&machine.host.version) {
+            return true;
+        }
+        let (version, label) = (machine.host.version.clone(), machine.label());
+        let suffixes = match self.page_suffixes(&job.rel) {
+            Suffixes::Known(suffixes) => suffixes,
+            Suffixes::Unknown => return true,
+            Suffixes::Wait => return false,
+        };
+        let unread: Vec<&str> = suffixes
+            .iter()
+            .filter(|s| !bunko_proto::release_reads_page(&version, s))
+            .map(String::as_str)
+            .collect();
+        if unread.is_empty() {
+            return true;
+        }
+        if self.unreadable_logged.insert((job.clone(), label.clone())) {
+            let version = if version.is_empty() {
+                "unknown"
+            } else {
+                &version
+            };
+            self.log(format!(
+                "Not offering {} to {label}: its release ({version}) cannot read {} pages",
+                job.file_name(),
+                unread.join(", ")
+            ));
+        }
+        false
+    }
+
+    /// The release machine `pid` runs: what it registered with; this server's own OCR
+    /// runs the library's.
+    pub fn release_of(&self, pid: &str) -> String {
+        match self.machines.get(pid) {
+            Some(m) if m.local && m.host.version.is_empty() => self.deps.version.clone(),
+            Some(m) => m.host.version.clone(),
+            None => String::new(),
+        }
+    }
+
+    /// Whether machine `pid` may try `job` again, given its failure record: a failure of
+    /// the volume itself only by a release that has not tried it (or any once the
+    /// library's release changed); see `bunko_sched::failures::machine_may_retry`.
+    fn may_retry_on(&self, pid: &str, job: &Job) -> bool {
+        let Some(row) = self.row(&job.gid) else {
+            return true;
+        };
+        let key = self.failure_key_of(job, row);
+        let Some(record) = self.failures.get(&key).and_then(Value::as_object) else {
+            return true;
+        };
+        let mtime = self.owed.volumes.get(&*job.rel).map(|v| v.mtime);
+        if bunko_sched::failures::replaced_since_failure(mtime, record) {
+            return true;
+        }
+        bunko_sched::failures::machine_may_retry(
+            Some(record),
+            &self.release_of(pid),
+            self.now(),
+            self.settings.poll_interval,
+            &self.deps.version,
+        )
+    }
+
+    /// Whether machine `pid` may be given `job`: it may try it again after a failure,
+    /// and its release reads the volume's pages ([`Self::machine_reads`]).
+    pub fn machine_takes(&mut self, pid: &str, job: &Job) -> bool {
+        self.may_retry_on(pid, job) && self.machine_reads(pid, job)
     }
 
     /// `_slot_refusal`: why this machine may not be offered the row.
@@ -837,6 +1053,9 @@ impl Scheduler {
                 self.forget_candidate(&job);
                 continue;
             }
+            if !self.machine_takes(&pid, &job) {
+                continue;
+            }
             if unmeasured.contains(&*job.gid) {
                 self.want_autobench(&pid, &row);
                 continue;
@@ -974,15 +1193,35 @@ impl Scheduler {
             .take(bunko_sched::eft::EFT_LOOKAHEAD)
             .map(|j| (j.clone(), j.gid.to_string(), self.known_pages(&j.rel)))
             .collect();
+        // A lane whose release cannot read a volume is no candidate for it, or the lane
+        // that can would step aside for one that never takes it.
+        let lane_pids: Vec<(u64, String)> = lanes
+            .iter()
+            .filter_map(|l| {
+                self.lanes
+                    .iter()
+                    .find(|x| x.id == l.key)
+                    .map(|x| (l.key, x.pid.clone()))
+            })
+            .collect();
+        let mut cannot: HashSet<(Job, u64)> = HashSet::new();
+        for (job, _, _) in &jobs {
+            for (key, pid) in &lane_pids {
+                if !self.machine_takes(pid, job) {
+                    cannot.insert((job.clone(), *key));
+                }
+            }
+        }
         let decision = {
             let pricing = self.pricing();
-            earliest_finish_claim(
+            earliest_finish_claim_where(
                 &jobs,
                 &lanes,
                 &lane.id,
                 |g, m| pricing.rate_for(g, Some(m), 0, 0.0),
                 |g, m| pricing.startup_for(g, Some(m)).seconds,
                 EftParams::default(),
+                |job, key| !cannot.contains(&(job.clone(), *key)),
             )
         };
         let Some(decision) = decision else {
@@ -1075,12 +1314,21 @@ impl Scheduler {
         let singles = single_volume_rows(&pairs, &warm_rows, &unavailable);
         let mut out = HashSet::new();
         for (gid, job) in singles {
+            // Only a warm session whose release reads the volume may keep it.
+            let readers: Vec<String> = warm_on[&gid]
+                .iter()
+                .filter(|pid| self.machine_takes(pid, &job))
+                .cloned()
+                .collect();
+            if readers.is_empty() {
+                continue;
+            }
             let pages = self.deps.facts.page_count(&job.path(&self.library()));
             let leave = {
                 let pricing = self.pricing();
                 let mine_rate = pricing.rate_for(&gid, Some(&my_name), 0, 0.0);
                 let mine_startup = pricing.startup_for(&gid, Some(&my_name)).seconds;
-                let warm: Vec<WarmMachine> = warm_on[&gid]
+                let warm: Vec<WarmMachine> = readers
                     .iter()
                     .filter_map(|pid| self.machines.get(pid))
                     .map(|m| {

@@ -24,8 +24,9 @@ use zipdir::{ZipEntry, ZipError};
 /// The largest page [`Volume::read_page`] reads into memory.
 pub const MAX_PAGE_BYTES: u64 = 256 * 1024 * 1024;
 
-/// Page image suffixes the OCR runner accepts (`engine_runner.IMAGE_EXTENSIONS`).
-pub const PAGE_EXTENSIONS: &[&str] = &[".jpg", ".jpeg", ".png", ".webp", ".avif"];
+/// Page image suffixes the OCR runner accepts (`engine_runner.IMAGE_EXTENSIONS`, plus
+/// JPEG XL; `bunko_ocr::pages::IMAGE_EXTENSIONS` is the same list).
+pub const PAGE_EXTENSIONS: &[&str] = &[".jpg", ".jpeg", ".png", ".webp", ".avif", ".jxl"];
 
 /// Why a volume or page could not be read.
 #[derive(Debug, thiserror::Error)]
@@ -385,6 +386,20 @@ mod tests {
         out.extend(cd_offset.to_le_bytes());
         out.extend(0u16.to_le_bytes());
         out
+    }
+
+    /// Regression: the OCR queue counted no pages in a volume of JPEG XL pages.
+    #[test]
+    fn jxl_members_are_pages() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = b"\xff\x0a not really a page".to_vec();
+        let path = dir.path().join("v.cbz");
+        std::fs::write(
+            &path,
+            stored_zip("v/001.JXL", &data, crc32fast::hash(&data)),
+        )
+        .unwrap();
+        assert_eq!(Volume::open(&path).unwrap().pages().len(), 1);
     }
 
     /// Regression (review finding): a page read into memory stops at the cap instead of

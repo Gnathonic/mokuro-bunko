@@ -39,13 +39,13 @@ use serde_json::{Map, Value};
 use tokio::sync::{mpsc, oneshot};
 use tracing::info;
 
-use super::owed::{OwedIndex, OwedVolume};
+use super::owed::{OwedIndex, OwedVolume, PageSuffixes};
 use super::profiles::Profiles;
 use super::types::{Job, LibraryFacts, PathLocks};
 
 pub use availability::availability_of;
 pub use bench::{BenchRequest, BenchState, cpu_label, physical_cores};
-pub use claim::{catalog_can_run, supported_for};
+pub use claim::{SUFFIX_BATCH, catalog_can_run, supported_for};
 pub use registry::{
     FailedLogin, Machine, PublicNames, RegisterInput, RegisterOutcome, SocketRefusal, TransferStats,
 };
@@ -196,6 +196,16 @@ pub enum Msg {
         stamp: Option<super::types::Stamp>,
         entry: Option<OwedVolume>,
     },
+    /// Page suffixes read on a helper thread for `machine_reads` (spec §8: on a remote
+    /// store the actor reads no archive): per volume, its version when read and what
+    /// the read gave (`Err`: could not be read now; tried again after the next walk).
+    PageSuffixesRead(
+        Vec<(
+            String,
+            Option<super::types::Stamp>,
+            Result<PageSuffixes, String>,
+        )>,
+    ),
     /// A local claim's archive was spooled from a remote store (spec §8, `spooling`).
     Spooled {
         sid: String,
@@ -237,6 +247,7 @@ impl std::fmt::Debug for Msg {
             Msg::ArchiveArrived(_) => "ArchiveArrived",
             Msg::ArchiveRemoved(_) => "ArchiveRemoved",
             Msg::ArrivalJudged { .. } => "ArrivalJudged",
+            Msg::PageSuffixesRead(_) => "PageSuffixesRead",
             Msg::Spooled { .. } => "Spooled",
             Msg::BenchSample { .. } => "BenchSample",
             Msg::Apply { .. } => "Apply",
@@ -346,6 +357,16 @@ pub struct Scheduler {
     pub returned_by: HashMap<Job, HashSet<String>>,
     pub eft_deadlines: EftDeadlines<Job>,
     pub left_logged: HashSet<(Job, String)>,
+    /// Volumes whose page suffixes `machine_reads` wants read on a helper thread (a
+    /// remote store; they are kept on the owed volume, [`OwedVolume::page_suffixes`]),
+    /// in the order asked (claim priority), at most [`SUFFIX_BATCH`].
+    pub suffixes_wanted: indexmap::IndexSet<String>,
+    /// A helper is reading page suffixes ([`Msg::PageSuffixesRead`]).
+    pub suffixes_reading: bool,
+    /// Volumes whose suffixes could not be read; asked again after the next walk.
+    pub suffixes_failed: HashSet<String>,
+    /// `(job, machine)` already logged as a volume that machine's release cannot read.
+    pub unreadable_logged: HashSet<(Job, String)>,
     pub cards: IndexMap<Job, Map<String, Value>>,
     /// Invalidates the cached pending list (`_queue_generation`).
     pub queue_generation: u64,
@@ -428,6 +449,10 @@ impl Scheduler {
             returned_by: HashMap::new(),
             eft_deadlines: EftDeadlines::new(),
             left_logged: HashSet::new(),
+            suffixes_wanted: indexmap::IndexSet::new(),
+            suffixes_reading: false,
+            suffixes_failed: HashSet::new(),
+            unreadable_logged: HashSet::new(),
             cards: IndexMap::new(),
             queue_generation: 0,
             page_version: 1,
@@ -617,6 +642,7 @@ impl Scheduler {
             Msg::ArchiveArrived(path) => self.archive_arrived(&path),
             Msg::ArchiveRemoved(path) => self.archive_removed(&path),
             Msg::ArrivalJudged { rel, stamp, entry } => self.arrival_judged(rel, stamp, entry),
+            Msg::PageSuffixesRead(read) => self.page_suffixes_read(read),
             Msg::Spooled { sid, job, result } => self.spooled(&sid, &job, result),
             Msg::BenchSample {
                 machine,
@@ -722,7 +748,18 @@ impl Scheduler {
             self.start_walk();
             return;
         }
+        let mut index = index;
+        // Page suffixes already read stay with their volume while its version does.
+        for (rel, v) in &mut index.volumes {
+            if let Some(old) = self.owed.volumes.get(rel)
+                && let Some((stamp, read)) = &old.page_suffixes
+                && *stamp == (v.size, v.mtime_ns)
+            {
+                v.page_suffixes = Some((*stamp, read.clone()));
+            }
+        }
         self.owed = index;
+        self.suffixes_failed.clear();
         self.last_walk_at = Some(self.mono());
         self.walks += 1;
         self.bump();
@@ -877,6 +914,7 @@ impl Scheduler {
         if now - self.scan_reset_at >= self.settings.poll_interval {
             self.scan_reset_at = now;
             self.left_logged.clear();
+            self.unreadable_logged.clear();
             self.stopped.clear();
             self.strikes.clear();
             self.autobench.asked.clear();
@@ -906,6 +944,10 @@ impl Scheduler {
             return;
         }
         if !self.claims.is_empty() || !self.autobench.inflight.is_empty() {
+            return;
+        }
+        // A volume waits for its page suffixes: the lanes look again when they come.
+        if self.suffixes_reading || !self.suffixes_wanted.is_empty() {
             return;
         }
         if self.holds.values().any(|n| *n > 0) {
@@ -966,6 +1008,7 @@ impl Scheduler {
             }
         }
         self.drain_autobench_requests();
+        self.start_suffix_reads();
         self.maybe_end_scan();
     }
 
@@ -1028,7 +1071,8 @@ impl Scheduler {
         }
     }
 
-    /// `_prune_failure_records`.
+    /// `_prune_failure_records`. A record's archive is looked for through the store (an
+    /// index read on a cloud library, whose root never exists on disk).
     pub fn prune_failures(&mut self) {
         let names: Vec<String> = self.settings.rows.iter().map(|r| r.name.clone()).collect();
         let library = self.library();
@@ -1038,7 +1082,9 @@ impl Scheduler {
             .filter(|(_, v)| {
                 v.as_object().is_some_and(|r| {
                     bunko_sched::failures::keep_record(r, &names, |s, v| {
-                        bunko_sched::failures::archive_exists_in(&library, s, v)
+                        bunko_sched::failures::archive_exists_with(&library, s, v, |p| {
+                            bunko_store::fs::is_file(p)
+                        })
                     })
                 })
             })

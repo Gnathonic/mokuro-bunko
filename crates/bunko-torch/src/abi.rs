@@ -236,11 +236,12 @@ pub struct PackManifest {
 }
 
 /// The oldest mokuro-bunko release whose backend packs (libtorch and Vulkan) a build of
-/// this source opens. A pack is compiled from bunko-torch, bunko-vlm, bunko-vulkan,
-/// bunko-ncnn and bunko-ocr, with the libtorch, wheels, ncnn and layout that xtask's
-/// `torch_specs.rs`, `torch_pack.rs` and `vulkan_pack.rs` pin. While none of that
-/// changes, the packs of earlier releases are the packs this release would build, and an
-/// update keeps the installed one instead of downloading gigabytes again.
+/// this source opens. A pack is compiled from bunko-torch, bunko-vlm, bunko-vulkan and
+/// bunko-ncnn, with the libtorch, wheels, ncnn and layout that xtask's `torch_specs.rs`,
+/// `torch_pack.rs` and `vulkan_pack.rs` pin; bunko-ocr is no part of its cdylib and is an
+/// input only for its model manifests (`torch_models.json`, `vulkan_models.json`). While
+/// none of that changes, the packs of earlier releases are the packs this release would
+/// build, and an update keeps the installed one instead of downloading gigabytes again.
 ///
 /// When a change to those sources is one an older pack lacks (a fix inside the cdylib, a
 /// new libtorch), set this to the release being made: older packs are then refused and

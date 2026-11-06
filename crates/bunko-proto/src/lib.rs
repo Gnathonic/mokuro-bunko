@@ -63,6 +63,33 @@ pub fn valid_id(id: &str) -> bool {
 
 // --- registration ---------------------------------------------------------------------
 
+/// Page formats the OCR learned after 0.7.0, each with the first release that reads it.
+/// Every other page the library counts, every 0.7 processor reads. The library offers a
+/// processor only volumes its release reads (it registers with its version).
+pub const PAGE_FORMATS_SINCE: &[(&str, &str)] = &[(".jxl", "0.7.5")];
+
+/// Whether release `version` reads pages ending in `suffix` (with the dot, any case). A
+/// version that does not parse is judged the oldest: only the 0.7.0 formats.
+pub fn release_reads_page(version: &str, suffix: &str) -> bool {
+    let suffix = suffix.to_ascii_lowercase();
+    let Some((_, since)) = PAGE_FORMATS_SINCE.iter().find(|(s, _)| *s == suffix) else {
+        return true;
+    };
+    let parse = |v: &str| semver::Version::parse(v.trim().trim_start_matches('v')).ok();
+    match (parse(version), parse(since)) {
+        (Some(v), Some(since)) => v.cmp_precedence(&since).is_ge(),
+        _ => false,
+    }
+}
+
+/// Whether release `version` reads every page format this build knows (then no volume
+/// needs looking into before it is offered).
+pub fn release_reads_every_page_format(version: &str) -> bool {
+    PAGE_FORMATS_SINCE
+        .iter()
+        .all(|(suffix, _)| release_reads_page(version, suffix))
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct HostInfo {
     #[serde(default)]
@@ -662,6 +689,26 @@ pub mod return_class {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn page_formats_by_release() {
+        // What every 0.7 processor reads.
+        for v in ["0.7.0", "0.7.4", "", "not a version"] {
+            assert!(release_reads_page(v, ".png"), "{v:?}");
+            assert!(release_reads_page(v, ".avif"), "{v:?}");
+        }
+        // JPEG XL from 0.7.5 on; a version that does not parse is the oldest.
+        assert!(!release_reads_page("0.7.4", ".jxl"));
+        assert!(!release_reads_page("v0.7.4", ".jxl"));
+        assert!(!release_reads_page("", ".jxl"));
+        assert!(!release_reads_page("0.7.5-beta.1", ".jxl"));
+        assert!(release_reads_page("0.7.5", ".jxl"));
+        assert!(release_reads_page("v0.7.6+abc", ".jxl"));
+        assert!(release_reads_page("0.8.0", ".jxl"));
+        assert!(release_reads_page("0.7.5", ".JXL"));
+        assert!(release_reads_every_page_format("0.7.5"));
+        assert!(!release_reads_every_page_format("0.7.4"));
+    }
 
     #[test]
     fn op_shapes() {

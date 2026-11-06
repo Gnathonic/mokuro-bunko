@@ -151,14 +151,20 @@ fn harness_inner(
 
 /// A `.cbz` with `pages` image members.
 pub fn write_cbz(path: &Path, pages: usize) {
+    write_cbz_of(path, pages, "jpg");
+}
+
+/// A `.cbz` with `pages` image members named `NNN.<suffix>`.
+pub fn write_cbz_of(path: &Path, pages: usize, suffix: &str) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let f = std::fs::File::create(path).unwrap();
     let mut z = zip::ZipWriter::new(f);
     let opts =
         zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
     for i in 0..pages {
-        z.start_file(format!("{:03}.jpg", i + 1), opts).unwrap();
-        z.write_all(b"not really a jpeg").unwrap();
+        z.start_file(format!("{:03}.{suffix}", i + 1), opts)
+            .unwrap();
+        z.write_all(b"not really an image").unwrap();
     }
     z.finish().unwrap();
 }
@@ -206,6 +212,13 @@ impl H {
         p
     }
 
+    /// A volume whose pages are JPEG XL (`NNN.jxl`).
+    pub fn add_jxl(&self, rel: &str, pages: usize) -> PathBuf {
+        let p = self.library().join(rel);
+        write_cbz_of(&p, pages, "jxl");
+        p
+    }
+
     /// Advance the clock to `t0 + dt` and tick.
     pub fn at(&mut self, dt: f64) {
         self.clock.set(self.t0 + dt);
@@ -242,17 +255,35 @@ impl H {
         self.connect_catalog(name, 1, catalog)
     }
 
+    /// A processor that runs every engine and says it is mokuro-bunko `version`.
+    pub fn connect_version(&mut self, name: &str, sessions: u32, version: &str) -> Proc {
+        let catalog = json!({"engines": ["hayai-nova", "paddle-manga", "ppocr-manga"], "detectors": ["ppocr-manga"], "devices": [{"id": "cpu", "label": "CPU"}]});
+        let host = json!({"cpu": "Test CPU (8 cores)", "gpu": "Test GPU", "backend": "cuda", "version": version});
+        self.connect_host(name, sessions, catalog, host)
+    }
+
     pub fn connect_catalog(
         &mut self,
         name: &str,
         sessions: u32,
         catalog: serde_json::Value,
     ) -> Proc {
+        let host = json!({"cpu": "Test CPU (8 cores)", "gpu": "Test GPU", "backend": "cuda"});
+        self.connect_host(name, sessions, catalog, host)
+    }
+
+    pub fn connect_host(
+        &mut self,
+        name: &str,
+        sessions: u32,
+        catalog: serde_json::Value,
+        host: serde_json::Value,
+    ) -> Proc {
         let (reply, mut rx) = tokio::sync::oneshot::channel();
         let body = json!({
             "protocol": 3,
             "name": name,
-            "host": {"cpu": "Test CPU (8 cores)", "gpu": "Test GPU", "backend": "cuda"},
+            "host": host,
             "catalog": catalog,
             "max_sessions": sessions,
         });

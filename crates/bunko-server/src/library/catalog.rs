@@ -314,11 +314,23 @@ fn get_series(deps: &LibraryDeps, name: &str) -> Response {
         info.insert("name".into(), Value::String(volume.name.clone()));
         info.insert("cover".into(), cover);
         let active = active_job(progress.as_ref(), name, &volume.name);
-        info.insert(
-            "ocr_pending".into(),
-            Value::Bool(volume.has_cbz && !volume.has_mokuro && !volume.has_mokuro_gz),
-        );
+        let owed = volume.has_cbz && !volume.has_mokuro && !volume.has_mokuro_gz;
+        // Owed and failing (a live failure record): "OCR failed", with the failure's
+        // public text, instead of pending. The keys appear only then, so every other
+        // entry keeps the 0.5.2 shape.
+        let failure = (owed && active.is_none())
+            .then(|| {
+                deps.ocr_status
+                    .as_ref()
+                    .and_then(|s| s.volume_failure(name, &volume.name))
+            })
+            .flatten();
+        info.insert("ocr_pending".into(), Value::Bool(owed && failure.is_none()));
         info.insert("ocr_active".into(), Value::Bool(active.is_some()));
+        if let Some(text) = failure {
+            info.insert("ocr_failed".into(), Value::Bool(true));
+            info.insert("ocr_failure".into(), Value::String(text));
+        }
         if let Some(job) = active {
             info.insert("ocr_pending".into(), Value::Bool(false));
             info.insert("ocr_progress".into(), volume_progress(job));

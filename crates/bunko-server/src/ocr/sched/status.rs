@@ -156,6 +156,41 @@ impl Scheduler {
 
     // --- cards and lists -----------------------------------------------------------------------
 
+    /// Volumes whose primary row has a live failure record (not made void by a replaced
+    /// archive) → the public text of its kind, keyed by the casefolded library-relative
+    /// archive path. What the catalog's "OCR failed" badge says; never the error itself.
+    pub fn failing_volumes(&self) -> std::collections::HashMap<String, String> {
+        let Some(primary) = self.settings.rows.iter().find(|r| r.primary) else {
+            return Default::default();
+        };
+        let library = self.library();
+        let mut out = std::collections::HashMap::new();
+        for (key, record) in &self.failures {
+            let Some(record) = record.as_object() else {
+                continue;
+            };
+            let row = record.get("generation").and_then(Value::as_str);
+            if row != Some(primary.name.as_str()) || key.ends_with("@upgrade") {
+                continue;
+            }
+            let mtime = bunko_store::fs::metadata(library.join(key))
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs_f64());
+            if bunko_sched::failures::replaced_since_failure(mtime, record) {
+                continue;
+            }
+            let error = record.get("error").and_then(Value::as_str).unwrap_or("");
+            let kind = bunko_sched::failures::FailureKind::of(error);
+            out.insert(
+                bunko_library::pyunicode::casefold(key),
+                kind.public_text().to_string(),
+            );
+        }
+        out
+    }
+
     /// The running jobs in `_progress_entry` shape, with page totals filled in.
     pub fn running_jobs(&self) -> Vec<Map<String, Value>> {
         let mut out = Vec::new();

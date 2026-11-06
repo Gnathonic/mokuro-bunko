@@ -21,7 +21,7 @@ the reference is 0.5.3 (`4016476`, at `../ref-0.5.3`).
   hayai-nova and paddle-manga; the main binary never links it.
 - **Memory matters** (lite build must run in 1 GB): stream files, never read a whole
   archive or upload into memory, bound every cache, avoid per-request big allocations.
-- Edition 2024, MSRV 1.88. `cargo clippy` clean (`-D warnings` for your crate).
+- Edition 2024, MSRV 1.89. `cargo clippy` clean (`-D warnings` for your crate).
 - Errors: `thiserror` enums per library crate. `anyhow` only in the `mokuro-bunko`
   binary, `xtask`, tests, and the top-level crates `bunko-server`, `bunko-tray` and
   `bunko-android`.
