@@ -7,10 +7,14 @@ use bunko_core::sidecar_names::{self, LayerClass};
 
 use crate::paths;
 
-/// Every sidecar of the archive `cbz` (listed from its directory): `<stem>.mokuro`,
-/// `<stem>.mokuro.gz`, `<stem>.webp`, `<stem>.nocover`, and every other file
-/// [`sidecar_names::sweep_set`] gives that volume (other spellings of those, its
-/// layers). Folders are no sidecars and archive nothing (rule 2).
+/// Every sidecar of the archive `cbz`, as its folder lists them: every file
+/// [`sidecar_names::sweep_set`] gives that volume (`<stem>.mokuro[.gz]`, `<stem>.webp`,
+/// `<stem>.nocover` in any spelling rule v1 gives it, its layers). Only listed names:
+/// a constructed `<stem>.mokuro` is never deleted on the chance that it exists, since a
+/// host that folds names would open another file there (`STRASSE.mokuro` for
+/// `Straße.mokuro` on Linux casefold), one rule v1 does not give the volume. Folders
+/// are no sidecars and archive nothing (rule 2). Nothing when the folder cannot be
+/// listed.
 ///
 /// Never a file that, with `cbz` gone, is a correction or curated layer of
 /// another listed archive: an archive nested under a volume's name (`V.edit.cbz` beside
@@ -18,14 +22,10 @@ use crate::paths;
 /// it, for good.
 pub fn siblings(cbz: &Path) -> Vec<PathBuf> {
     let name = paths::file_name(cbz);
-    let stem = paths::py_stem(&name).to_string();
     let Some(dir) = cbz.parent() else {
         return Vec::new();
     };
-    let mut out: Vec<PathBuf> = [".mokuro", ".mokuro.gz", ".webp", ".nocover"]
-        .iter()
-        .map(|s| dir.join(format!("{stem}{s}")))
-        .collect();
+    let mut out: Vec<PathBuf> = Vec::new();
     let Ok(entries) = bunko_store::fs::read_dir(dir) else {
         return out;
     };
@@ -174,6 +174,31 @@ mod tests {
         std::fs::write(d.join("W.curated.cbz"), b"x").unwrap();
         std::fs::write(d.join("W.curated.mokuro"), b"x").unwrap();
         assert!(names("W.curated.cbz").contains(&"W.curated.mokuro".to_string()));
+    }
+
+    /// Only listed names go with an archive: `Straße.mokuro` is not built and deleted
+    /// on the chance it exists (Linux casefold would open, and delete, the
+    /// `STRASSE.mokuro` beside it, which rule v1 does not give `Straße.cbz`; a
+    /// case-sensitive disk would not).
+    #[test]
+    fn only_listed_names_go_with_an_archive() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        for n in ["Stra\u{df}e.cbz", "STRASSE.mokuro", "V.cbz", "v.mokuro"] {
+            std::fs::write(d.join(n), b"x").unwrap();
+        }
+        let listed: Vec<String> = std::fs::read_dir(d)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        let straße = siblings(&d.join("Stra\u{df}e.cbz"));
+        assert!(straße.is_empty(), "{straße:?}");
+        let v: Vec<String> = siblings(&d.join("V.cbz"))
+            .iter()
+            .map(|p| paths::file_name(p))
+            .collect();
+        assert_eq!(v, ["v.mokuro"]);
+        assert!(v.iter().all(|n| listed.contains(n)));
     }
 
     #[test]

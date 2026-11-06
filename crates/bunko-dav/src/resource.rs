@@ -268,23 +268,55 @@ impl Roots {
 
     /// The physical path of the per-user `rel` (`goals.json`, `history/dev/x`, in any
     /// case) for `caller`, existing or not. Built from the canonical per-user name, never
-    /// from the raw `rel`: `History/x` is `history/x`. A root file is its name under the
-    /// base; inside `history` every segment that names an existing entry takes its
-    /// listed spelling (one device folder per device, whatever case the reader sends),
-    /// and the result must resolve (symlinks followed) inside the base's `history`.
+    /// from the raw `rel`: `History/x` is `history/x`. Under `users/<u>/` the per-user
+    /// name is the entry its folder lists in any spelling (a `Goals.json` made there
+    /// outside Bunko is the account's `goals.json`, read and written under its own
+    /// spelling, on every host), decided from the listing; in the cloud-root owner's
+    /// folder it is the canonical name (an entry spelled otherwise there is refused,
+    /// [`crate::methods`]). Inside `history` every segment that names an existing entry
+    /// takes its listed spelling (one device folder per device, whatever case the reader
+    /// sends), and the result must resolve (symlinks followed) inside the base's
+    /// `history`.
     pub fn user_path(&self, caller: Caller<'_>, rel: &str) -> Option<PathBuf> {
         let base = self.user_base(caller)?;
         match reader_tree::per_user(rel)? {
-            PerUser::File(name) => Some(base.join(name)),
+            PerUser::File(name) => Some(base.join(self.per_user_name(&base, name))),
             PerUser::Dir(dir) => {
-                let resolved = paths::resolve_under(&base, dir)?;
-                resolved.starts_with(base.join(dir)).then_some(resolved)
+                let dir = self.per_user_name(&base, dir);
+                let resolved = paths::resolve_under(&base, &dir)?;
+                resolved.starts_with(base.join(&dir)).then_some(resolved)
             }
             PerUser::InDir { dir, rest } => {
-                let rest = crate::path_case::resolve_existing(&base.join(dir), rest, false);
+                let dir = self.per_user_name(&base, dir);
+                let rest = crate::path_case::resolve_existing(&base.join(&dir), rest, false);
                 let resolved = paths::resolve_under(&base, &format!("{dir}/{rest}"))?;
-                resolved.starts_with(base.join(dir)).then_some(resolved)
+                resolved.starts_with(base.join(&dir)).then_some(resolved)
             }
+        }
+    }
+
+    /// The spelling of the per-user root name `canonical` under `base`: the listed
+    /// entry that folds like it under `users/<u>/`, else `canonical`. Always `canonical`
+    /// in the library root (the cloud-root owner's base). Blocking (one listing).
+    fn per_user_name(&self, base: &Path, canonical: &str) -> String {
+        if base == self.library {
+            return canonical.to_string();
+        }
+        crate::path_case::on_disk_name(base, canonical, false)
+            .unwrap_or_else(|| canonical.to_string())
+    }
+
+    /// Is the per-user path `phys` (below `caller`'s base) listed exactly as spelled, each
+    /// segment the entry its folder lists ([`crate::path_case::reachable_as_spelled`])?
+    /// Whether a per-user file exists, decided from the listings: the cloud-root owner's
+    /// `goals.json` beside a listed `Goals.json` does not exist on any host.
+    fn per_user_listed(&self, caller: Caller<'_>, phys: &Path) -> bool {
+        let Some(base) = self.user_base(caller) else {
+            return false;
+        };
+        match paths::relative_posix(phys, &base) {
+            Some(rel) => crate::path_case::reachable_as_spelled(&base, &rel, false),
+            None => false,
         }
     }
 
@@ -303,7 +335,11 @@ impl Roots {
         match paths::classify(&norm) {
             Target::Root | Target::ReaderRoot => Some(Resource::Virtual { path: norm }),
             Target::Progress(rel) => {
-                let phys = self.user_path(caller?, &rel)?;
+                let caller = caller?;
+                let phys = self.user_path(caller, &rel)?;
+                if !self.per_user_listed(caller, &phys) {
+                    return None;
+                }
                 let meta = fs::metadata(&phys).ok()?;
                 Some(Self::resource(
                     norm,
@@ -436,8 +472,9 @@ impl Roots {
     /// Is `phys` inside `caller`'s history tree (where a Progress folder's members must
     /// stay)?
     fn in_user_history(&self, caller: Caller<'_>, phys: &Path) -> bool {
-        self.user_base(caller)
-            .is_some_and(|base| phys.starts_with(base.join(reader_tree::HISTORY_DIR)))
+        self.user_base(caller).is_some_and(|base| {
+            phys.starts_with(base.join(self.per_user_name(&base, reader_tree::HISTORY_DIR)))
+        })
     }
 
     /// The physical path a member `name` of the collection `parent` would have (0.5.2

@@ -83,6 +83,9 @@ pub(crate) async fn dispatch(inner: Arc<Inner>, req: Request<Body>, ctx: DavCont
     if let Some(resp) = per_user_spelled_otherwise(&inner, &r).await {
         return resp;
     }
+    if let Some(resp) = frozen_refusal(&inner, &r).await {
+        return resp;
+    }
     let result = match r.method.as_str() {
         "OPTIONS" => read::options(&inner, &r).await,
         "PROPFIND" => read::propfind(&inner, &r, body).await,
@@ -419,6 +422,61 @@ async fn per_user_spelled_otherwise(inner: &Arc<Inner>, r: &Req) -> Option<Resp>
              startup log name it), then try again."
         ),
     ))
+}
+
+/// The freeze (design 0.8 D5, [`bunko_core::fold_groups`]): a folder that lists two or
+/// more spellings of one name (only a case-sensitive store can, made outside Bunko or
+/// by a release before 0.5.3) holds a case-variant group, and until an admin merges it
+/// no write touches it. A PUT, DELETE, MKCOL, COPY, MOVE, PROPPATCH or LOCK whose
+/// target, COPY or MOVE source, or destination is a member of a group (the reachable
+/// winner included), a file rule v1 gives or would give to an archive of one (or below
+/// a member folder), answers 409 naming the group; so does a DELETE, COPY or MOVE of a
+/// folder that holds one, or a COPY or MOVE onto such a folder. Reads still reach the
+/// winner. Decided once, here, from the folder listings: the same on every host, for
+/// every method.
+async fn frozen_refusal(inner: &Arc<Inner>, r: &Req) -> Option<Resp> {
+    let method = r.method.as_str();
+    if !matches!(
+        method,
+        "PUT" | "DELETE" | "MKCOL" | "COPY" | "MOVE" | "PROPPATCH" | "LOCK"
+    ) {
+        return None;
+    }
+    let whole = matches!(method, "DELETE" | "COPY" | "MOVE");
+    let mut targets: Vec<String> = Vec::new();
+    if let paths::Target::Library(rel) = paths::classify(&r.path) {
+        targets.push(rel);
+    }
+    if matches!(method, "COPY" | "MOVE")
+        && let Ok(dest) = write::destination_path(r)
+        && let paths::Target::Library(rel) = paths::classify(&dest)
+    {
+        targets.push(rel);
+    }
+    if targets.is_empty() {
+        return None;
+    }
+    let library = inner.roots.library.clone();
+    let refusal = blocking(move || -> Option<String> {
+        for rel in targets {
+            let rel = rel.trim_matches('/').to_string();
+            if let Some(frozen) = crate::path_case::frozen(&library, &rel) {
+                return Some(frozen.describe());
+            }
+            if whole
+                && crate::path_case::reachable_as_spelled(&library, &rel, true)
+                && let Some((dir, group)) = crate::path_case::frozen_inside(&library.join(&rel))
+            {
+                let folder = paths::relative_posix(&dir, &library).unwrap_or_default();
+                return Some(bunko_core::fold_groups::Frozen::Group { folder, group }.describe());
+            }
+        }
+        None
+    })
+    .await
+    .ok()
+    .flatten()?;
+    Some(response::status_page(StatusCode::CONFLICT, &refusal))
 }
 
 /// 0.5.2 `_forget_ocr_records`.

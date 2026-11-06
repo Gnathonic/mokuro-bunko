@@ -77,6 +77,30 @@ pub(crate) fn overlay_path(
     resolved.starts_with(&base).then_some(resolved)
 }
 
+/// Does `username`'s overlay folder for the library folder of `dest` (a library path)
+/// list `dest`'s name in another spelling (`V.edit.mokuro` for a library file
+/// `v.EDIT.mokuro`)? The account's listings show its overlay beside the library, so a
+/// library file of that name would be a second spelling of one in its view: refused,
+/// as a second spelling in the library itself is. From the listing, on every host.
+pub(crate) fn overlay_spells_otherwise(
+    library: &Path,
+    users: &Path,
+    username: Option<&str>,
+    dest: &Path,
+) -> bool {
+    let (Some(username), Some(rel)) = (username, paths::relative_posix(dest, library)) else {
+        return false;
+    };
+    let (folder, name) = rel.rsplit_once('/').unwrap_or(("", rel.as_str()));
+    let Some(dir) = overlay_path(library, users, username, folder) else {
+        return false;
+    };
+    let folded = crate::fold_name(name);
+    names_in(&dir)
+        .iter()
+        .any(|n| n != name && crate::fold_name(n) == folded)
+}
+
 /// `rel` (a library rel, each segment the library's listed spelling of the entry, or
 /// of one gone) below the overlay base `base`, every segment that names an existing
 /// overlay entry in its listed spelling (any case). An overlay folder spelled otherwise
@@ -408,14 +432,25 @@ impl PersonalOverlays {
 
     /// The library rels of the physical correction files: names that read as a personal
     /// layer and are no listed archive's primary (rule 4). On a library on this disk,
-    /// and in a cloud library with no progress user, nobody sees them. Blocking (an
-    /// index walk on a cloud library).
+    /// and in a cloud library with no progress user, nobody sees them. Nothing a
+    /// case-variant group freezes is among them ([`bunko_core::fold_groups`]: a member,
+    /// the winner included, a file rule v1 gives an archive of the group, anything
+    /// inside a member folder): adopting one would move it out of the group. Blocking
+    /// (an index walk on a cloud library).
     pub fn physical_corrections(&self) -> Vec<String> {
         let mut out = Vec::new();
         let mut todo = vec![String::new()];
         while let Some(rel) = todo.pop() {
             let dir = self.library.join(&rel);
-            let names = names_in(&dir);
+            let Some((entries, groups)) = crate::path_case::listed_groups(&dir, rel.is_empty())
+            else {
+                continue;
+            };
+            let names: Vec<String> = entries
+                .iter()
+                .filter(|(n, is_dir)| !is_dir && !paths::is_staging_name(n))
+                .map(|(n, _)| n.clone())
+                .collect();
             let stems = stems_of(&names);
             let child_of = |name: &str| {
                 if rel.is_empty() {
@@ -424,23 +459,19 @@ impl PersonalOverlays {
                     format!("{rel}/{name}")
                 }
             };
-            for entry in fs::read_dir(&dir).into_iter().flatten().flatten() {
-                if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+            for (name, is_dir) in &entries {
+                if groups.is_frozen(name) {
                     continue;
                 }
-                let child = child_of(&entry.file_name().to_string_lossy());
-                let path = self.library.join(&child);
-                // The cloud-root owner's own tree holds no volume, and a symlinked
-                // folder is not walked (the index's scan does not either; a link up
-                // the tree would loop).
-                let linked = fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink());
-                if !linked && !reader_tree::is_per_user_rel(&child) {
-                    todo.push(child);
-                }
-            }
-            for name in &names {
                 let child = child_of(name);
-                if personal_name(name).is_some()
+                if *is_dir {
+                    // A symlinked folder is not walked (the index's scan does not
+                    // either; a link up the tree would loop).
+                    let path = self.library.join(&child);
+                    if !fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
+                        todo.push(child);
+                    }
+                } else if personal_name(name).is_some()
                     && !matches!(
                         sidecar_names::classify(name, &stems),
                         SidecarClass::Primary { .. }
@@ -459,6 +490,10 @@ impl PersonalOverlays {
     /// has one there. False when it stayed (a write in progress, a bad name).
     pub fn adopt(&self, rel: &str, username: &str) -> bool {
         let rel = rel.trim_matches('/');
+        // Never out of a frozen case-variant group (one made since the walk).
+        if crate::path_case::frozen(&self.library, rel).is_some() {
+            return false;
+        }
         let (folder, name) = rel.rsplit_once('/').unwrap_or(("", rel));
         let Some((stem, id, false)) = personal_name(name) else {
             return false;
@@ -764,6 +799,39 @@ mod tests {
         std::os::unix::fs::symlink("..", library.join("S/all")).unwrap();
         let overlays = PersonalOverlays::new(library, users, PathWriteLocks::new());
         assert_eq!(overlays.physical_corrections(), ["S/V.edit.mokuro"]);
+    }
+
+    /// Nothing a case-variant group freezes is adopted: `S/` lists `V.cbz` and `v.cbz`
+    /// (where the disk keeps both), so neither's correction moves, the winner's
+    /// included; `T/` is an ordinary series.
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn the_correction_walk_leaves_frozen_groups() {
+        let dir = tempfile::tempdir().unwrap();
+        let (library, users) = (dir.path().join("library"), dir.path().join("users"));
+        std::fs::create_dir_all(library.join("S")).unwrap();
+        std::fs::create_dir_all(library.join("T")).unwrap();
+        std::fs::create_dir_all(&users).unwrap();
+        std::fs::write(library.join("S/V.cbz"), b"x").unwrap();
+        std::fs::write(library.join("S/V.edit.mokuro"), b"{}").unwrap();
+        std::fs::write(library.join("T/W.cbz"), b"x").unwrap();
+        std::fs::write(library.join("T/W.edit.mokuro"), b"{}").unwrap();
+        let two = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(library.join("S/v.cbz"))
+            .is_ok();
+        let overlays = PersonalOverlays::new(library.clone(), users, PathWriteLocks::new());
+        if two {
+            assert_eq!(overlays.physical_corrections(), ["T/W.edit.mokuro"]);
+            assert!(!overlays.adopt("S/V.edit.mokuro", "alice"));
+            assert!(library.join("S/V.edit.mokuro").is_file());
+        } else {
+            assert_eq!(
+                overlays.physical_corrections(),
+                ["S/V.edit.mokuro", "T/W.edit.mokuro"]
+            );
+        }
     }
 
     #[test]

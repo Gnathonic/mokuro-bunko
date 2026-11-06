@@ -94,10 +94,10 @@ fn delete_resource(
             let Some(_guard) = inner.write_locks.try_lock(phys) else {
                 return Err(write_lock_conflict(req, target, "delete", None));
             };
-            // A hidden entry (a case variant, or a hidden archive's own file) is never
-            // deleted: the folder goes whole or not at all.
-            if crate::path_case::holds_hidden(phys) {
-                return Err(hidden_inside());
+            // A frozen case-variant group is never deleted (checked again under the
+            // lock: one made since the request was let through).
+            if crate::path_case::frozen_inside(phys).is_some() {
+                return Err(frozen_inside());
             }
             fs::remove_dir_all(phys)?;
             if let Some(rel) = inner.roots.library_rel(phys).filter(|r| !r.is_empty()) {
@@ -322,12 +322,19 @@ fn create_series_folder(inner: &Inner, req: &Req, dir: &Path) -> DavResult<()> {
 ///   pass to that other entry, and every request for it would reach the wrong one.
 /// * Any other destination in the library is refused (409) when its folder lists the
 ///   name in another spelling than the reachable `dest` itself
-///   ([`crate::path_case::spelled_otherwise`]): one made since PathCase resolved the
-///   request (a concurrent upload), or a hidden case variant's own file. Bunko never
-///   makes a second spelling of a name, nor writes over a hidden entry.
+///   ([`crate::path_case::spelled_otherwise`]: one made since PathCase resolved the
+///   request, a concurrent upload; a case-variant group was refused before, by the
+///   freeze), or the caller's own corrections there do
+///   ([`crate::personal::overlay_spells_otherwise`]). Bunko never makes a second
+///   spelling of a name.
 ///
 /// Blocking.
-fn dest_spelling_allowed(inner: &Inner, src: Option<&Path>, dest: &Path) -> DavResult<()> {
+fn dest_spelling_allowed(
+    inner: &Inner,
+    req: &Req,
+    src: Option<&Path>,
+    dest: &Path,
+) -> DavResult<()> {
     let (Some(parent), Some(dest_name)) =
         (dest.parent(), dest.file_name().and_then(|n| n.to_str()))
     else {
@@ -361,7 +368,14 @@ fn dest_spelling_allowed(inner: &Inner, src: Option<&Path>, dest: &Path) -> DavR
     if !dest.starts_with(&inner.roots.library) {
         return Ok(());
     }
-    if crate::path_case::spelled_otherwise(parent, dest_name, parent == inner.roots.library) {
+    if crate::path_case::spelled_otherwise(parent, dest_name, parent == inner.roots.library)
+        || crate::personal::overlay_spells_otherwise(
+            &inner.roots.library,
+            &inner.roots.users,
+            req.username(),
+            dest,
+        )
+    {
         return Err(case_variant());
     }
     Ok(())
@@ -372,18 +386,18 @@ fn case_variant() -> DavError {
     DavError::new(
         StatusCode::CONFLICT,
         "Another spelling of this name is listed here (made since this request was \
-         resolved, or a hidden case variant's own file); Bunko keeps one spelling per \
-         name: send the request again, or merge the case variants first.",
+         resolved, or one of your own corrections); Bunko keeps one spelling per name: \
+         send the request again to reach it.",
     )
 }
 
-/// 409: a folder holding a hidden entry is never deleted or replaced whole.
-fn hidden_inside() -> DavError {
+/// 409: a folder holding a frozen case-variant group is never deleted or replaced
+/// whole.
+fn frozen_inside() -> DavError {
     DavError::new(
         StatusCode::CONFLICT,
-        "This folder holds a hidden case variant (another spelling of a name, or its own \
-         files); Bunko never deletes one: merge the case variants first (doctor names \
-         them).",
+        "This folder holds case variants of one name; Bunko changes none of them until \
+         they are merged by hand (doctor names them).",
     )
 }
 
@@ -810,7 +824,7 @@ fn move_file(
     let Some(_guard) = inner.write_locks.try_lock_all(&[src, dest]) else {
         return Err(write_lock_conflict(req, target, "move", Some(dest_v)));
     };
-    dest_spelling_allowed(inner, Some(src), dest)?;
+    dest_spelling_allowed(inner, req, Some(src), dest)?;
     let old_rel = inner.roots.library_rel(src);
     let new_rel = inner.roots.library_rel(dest);
     primary_leaving(inner, req, src);
@@ -859,7 +873,7 @@ fn move_personal(
     let Some(_guard) = inner.write_locks.try_lock_all(&[src, dest]) else {
         return Err(write_lock_conflict(req, target, operation, Some(dest_v)));
     };
-    dest_spelling_allowed(inner, Some(src), dest)?;
+    dest_spelling_allowed(inner, req, Some(src), dest)?;
     if is_move {
         if let Some(parent) = dest.parent() {
             fs::create_dir_all(parent)?;
@@ -893,7 +907,7 @@ fn copy_file(
     let Some(_guard) = inner.write_locks.try_lock(dest) else {
         return Err(write_lock_conflict(req, target, "copy", Some(dest_v)));
     };
-    dest_spelling_allowed(inner, None, dest)?;
+    dest_spelling_allowed(inner, req, None, dest)?;
     copy_one(src, dest)?;
     effects.note_arrived(inner, dest);
     forget_ocr_records(req, inner.roots.library_rel(dest).as_deref(), false);
@@ -956,7 +970,7 @@ fn move_folder(
     let Some(_guard) = inner.write_locks.try_lock_all(&[src, dest]) else {
         return Err(write_lock_conflict(req, target, "move", Some(dest_v)));
     };
-    dest_spelling_allowed(inner, Some(src), dest)?;
+    dest_spelling_allowed(inner, req, Some(src), dest)?;
     let old_prefix = inner.roots.library_rel(src);
     let new_prefix = inner.roots.library_rel(dest);
     let volumes = cbz_under(src);
@@ -1043,11 +1057,6 @@ fn copy_folder(
     let Some(src_phys) = src.phys() else {
         return Err(DavError::status(StatusCode::FORBIDDEN));
     };
-    // A destination folder holding a hidden entry is never replaced: the copy would
-    // delete it, or write over its own files through another spelling.
-    if dest.is_some() && crate::path_case::holds_hidden(dest_phys) {
-        return Err(hidden_inside());
-    }
     // A new destination folder: its name is held from the check to the create.
     let made = match dest {
         Some(_) => None,
@@ -1056,7 +1065,7 @@ fn copy_folder(
                 let target = folder_audit_target(inner, dest_v, Some(dest_phys));
                 return Err(write_lock_conflict(req, target, "copy", Some(dest_v)));
             };
-            dest_spelling_allowed(inner, None, dest_phys)?;
+            dest_spelling_allowed(inner, req, None, dest_phys)?;
             Some(guard)
         }
     };
@@ -1082,12 +1091,14 @@ fn copy_folder(
         };
         let mut entries: Vec<_> = entries.flatten().collect();
         entries.sort_by_key(|e| e.file_name());
-        // A source member no request reaches (another spelling of a name, a hidden
-        // archive's own file) is never copied: its content stays its own.
-        let hidden = crate::path_case::hidden(&from, &listed_pairs(&entries));
+        // Neither tree holds a case-variant group (the freeze refused the request
+        // otherwise): one made since stops the copy.
+        if !crate::path_case::hidden(&from, &listed_pairs(&entries)).is_empty() {
+            return Err(frozen_inside());
+        }
         for e in entries {
             let name = e.file_name().to_string_lossy().into_owned();
-            if paths::is_staging_name(&name) || hidden.contains(&name) {
+            if paths::is_staging_name(&name) {
                 continue;
             }
             // The destination member is the entry already there in any spelling (the
@@ -1143,10 +1154,12 @@ fn prune_unmatched(
             .iter()
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect();
-        // A destination member no request reaches is never deleted.
-        let hidden = crate::path_case::hidden(&d, &listed_pairs(&entries));
+        // A case-variant group made since the request was let through stops the prune.
+        if !crate::path_case::hidden(&d, &listed_pairs(&entries)).is_empty() {
+            return Err(frozen_inside());
+        }
         for (e, name) in entries.into_iter().zip(names) {
-            if paths::is_staging_name(&name) || hidden.contains(&name) {
+            if paths::is_staging_name(&name) {
                 continue;
             }
             // Matched by a source member in any spelling (the one a request reaches

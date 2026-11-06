@@ -269,13 +269,15 @@ async fn put_inner(inner: &Arc<Inner>, req: &Req, body: Body) -> Result<Resp, Pu
     };
     // A name that is not there as spelled, in a library folder that lists it in another
     // spelling: one created since PathCase resolved this request (a racing upload that
-    // held this folded lock before it), or a hidden case variant's own file. That entry
-    // is this name, or no request's: Bunko never creates a second spelling of it, nor
-    // writes over a hidden entry. Refused, so a retry resolves to it and is judged as a
-    // write to that existing file. Decided from the folder listing under the lock, so
-    // every host answers alike.
+    // held this folded lock before it; a case-variant group is refused before, by the
+    // freeze). That entry is this name: Bunko never creates a second spelling of it.
+    // Refused, so a retry resolves to it and is judged as a write to that existing file.
+    // Decided from the folder listing under the lock, so every host answers alike.
     if res.is_none() && dest.starts_with(&inner.roots.library) {
         let (dest2, library) = (dest.clone(), inner.roots.library.clone());
+        let users = inner.roots.users.clone();
+        let user = req.username().map(str::to_string);
+        let library_file = kind == Some(FileKind::Library);
         let appeared = super::blocking(move || {
             let (Some(parent), Some(name)) =
                 (dest2.parent(), dest2.file_name().and_then(|n| n.to_str()))
@@ -283,15 +285,24 @@ async fn put_inner(inner: &Arc<Inner>, req: &Req, body: Body) -> Result<Resp, Pu
                 return false;
             };
             crate::path_case::spelled_otherwise(parent, name, parent == library)
+                // The caller's own correction of that name, listed beside the library
+                // in its view.
+                || (library_file
+                    && crate::personal::overlay_spells_otherwise(
+                        &library,
+                        &users,
+                        user.as_deref(),
+                        &dest2,
+                    ))
         })
         .await?;
         if appeared {
             return Err(Rejection::new(
                 409,
                 "case-variant",
-                "Another spelling of this name is listed here (just created, or a hidden \
-                 case variant's own file); Bunko keeps one spelling per name: send the \
-                 request again, or merge the case variants first.",
+                "Another spelling of this name is listed here (just created, or one of your \
+                 own corrections); Bunko keeps one spelling per name: send the request \
+                 again to reach it.",
                 true,
             )
             .into());

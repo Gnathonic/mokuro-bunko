@@ -165,7 +165,9 @@ fn the_request_rewrite_keeps_the_query_and_the_destination_shape() {
 /// case-insensitive host that destination IS the source. A hard link reproduces "two
 /// spellings, one file" on a case-sensitive test host; elsewhere the filesystem does.
 /// The source is spelled `Vol9.cbz`, the byte-smallest, so it is the entry every
-/// spelling reaches on both kinds of host.
+/// spelling reaches on both kinds of host. Where the folder then lists both spellings
+/// (the hard link, a case-sensitive host) they are a case-variant group, frozen: the
+/// MOVE answers 409 and nothing changes.
 #[tokio::test]
 async fn a_moves_case_variant_destination_is_not_an_existing_resource() {
     let env = Env::new();
@@ -175,6 +177,7 @@ async fn a_moves_case_variant_destination_is_not_an_existing_resource() {
     if !series.join("vol9.cbz").exists() {
         std::fs::hard_link(series.join("Vol9.cbz"), series.join("vol9.cbz")).unwrap();
     }
+    let two = holds_two_spellings(&series, "Vol9.cbz", "vol9.cbz");
 
     // Not a MOVE: the other spelling reaches the volume (through PathCase, as every
     // request does).
@@ -199,6 +202,20 @@ async fn a_moves_case_variant_destination_is_not_an_existing_resource() {
         b"",
     )
     .await;
+    if two {
+        assert_eq!(r.code(), 409, "{}", r.text());
+        assert_eq!(
+            names(&series),
+            ["Vol9.cbz", "Vol9.mokuro", "vol1.cbz", "vol9.cbz"]
+        );
+        assert!(
+            !env.hooks
+                .calls()
+                .iter()
+                .any(|c| c.contains("volume_upload"))
+        );
+        return;
+    }
     assert_eq!(r.code(), 204, "{}", r.text());
     // Reported as existing, the destination would have been deleted first -- with the
     // source volume's sidecars and records.

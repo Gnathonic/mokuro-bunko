@@ -2,8 +2,11 @@
 //! never by opening the requested spelling. A case-sensitive disk (or a remote store)
 //! can hold two spellings of a name; the one no request reaches is hidden, and so are
 //! the files rule v1 gives to a hidden archive (its sidecars, cover and corrections,
-//! named by its exact stem). Nothing hidden is ever shown, read, written or deleted
-//! through another spelling, and no request makes a second spelling of a name.
+//! named by its exact stem). Nothing hidden is ever shown or read through another
+//! spelling, and the whole group is frozen: every write to a member (the winner
+//! included), to a file rule v1 gives either, or to a folder holding them, answers 409
+//! until the variants are merged by hand. No request makes a second spelling of a
+//! name.
 //!
 //! Fixtures that need two spellings run that part only where the folder really lists
 //! both (a case-sensitive disk); everything else asserts one outcome on every host.
@@ -146,7 +149,7 @@ async fn a_hidden_archives_files_are_never_reached() {
         let put = req(&env, Some("admin"), "PUT", &path, &[], b"overwritten").await;
         assert_eq!(put.code(), 409, "PUT {name}: {}", put.text());
         let del = req(&env, Some("admin"), "DELETE", &path, &[], b"").await;
-        assert_eq!(del.code(), 404, "DELETE {name}");
+        assert_eq!(del.code(), 409, "DELETE {name}: {}", del.text());
     }
     // The cloud-root owner's correction of `V.cbz` is no write into the hidden one's.
     let put = as_owner(
@@ -254,9 +257,9 @@ async fn a_hidden_archives_correction_stays_its_own() {
     );
     assert_eq!(got.code(), 404);
     let put = req(&env, Some("alice"), "PUT", edit, &[], &layer("alice on V")).await;
-    assert_eq!(put.code(), 403, "{}", put.text());
+    assert_eq!(put.code(), 409, "{}", put.text());
     let del = req(&env, Some("alice"), "DELETE", edit, &[], b"").await;
-    assert_eq!(del.code(), 404);
+    assert_eq!(del.code(), 409, "{}", del.text());
     assert_eq!(std::fs::read(&overlay).unwrap(), layer("alice on v"));
     assert_eq!(names(overlay.parent().unwrap()), ["v.edit.mokuro"]);
 }
@@ -380,4 +383,102 @@ async fn names_full_case_folding_joins_are_one_entry() {
     );
     let got = req(&env, None, "GET", "/mokuro-reader/strasse/V.CBZ", &[], b"").await;
     assert_eq!(got.code(), 200);
+}
+
+/// An account's per-user files are found from the listing of `users/<u>/`: a
+/// `Goals.json` made there outside Bunko is its `goals.json` on every host (read, and
+/// written under its own spelling, never a second file beside it). The cloud-root
+/// owner's `goals.json` is the canonical name in the cloud folder: a listed
+/// `Goals.json` is not it, on any host (its writes are refused until it is renamed).
+#[tokio::test]
+async fn per_user_files_exist_by_the_listing() {
+    let env = Env::new();
+    let alice = env.base.join("users/alice");
+    std::fs::create_dir_all(&alice).unwrap();
+    std::fs::write(alice.join("Goals.json"), b"{\"g\":1}").unwrap();
+    let got = req(
+        &env,
+        Some("alice"),
+        "GET",
+        "/mokuro-reader/goals.json",
+        &[],
+        b"",
+    )
+    .await;
+    assert_eq!((got.code(), got.body), (200, b"{\"g\":1}".to_vec()));
+    let put = req(
+        &env,
+        Some("alice"),
+        "PUT",
+        "/mokuro-reader/goals.json",
+        &[],
+        b"{\"g\":2}",
+    )
+    .await;
+    assert_eq!(put.code(), 204, "{}", put.text());
+    assert_eq!(names(&alice), ["Goals.json"]);
+    assert_eq!(
+        std::fs::read(alice.join("Goals.json")).unwrap(),
+        b"{\"g\":2}"
+    );
+    // The cloud-root owner: the library root lists `Goals.json`, never its
+    // `goals.json`.
+    std::fs::write(env.lib("Goals.json"), b"{\"owner\":1}").unwrap();
+    let got = as_owner(&env, "GET", "/mokuro-reader/goals.json", b"").await;
+    assert_eq!(got.code(), 404, "{}", got.text());
+    let put = as_owner(&env, "PUT", "/mokuro-reader/goals.json", b"{}").await;
+    assert_eq!(put.code(), 409, "{}", put.text());
+    assert_eq!(
+        std::fs::read(env.lib("Goals.json")).unwrap(),
+        b"{\"owner\":1}"
+    );
+    assert!(
+        !names(&env.lib("")).contains(&"goals.json".to_string()),
+        "{:?}",
+        names(&env.lib(""))
+    );
+}
+
+/// An account sees its own corrections beside the library files, so a library file
+/// spelled like one of them (`v.EDIT.mokuro` beside alice's `V.edit.mokuro`, a name rule
+/// v1 does not read as a correction) would be a second spelling in its listings: the
+/// write is refused (409), the same on every host, and nothing is made.
+#[tokio::test]
+async fn a_library_name_an_accounts_correction_spells_otherwise_is_refused() {
+    let env = Env::new();
+    std::fs::create_dir_all(env.lib("S")).unwrap();
+    std::fs::write(env.lib("S/V.cbz"), b"v").unwrap();
+    let put = req(
+        &env,
+        Some("alice"),
+        "PUT",
+        "/mokuro-reader/S/V.edit.mokuro",
+        &[],
+        &layer("alice"),
+    )
+    .await;
+    assert_eq!(put.code(), 201, "{}", put.text());
+    let put = req(
+        &env,
+        Some("alice"),
+        "PUT",
+        "/mokuro-reader/s/v.EDIT.mokuro",
+        &[],
+        &layer("again"),
+    )
+    .await;
+    assert_eq!(put.code(), 409, "{}", put.text());
+    assert_eq!(names(&env.lib("S")), ["V.cbz"]);
+    let listing = req(
+        &env,
+        Some("alice"),
+        "PROPFIND",
+        "/mokuro-reader/S/",
+        &[("depth", "1")],
+        b"",
+    )
+    .await;
+    let text = listing.text();
+    assert!(text.contains("/mokuro-reader/S/V.edit.mokuro"), "{text}");
+    assert!(!text.contains("EDIT"), "{text}");
 }

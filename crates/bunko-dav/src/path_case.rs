@@ -20,7 +20,10 @@
 //! disk or a remote store can) is addressed through ONE of them, whatever the request
 //! spells, the exact spelling of another included: the store's case winner (a remote
 //! store's oldest spelling, the one its case merge keeps), else the byte-smallest. The
-//! others are shadowed.
+//! others are shadowed. Such a case-variant group is frozen until it is merged by hand
+//! ([`bunko_core::fold_groups`], [`frozen`]): every write to a member, the winner
+//! included, to a file rule v1 gives (or would give) an archive of it, or to a folder
+//! holding one answers 409 (`crate::methods`); reads still reach the winner.
 //!
 //! The per-user names at the reader root (`history`, `goals.json`, ...) are reserved in
 //! every spelling: a request for `/mokuro-reader/History/x` is rewritten to the canonical
@@ -32,6 +35,7 @@
 
 use std::path::{Path, PathBuf};
 
+use bunko_core::fold_groups::{FoldGroups, Frozen};
 use bunko_core::reader_tree;
 use bunko_store::fs;
 use http::{Uri, request::Parts};
@@ -68,15 +72,39 @@ fn listing(parent: &Path, top: bool) -> Option<Vec<(String, bool)>> {
     Some(out)
 }
 
-/// The names of `entries` (`parent`'s listing) no request reaches
-/// ([`bunko_core::sidecar_names::hidden_names`]): every spelling of a name but the one
-/// [`on_disk_name`] picks, and every file rule v1 gives to a shadowed archive (its
-/// sidecars, cover and layers, named by its exact stem). No listing shows them, no
-/// request reads, writes or deletes them, and no new name is made beside them.
-fn hidden_in(parent: &Path, entries: &[(String, bool)]) -> std::collections::HashSet<String> {
+/// The fold groups of `parent`'s listing `entries`
+/// ([`bunko_core::fold_groups::FoldGroups`]): which names no request reaches (every
+/// spelling of a name but the one [`on_disk_name`] picks, and every file rule v1 gives
+/// to a shadowed archive) and which the freeze holds (no write touches them until the
+/// case variants are merged by hand).
+fn groups_in(parent: &Path, entries: &[(String, bool)]) -> FoldGroups {
     let store = bunko_store::store_for(parent);
-    bunko_core::sidecar_names::hidden_names(entries.iter().map(|(n, d)| (n.as_str(), *d)), |fold| {
+    FoldGroups::new(entries.iter().map(|(n, d)| (n.as_str(), *d)), |fold| {
         store.as_ref()?.case_winner(parent, fold)
+    })
+}
+
+/// The names of `entries` (`parent`'s listing) no request reaches
+/// ([`FoldGroups::hidden`]). No listing shows them, no request reads, writes or deletes
+/// them, and no new name is made beside them.
+fn hidden_in(parent: &Path, entries: &[(String, bool)]) -> std::collections::HashSet<String> {
+    groups_in(parent, entries).hidden().clone()
+}
+
+/// Where the library path `rel` (below `library`, as PathCase resolved it) meets the
+/// freeze ([`bunko_core::fold_groups::frozen_along`]): a segment that is a member of a
+/// case-variant group, or a file rule v1 gives (or would give, once written) to an
+/// archive such a group freezes, in any folder on the way. Every write to it answers
+/// 409. From the listings alone, so every host answers alike.
+pub(crate) fn frozen(library: &Path, rel: &str) -> Option<Frozen> {
+    bunko_core::fold_groups::frozen_along(rel, false, |folder| {
+        let dir = if folder.is_empty() {
+            library.to_path_buf()
+        } else {
+            library.join(folder)
+        };
+        let entries = listing(&dir, folder.is_empty())?;
+        Some(groups_in(&dir, &entries))
     })
 }
 
@@ -171,6 +199,15 @@ pub(crate) fn hidden(
     hidden_in(parent, entries)
 }
 
+/// `parent`'s listing (UTF-8 names, each with whether it is a folder; at the library
+/// root, `top`, without the per-user names) and its fold groups. `None` when it cannot
+/// be listed.
+pub(crate) fn listed_groups(parent: &Path, top: bool) -> Option<(Vec<(String, bool)>, FoldGroups)> {
+    let entries = listing(parent, top)?;
+    let groups = groups_in(parent, &entries);
+    Some((entries, groups))
+}
+
 /// `parent`'s listing (UTF-8 names, each with whether it is a folder) and its
 /// [`hidden`] names. Empty when it cannot be listed.
 pub(crate) fn listed_with_hidden(
@@ -181,17 +218,17 @@ pub(crate) fn listed_with_hidden(
     (entries, hidden)
 }
 
-/// Does the folder `dir`, or any folder below it (symlinked folders not followed), hold
-/// an entry no request reaches ([`hidden`])? A write that would delete or replace the
-/// folder whole is refused while it does: a hidden entry is never deleted.
-pub(crate) fn holds_hidden(dir: &Path) -> bool {
+/// The first case-variant group in the folder `dir` or any folder below it (symlinked
+/// folders not followed), with the folder that lists it. A DELETE, MOVE or COPY of the
+/// folder whole, or onto it, is refused while it holds one: the group is frozen.
+pub(crate) fn frozen_inside(dir: &Path) -> Option<(PathBuf, bunko_core::fold_groups::Group)> {
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
         let Some(entries) = listing(&d, false) else {
             continue;
         };
-        if !hidden_in(&d, &entries).is_empty() {
-            return true;
+        if let Some(group) = groups_in(&d, &entries).groups().first() {
+            return Some((d, group.clone()));
         }
         for (name, is_dir) in entries {
             let child = d.join(&name);
@@ -200,7 +237,7 @@ pub(crate) fn holds_hidden(dir: &Path) -> bool {
             }
         }
     }
-    false
+    None
 }
 
 /// `relative` (below `base`) with every existing segment in its listed spelling
