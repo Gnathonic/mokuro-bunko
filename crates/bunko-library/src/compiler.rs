@@ -605,15 +605,26 @@ mod tests {
     #[test]
     fn the_reading_history_folder_is_not_a_series() {
         let dir = tempfile::tempdir().unwrap();
-        for folder in ["history", "History", "S"] {
+        let titles = |dir: &Path| -> Vec<String> {
+            iter_series_folders(dir)
+                .into_iter()
+                .map(|f| f.title)
+                .collect()
+        };
+        for folder in ["history", "S"] {
             let path = dir.path().join(folder);
             std::fs::create_dir(&path).unwrap();
             std::fs::write(path.join("V.cbz"), "x").unwrap();
         }
-        let titles: Vec<String> = iter_series_folders(dir.path())
-            .into_iter()
-            .map(|f| f.title)
-            .collect();
-        assert_eq!(titles, ["History", "S"]);
+        assert_eq!(titles(dir.path()), ["S"]);
+        // A series `History/` beside `history/` needs a case-sensitive filesystem (not
+        // the default on Windows or macOS, where both are one folder).
+        if dir.path().join("HISTORY").exists() {
+            return;
+        }
+        let series = dir.path().join("History");
+        std::fs::create_dir(&series).unwrap();
+        std::fs::write(series.join("V.cbz"), "x").unwrap();
+        assert_eq!(titles(dir.path()), ["History", "S"]);
     }
 }
