@@ -423,7 +423,7 @@ mod tests {
     }
 
     /// Sidecar names rule v1: a sidecar in another spelling of the volume's stem
-    /// (`V.MOKURO`, `v.fast.mokuro` on a case-sensitive disk) is the volume's, so the
+    /// (`V.MOKURO`, `v2.fast.mokuro.gz`) is the volume's, so the
     /// walk does not OCR it again and write a second primary beside it.
     #[test]
     fn a_sidecar_in_another_spelling_is_done() {
@@ -439,12 +439,10 @@ mod tests {
         ] {
             std::fs::write(lib.join("S").join(name), b"{}").unwrap();
         }
-        // Two archives fold alike: a folded-only sidecar is neither's.
-        for name in [
-            "W.cbz", "w.cbz", "W.mokuro", "w.mokuro", "x.cbz", "X.cbz", "x.MOKURO",
-        ] {
-            std::fs::write(lib.join("S").join(name), b"{}").unwrap();
-        }
+        // A volume with no sidecar in any spelling owes everything. (Two archives whose
+        // stems fold alike, which only a case-sensitive store can list, are bunko-core's
+        // synthetic-listing vectors.)
+        std::fs::write(lib.join("S").join("X.cbz"), b"{}").unwrap();
         let index = walk(lib, &rows(), &FileFacts, None, &KnownPages::new());
         let owed: Vec<(&str, Vec<String>)> = index
             .volumes
@@ -455,10 +453,7 @@ mod tests {
             owed,
             [
                 ("S/V1.cbz", vec!["g-2".to_string()]),
-                ("S/W.cbz", vec!["g-2".to_string()]),
                 ("S/X.cbz", vec!["g-1".to_string(), "g-2".to_string()]),
-                ("S/w.cbz", vec!["g-2".to_string()]),
-                ("S/x.cbz", vec!["g-2".to_string()]),
             ]
         );
         assert!(!still_owed(lib, "S/V1.cbz", &rows()[0], false));

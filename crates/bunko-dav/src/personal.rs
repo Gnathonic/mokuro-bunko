@@ -59,10 +59,20 @@ pub(crate) fn edits_base(users: &Path, username: &str) -> Option<PathBuf> {
 }
 
 /// `users/<u>/edits/<rel>`, which must stay inside `users/<u>/edits` (symlinks followed).
+/// Every segment that names an existing overlay folder or file in any spelling takes its
+/// listed spelling, so one volume's correction is one file on every host, whatever case
+/// the library or the request spells it in.
 pub(crate) fn overlay_path(users: &Path, username: &str, rel: &str) -> Option<PathBuf> {
     let base = edits_base(users, username)?;
+    let rel = resolve_existing(&base, rel);
     let resolved = paths::resolve_under(users, &format!("{username}/{EDITS_DIR}/{rel}"))?;
     resolved.starts_with(&base).then_some(resolved)
+}
+
+/// `rel` below the overlay base `base` with every existing segment in its listed
+/// spelling (any case).
+fn resolve_existing(base: &Path, rel: &str) -> String {
+    crate::path_case::resolve_existing(base, rel, false)
 }
 
 /// A library file that is a personal correction.
@@ -243,8 +253,9 @@ impl PersonalOverlays {
     }
 
     /// Move one overlay into `to_dir` as `<stem>.<id>.mokuro`, or the next free
-    /// `edit-<n>` when that is taken (merge.rs `free_layer`: nothing is lost). The
-    /// destination when it moved.
+    /// `edit-<n>` when that is taken in any spelling (merge.rs `free_layer`: nothing is
+    /// lost). The destination when it moved, or the source itself when it is already
+    /// there under that name.
     fn move_one(&self, from: &Path, to_dir: &Path, stem: &str, id: &str) -> Option<PathBuf> {
         if fs::create_dir_all(to_dir).is_err() {
             return None;
@@ -255,8 +266,19 @@ impl PersonalOverlays {
                 n => format!("edit-{n}"),
             };
             let dest = to_dir.join(format!("{stem}.{id}.mokuro"));
-            // Free, or the source itself spelled differently (a case-insensitive disk).
-            let free = |dest: &Path| !fs::exists(dest) || crate::path_case::same_file(from, dest);
+            // Already there: the same file under the same name.
+            if dest.file_name() == from.file_name() && crate::path_case::same_file(from, &dest) {
+                return Some(from.to_path_buf());
+            }
+            // Free in every spelling, or taken only by the source itself (a case-only
+            // rename, which `fs::rename` carries out on every host).
+            let free = |dest: &Path| {
+                let name = dest.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                match crate::path_case::on_disk_name(to_dir, name, false) {
+                    None => true,
+                    Some(listed) => crate::path_case::same_file(from, &to_dir.join(listed)),
+                }
+            };
             if !free(&dest) {
                 continue;
             }
@@ -367,14 +389,59 @@ impl PersonalOverlays {
         };
         let old_name = paths::uri_name(old).to_string();
         for base in self.bases() {
-            let dir = base.join(old_folder);
+            let dir = base.join(resolve_existing(&base, old_folder));
             let owned = self.owned(&dir, old_folder, &old_name);
-            for (name, id) in &owned {
-                self.move_one(&dir.join(name), &base.join(new_folder), new_stem, id);
+            if owned.is_empty() {
+                continue;
             }
-            if !owned.is_empty() && !old_folder.is_empty() {
+            let to_rel = resolve_existing(&base, new_folder);
+            let to_dir = base.join(&to_rel);
+            for (name, id) in &owned {
+                self.move_one(&dir.join(name), &to_dir, new_stem, id);
+            }
+            if !old_folder.is_empty() && dir != to_dir {
                 self.drop_if_empty(&dir);
             }
+            // The receiving folder takes the library's spelling (a case merge or a case
+            // fix of the folder): the overlay tree stays aligned with the library.
+            self.respell(&base, &to_rel, new_folder);
+        }
+    }
+
+    /// Rename the overlay folders of `have` (below `base`, listed spellings) whose
+    /// spelling differs from `want`'s only in case, segment by segment, to `want`'s
+    /// spelling. A distinct folder already spelled that way (a case-sensitive disk)
+    /// takes the other's overlays instead ([`Self::merge_dir`]).
+    fn respell(&self, base: &Path, have: &str, want: &str) {
+        let have: Vec<&str> = have.split('/').filter(|s| !s.is_empty()).collect();
+        let want: Vec<&str> = want.split('/').filter(|s| !s.is_empty()).collect();
+        if have.len() != want.len() {
+            return;
+        }
+        let mut parent = base.to_path_buf();
+        for (h, w) in have.iter().zip(&want) {
+            if h != w && crate::fold_name(h) == crate::fold_name(w) {
+                let (from, to) = (parent.join(h), parent.join(w));
+                if fs::exists(&to) && !crate::path_case::same_file(&from, &to) {
+                    self.merge_dir(&from, &to);
+                } else {
+                    let Some(_guard) = self.locks.try_lock_all(&[&from, &to]) else {
+                        tracing::warn!(
+                            "[DAV] corrections are being written under {}: its spelling stays",
+                            from.display()
+                        );
+                        return;
+                    };
+                    if let Err(e) = fs::rename(&from, &to) {
+                        tracing::warn!(
+                            "[DAV] respelling the corrections folder {}: {e}",
+                            from.display()
+                        );
+                        return;
+                    }
+                }
+            }
+            parent.push(w);
         }
     }
 
@@ -418,7 +485,7 @@ impl PersonalOverlays {
         };
         let name = paths::uri_name(rel).to_string();
         for base in self.bases() {
-            let dir = base.join(folder);
+            let dir = base.join(resolve_existing(&base, folder));
             let owned = self.owned(&dir, folder, &name);
             for (file, _) in &owned {
                 let path = dir.join(file);
@@ -445,11 +512,21 @@ impl PersonalOverlays {
         if old == new || old.is_empty() || new.is_empty() {
             return;
         }
+        let (new_parent, new_name) = new.rsplit_once('/').unwrap_or(("", new));
         for base in self.bases() {
-            let (from, to) = (base.join(old), base.join(new));
+            let from = base.join(resolve_existing(&base, old));
             if !fs::is_dir(&from) {
                 continue;
             }
+            // Into an existing folder of the new name in any spelling, unless that is
+            // the source itself (a case fix: renamed to the new spelling).
+            let to_parent = base.join(resolve_existing(&base, new_parent));
+            let to = match crate::path_case::on_disk_name(&to_parent, new_name, false) {
+                Some(listed) if !crate::path_case::same_file(&from, &to_parent.join(&listed)) => {
+                    to_parent.join(listed)
+                }
+                _ => to_parent.join(new_name),
+            };
             // Free, or the same directory spelled differently (a case-insensitive disk):
             // one rename.
             if !fs::exists(&to) || crate::path_case::same_file(&from, &to) {
@@ -484,7 +561,8 @@ impl PersonalOverlays {
                 entry.file_name().to_string_lossy().into_owned(),
             );
             if fs::is_dir(&path) {
-                self.merge_dir(&path, &to.join(&name));
+                let into = crate::path_case::on_disk_name(to, &name, false).unwrap_or(name);
+                self.merge_dir(&path, &to.join(into));
             } else if let Some((stem, id, _)) = personal_name(&name) {
                 self.move_one(&path, to, stem, id);
             }
@@ -499,7 +577,7 @@ impl PersonalOverlays {
             return;
         }
         for base in self.bases() {
-            let dir = base.join(rel);
+            let dir = base.join(resolve_existing(&base, rel));
             if !fs::is_dir(&dir) {
                 continue;
             }

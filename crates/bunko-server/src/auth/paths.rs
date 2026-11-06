@@ -158,8 +158,9 @@ mod tests {
     #[test]
     fn progress_and_library() {
         assert!(is_progress_path("/mokuro-reader/volume-data.json"));
-        assert!(!is_progress_path("/mokuro-reader/Volume-Data.json"));
-        assert!(is_library_path("/mokuro-reader/Volume-Data.json"));
+        // Per-user names match in any case (no shared `Volume-Data.json`).
+        assert!(is_progress_path("/mokuro-reader/Volume-Data.json"));
+        assert!(!is_library_path("/mokuro-reader/Volume-Data.json"));
         assert!(!is_library_path("/mokuro-reader/"));
         assert!(!is_library_path("/mokuro-reader/profiles.json"));
         // The reader's position index is the user's own, like their progress.
@@ -180,11 +181,14 @@ mod tests {
         }
         assert!(is_progress_path("/mokuro-reader/goals.json"));
         assert!(!is_history_path("/mokuro-reader/goals.json"));
-        for p in ["/mokuro-reader/History/v.cbz", "/mokuro-reader/historyx"] {
-            assert!(!is_progress_path(p), "{p}");
-            assert!(!is_history_path(p), "{p}");
-            assert!(is_library_path(p), "{p}");
+        for p in ["/mokuro-reader/History/v.cbz", "/mokuro-reader/HISTORY"] {
+            assert!(is_progress_path(p), "{p}");
+            assert!(is_history_path(p), "{p}");
+            assert!(!is_library_path(p), "{p}");
         }
+        assert!(!is_progress_path("/mokuro-reader/historyx"));
+        assert!(!is_history_path("/mokuro-reader/historyx"));
+        assert!(is_library_path("/mokuro-reader/historyx"));
         assert!(!is_compiled_metadata_path(
             "/mokuro-reader/history/series.json"
         ));
@@ -251,7 +255,7 @@ mod tests {
         assert!(series_title_from_series_file_path("/mokuro-reader/ /series.json").is_none());
         // The reading-history tree is the account's own, never compiled metadata.
         assert!(!is_series_file_path("/mokuro-reader/history/series.json"));
-        assert!(is_series_file_path("/mokuro-reader/History/series.json"));
+        assert!(!is_series_file_path("/mokuro-reader/History/series.json"));
     }
 
     /// C4: the segment helpers read the path as DAV resolves it.

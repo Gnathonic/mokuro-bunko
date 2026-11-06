@@ -105,6 +105,17 @@ impl Env {
     }
 }
 
+/// The names in a local folder, sorted.
+fn listed(dir: &std::path::Path) -> Vec<String> {
+    let mut v: Vec<String> = bunko_store::fs::read_dir(dir)
+        .unwrap()
+        .flatten()
+        .map(|d| d.file_name().to_string_lossy().into_owned())
+        .collect();
+    v.sort();
+    v
+}
+
 async fn eventually(what: &str, mut f: impl FnMut() -> bool) {
     let until = Instant::now() + Duration::from_secs(30);
     while !f() {
@@ -184,13 +195,11 @@ async fn a_case_merge_carries_the_db_rows_per_volume_and_holds_the_queue() {
     for n in ["Vol 1.cbz", "Vol 2.cbz", "Vol 2.mokuro"] {
         assert!(kingdom.contains(&n.to_string()), "{kingdom:?}");
     }
-    // The account's correction follows its volume into the winning spelling.
-    assert!(bunko_store::fs::exists(
-        overlays.join("Kingdom/Vol 2.edit.mokuro")
-    ));
-    assert!(!bunko_store::fs::exists(
-        overlays.join("kingdom/Vol 2.edit.mokuro")
-    ));
+    // The account's correction follows its volume into the winning spelling: the
+    // overlay folder is respelled, the same on every host (checked by listing: a
+    // lookup by name folds on a case-insensitive disk).
+    assert_eq!(listed(&overlays), ["Kingdom"]);
+    assert_eq!(listed(&overlays.join("Kingdom")), ["Vol 2.edit.mokuro"]);
     // Per volume: the owner, the OCR row and the volume id follow the archive.
     assert_eq!(
         db.get_volume_owner("Kingdom/Vol 2.cbz").unwrap().as_deref(),
@@ -441,8 +450,6 @@ async fn corrections_of_a_trashed_identical_copy_move_to_the_kept_one() {
         f2.node_at(&format!("{ROOT}/kingdom")).is_none()
     })
     .await;
-    assert!(bunko_store::fs::exists(
-        overlays.join("Kingdom/Vol 1.edit.mokuro")
-    ));
-    assert!(!bunko_store::fs::exists(overlays.join("kingdom")));
+    assert_eq!(listed(&overlays), ["Kingdom"]);
+    assert_eq!(listed(&overlays.join("Kingdom")), ["Vol 1.edit.mokuro"]);
 }

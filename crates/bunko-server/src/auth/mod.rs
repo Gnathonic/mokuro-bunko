@@ -1374,8 +1374,9 @@ mod tests {
             )
             .is_ok()
         );
-        // history/series.json is the account's, not compiled metadata; a library
-        // `History/` series is still the library's.
+        // history/series.json is the account's, not compiled metadata; `History/` is
+        // the account's history too (any case), so an archive there is refused by the
+        // history shape, never treated as a library upload.
         assert!(
             authorize(
                 &m("PUT"),
@@ -1387,7 +1388,7 @@ mod tests {
             )
             .is_ok()
         );
-        assert_eq!(
+        assert!(
             authorize(
                 &m("PUT"),
                 "/mokuro-reader/History/v.cbz",
@@ -1396,9 +1397,7 @@ mod tests {
                 OPEN,
                 &B
             )
-            .unwrap_err()
-            .message,
-            "Permission denied: cannot add files"
+            .is_ok()
         );
     }
 

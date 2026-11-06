@@ -59,7 +59,10 @@ pub fn checks(config: &Config) -> Vec<Row> {
             ),
             None,
         )];
-        out.extend(history_series_row(&config.storage.layout().library(), None));
+        out.extend(reserved_series_rows(
+            &config.storage.layout().library(),
+            None,
+        ));
         out.extend(credentials_row(&config.storage.layout().cloud_dir()));
         return out;
     }
@@ -121,48 +124,69 @@ pub fn checks(config: &Config) -> Vec<Row> {
     out
 }
 
-/// A library whose top-level `history/` holds archives: 0.8 serves
-/// `/mokuro-reader/history` as each account's reading history, so that series is out of
-/// every reader's reach until it is renamed. A cloud folder (`cloud_folder`) can have
-/// one too, uploaded under 0.7 or by a reader writing to the cloud directly; there it is
-/// also the progress user's reading history, which that account may delete from. Only
-/// the running server can look (doctor is offline): it logs this once the cloud
-/// library is in sync.
-pub fn history_series_row(library: &Path, cloud_folder: Option<&str>) -> Option<Row> {
-    let dir = library.join(bunko_core::reader_tree::HISTORY_DIR);
-    let archives = bunko_store::fs::read_dir(&dir)
-        .ok()?
+/// Library folders spelled like a per-user name in any case (`history/`, `History/`,
+/// `Goals.json/`) that hold archives: 0.8 serves `/mokuro-reader/history` (in every
+/// spelling) as each account's reading history, so such a series is out of every
+/// reader's reach until it is renamed. One row per folder, naming its spelling. A cloud
+/// folder (`cloud_folder`) can have one too, uploaded under 0.7 or by a reader writing
+/// to the cloud directly; there it is also the progress user's reading history, which
+/// that account may delete from. Only the running server can look at a cloud library
+/// (doctor is offline): it logs this once the cloud library is in sync.
+pub fn reserved_series_rows(library: &Path, cloud_folder: Option<&str>) -> Vec<Row> {
+    let Ok(entries) = bunko_store::fs::read_dir(library) else {
+        return Vec::new();
+    };
+    let mut folders: Vec<String> = entries
         .flatten()
-        .filter(|e| {
-            bunko_library::pyunicode::lower(&e.file_name().to_string_lossy()).ends_with(".cbz")
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .filter_map(|e| e.file_name().to_str().map(str::to_string))
+        .filter(|n| bunko_core::reader_tree::is_per_user_root_name(n))
+        .collect();
+    folders.sort();
+    folders
+        .into_iter()
+        .filter_map(|name| {
+            let dir = library.join(&name);
+            let archives = bunko_store::fs::read_dir(&dir)
+                .ok()?
+                .flatten()
+                .filter(|e| {
+                    bunko_library::pyunicode::lower(&e.file_name().to_string_lossy())
+                        .ends_with(".cbz")
+                })
+                .count();
+            (archives > 0).then(|| {
+                let volumes = format!("{archives} volume{}", if archives == 1 { "" } else { "s" });
+                let reserved = format!(
+                    "/mokuro-reader/{}",
+                    bunko_core::reader_tree::canonical_per_user_rel(&name).unwrap_or_default()
+                );
+                match cloud_folder {
+                    None => row(
+                        Verdict::Warn,
+                        "Reserved series name",
+                        format!(
+                            "the series folder {name}/ ({volumes}) is hidden: 0.8 reserves {reserved} in every spelling for each account's own files"
+                        ),
+                        Some(format!(
+                            "Stop Bunko and rename the series folder {} (e.g. to \"{name} (series)\").",
+                            dir.display()
+                        )),
+                    ),
+                    Some(folder) => row(
+                        Verdict::Warn,
+                        "Reserved series name",
+                        format!(
+                            "the cloud series folder {name}/ ({volumes}) is hidden: 0.8 reserves {reserved} in every spelling for each account's own files, and in a cloud folder it is the progress user's"
+                        ),
+                        Some(format!(
+                            "Rename {folder}/{name}/ in the cloud (e.g. to \"{name} (series)\") before the progress user's reader syncs its own files there."
+                        )),
+                    ),
+                }
+            })
         })
-        .count();
-    (archives > 0).then(|| {
-        let volumes = format!("{archives} volume{}", if archives == 1 { "" } else { "s" });
-        match cloud_folder {
-            None => row(
-                Verdict::Warn,
-                "Reserved series name",
-                format!(
-                    "the series folder history/ ({volumes}) is hidden: 0.8 reserves /mokuro-reader/history for each account's reading history"
-                ),
-                Some(format!(
-                    "Stop Bunko and rename the series folder {} (e.g. to \"History (series)\").",
-                    dir.display()
-                )),
-            ),
-            Some(folder) => row(
-                Verdict::Warn,
-                "Reserved series name",
-                format!(
-                    "the cloud series folder history/ ({volumes}) is hidden: 0.8 reserves /mokuro-reader/history for each account's reading history, and in a cloud folder it is the progress user's"
-                ),
-                Some(format!(
-                    "Rename {folder}/history/ in the cloud (e.g. to \"History (series)\") before the progress user's reader syncs its reading history there."
-                )),
-            ),
-        }
-    })
+        .collect()
 }
 
 /// `storage.library.spool_gb` against 2 × lanes × the largest archive (the biggest one
@@ -393,24 +417,51 @@ mod tests {
     /// library series of that exact name can no longer be reached: named, with the fix.
     #[test]
     fn a_local_series_named_history_is_reported() {
+        let reserved = |c: &Config| -> Vec<Row> {
+            checks(c)
+                .into_iter()
+                .filter(|r| r.label == "Reserved series name")
+                .collect()
+        };
+        // `History/` is the reserved name too: reported, by its own spelling.
         let dir = tempfile::tempdir().unwrap();
         let mut c = Config::default();
         c.storage.base_path = dir.path().to_path_buf();
         let library = c.storage.layout().library();
         bunko_store::fs::create_dir_all(library.join("History")).unwrap();
         bunko_store::fs::write(library.join("History/v.cbz"), "x").unwrap();
-        assert!(checks(&c).iter().all(|r| r.verdict == Verdict::Pass));
+        let rows = reserved(&c);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].verdict, Verdict::Warn);
+        assert!(
+            rows[0].detail.contains("/mokuro-reader/history"),
+            "{rows:?}"
+        );
+        assert!(rows[0].detail.contains("History/"), "{rows:?}");
+        assert!(
+            rows[0].hint.as_deref().unwrap().contains("rename"),
+            "{rows:?}"
+        );
+
+        // In a fresh library: an empty `history/` passes, one holding an archive does not.
+        let dir = tempfile::tempdir().unwrap();
+        let mut c = Config::default();
+        c.storage.base_path = dir.path().to_path_buf();
+        let library = c.storage.layout().library();
         bunko_store::fs::create_dir_all(library.join("history")).unwrap();
         assert!(checks(&c).iter().all(|r| r.verdict == Verdict::Pass));
         bunko_store::fs::write(library.join("history/Vol 1.CBZ"), "x").unwrap();
-        let rows = checks(&c);
-        let r = rows
-            .iter()
-            .find(|r| r.label == "Reserved series name")
-            .expect("reported");
-        assert_eq!(r.verdict, Verdict::Warn);
-        assert!(r.detail.contains("/mokuro-reader/history"), "{}", r.detail);
-        assert!(r.hint.as_deref().unwrap().contains("rename"), "{r:?}");
+        let rows = reserved(&c);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].verdict, Verdict::Warn);
+        assert!(
+            rows[0].detail.contains("/mokuro-reader/history"),
+            "{rows:?}"
+        );
+        assert!(
+            rows[0].hint.as_deref().unwrap().contains("rename"),
+            "{rows:?}"
+        );
     }
 
     /// A cloud folder can hold a `history/` series too (uploaded under 0.7, or by a
@@ -423,7 +474,9 @@ mod tests {
         let library = dir.path().join("library");
         bunko_store::fs::create_dir_all(library.join("history")).unwrap();
         bunko_store::fs::write(library.join("history/Vol 1.cbz"), "x").unwrap();
-        let r = history_series_row(&library, Some("mokuro-reader")).expect("reported");
+        let r = reserved_series_rows(&library, Some("mokuro-reader"))
+            .pop()
+            .expect("reported");
         assert_eq!(r.verdict, Verdict::Warn);
         assert!(r.detail.contains("progress user"), "{}", r.detail);
         let hint = r.hint.unwrap();

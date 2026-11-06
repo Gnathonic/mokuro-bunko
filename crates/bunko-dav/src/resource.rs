@@ -266,15 +266,23 @@ impl Roots {
         reader_tree::user_base(&self.library, &self.users, caller)
     }
 
-    /// The physical path of the per-user `rel` (`goals.json`, `history/dev/x`) for
-    /// `caller`, existing or not. A root file is its name under the base; anything in
-    /// `history` must resolve (symlinks followed) inside the base's `history`.
+    /// The physical path of the per-user `rel` (`goals.json`, `history/dev/x`, in any
+    /// case) for `caller`, existing or not. Built from the canonical per-user name, never
+    /// from the raw `rel`: `History/x` is `history/x`. A root file is its name under the
+    /// base; inside `history` every segment that names an existing entry takes its
+    /// listed spelling (one device folder per device, whatever case the reader sends),
+    /// and the result must resolve (symlinks followed) inside the base's `history`.
     pub fn user_path(&self, caller: Caller<'_>, rel: &str) -> Option<PathBuf> {
         let base = self.user_base(caller)?;
         match reader_tree::per_user(rel)? {
             PerUser::File(name) => Some(base.join(name)),
-            PerUser::Dir(dir) | PerUser::InDir { dir, .. } => {
-                let resolved = paths::resolve_under(&base, rel.trim_matches('/'))?;
+            PerUser::Dir(dir) => {
+                let resolved = paths::resolve_under(&base, dir)?;
+                resolved.starts_with(base.join(dir)).then_some(resolved)
+            }
+            PerUser::InDir { dir, rest } => {
+                let rest = crate::path_case::resolve_existing(&base.join(dir), rest, false);
+                let resolved = paths::resolve_under(&base, &format!("{dir}/{rest}"))?;
                 resolved.starts_with(base.join(dir)).then_some(resolved)
             }
         }
@@ -437,7 +445,11 @@ impl Roots {
                 kind: FileKind::Progress,
                 ..
             } => {
-                let resolved = paths::resolve_under(phys, name)?;
+                // An existing member in any spelling is that member (one device folder
+                // per device on every host).
+                let name = crate::path_case::on_disk_name(phys, name, false)
+                    .unwrap_or_else(|| name.to_string());
+                let resolved = paths::resolve_under(phys, &name)?;
                 self.in_user_history(caller?, &resolved)
                     .then_some((resolved, FileKind::Progress))
             }
@@ -846,11 +858,16 @@ mod tests {
         // The owner's own files at the library root are no library path.
         assert_eq!(roots.library_rel(&base.join("library/history/d/x")), None);
         assert_eq!(roots.library_rel(&base.join("library/goals.json")), None);
+        // A per-user name in any case is reserved: never a library path, and the
+        // physical path is built from the canonical name.
+        assert_eq!(roots.library_rel(&base.join("library/History/v.cbz")), None);
         assert_eq!(
-            roots
-                .library_rel(&base.join("library/History/v.cbz"))
-                .as_deref(),
-            Some("History/v.cbz")
+            roots.user_path(alice, "Goals.json"),
+            Some(base.join("users/alice/goals.json"))
+        );
+        assert_eq!(
+            roots.user_path(owner, "History/d/x.events"),
+            Some(base.join("library/history/d/x.events"))
         );
         // A history that leads out of the account's tree is not the account's history.
         #[cfg(unix)]

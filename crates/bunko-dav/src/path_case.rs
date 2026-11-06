@@ -184,6 +184,14 @@ fn library_relative(path: &str) -> Option<&str> {
     Some(relative)
 }
 
+/// `path` with its per-user first segment in the canonical spelling, when it is a
+/// per-user path under the reader root spelled otherwise; `None` for anything else.
+fn per_user_rewrite(path: &str) -> Option<String> {
+    let relative = path.strip_prefix(LIBRARY_PREFIX)?;
+    let canonical = reader_tree::canonical_per_user_rel(relative)?;
+    (canonical != relative).then(|| format!("{LIBRARY_PREFIX}{canonical}"))
+}
+
 /// The request-edge rewrite (0.5.3 `PathCaseMiddleware`).
 #[derive(Debug, Clone)]
 pub struct PathCase {
@@ -200,8 +208,13 @@ impl PathCase {
     }
 
     /// A decoded request path in on-disk spelling (unchanged when it is not a library
-    /// path). Blocking.
+    /// path). A per-user name at the reader root spelled in another case (`History/`,
+    /// `Goals.json`) takes its canonical spelling, so every layer, auth included, sees
+    /// the caller's own entry. Blocking.
     pub fn canonical_path(&self, path: &str, keep_last_if_variant_of: Option<&str>) -> String {
+        if let Some(per_user) = per_user_rewrite(path) {
+            return per_user;
+        }
         match library_relative(path) {
             None => path.to_string(),
             Some(relative) => format!(
@@ -216,7 +229,7 @@ impl PathCase {
     /// lets a caller skip the blocking hop for everything else.
     pub fn may_rewrite(parts: &Parts) -> bool {
         let library = paths::decode_request_path(parts.uri.path())
-            .is_some_and(|p| library_relative(&p).is_some());
+            .is_some_and(|p| library_relative(&p).is_some() || per_user_rewrite(&p).is_some());
         library
             || (matches!(parts.method.as_str(), "MOVE" | "COPY")
                 && parts.headers.contains_key("destination"))
@@ -315,10 +328,15 @@ mod tests {
         assert_eq!(library_relative("/mokuro-reader/"), None);
         assert_eq!(library_relative("/mokuro-reader//"), None);
         assert_eq!(library_relative("/mokuro-reader/volume-data.json"), None);
+        // Per-user in any case.
+        assert_eq!(library_relative("/mokuro-reader/Volume-Data.json"), None);
+        assert_eq!(library_relative("/mokuro-reader/History/x"), None);
         assert_eq!(
-            library_relative("/mokuro-reader/Volume-Data.json"),
-            Some("Volume-Data.json")
+            per_user_rewrite("/mokuro-reader/Volume-Data.json").as_deref(),
+            Some("/mokuro-reader/volume-data.json")
         );
+        assert_eq!(per_user_rewrite("/mokuro-reader/volume-data.json"), None);
+        assert_eq!(per_user_rewrite("/mokuro-reader/S/History"), None);
         assert_eq!(library_relative("/mokuro-reader"), None);
         assert_eq!(library_relative("/inbox/x"), None);
     }

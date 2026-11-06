@@ -21,9 +21,9 @@ use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_decode_str, utf8_perc
 use bunko_core::reader_tree;
 pub use bunko_core::reader_tree::{PER_USER_FILES, READER_ROOT};
 
-/// One of the account's root files (`goals.json`, ...), exactly as written.
+/// One of the account's root files (`goals.json`, ...), in any case.
 pub fn is_per_user_name(name: &str) -> bool {
-    PER_USER_FILES.contains(&name)
+    PER_USER_FILES.iter().any(|n| n.eq_ignore_ascii_case(name))
 }
 
 /// Percent-decode a request path to UTF-8 (spec §3.1). `None` for invalid UTF-8 or a NUL
@@ -51,7 +51,8 @@ pub enum Target {
     Root,
     ReaderRoot,
     /// `/mokuro-reader/<rel>` of the caller's own tree (`reader_tree::per_user`): a root
-    /// file, `history` or below it. Carries the rel, trailing `/` trimmed.
+    /// file, `history` or below it, in any case. Carries the rel with its per-user name
+    /// in the canonical spelling, trailing `/` trimmed.
     Progress(String),
     /// `/mokuro-reader/<rel>` (rel non-empty, not a per-user name)
     Library(String),
@@ -81,8 +82,8 @@ pub fn classify(path: &str) -> Target {
         return Target::ReaderRoot;
     }
     if let Some(rel) = norm.strip_prefix(&format!("{reader}/")) {
-        if reader_tree::is_per_user_rel(rel) {
-            return Target::Progress(rel.trim_matches('/').to_string());
+        if let Some(canonical) = reader_tree::canonical_per_user_rel(rel) {
+            return Target::Progress(canonical.trim_matches('/').to_string());
         }
         return Target::Library(rel.to_string());
     }
@@ -342,17 +343,22 @@ mod tests {
             classify("/mokuro-reader/history/dev/x.events"),
             Target::Progress("history/dev/x.events".into())
         );
+        // A per-user name in any case is the caller's own entry, canonically spelled.
         assert_eq!(
             classify("/mokuro-reader/History/v.cbz"),
-            Target::Library("History/v.cbz".into())
+            Target::Progress("history/v.cbz".into())
         );
         assert!(is_history_path("/mokuro-reader/history"));
         assert!(is_history_path("/mokuro-reader/history/d/x"));
         assert!(!is_history_path("/mokuro-reader/goals.json"));
-        assert!(!is_history_path("/mokuro-reader/History/x"));
+        assert!(is_history_path("/mokuro-reader/History/x"));
         assert_eq!(
             classify("/mokuro-reader/Goals.json"),
-            Target::Library("Goals.json".into())
+            Target::Progress("goals.json".into())
+        );
+        assert_eq!(
+            classify("/mokuro-reader/S/Goals.json"),
+            Target::Library("S/Goals.json".into())
         );
         assert_eq!(
             classify("/mokuro-reader/S/v.cbz/"),

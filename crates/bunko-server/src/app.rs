@@ -235,9 +235,7 @@ impl Services {
                     (guard, Some(handle), layout)
                 }
                 None => {
-                    if let Some(r) =
-                        crate::storage::doctor::history_series_row(&layout.library(), None)
-                    {
+                    for r in crate::storage::doctor::reserved_series_rows(&layout.library(), None) {
                         tracing::warn!("[STORAGE] {}. {}", r.detail, r.hint.unwrap_or_default());
                     }
                     (crate::library::mount_local(&layout.library()), None, layout)
@@ -956,7 +954,7 @@ pub fn start_library_services(
             // doctor cannot see the cloud folder: the reserved-name finding is logged here.
             let (lib, folder) = (library_dir.clone(), storage.folder.clone());
             tokio::task::spawn_blocking(move || {
-                if let Some(r) = crate::storage::doctor::history_series_row(&lib, Some(&folder)) {
+                for r in crate::storage::doctor::reserved_series_rows(&lib, Some(&folder)) {
                     tracing::warn!("[STORAGE] {}. {}", r.detail, r.hint.unwrap_or_default());
                 }
             });

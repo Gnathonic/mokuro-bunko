@@ -44,7 +44,9 @@ pub struct FolderAdoption {
 /// A top-level library name that can be a series folder: not the cloud-root owner's
 /// own tree, the cover cache, or a dot name (staging).
 fn is_series_folder_name(name: &str) -> bool {
-    !reader_tree::is_per_user_root_name(name) && name != "thumbnails" && !name.starts_with('.')
+    !reader_tree::is_per_user_root_name(name)
+        && !name.eq_ignore_ascii_case("thumbnails")
+        && !name.starts_with('.')
 }
 
 /// The series folders listed at the library root (through the store: an index read on

@@ -95,15 +95,19 @@ fn a_folder_of_one_uploader_becomes_its() {
     assert_eq!(lib.owner("Empty"), None);
 }
 
+/// Folders whose names are one series key (`fold_series_title_key` folds case and
+/// collapses whitespace) count together. The spellings differ in whitespace too, so they
+/// are separate folders on every host: a case-only variant is one folder on APFS, NTFS
+/// and casefold, and the server's PathCase never makes a second one anywhere.
 #[test]
 fn every_spelling_of_a_series_counts_together() {
     let lib = Lib::new();
     lib.upload("dr stone/Vol 1.cbz", "alice");
-    lib.upload("Dr Stone/Vol 2.cbz", "alice");
-    lib.upload("Kingdom/Vol 1.cbz", "alice");
-    lib.upload("kingdom/Vol 2.cbz", "bob");
-    lib.upload("One/Vol 1.cbz", "alice");
-    lib.file("one/Vol 2.cbz");
+    lib.upload("Dr  Stone/Vol 2.cbz", "alice");
+    lib.upload("Kingdom  Hearts/Vol 1.cbz", "alice");
+    lib.upload("kingdom hearts/Vol 2.cbz", "bob");
+    lib.upload("One  Piece/Vol 1.cbz", "alice");
+    lib.file("one piece/Vol 2.cbz");
     assert_eq!(
         lib.adopt(),
         Some(FolderAdoption {
@@ -116,10 +120,10 @@ fn every_spelling_of_a_series_counts_together() {
     // The smallest spelling that holds a tracked volume.
     assert_eq!(
         (rows[0].folder_name.as_str(), rows[0].owner.as_str()),
-        ("Dr Stone", "alice")
+        ("Dr  Stone", "alice")
     );
-    assert_eq!(lib.owner("KINGDOM"), None);
-    assert_eq!(lib.owner("ONE"), None);
+    assert_eq!(lib.owner("KINGDOM HEARTS"), None);
+    assert_eq!(lib.owner("ONE PIECE"), None);
 }
 
 #[test]

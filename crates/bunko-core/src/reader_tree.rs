@@ -11,7 +11,11 @@
 //! | `history`, `history/<device>` | collections the reader creates (MKCOL) |
 //! | `history/<device>/<file>` | the account's reading-history files |
 //!
-//! Names match exactly, case-sensitively: `Goals.json` and `History/` are library paths.
+//! Names match in any case: the reader root is one case-insensitive namespace, like
+//! every library folder (design 0.8 D5), so `History/` and `Goals.json` ARE the
+//! account's `history/` and `goals.json`, never library paths. Every function here
+//! hands back the canonical (lowercase) constant, so the physical per-user path is
+//! always built from it.
 
 use std::path::{Path, PathBuf};
 
@@ -46,27 +50,54 @@ pub enum PerUser<'a> {
     InDir { dir: &'static str, rest: &'a str },
 }
 
-/// Classify a reader-root-relative path (leading and trailing `/` ignored). Exact,
-/// case-sensitive; `None` for a library path.
+/// The canonical per-user root name `name` spells in any ASCII case (every reserved
+/// name is ASCII, so this is the filename fold for them).
+fn root_name(name: &str) -> Option<&'static str> {
+    PER_USER_FILES
+        .iter()
+        .chain(PER_USER_DIRS.iter())
+        .find(|n| n.eq_ignore_ascii_case(name))
+        .copied()
+}
+
+/// Classify a reader-root-relative path (leading and trailing `/` ignored). The first
+/// segment matches in any case and comes back as the canonical constant; `None` for a
+/// library path.
 pub fn per_user(rel: &str) -> Option<PerUser<'_>> {
     let rel = rel.trim_matches('/');
-    if let Some(name) = PER_USER_FILES.iter().find(|n| **n == rel) {
-        return Some(PerUser::File(name));
+    let (first, rest) = match rel.split_once('/') {
+        Some((first, rest)) => (first, Some(rest)),
+        None => (rel, None),
+    };
+    if let Some(name) = PER_USER_FILES
+        .iter()
+        .find(|n| n.eq_ignore_ascii_case(first))
+    {
+        return rest.is_none().then_some(PerUser::File(name));
     }
-    for dir in PER_USER_DIRS {
-        if rel == dir {
-            return Some(PerUser::Dir(dir));
-        }
-        if let Some(rest) = rel.strip_prefix(dir).and_then(|r| r.strip_prefix('/')) {
-            let rest = rest.trim_start_matches('/');
-            return Some(if rest.is_empty() {
-                PerUser::Dir(dir)
-            } else {
-                PerUser::InDir { dir, rest }
-            });
-        }
-    }
-    None
+    let dir = PER_USER_DIRS
+        .iter()
+        .find(|n| n.eq_ignore_ascii_case(first))?;
+    let rest = rest.unwrap_or("").trim_start_matches('/');
+    Some(if rest.is_empty() {
+        PerUser::Dir(dir)
+    } else {
+        PerUser::InDir { dir, rest }
+    })
+}
+
+/// `rel` with its per-user first segment in the canonical spelling (`History/x` →
+/// `history/x`, `Goals.json` → `goals.json`), the rest and any leading or trailing
+/// `/` kept as they are. `None` for a library path.
+pub fn canonical_per_user_rel(rel: &str) -> Option<String> {
+    per_user(rel)?;
+    let body = rel.trim_start_matches('/');
+    let lead = &rel[..rel.len() - body.len()];
+    let (first, tail) = match body.find('/') {
+        Some(i) => body.split_at(i),
+        None => (body, ""),
+    };
+    Some(format!("{lead}{}{tail}", root_name(first)?))
 }
 
 pub fn is_per_user_rel(rel: &str) -> bool {
@@ -87,18 +118,17 @@ pub fn is_history_rel(rel: &str) -> bool {
     )
 }
 
-/// A name directly under the reader root that is the account's own (a file or a dir).
+/// A name directly under the reader root that is the account's own (a file or a dir),
+/// in any case: `History` and `GOALS.json` are reserved too, and never library entries.
 pub fn is_per_user_root_name(name: &str) -> bool {
-    PER_USER_FILES.contains(&name) || PER_USER_DIRS.contains(&name)
+    root_name(name).is_some()
 }
 
-/// A name that a case-insensitive comparison would take for a per-user root name
-/// (`History`, `GOALS.json`): never merged with, or resolved into, the per-user tree.
+/// [`is_per_user_root_name`] (kept for the callers that spell out that a
+/// case-insensitive comparison is meant: never merged with, or resolved into, the
+/// per-user tree).
 pub fn folds_to_per_user_root_name(name: &str) -> bool {
-    PER_USER_FILES
-        .iter()
-        .chain(PER_USER_DIRS.iter())
-        .any(|n| n.eq_ignore_ascii_case(name))
+    is_per_user_root_name(name)
 }
 
 /// What a path below `history/` may be.
@@ -204,8 +234,21 @@ mod tests {
                 rest: "dev/2026-10.events"
             })
         );
-        assert_eq!(per_user("History/x"), None);
-        assert_eq!(per_user("Goals.json"), None);
+        // Any case: the per-user entry, in its canonical spelling.
+        assert_eq!(
+            per_user("History/x"),
+            Some(PerUser::InDir {
+                dir: "history",
+                rest: "x"
+            })
+        );
+        assert_eq!(per_user("HISTORY"), Some(PerUser::Dir("history")));
+        assert_eq!(per_user("Goals.json"), Some(PerUser::File("goals.json")));
+        assert_eq!(
+            per_user("Volume-Data.json"),
+            Some(PerUser::File("volume-data.json"))
+        );
+        assert_eq!(per_user("goals.json/x"), None);
         assert_eq!(per_user("historyx/y"), None);
         assert_eq!(per_user("S/goals.json"), None);
         assert_eq!(per_user(""), None);
@@ -214,10 +257,33 @@ mod tests {
         assert!(!is_history_rel("goals.json"));
         assert!(is_per_user_root_name("history"));
         assert!(is_per_user_root_name("volume-data.json"));
-        assert!(!is_per_user_root_name("History"));
+        assert!(is_per_user_root_name("History"));
+        assert!(!is_per_user_root_name("histories"));
         assert!(folds_to_per_user_root_name("History"));
         assert!(folds_to_per_user_root_name("GOALS.JSON"));
         assert!(!folds_to_per_user_root_name("histories"));
+    }
+
+    #[test]
+    fn canonical_per_user_rels() {
+        assert_eq!(
+            canonical_per_user_rel("History/Dev/x").as_deref(),
+            Some("history/Dev/x")
+        );
+        assert_eq!(
+            canonical_per_user_rel("/HISTORY/").as_deref(),
+            Some("/history/")
+        );
+        assert_eq!(
+            canonical_per_user_rel("Goals.json").as_deref(),
+            Some("goals.json")
+        );
+        assert_eq!(
+            canonical_per_user_rel("goals.json").as_deref(),
+            Some("goals.json")
+        );
+        assert_eq!(canonical_per_user_rel("S/goals.json"), None);
+        assert_eq!(canonical_per_user_rel("Histories/x"), None);
     }
 
     #[test]

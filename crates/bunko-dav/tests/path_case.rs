@@ -1,11 +1,13 @@
-//! Library paths behave as on NTFS: case-insensitive, case-preserving (0.5.3
+//! Library paths are case-insensitive and case-preserving on every host, as on NTFS (0.5.3
 //! `tests/integration/test_path_case.py`: `TestCanonicalizer`, `TestCaseInsensitiveHost`,
 //! and the DAV half of `TestCaseOnlyRenames`; the full-stack half, with auth and the
 //! database, is `bunko-server/tests/dav_path_case.rs`).
 //!
 //! A library on a case-sensitive filesystem can end up with `Kingdom/` and a stray `kingdom/`
 //! (an upload spelled in another case), and the catalog then showed only the stray folder's
-//! one volume. On NTFS that request lands in `Kingdom/`.
+//! one volume. Every host now behaves as NTFS does: that request lands in `Kingdom/`. The
+//! tests give the same results on case-sensitive and case-insensitive filesystems; a
+//! fixture that needs two spellings creates the winner (the byte-smallest) first.
 
 // Fixtures are set up and checked with std::fs on purpose.
 #![allow(clippy::disallowed_methods)]
@@ -139,7 +141,7 @@ fn the_request_rewrite_keeps_the_query_and_the_destination_shape() {
         parts.headers["destination"],
         "http://localhost:8080/mokuro-reader/series/VOL1.cbz?y#z"
     );
-    // Per-user files and the roots are never rewritten.
+    // Per-user files and the roots are never resolved against the library.
     for path in [
         "/mokuro-reader/volume-data.json",
         "/mokuro-reader/",
@@ -149,6 +151,11 @@ fn the_request_rewrite_keeps_the_query_and_the_destination_shape() {
         env.dav.path_case().rewrite_request(&mut parts);
         assert_eq!(parts.uri.path(), path);
     }
+    // A per-user name in another case takes its canonical spelling.
+    let (mut parts, _) = request("GET", "/mokuro-reader/Volume-Data.json", &[], b"").into_parts();
+    assert!(bunko_dav::PathCase::may_rewrite(&parts));
+    env.dav.path_case().rewrite_request(&mut parts);
+    assert_eq!(parts.uri.path(), "/mokuro-reader/volume-data.json");
 }
 
 // --- TestCaseInsensitiveHost: NTFS/APFS, where the filesystem itself opens `Kingdom` as
@@ -561,12 +568,15 @@ async fn a_case_fix_onto_an_existing_other_spelling_is_refused() {
     }
 }
 
-// --- The per-user tree is never reached by a case fold (0.8) -------------------------
+// --- The per-user names are reserved in every spelling (0.8) ------------------------
 
+/// Inside the caller's own history tree nothing resolves against the library; an
+/// existing device folder is reached in any spelling (one folder per device on every
+/// host).
 #[tokio::test]
-async fn history_paths_are_never_case_canonicalised() {
+async fn history_paths_never_resolve_against_the_library() {
     let env = Env::new();
-    std::fs::create_dir_all(env.lib("History/Dev")).unwrap();
+    std::fs::create_dir_all(env.lib("Kingdom/Dev")).unwrap();
     let pc = env.dav.path_case();
     assert_eq!(
         pc.canonical_path("/mokuro-reader/history/Dev/x", None),
@@ -576,48 +586,77 @@ async fn history_paths_are_never_case_canonicalised() {
         pc.canonical_path("/mokuro-reader/history/dev/x", None),
         "/mokuro-reader/history/dev/x"
     );
+
+    for path in ["/mokuro-reader/history", "/mokuro-reader/history/dev"] {
+        let r = req(&env, Some("reader"), "MKCOL", path, &[], b"").await;
+        assert_eq!(r.code(), 201, "MKCOL {path}: {}", r.text());
+    }
+    let r = req(
+        &env,
+        Some("reader"),
+        "PUT",
+        "/mokuro-reader/history/DEV/x.events",
+        &[],
+        b"events",
+    )
+    .await;
+    assert!(matches!(r.code(), 201 | 204), "{}", r.text());
+    let history = env.base.join("users/reader/history");
+    assert_eq!(names(&history), ["dev"]);
+    assert_eq!(names(&history.join("dev")), ["x.events"]);
 }
 
-/// A library series spelled like a per-user name (`HISTORY/`, `Goals.json`) never folds
-/// into the cloud-root owner's own `history/` or `goals.json` at the library root.
+/// `/mokuro-reader/` is one case-insensitive namespace: `HISTORY/` and `Goals.json` ARE
+/// the caller's `history/` and `goals.json`, whatever the library holds, and never a
+/// library path. A legacy library folder spelled like one is hidden, never written.
 #[tokio::test]
-async fn a_case_fold_never_routes_into_the_per_user_tree() {
+async fn a_reserved_name_in_any_spelling_is_the_per_user_entry() {
     let env = Env::new();
     std::fs::create_dir_all(env.lib("history/dev")).unwrap();
     std::fs::write(env.lib("goals.json"), b"{}").unwrap();
     let pc = env.dav.path_case();
     assert_eq!(
         pc.canonical_path("/mokuro-reader/HISTORY/v.cbz", None),
-        "/mokuro-reader/HISTORY/v.cbz"
+        "/mokuro-reader/history/v.cbz"
     );
     assert_eq!(
         pc.canonical_path("/mokuro-reader/Goals.json", None),
-        "/mokuro-reader/Goals.json"
+        "/mokuro-reader/goals.json"
     );
-    // With a library series beside it, the request lands in the series. A series
-    // `History/` beside `history/` needs a case-sensitive filesystem (not the default on
-    // Windows or macOS, where both are one folder).
-    if env.lib("HISTORY").exists() {
-        return;
-    }
+
+    // A library holding only a legacy `History/` series.
+    let env = Env::new();
     std::fs::create_dir_all(env.lib("History")).unwrap();
-    for spelling in ["HISTORY", "hIstory"] {
+    std::fs::write(env.lib("History/old.cbz"), b"old").unwrap();
+    let pc = env.dav.path_case();
+    for spelling in ["HISTORY", "hIstory", "History"] {
         let path = format!("/mokuro-reader/{spelling}/v.cbz");
         assert_eq!(
             pc.canonical_path(&path, None),
-            "/mokuro-reader/History/v.cbz"
+            "/mokuro-reader/history/v.cbz"
         );
     }
-    let r = req(
+    let library_before = names(&env.lib(""));
+    let body = cbz_bytes(1);
+    let put = |path: &'static str| req(&env, Some("uploader"), "PUT", path, &[], &body);
+    let canonical = put("/mokuro-reader/history/v.cbz").await.code();
+    let other = put("/mokuro-reader/HISTORY/v.cbz").await.code();
+    assert_eq!(other, canonical);
+    assert!(!matches!(other, 200..=299), "{other}");
+    // Nothing written: not in the library's `History/`, not in the account's tree.
+    assert_eq!(names(&env.lib("")), library_before);
+    assert_eq!(names(&env.lib("History")), ["old.cbz"]);
+    assert!(!env.base.join("users/uploader/history").exists());
+
+    let listing = req(
         &env,
         Some("uploader"),
-        "PUT",
-        "/mokuro-reader/HISTORY/v.cbz",
-        &[],
-        &cbz_bytes(1),
+        "PROPFIND",
+        "/mokuro-reader/",
+        &[("depth", "1")],
+        b"",
     )
     .await;
-    assert_eq!(r.code(), 201);
-    assert!(env.lib("History/v.cbz").is_file());
-    assert!(!env.lib("history/v.cbz").exists());
+    assert_eq!(listing.code(), 207);
+    assert!(!listing.text().contains("History"), "{}", listing.text());
 }

@@ -455,7 +455,8 @@ mod tests {
     use super::*;
 
     /// Sidecar names rule v1: a primary in another spelling of the stem (`V.MOKURO`,
-    /// `v.mokuro.gz` on a case-sensitive disk) means the volume is not pending OCR.
+    /// `v.mokuro.gz`) means the volume is not pending OCR. (Two archives whose stems fold
+    /// alike are bunko-core's synthetic-listing vectors.)
     #[test]
     fn a_primary_in_any_spelling_is_not_pending() {
         let dir = tempfile::tempdir().unwrap();
@@ -469,9 +470,6 @@ mod tests {
             "C.cbz",
             "D.cbz",
             "D.mokuro",
-            "Ee.cbz",
-            "eE.cbz",
-            "ee.Mokuro",
         ] {
             bunko_store::fs::write(series.join(name), b"{}").unwrap();
         }
@@ -481,8 +479,7 @@ mod tests {
             .iter()
             .map(|(_, v)| v.as_str())
             .collect();
-        // `ee.Mokuro` could be `Ee`'s or `eE`'s: it is neither's.
-        assert_eq!(pending, ["C", "Ee", "eE"]);
+        assert_eq!(pending, ["C"]);
         let volumes = &snapshot.series[0].volumes;
         let flags = |name: &str| {
             let v = volumes.iter().find(|v| v.name == name).unwrap();

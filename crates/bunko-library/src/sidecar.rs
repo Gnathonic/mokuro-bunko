@@ -131,43 +131,34 @@ pub fn sidecar_siblings(cbz_path: &Path) -> Vec<PathBuf> {
     siblings
 }
 
-/// `_sidecar_for`: `<stem>.mokuro` if it is a file, else `<stem>.mokuro.gz`; else
-/// (rule v1) the primary in another spelling the listing has
-/// ([`sidecar_names::primary_of`]: `V.MOKURO`, `v.mokuro` on a case-sensitive disk).
+/// `_sidecar_for`: the archive's primary sidecar as the folder lists it, by rule v1
+/// ([`sidecar_names::primary_of`]: an exact stem before a folded one, `.mokuro` before
+/// `.mokuro.gz`, so `V.MOKURO` for `V.cbz`). Always resolved from the listing, never by
+/// opening a constructed name: a case-insensitive disk would find `V.mokuro` and hand
+/// back that spelling, a case-sensitive one would not, so the answer would depend on the
+/// host. Lists the folder once per call.
 pub fn primary_sidecar(cbz_path: &Path) -> Option<PathBuf> {
-    exact_sidecar(cbz_path, ".mokuro").or_else(|| {
-        let names = listing(cbz_path)?;
-        let names: Vec<&str> = names.iter().map(String::as_str).collect();
-        listed_file(cbz_path, |name| {
-            sidecar_names::Folder::new(&names).primary_of(name)
-        })
+    let names = listing(cbz_path)?;
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    listed_file(cbz_path, |name| {
+        sidecar_names::Folder::new(&names).primary_of(name)
     })
 }
 
 /// [`primary_sidecar`] with the archive's folder already listed: a pass over a whole
-/// series lists it once, not once a volume without an exact-case primary.
+/// series lists it once.
 pub fn primary_sidecar_in(cbz_path: &Path, folder: &sidecar_names::Folder) -> Option<PathBuf> {
-    exact_sidecar(cbz_path, ".mokuro")
-        .or_else(|| listed_file(cbz_path, |name| folder.primary_of(name)))
+    listed_file(cbz_path, |name| folder.primary_of(name))
 }
 
-/// The archive's layer `id`: `<stem>.<id>.mokuro[.gz]` as named, else (rule v1) in
-/// another spelling of the stem the folder has ([`sidecar_names::Folder::layer_of`]).
+/// The archive's layer `id`: `<stem>.<id>.mokuro[.gz]` in any spelling of the stem the
+/// folder lists (rule v1, [`sidecar_names::Folder::layer_of`]), the listed name.
 pub fn layer_sidecar_in(
     cbz_path: &Path,
     id: &str,
     folder: &sidecar_names::Folder,
 ) -> Option<PathBuf> {
-    exact_sidecar(cbz_path, &format!(".{id}.mokuro"))
-        .or_else(|| listed_file(cbz_path, |name| folder.layer_of(name, id)))
-}
-
-/// `<stem><suffix>` if it is a file, else `<stem><suffix>.gz`.
-fn exact_sidecar(cbz_path: &Path, suffix: &str) -> Option<PathBuf> {
-    [suffix.to_owned(), format!("{suffix}.gz")]
-        .iter()
-        .map(|suffix| with_suffix(cbz_path, suffix))
-        .find(|candidate| is_file(candidate))
+    listed_file(cbz_path, |name| folder.layer_of(name, id))
 }
 
 /// The listed name `find` gives for the archive's name, when it is a file.
@@ -413,8 +404,10 @@ mod tests {
             .collect()
     }
 
-    /// Rule v1 on a case-sensitive directory: the primary is found in any spelling,
-    /// the exact one first.
+    /// Rule v1 over the listing: the primary is found in any spelling, the exact stem
+    /// first, then `.mokuro` before `.mokuro.gz`, and the listed name comes back. Only
+    /// one spelling of each name is ever written, so every host lists the same thing
+    /// (listings only a case-sensitive store can hold are bunko-core's vectors).
     #[test]
     fn primary_in_any_case() {
         let dir = tempfile::tempdir().unwrap();
@@ -422,15 +415,19 @@ mod tests {
         touch(d, &["V.cbz", "V.MOKURO"]);
         assert_eq!(primary_sidecar(&d.join("V.cbz")), Some(d.join("V.MOKURO")));
         touch(d, &["V.mokuro.gz"]);
+        assert_eq!(primary_sidecar(&d.join("V.cbz")), Some(d.join("V.MOKURO")));
+
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        touch(d, &["W.cbz", "w.mokuro"]);
+        assert_eq!(primary_sidecar(&d.join("W.cbz")), Some(d.join("w.mokuro")));
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        touch(d, &["W.cbz", "w.mokuro.gz"]);
         assert_eq!(
-            primary_sidecar(&d.join("V.cbz")),
-            Some(d.join("V.mokuro.gz"))
+            primary_sidecar(&d.join("W.cbz")),
+            Some(d.join("w.mokuro.gz"))
         );
-        touch(d, &["V.mokuro"]);
-        assert_eq!(primary_sidecar(&d.join("V.cbz")), Some(d.join("V.mokuro")));
-        touch(d, &["W.cbz", "w.cbz", "w.mokuro"]);
-        assert_eq!(primary_sidecar(&d.join("W.cbz")), None);
-        assert_eq!(primary_sidecar(&d.join("w.cbz")), Some(d.join("w.mokuro")));
     }
 
     #[test]
@@ -462,9 +459,9 @@ mod tests {
             &["V.cbz", "v.MOKURO", "v.gcv.mokuro.gz", "W.cbz", "W.mokuro"],
         );
         // A folder named like an archive is none (rule 2).
-        fs::create_dir(d.join("v.cbz")).unwrap();
+        fs::create_dir(d.join("x.cbz")).unwrap();
         let names = list_names(d).unwrap();
-        assert!(!names.iter().any(|n| n == "v.cbz"));
+        assert!(!names.iter().any(|n| n == "x.cbz"));
         let names: Vec<&str> = names.iter().map(String::as_str).collect();
         let folder = sidecar_names::Folder::new(&names);
         assert_eq!(

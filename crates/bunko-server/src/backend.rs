@@ -110,9 +110,11 @@ fn virtual_to_physical(
     if rel.split('/').any(|s| s == "..") {
         return None;
     }
-    if reader_tree::is_per_user_rel(rel) {
+    // A per-user name in any case is the caller's own entry; the path is built from
+    // its canonical spelling, never from the raw rel.
+    if let Some(canonical) = reader_tree::canonical_per_user_rel(rel) {
         let base = reader_tree::user_base(&layout.library(), &layout.users(), caller?)?;
-        return Some(base.join(rel));
+        return Some(base.join(canonical));
     }
     Some(layout.library().join(rel))
 }
@@ -319,10 +321,14 @@ mod tests {
         );
         assert_eq!(map("/mokuro-reader/goals.json", None), None);
         assert_eq!(map("/mokuro-reader/history", None), None);
-        // Case-sensitive: a series that only folds to a per-user name is the library's.
+        // A per-user name in any case is the caller's own, canonically spelled.
         assert_eq!(
             map("/mokuro-reader/History/v.cbz", Some(alice)),
-            Some(layout.library().join("History/v.cbz"))
+            Some(layout.users().join("alice/history/v.cbz"))
+        );
+        assert_eq!(
+            map("/mokuro-reader/Goals.json", Some(alice)),
+            Some(layout.users().join("alice/goals.json"))
         );
         assert_eq!(map("/mokuro-reader/../x", Some(alice)), None);
         assert_eq!(map("/mokuro-readerx/y", Some(alice)), None);

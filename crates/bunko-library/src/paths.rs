@@ -98,7 +98,7 @@ pub fn classify_change(library_root: &Path, path: &Path) -> LibraryChange {
         return LibraryChange::Library;
     }
     match parts[0].as_os_str().to_str() {
-        Some("thumbnails") => LibraryChange::Ignore,
+        Some(first) if first.eq_ignore_ascii_case("thumbnails") => LibraryChange::Ignore,
         Some(first) => LibraryChange::Series(first.to_owned()),
         None => LibraryChange::Library,
     }
@@ -140,10 +140,8 @@ mod tests {
         // An account's reading history is never a series: no series.json under it.
         assert_eq!(library_relative("/mokuro-reader/history"), None);
         assert!(!is_series_file_path("/mokuro-reader/history/series.json"));
-        assert_eq!(
-            library_relative("/mokuro-reader/History/series.json").as_deref(),
-            Some("History/series.json")
-        );
+        // In any spelling.
+        assert_eq!(library_relative("/mokuro-reader/History/series.json"), None);
         assert_eq!(
             library_relative("/../mokuro-reader/x"),
             Some("x".to_owned())
@@ -179,9 +177,14 @@ mod tests {
             classify_change(root, Path::new("/lib/history")),
             LibraryChange::Ignore
         );
+        // Reserved in any spelling.
         assert_eq!(
             classify_change(root, Path::new("/lib/History/v.cbz")),
-            LibraryChange::Series("History".into())
+            LibraryChange::Ignore
+        );
+        assert_eq!(
+            classify_change(root, Path::new("/lib/Thumbnails/x.webp")),
+            LibraryChange::Ignore
         );
     }
 }

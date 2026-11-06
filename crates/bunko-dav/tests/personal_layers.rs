@@ -646,11 +646,11 @@ async fn corrections_follow_a_folder_move() {
 }
 
 /// A deleted archive or folder takes every account's corrections of it along; those
-/// of another volume (rule 6: an exact stem wins over a folded one) stay.
+/// of another volume stay. A correction PUT in another spelling of the volume reaches
+/// the one the account already has: one file per account and volume on every host.
 #[tokio::test]
 async fn corrections_go_with_their_volume() {
     let env = Env::new();
-    std::fs::write(env.lib("series/VOL1.cbz"), b"x").unwrap();
     std::fs::write(env.lib("series/vol2.cbz"), b"x").unwrap();
     for user in ["alice", "bob"] {
         env.put_correction(user, EDIT, user).await;
@@ -659,6 +659,21 @@ async fn corrections_go_with_their_volume() {
         .await;
     env.put_correction("alice", "/mokuro-reader/series/vol2.edit.mokuro", "two")
         .await;
+    let listed = |user: &str| {
+        let dir = env.base.join("users").join(user).join("edits/series");
+        let mut v: Vec<String> = std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    };
+    assert_eq!(listed("alice"), ["vol1.edit.mokuro", "vol2.edit.mokuro"]);
+    assert_eq!(
+        std::fs::read(env.overlay("alice", "series/vol1.edit.mokuro")).unwrap(),
+        layer("upper")
+    );
     let r = env
         .req(
             Some("editor"),
@@ -669,10 +684,8 @@ async fn corrections_go_with_their_volume() {
         )
         .await;
     assert_eq!(r.code(), 204);
-    assert!(!env.overlay("alice", "series/vol1.edit.mokuro").exists());
-    assert!(!env.overlay("bob", "series/vol1.edit.mokuro").exists());
-    assert!(env.overlay("alice", "series/VOL1.edit.mokuro").exists());
-    assert!(env.overlay("alice", "series/vol2.edit.mokuro").exists());
+    assert_eq!(listed("alice"), ["vol2.edit.mokuro"]);
+    assert!(listed("bob").is_empty());
 
     let r = env
         .req(Some("editor"), "DELETE", "/mokuro-reader/series/", &[], b"")
