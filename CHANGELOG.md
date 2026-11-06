@@ -345,9 +345,29 @@
   (`V.WEBP`, `V.MOKURO`); reading-history device folders are reached in any case; the
   catalog's volume manifest and the admin OCR actions take a series or volume in any
   case; an uploader keeps control of a volume renamed to another case outside Bunko.
+  The start-up pass that lets JPEG XL volumes get their cover removes the `.nocover`
+  marker in the spelling the folder lists, and an OCR failure record stays while its
+  volume is listed in any case (`V1.CBZ`), on every host alike.
 - **Deleting an account no longer deletes another account's folder** whose name differs
   only in case (possible in databases from before such names were refused), on disks
   that ignore case.
+- **OCR failures in a cloud library are remembered.** Bunko keeps a failure record
+  only while the volume's archive is still in the library, and looked for it on the
+  local disk, where a cloud library's archives never are. Every scan therefore dropped
+  every record: a volume in which nothing decodes was offered again, at once, to the
+  release that had just failed it, the backoff never grew, and the catalog never marked
+  the volume as failing. The archive is now looked for in the cloud library's index.
+- **Covers for JPEG XL volumes in a cloud library.** The start-up pass that clears the
+  `.nocover` marker of a JPEG XL volume did not reach a cloud library, which keeps those
+  records in Bunko's own data rather than as files beside the volumes: a volume of
+  `.jxl` pages an earlier 0.8 build had recorded as coverless stayed without a cover.
+  The first cover pass now drops those records and makes the covers.
+- **Checking a cloud volume's page formats no longer holds up the OCR queue.** Whether a
+  processor older than a page format (JPEG XL before 0.7.5) can read a volume is
+  decided from the archive's page names. In a cloud library they are now read on a
+  helper thread, not by the scheduler itself, which could wait on a download of the
+  archive while every other processor waited too; the volume waits for that answer
+  before it is offered to such a processor.
 - **A new account cannot take an existing name in other letter case.** `ALICE` could
   register beside `alice`; on a Windows or macOS disk, which ignore case, both then
   read and wrote one `users/alice/` folder (progress, reading history, corrections),
@@ -366,7 +386,9 @@
   moved, and the reader then refused to rename the series, taking the stray cover for a
   volume it did not have. A cover Bunko made lately now follows its archive: to the new
   name, or removed when the new name has a cover already; a deleted archive takes
-  it too. Covers a reader uploaded stay where they are.
+  it too. Covers a reader uploaded stay where they are. This works on Windows too, and
+  wherever the storage folder is reached through a link (macOS temporary folders
+  among them).
 - **A volume renamed while Bunko makes its cover leaves no stray cover behind.** A
   cover made from an archive that a reader moved away meanwhile (a volume rename, then
   its series') was still written under the old name, beside nothing, and the old
@@ -484,6 +506,100 @@
 - **Mokuro Reader tells WebDAV servers apart only by type.** Its protection for
   edited OCR from a server counts every WebDAV server as one provider, so a second
   WebDAV server (another Bunko included) is taken for the first.
+
+## [0.7.7] - 2026-11-05
+
+A volume is offered only to machines whose release reads its pages, the catalog says
+when a volume's OCR keeps failing, and a failure of the volume itself is no longer
+retried every hour forever.
+
+### Changed
+- **Failures of the volume itself are parked.** A volume whose archive has no page that
+  can be decoded, or does not open as a zip, failed the same way every hour, forever.
+  It now waits until something could change the outcome: its archive is replaced, the
+  library runs another release, a machine of a release that has not tried it connects
+  (and only that machine is offered it; each record lists the releases that tried it in
+  `tried_by`), or an admin retries it. A failure recorded by an older server is tried
+  once more after the update. A machine's trouble (out of memory, a timeout, a lost
+  connection or download) keeps the hourly cap; an error nothing recognizes backs off
+  further from the 7th attempt: 6 hours, a day, then a week.
+- The queue page says "no decodable pages" or "damaged archive", "waits for a new
+  archive or release", for a parked volume instead of "failed — will retry".
+
+### Added
+- **Retry failed volumes.** The admin panel's OCR section has a "Retry failed volumes"
+  button (`POST /api/ocr/failures/retry`, optionally `{"volume": "<series>/<volume>.cbz"}`):
+  the failure records go and those volumes are tried again at once.
+- **"OCR failed" in the catalog.** A volume whose OCR has a live failure record shows
+  an "OCR failed" badge instead of "OCR pending", with the kind of failure as its hover
+  text: "This volume has no pages that could be decoded.", "The archive is damaged or
+  is not a valid zip file.", or "OCR failed; it will be tried again later." The text
+  names the kind of failure only, never the error itself (which can name a
+  processor's paths or settings). A replaced archive clears it. The series API adds
+  `ocr_failed` and `ocr_failure` to such a volume only; every other entry is unchanged.
+
+### Fixed
+- **Volumes a processor's release cannot read.** The library handed a volume to any
+  processor, whatever release it ran. A processor older than 0.7.5 was given volumes of
+  JPEG XL pages; it failed each with "no page images found", and the failure held the
+  volume back an hour for every machine, so a library whose fastest processors were
+  older kept a volume failing while a machine that could read it stood idle. The
+  library now judges each processor by the version it registered with
+  (`bunko_proto::PAGE_FORMATS_SINCE`: JPEG XL from 0.7.5) and offers it only volumes
+  its release reads. The earliest-finish walk and the warm-session handoff no longer
+  leave a volume to a machine that cannot read it, and a volume no connected machine
+  can read waits for one, unrecorded, instead of failing. This server's own OCR reads
+  everything. Only a processor older than some page format costs a look into the
+  volume's zip directory, kept while the archive is unchanged.
+- **The benchmark sample keeps to pages every release reads.** Every machine
+  benchmarks with the same sample, which could hold JPEG XL pages a processor older
+  than 0.7.5 cannot read. It now takes volumes of other formats first, and a library of
+  JPEG XL volumes only still benchmarks with them.
+
+## [0.7.6] - 2026-11-05
+
+Processors that have both a libtorch pack and the Vulkan pack update themselves again.
+
+### Fixed
+- **Automatic updates of a processor with two OCR backend packs.** A processor with a
+  libtorch pack (cu130, rocm7.1 or cpu) and the Vulkan pack beside it could not update
+  itself. During the update the new release lists the installed packs, which all belong
+  to the old release. It read each pack's kind through its own release check, which every
+  one of them fails, so it judged them by folder name: the Vulkan pack passed for a
+  libtorch one and sorted first. The update staged the Vulkan pack instead of the
+  libtorch one, stopped on "no compiled hayai-nova package for cpu (cpu)", and tried
+  again every 10 minutes, so the processor stayed on its old release. A pack's kind now
+  comes from its manifest whatever its release, so the update brings the libtorch pack
+  along, and the Vulkan pack of the new release follows at the restart, as at any start.
+  The fix is in the release being installed, so a processor stuck this way updates to
+  0.7.6 by itself once its library runs 0.7.6.
+
+## [0.7.5] - 2026-11-04
+
+Volumes of JPEG XL pages get OCR and covers.
+
+### Added
+- **JPEG XL pages.** A volume whose pages are `.jxl` is now read like any other:
+  the OCR reads its pages and the server makes its cover. That covers bare codestreams
+  and containers, lossless and lossy, and JPEGs transcoded to JPEG XL. Until now
+  the catalog counted `.jxl` images as pages but the OCR did not, so every OCR attempt
+  failed with "no page images found". The volume kept its "OCR pending" badge and was retried every hour,
+  and a volume without a cover of its own got a `.nocover` marker. Pages decode with jxl-rs (`jxl` 0.8, BSD-3-Clause), the decoder Chromium
+  and Firefox ship. Lossless and transcoded pages read the same text as their source
+  images. A processor needs 0.7.5 to read these volumes; with automatic updates on,
+  it follows the library.
+- **JPEG XL decodes stay within the decode budget.** Before decoding, the headers of
+  the image and every frame are read, and a file whose decoder buffers would exceed
+  the budget is refused like any oversized image. A decoder that panics on a broken
+  image now fails only that page or cover.
+
+### Fixed
+- **Covers for JPEG XL volumes an older server gave up on.** On start, the server
+  removes the `.nocover` marker of every archive that holds a `.jxl` image, so the
+  next scan makes its cover.
+
+### Changed
+- The minimum supported Rust is 1.89 (jxl-rs needs it).
 
 ## [0.7.4] - 2026-11-02
 

@@ -16,9 +16,13 @@ async function connect(reader, rig) {
 }
 
 /**
- * Signed in, the volume `title` downloaded and open in the reader, and the syncs the
- * app starts by itself (after the sign-in, when a reader opens) done: its id. A fault
- * set after this meets the spec's own sync, not one of those.
+ * Signed in, the volume `title` downloaded and opened in the reader, then back on its
+ * series page, and the syncs the app starts by itself (after the sign-in, when a reader
+ * opens, when it closes) done: its id. A fault set after this meets the spec's own
+ * sync, not one of those. Out of the reader because a page turn made while it is open
+ * does not upload volume-data.json: positions.json carries it, and the file follows at
+ * the end of the reading session (the reader's volume-data-deferral.ts). Turned from
+ * the series page, the spec's own sync writes the file.
  */
 async function ready(reader, rig, title = 'Vol 1') {
     await connect(reader, rig);
@@ -33,12 +37,16 @@ async function ready(reader, rig, title = 'Vol 1') {
         { timeout: 30_000 },
     );
     await reader.idle();
+    await reader.showSeries(rig.library.series);
+    await reader.page.waitForFunction(() => !location.hash.includes('/reader/'), null, { timeout: 30_000 });
+    await reader.idle();
     return id;
 }
 
 /**
- * Read on to a page other than the one this device (and so the cloud) has: that page.
- * Its own sync follows 5 s after (activity-tracker.ts): a spec's sync comes first.
+ * A page other than the one this device (and so the cloud) has, as the reader's page
+ * turn records it: that page. Its own sync follows 5 s after (activity-tracker.ts): a
+ * spec's sync comes first.
  */
 async function turn(reader, id) {
     const page = ((await reader.progress(id)).page % PAGES) + 1;

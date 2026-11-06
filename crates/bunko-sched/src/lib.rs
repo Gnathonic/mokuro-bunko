@@ -45,7 +45,7 @@ pub enum SchedError {
 pub use congestion::{
     average_runs, build_record, pipeline_verdict, summarize, summarize_event_stats, widen_target,
 };
-pub use eft::{EftDecision, EftLane, EftLeft, earliest_finish_claim};
+pub use eft::{EftDecision, EftLane, EftLeft, earliest_finish_claim, earliest_finish_claim_where};
 pub use job_order::{natural_key, order_jobs};
 pub use plan::{Lane, PlanInputs, Pricing, QueuePlan, plan_queue, progress_metrics};
 pub use py::iso_utc;

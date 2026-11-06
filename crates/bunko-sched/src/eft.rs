@@ -101,6 +101,35 @@ where
     R: Fn(&str, &str) -> Option<RateEstimate>,
     S: Fn(&str, &str) -> f64,
 {
+    earliest_finish_claim_where(
+        jobs,
+        lanes,
+        asking,
+        rate_for,
+        startup_for,
+        params,
+        |_, _| true,
+    )
+}
+
+/// [`earliest_finish_claim`] where `can_take(job, lane)` says whether a lane may be
+/// given that job at all (beyond its rows): a lane that may not is no candidate for it.
+pub fn earliest_finish_claim_where<J, K, R, S, C>(
+    jobs: &[(J, String, Option<i64>)],
+    lanes: &[EftLane<K>],
+    asking: &K,
+    rate_for: R,
+    startup_for: S,
+    params: EftParams,
+    can_take: C,
+) -> Option<EftDecision<J, K>>
+where
+    J: Clone,
+    K: Clone + Eq + Hash,
+    R: Fn(&str, &str) -> Option<RateEstimate>,
+    S: Fn(&str, &str) -> f64,
+    C: Fn(&J, &K) -> bool,
+{
     let known: Vec<i64> = jobs
         .iter()
         .filter_map(|(_, _, p)| *p)
@@ -129,7 +158,7 @@ where
         let mut best_busy = false;
         let mut mine_at: Option<f64> = None;
         for item in lanes {
-            if !item.rows.contains(generation_id) {
+            if !item.rows.contains(generation_id) || !can_take(job, &item.key) {
                 continue;
             }
             let key = (generation_id.clone(), item.machine.clone());
@@ -409,6 +438,28 @@ mod tests {
         let d = earliest_finish_claim(&jobs, &lanes, &2, rate, |_, _| 5.0, EftParams::default())
             .unwrap();
         assert_eq!(d.mine, Some("v1"));
+    }
+
+    /// A lane that cannot take a job (its release cannot read the volume's pages) is no
+    /// candidate for it, however fast: the asking lane keeps it, and needs no rate for
+    /// the lane that cannot.
+    #[test]
+    fn a_lane_that_cannot_take_the_job_is_no_candidate() {
+        let lanes = vec![lane(1, "slow", 0.0, &["g"]), lane(2, "fast", 0.0, &["g"])];
+        let jobs = vec![("v1", "g".to_owned(), Some(100))];
+        let rate = |_: &str, m: &str| (m == "slow").then(|| RateEstimate::new(1.0, "x", 0, 0.0));
+        let d = earliest_finish_claim_where(
+            &jobs,
+            &lanes,
+            &1,
+            rate,
+            |_, _| 5.0,
+            EftParams::default(),
+            |_, lane: &u32| *lane != 2,
+        )
+        .unwrap();
+        assert_eq!(d.mine, Some("v1"));
+        assert!(d.left.is_empty());
     }
 
     #[test]

@@ -1731,7 +1731,7 @@ mod tests {
         };
         let oldest = bunko_engines::torch::abi::OLDEST_PACK_RELEASE;
         let t = bunko_update::TARGET;
-        // A target this build is not (macOS arm runners are `aarch64-apple-darwin`).
+        // A real target that is not this build's (macOS CI builds aarch64-apple-darwin).
         let other = if t == "aarch64-apple-darwin" {
             "x86_64-unknown-linux-gnu"
         } else {

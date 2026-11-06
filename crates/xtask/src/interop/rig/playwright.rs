@@ -664,17 +664,18 @@ mod tests {
         ] {
             std::fs::write(d.path().join(f), "").unwrap();
         }
-        let names: Vec<String> = spec_files(d.path())
+        // Compared as paths: Windows displays `sub\c.spec.mjs`.
+        let names: Vec<PathBuf> = spec_files(d.path())
             .iter()
-            .map(|p| {
-                let rel = p.strip_prefix(d.path()).unwrap();
-                let parts: Vec<String> = rel
-                    .components()
-                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
-                    .collect();
-                parts.join("/")
-            })
+            .map(|p| p.strip_prefix(d.path()).unwrap().to_path_buf())
             .collect();
-        assert_eq!(names, ["a.spec.mjs", "b.spec.mjs", "sub/c.spec.mjs"]);
+        assert_eq!(
+            names,
+            [
+                PathBuf::from("a.spec.mjs"),
+                PathBuf::from("b.spec.mjs"),
+                Path::new("sub").join("c.spec.mjs"),
+            ]
+        );
     }
 }

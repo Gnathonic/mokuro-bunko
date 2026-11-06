@@ -322,6 +322,14 @@
                                 </div>
                             </div>
 
+                            <div class="field" id="ocr-failures-card">
+                                <span class="field__label">Failed volumes</span>
+                                <div class="field__control">
+                                    <p class="form-hint">A volume whose archive has no page that can be decoded, or does not open, is not retried on a timer: it waits for a new archive or a new release. After repairing an archive in place, retry them now.</p>
+                                    <button type="button" class="btn btn--small" id="ocr-failures-retry">Retry failed volumes</button>
+                                </div>
+                            </div>
+
                             <div class="field" id="processors-card">
                                 <span class="field__label">Processors</span>
                                 <div class="field__control">

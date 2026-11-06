@@ -322,9 +322,11 @@ fn pages(archive: &Path) -> Result<Vec<String>, String> {
         let name = member.name().to_string();
         let lower = name.to_ascii_lowercase();
         if member.is_dir()
-            || ![".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".avif"]
-                .iter()
-                .any(|e| lower.ends_with(e))
+            || ![
+                ".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".avif", ".jxl",
+            ]
+            .iter()
+            .any(|e| lower.ends_with(e))
         {
             continue;
         }
@@ -496,5 +498,26 @@ impl VolumeRunner for FakeRunner {
                 ..Default::default()
             }],
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    /// The fake reads the pages the real engines read: JPEG XL included.
+    #[test]
+    fn jxl_members_are_pages() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v.cbz");
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+        for name in ["v/002.jxl", "v/001.JXL", "v/info.txt"] {
+            zip.start_file(name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(b"x").unwrap();
+        }
+        zip.finish().unwrap();
+        assert_eq!(pages(&path).unwrap(), ["v/001.JXL", "v/002.jxl"]);
     }
 }

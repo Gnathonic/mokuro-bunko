@@ -511,21 +511,28 @@ mod tests {
     /// in any spelling: its owner is unknown, never "none" (an addition through a
     /// spelling the store folds onto `S/` would otherwise pass). The same on every host:
     /// the folder is never looked up by name (a case-insensitive disk would find `S/`
-    /// for `s`).
+    /// for `s`), so its own spelling, a case variant and a spelling no filesystem folds
+    /// (a run of spaces) all wait alike.
     #[cfg(unix)]
     #[test]
     fn an_unlistable_root_leaves_the_owner_unknown() {
         use std::os::unix::fs::PermissionsExt;
-        let (_dir, _db, backend) = owned_library();
+        let (_dir, db, backend) = owned_library();
         let root = backend.layout.library();
+        bunko_store::fs::create_dir_all(root.join("Dr Stone")).unwrap();
+        db.record_series_folder_owner("Dr Stone", "alice").unwrap();
         // Searchable (`S/` is still reached by name) but not listable.
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o311)).unwrap();
         let listable = bunko_store::fs::read_dir(&root).is_ok(); // root reads anything
-        let variant = decide(&backend, "PUT", "/mokuro-reader/s/W.cbz", "bob");
+        // No filesystem folds a run of spaces: only the root listing would find this.
+        let variant = decide(&backend, "PUT", "/mokuro-reader/Dr  Stone/W.cbz", "bob");
+        // A case-insensitive filesystem (APFS, NTFS) would reach `S/` by the name `s`.
+        let case_only = decide(&backend, "PUT", "/mokuro-reader/s/W.cbz", "bob");
         let named = decide(&backend, "PUT", "/mokuro-reader/S/W.cbz", "bob");
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
         if !listable {
             assert_eq!(variant, Some((503, Some(10))));
+            assert_eq!(case_only, Some((503, Some(10))));
             assert_eq!(named, Some((503, Some(10))));
         }
     }

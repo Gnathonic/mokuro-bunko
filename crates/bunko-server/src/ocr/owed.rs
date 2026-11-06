@@ -15,7 +15,7 @@ use bunko_core::sidecar_names::Folder;
 use bunko_library::sidecar;
 use bunko_store::fs;
 
-use super::types::{LibraryFacts, mtime_ns, rel_of};
+use super::types::{LibraryFacts, Stamp, mtime_ns, rel_of};
 
 /// One volume's debt.
 #[derive(Clone, Debug, PartialEq)]
@@ -34,6 +34,39 @@ pub struct OwedVolume {
     pub upgrade: bool,
     /// The metadata cache's page count, else the zip directory's own.
     pub pages: Option<i64>,
+    /// The page suffixes read from the archive at that version (`(size, mtime_ns)`),
+    /// once a processor of an older release needed them (`machine_reads`). Read on a
+    /// helper thread on a remote store; a walk keeps them while the version stays.
+    pub page_suffixes: Option<(Stamp, PageSuffixes)>,
+}
+
+/// What a volume's zip directory says about its page formats.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PageSuffixes {
+    /// The suffixes of its pages (lowercase, with the dot), each once.
+    Read(Arc<[String]>),
+    /// Damaged or of a kind this build cannot open: no format to judge (the claim's
+    /// own checks decide, as for any machine).
+    Unreadable,
+}
+
+/// The page suffixes of `cbz` from its zip directory. `Err`: it could not be read
+/// at all (an I/O error, the network), worth trying again.
+pub fn read_page_suffixes(cbz: &Path) -> std::io::Result<PageSuffixes> {
+    let volume = match bunko_library::Volume::open(cbz) {
+        Ok(volume) => volume,
+        Err(bunko_library::archive::ArchiveError::Io(e)) => return Err(e),
+        Err(_) => return Ok(PageSuffixes::Unreadable),
+    };
+    let suffixes: std::collections::BTreeSet<String> = volume
+        .pages()
+        .iter()
+        .filter_map(|page| {
+            let name = page.path.rsplit('/').next().unwrap_or(&page.path);
+            name.rfind('.').map(|i| name[i..].to_ascii_lowercase())
+        })
+        .collect();
+    Ok(PageSuffixes::Read(suffixes.into_iter().collect()))
 }
 
 /// `<library>/<rel>` → its debt.
@@ -209,6 +242,7 @@ fn compute_in(
         missing_pages,
         upgrade: wants_upgrade,
         pages: None,
+        page_suffixes: None,
     })
 }
 

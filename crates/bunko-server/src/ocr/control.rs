@@ -131,6 +131,8 @@ struct Inner {
     upgrade: Arc<upgrade::Upgrade>,
     /// What the scheduler thread last published of its running jobs.
     running_jobs: actor::RunningJobs,
+    /// What the scheduler thread last published of its failing volumes.
+    failing: actor::FailingVolumes,
     queue_file: queue_file::QueueFile,
     status: queue_api::StatusCache,
     storage: PathBuf,
@@ -234,6 +236,7 @@ impl OcrControl {
             runtime: Mutex::new(None),
             upgrade: up,
             running_jobs: actor::RunningJobs::default(),
+            failing: actor::FailingVolumes::default(),
             queue_file: queue_file::QueueFile::default(),
             status: queue_api::StatusCache::default(),
             storage: layout.base.clone(),
@@ -275,6 +278,16 @@ impl OcrControl {
         self.0.running_jobs.read().clone()
     }
 
+    /// The public text of `rel`'s OCR failure (library-relative archive path, any case),
+    /// as the scheduler last published it; None when it is not failing.
+    pub fn failing_volume(&self, rel: &str) -> Option<String> {
+        self.0
+            .failing
+            .read()
+            .get(&bunko_library::pyunicode::casefold(rel))
+            .cloned()
+    }
+
     /// Start the scheduler thread, the in-process processor (full build, local
     /// processing on) and the stop watcher. Must be called inside a tokio runtime.
     pub fn start(&self, stop: CancellationToken) {
@@ -282,7 +295,12 @@ impl OcrControl {
             return;
         };
         let local_processing = sched.settings().local_processing;
-        match actor::spawn(sched, rx, self.0.running_jobs.clone()) {
+        match actor::spawn(
+            sched,
+            rx,
+            self.0.running_jobs.clone(),
+            self.0.failing.clone(),
+        ) {
             Ok(handle) => *self.0.thread.lock() = Some(handle),
             Err(e) => {
                 tracing::error!("could not start the OCR scheduler: {e}");

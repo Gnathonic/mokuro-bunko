@@ -119,6 +119,39 @@ async fn fake_processor(ocr: &OcrControl, name: &str) -> tokio::sync::mpsc::Unbo
     ops
 }
 
+/// `POST /api/ocr/failures/retry` (the admin's "retry"): answered by this server's OCR;
+/// what it clears is the scheduler's `retry_failed` (ocr_sched). Other methods: 404.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_admin_retry_endpoint_answers_with_what_it_cleared() {
+    use bunko_server::admin::ocr::OcrAdmin;
+    let e = env(|_| {});
+    let cfg = e.core.config.read().clone();
+    let path = ["ocr", "failures", "retry"];
+    let ocr = e.ocr.clone();
+    let cfg2 = cfg.clone();
+    let r = tokio::task::spawn_blocking(move || {
+        ocr.other(
+            &cfg2,
+            &http::Method::POST,
+            &path,
+            "",
+            &serde_json::json!({}),
+        )
+    })
+    .await
+    .unwrap();
+    let (status, body) = r.expect("handled").expect("ok");
+    assert_eq!(status, 200);
+    assert_eq!(body, serde_json::json!({"success": true, "cleared": 0}));
+    let ocr = e.ocr.clone();
+    let r = tokio::task::spawn_blocking(move || {
+        ocr.other(&cfg, &http::Method::GET, &path, "", &serde_json::json!({}))
+    })
+    .await
+    .unwrap();
+    assert_eq!(r.expect("handled").unwrap_err().status, 404);
+}
+
 #[tokio::test]
 async fn queue_status_levels_etag_and_viewers() {
     let e = env(|_| {});

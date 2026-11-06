@@ -635,8 +635,23 @@ impl OcrAdmin for OcrControl {
         method: &Method,
         path: &[&str],
         _query: &str,
-        _body: &Value,
+        body: &Value,
     ) -> Option<Result<(u16, Value), OcrError>> {
+        // `POST /api/ocr/failures/retry` (`{"volume": "<series>/<volume>.cbz"}`, or no
+        // volume: every one): drop the failure records, so those volumes are tried again
+        // at once, parked or not (a failure of the volume itself waits for an archive or
+        // release change otherwise).
+        if path == ["ocr", "failures", "retry"] {
+            if *method != Method::POST {
+                return Some(Err(OcrError::not_found()));
+            }
+            let volume = body
+                .get("volume")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let cleared = ask(self, move |s| s.retry_failed(volume.as_deref())).unwrap_or(0);
+            return Some(Ok((200, json!({"success": true, "cleared": cleared}))));
+        }
         // 0.7: `GET /api/ocr/install` (where this server's background OCR backend
         // install stands) and `POST /api/ocr/install` (start it, or retry a failed one).
         if path == ["ocr", "install"] {

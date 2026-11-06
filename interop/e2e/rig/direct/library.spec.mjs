@@ -1,7 +1,7 @@
 // direct (§7.1): the reader alone on the cloud reads and writes its library. A volume
 // opened is downloaded from the cloud and its pages shown; its progress goes up to the
-// cloud's volume-data.json, and its cover beside its archive; another device signed in
-// to the same cloud reads the progress back.
+// cloud's volume-data.json once the reading session ends, and its cover beside its
+// archive; another device signed in to the same cloud reads the progress back.
 import { test, expect } from '../fixtures.mjs';
 import { cloudFile, signIn } from '../cloud-direct.mjs';
 
@@ -66,6 +66,12 @@ test('progress and the cover go up to the cloud; another device reads the progre
     // A page other than the one the cloud already has (an earlier spec's).
     const page = ((await reader.progress(id)).page % 4) + 1;
     expect(await reader.setPage(id, page)).toMatchObject({ page });
+    // While the reader is open the turn travels in positions.json and volume-data.json
+    // waits for the end of the session (the reader's volume-data-deferral.ts): out of
+    // the reader, the next sync writes it.
+    await reader.showSeries(rig.library.series);
+    await reader.page.waitForFunction(() => !location.hash.includes('/reader/'), null, { timeout: 30_000 });
+    await reader.idle();
     expect(await reader.sync()).toEqual({ ok: true, errors: [] });
 
     const after = await cloudFile(rig, VOLUME_DATA);

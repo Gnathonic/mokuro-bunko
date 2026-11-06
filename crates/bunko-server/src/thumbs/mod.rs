@@ -28,6 +28,8 @@
 //! remote); and `.nocover` is not a file in the cloud but a local-only record,
 //! [`NoCoverSet`], kept in `<base>/cloud/<store-id>/nocover.json` until the store's
 //! durable `local_row` table offers `nocover` rows (it keeps only staging rows today).
+//! A `.nocover` file a copied-in library brought is still honoured, except beside an
+//! archive of JPEG XL pages (a build before 0.7.5 could not read those).
 //! An archive an open case merge is moving gets its cover only after the merge (it
 //! is looked at again every [`MERGE_RETRY`]): the merge moves the archive before its
 //! cover, and a cover made in between would meet the moving one as a duplicate.
@@ -57,9 +59,9 @@ use parking_lot::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-/// Suffixes a cover may have (`_extract_cover_image_data`): no `.avif`.
-pub const COVER_EXTENSIONS: [&str; 8] = [
-    ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".tif",
+/// Suffixes a cover may have: `_extract_cover_image_data`'s (no `.avif`), plus JPEG XL.
+pub const COVER_EXTENSIONS: [&str; 9] = [
+    ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".tif", ".jxl",
 ];
 /// Decode budget of one cover (pixel buffers).
 pub const MAX_DECODE_BYTES: u64 = 192 * 1024 * 1024;
@@ -85,20 +87,27 @@ type Busy<'a> = &'a dyn Fn(&Path) -> bool;
 #[derive(Default)]
 pub struct MadeCovers(Mutex<HashMap<PathBuf, (u64, Instant)>>);
 
-/// The key a made cover is recorded under: its folder's canonical path plus its name.
-/// The worker publishes under the layout's library path while the DAV hooks report the
-/// canonical one (`/private/var/...` for `/var/...` on macOS, `\\?\C:\...` on Windows,
-/// any symlinked library root), and both must find the one record.
-fn made_key(cover: &Path) -> PathBuf {
-    match (cover.parent(), cover.file_name()) {
-        (Some(dir), Some(name)) if !dir.as_os_str().is_empty() => {
-            fs::canonicalize(dir).map_or_else(|_| cover.to_path_buf(), |d| d.join(name))
-        }
-        _ => cover.to_path_buf(),
-    }
-}
-
 impl MadeCovers {
+    /// The record of `cover` is kept under its folder as the disk names it, plus its
+    /// name. The cover worker finds archives under the library root as configured; a
+    /// WebDAV MOVE or DELETE names them under the root bunko-dav canonicalized. The two
+    /// differ on Windows always (the `\\?\` final path, 8.3 names expanded) and on any
+    /// host whose root goes through a link (macOS temp folders: `/var` is
+    /// `/private/var`): keyed as given, the hook never found the cover it made. A cloud
+    /// library's paths are mount paths, one spelling already, and are kept as given
+    /// (so no store lookup runs under the lock).
+    fn key(cover: &Path) -> PathBuf {
+        if bunko_store::store_for(cover).is_some_and(|s| s.caps().remote) {
+            return cover.to_path_buf();
+        }
+        match (cover.parent(), cover.file_name()) {
+            (Some(dir), Some(name)) if !dir.as_os_str().is_empty() => {
+                fs::canonicalize(dir).map_or_else(|_| cover.to_path_buf(), |d| d.join(name))
+            }
+            _ => cover.to_path_buf(),
+        }
+    }
+
     /// Forget the covers made longer ago than [`MADE_KEPT`].
     fn prune(made: &mut HashMap<PathBuf, (u64, Instant)>) {
         made.retain(|_, (_, at)| at.elapsed() < MADE_KEPT);
@@ -116,7 +125,7 @@ impl MadeCovers {
             return None;
         }
         let cover = cover_path(cbz);
-        let key = made_key(&cover);
+        let key = Self::key(&cover);
         // Still listed under exactly this name (an archive replaced, not gone). A listing,
         // not a lookup: after a case-only rename the old name still opens on a
         // case-insensitive disk.
@@ -150,11 +159,11 @@ impl MadeCovers {
             } else {
                 cover
             };
-            made.insert(made_key(&at), (size, Instant::now()));
+            made.insert(Self::key(&at), (size, Instant::now()));
             return;
         }
         if !fs::exists(&dest) && fs::rename(&cover, &dest).is_ok() {
-            made.insert(made_key(&dest), (size, Instant::now()));
+            made.insert(Self::key(&dest), (size, Instant::now()));
             return;
         }
         if let Err(e) = fs::remove_file(&cover) {
@@ -227,8 +236,18 @@ pub fn needs_thumbnail_with(cbz: &Path, nocover: Option<&NoCoverSet>) -> bool {
         // volume's: nothing is written for it.
         && bunko_library::sidecar::sibling(cbz, ".webp").is_some()
         && !written_for(&cover_path(cbz), cbz)
-        && !written_for(&nocover_path(cbz), cbz)
+        && !marked_nocover(cbz, nocover.is_some())
         && nocover.is_none_or(|n| !n.contains(cbz))
+}
+
+/// A `<stem>.nocover` file beside the archive, written since it. In a cloud folder
+/// such a file never comes from this build (its markers are [`NoCoverSet`] records,
+/// D14) but from a library copied in, and one a build before JPEG XL covers left for
+/// an archive holding `.jxl` images is not believed: the local library's marker is
+/// removed at start ([`clear_jxl_nocovers`]), the cloud one is left where it is and
+/// a missing cover is recorded locally as usual.
+fn marked_nocover(cbz: &Path, cloud: bool) -> bool {
+    written_for(&nocover_path(cbz), cbz) && !(cloud && holds_jxl(cbz))
 }
 
 /// `side` (a cover or a `.nocover` marker) is there and was written for the archive as
@@ -258,6 +277,10 @@ pub struct NoCoverSet {
     file: PathBuf,
     library: PathBuf,
     set: Mutex<HashSet<(String, u64, i128)>>,
+    /// Paths of the records found in `file` at load whose archive [`Self::clear_jxl`]
+    /// has not looked at yet (an earlier build's records; one this build writes is
+    /// its own verdict).
+    unchecked: Mutex<HashSet<String>>,
 }
 
 impl NoCoverSet {
@@ -265,7 +288,7 @@ impl NoCoverSet {
     // unmounted: `file` is in the store's local directory, not in the library.
     #[allow(clippy::disallowed_methods)]
     pub fn load(file: PathBuf, library: PathBuf) -> NoCoverSet {
-        let set = std::fs::read(&file)
+        let set: HashSet<(String, u64, i128)> = std::fs::read(&file)
             .ok()
             .and_then(|b| serde_json::from_slice::<Vec<(String, u64, String)>>(&b).ok())
             .map(|rows| {
@@ -274,10 +297,12 @@ impl NoCoverSet {
                     .collect()
             })
             .unwrap_or_default();
+        let unchecked = set.iter().map(|(p, _, _)| p.clone()).collect();
         NoCoverSet {
             file,
             library,
             set: Mutex::new(set),
+            unchecked: Mutex::new(unchecked),
         }
     }
 
@@ -307,6 +332,7 @@ impl NoCoverSet {
                 "the archive is not in the library",
             ));
         };
+        self.unchecked.lock().remove(&k.0);
         let rows = {
             let mut set = self.set.lock();
             // A path keeps one record: its newest version.
@@ -323,6 +349,7 @@ impl NoCoverSet {
         let Some(rel) = crate::ocr::types::rel_of(&self.library, cbz) else {
             return Ok(());
         };
+        self.unchecked.lock().remove(&rel);
         let rows = {
             let mut set = self.set.lock();
             let before = set.len();
@@ -333,6 +360,55 @@ impl NoCoverSet {
             Self::rows(&set)
         };
         self.save(&rows)
+    }
+
+    /// [`clear_jxl_nocovers`] for a cloud library: drop the record an earlier build
+    /// kept for an archive that holds a `.jxl` image (a build before JPEG XL covers
+    /// recorded it as having none), so this pass makes its cover. Each loaded record
+    /// is looked at once, when its archive is in the library; one whose archive is
+    /// not (yet: a store still syncing) waits for a later pass, so the cover loop runs
+    /// this before every pass. Returns the archives whose record went.
+    pub fn clear_jxl(&self) -> Vec<PathBuf> {
+        let pending: Vec<String> = {
+            let unchecked = self.unchecked.lock();
+            if unchecked.is_empty() {
+                return Vec::new();
+            }
+            let mut paths: Vec<String> = unchecked.iter().cloned().collect();
+            paths.sort();
+            paths
+        };
+        let mut gone = HashSet::new();
+        for rel in pending {
+            let cbz = self.library.join(&rel);
+            // Listed under exactly the record's name: a record keyed by another
+            // spelling matches no archive ([`Self::contains`]), and a cover made
+            // for it would be a second spelling of the volume's.
+            if !fs::is_file(&cbz) || !listed_exactly(&cbz) {
+                continue;
+            }
+            self.unchecked.lock().remove(&rel);
+            if holds_jxl(&cbz) {
+                gone.insert(rel);
+            }
+        }
+        if gone.is_empty() {
+            return Vec::new();
+        }
+        for rel in &gone {
+            info!("Looking for a JPEG XL cover again: {rel}");
+        }
+        let rows = {
+            let mut set = self.set.lock();
+            set.retain(|(p, _, _)| !gone.contains(p));
+            Self::rows(&set)
+        };
+        if let Err(e) = self.save(&rows) {
+            warn!("could not save the .nocover records: {e}");
+        }
+        let mut cleared: Vec<PathBuf> = gone.iter().map(|rel| self.library.join(rel)).collect();
+        cleared.sort();
+        cleared
     }
 
     fn rows(set: &HashSet<(String, u64, i128)>) -> Vec<(String, u64, String)> {
@@ -595,7 +671,7 @@ fn publish_cover_with(
     }
     before_record(cbz);
     MadeCovers::prune(&mut made);
-    made.insert(made_key(&out), (webp.len() as u64, Instant::now()));
+    made.insert(MadeCovers::key(&out), (webp.len() as u64, Instant::now()));
     Ok(true)
 }
 
@@ -927,11 +1003,15 @@ impl Thumbnails {
                 }
                 let (m, lib, s, n) = (me.clone(), library.clone(), stop.clone(), nocover.clone());
                 let scan = tokio::task::spawn_blocking(move || {
+                    // JPEG XL volumes an older build recorded as having no cover get
+                    // one (each record once its archive is in the index), in this
+                    // pass whatever it was woken for.
+                    let cleared = n.clear_jxl();
                     let candidates = if work.full {
                         thumbnail_candidates_with(&lib, Some(&n))
                     } else {
                         let mut out = BTreeSet::new();
-                        for p in &work.paths {
+                        for p in work.paths.iter().chain(&cleared) {
                             if fs::is_dir(p) {
                                 out.extend(thumbnail_candidates_with(p, Some(&n)));
                             } else if needs_thumbnail_with(p, Some(&n)) {
@@ -1048,6 +1128,50 @@ fn check_sidecar_capped(path: &Path, cap: u64) -> SidecarCheck {
         Err(e) if e.to_string().contains("surrogate") => SidecarCheck::Valid,
         Err(_) => SidecarCheck::Invalid,
     }
+}
+
+/// Upgrade from 0.7.4 and older, which could not read JPEG XL and so marked a volume
+/// of JPEG XL pages `.nocover`: drop the marker of every archive holding a `.jxl`
+/// image, so the next scan makes its cover. One-shot at startup; returns how many
+/// markers went. A cloud library's records are [`NoCoverSet::clear_jxl`]'s. The marker
+/// is the one the folder lists in any spelling (`V.NOCOVER`); nothing is removed for
+/// an archive another spelling shadows, nor a marker another archive's name owns
+/// ([`bunko_library::sidecar::sibling`]).
+pub fn clear_jxl_nocovers(library: &Path) -> usize {
+    let mut marked = Vec::new();
+    walk(library, &mut |p| {
+        if is_cbz(p)
+            && let Some(marker) = bunko_library::sidecar::sibling(p, ".nocover")
+            && fs::is_file(&marker)
+        {
+            marked.push((p.to_path_buf(), marker));
+        }
+    });
+    marked.sort();
+    let mut cleared = 0;
+    for (cbz, marker) in marked {
+        if !holds_jxl(&cbz) {
+            continue;
+        }
+        match fs::remove_file(&marker) {
+            Ok(()) => {
+                cleared += 1;
+                info!("Looking for a JPEG XL cover again: {}", cbz.display());
+            }
+            Err(e) => warn!(
+                "could not remove the .nocover marker of {}: {e}",
+                cbz.display()
+            ),
+        }
+    }
+    cleared
+}
+
+/// Whether the archive opens and has a `.jxl` member. Read through its central
+/// directory only (on a cloud library, the store's cached tail).
+fn holds_jxl(cbz: &Path) -> bool {
+    bunko_library::archive::zipdir::list_entries(cbz)
+        .is_ok_and(|entries| entries.iter().any(|e| suffix_lower(&e.filename) == ".jxl"))
 }
 
 /// `_remove_corrupt_sidecars`: delete every invalid library sidecar; returns how many.
@@ -1504,7 +1628,7 @@ mod tests {
             .insert(tmp.path().join("Old.webp"), (3, long_ago));
         assert!(publish_cover(&cbz_path, &webp, &|_| false, &made).unwrap());
         let kept: Vec<PathBuf> = made.0.lock().keys().cloned().collect();
-        assert_eq!(kept, [made_key(&cover_path(&cbz_path))]);
+        assert_eq!(kept, [MadeCovers::key(&cover_path(&cbz_path))]);
     }
 
     /// The cloud's hooks (on its events thread) hand a MOVE's two follow-ups over in
@@ -1652,6 +1776,169 @@ mod tests {
         assert!(series.join("Vol 1.webp").is_file());
         assert!(series.join("Vol 2.webp").is_file());
         assert!(thumbnail_candidates(&lib).is_empty());
+    }
+
+    /// Regression: a volume whose pages are all JPEG XL got a `.nocover` marker
+    /// ("no image") instead of a cover.
+    #[test]
+    fn jxl_volumes_get_covers() {
+        let page = std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../bunko-ocr/tests/fixtures/jxl/page-rgb.jxl"),
+        )
+        .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let lib = tmp.path().join("library");
+        let series = lib.join("Series");
+        std::fs::create_dir_all(&series).unwrap();
+        cbz(
+            &series.join("Vol 1.cbz"),
+            &[("v/002.jxl", &page), ("v/001.jxl", &page)],
+        );
+        let thumbs = Thumbnails::default();
+        assert_eq!(thumbs.scan_once(&lib, &CancellationToken::new()), 1);
+        assert!(!series.join("Vol 1.nocover").exists());
+        let img =
+            image::load_from_memory(&std::fs::read(series.join("Vol 1.webp")).unwrap()).unwrap();
+        assert_eq!(
+            (img.width(), img.height()),
+            bunko_thumb::contain_size(24, 16, bunko_thumb::THUMBNAIL_BOX)
+        );
+    }
+
+    /// Upgrade: 0.7.4 and older could not read JPEG XL, so they marked a volume of JPEG
+    /// XL pages `.nocover` ("no image"), and the marker stops every later look. Those
+    /// markers go; the others stay.
+    #[test]
+    fn jxl_nocover_markers_are_cleared() {
+        let page = std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../bunko-ocr/tests/fixtures/jxl/page-rgb.jxl"),
+        )
+        .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let lib = tmp.path().join("library");
+        let series = lib.join("Series");
+        std::fs::create_dir_all(&series).unwrap();
+        cbz(&series.join("Vol 1.cbz"), &[("v/001.jxl", &page)]);
+        cbz(&series.join("Vol 2.CBZ"), &[("v/001.JXL", &page)]);
+        cbz(&series.join("Vol 3.cbz"), &[("notes.txt", b"x")]);
+        std::fs::write(series.join("Vol 4.cbz"), b"not a zip").unwrap();
+        for stem in ["Vol 1", "Vol 2", "Vol 3", "Vol 4", "Orphan"] {
+            std::fs::write(series.join(format!("{stem}.nocover")), b"").unwrap();
+        }
+        assert_eq!(clear_jxl_nocovers(&lib), 2);
+        assert!(!series.join("Vol 1.nocover").exists());
+        assert!(!series.join("Vol 2.nocover").exists());
+        for stem in ["Vol 3", "Vol 4", "Orphan"] {
+            assert!(series.join(format!("{stem}.nocover")).is_file(), "{stem}");
+        }
+        let thumbs = Thumbnails::default();
+        assert_eq!(thumbs.scan_once(&lib, &CancellationToken::new()), 2);
+        assert!(series.join("Vol 1.webp").is_file());
+        assert!(series.join("Vol 2.webp").is_file());
+        assert_eq!(clear_jxl_nocovers(&lib), 0);
+    }
+
+    /// The marker cleared is the one the folder lists in any spelling (`V.NOCOVER`),
+    /// and the cover made after it is that volume's only cover: no second spelling.
+    #[test]
+    fn jxl_nocover_markers_are_cleared_in_any_spelling() {
+        let page = std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../bunko-ocr/tests/fixtures/jxl/page-rgb.jxl"),
+        )
+        .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let lib = tmp.path().join("library");
+        let series = lib.join("Series");
+        std::fs::create_dir_all(&series).unwrap();
+        cbz(&series.join("Vol 1.cbz"), &[("v/001.jxl", &page)]);
+        std::fs::write(series.join("Vol 1.NOCOVER"), b"").unwrap();
+        assert_eq!(clear_jxl_nocovers(&lib), 1);
+        let thumbs = Thumbnails::default();
+        assert_eq!(thumbs.scan_once(&lib, &CancellationToken::new()), 1);
+        let mut names: Vec<String> = std::fs::read_dir(&series)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["Vol 1.cbz", "Vol 1.webp"]);
+    }
+
+    /// A record kept under another spelling of its archive's name matches no archive:
+    /// it is not taken for the volume listed now (whose cover pass already looks).
+    #[test]
+    fn a_jxl_nocover_record_of_another_spelling_is_left() {
+        let page = std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../bunko-ocr/tests/fixtures/jxl/page-rgb.jxl"),
+        )
+        .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let lib = tmp.path().join("library");
+        let series = lib.join("S");
+        std::fs::create_dir_all(&series).unwrap();
+        let file = tmp.path().join("nocover.json");
+        let old = series.join("old.cbz");
+        cbz(&old, &[("v/001.jxl", &page)]);
+        let earlier = NoCoverSet::load(file.clone(), lib.clone());
+        earlier.insert(&old).unwrap();
+        drop(earlier);
+        std::fs::remove_file(&old).unwrap();
+        cbz(&series.join("OLD.cbz"), &[("v/001.jxl", &page)]);
+        let set = NoCoverSet::load(file, lib);
+        assert!(set.clear_jxl().is_empty());
+        assert_eq!(set.len(), 1);
+    }
+
+    /// [`NoCoverSet::clear_jxl`] looks at each record an earlier run kept once its
+    /// archive is in the library: a record whose archive is not there yet (a cloud
+    /// store still syncing) waits for a later pass, and a record this run wrote is
+    /// its own verdict.
+    #[test]
+    fn jxl_nocover_records_wait_for_their_archive() {
+        let page = std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../bunko-ocr/tests/fixtures/jxl/page-rgb.jxl"),
+        )
+        .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let lib = tmp.path().join("library");
+        let series = lib.join("S");
+        std::fs::create_dir_all(&series).unwrap();
+        let file = tmp.path().join("nocover.json");
+        let (old, plain, late) = (
+            series.join("old.cbz"),
+            series.join("plain.cbz"),
+            series.join("late.cbz"),
+        );
+        cbz(&old, &[("v/001.jxl", &page)]);
+        cbz(&plain, &[("notes.txt", b"x")]);
+        cbz(&late, &[("v/001.jxl", &page)]);
+        let earlier = NoCoverSet::load(file.clone(), lib.clone());
+        for a in [&old, &plain, &late] {
+            earlier.insert(a).unwrap();
+        }
+        drop(earlier);
+        std::fs::remove_file(&late).unwrap();
+
+        let set = NoCoverSet::load(file.clone(), lib.clone());
+        assert_eq!(set.clear_jxl(), std::slice::from_ref(&old));
+        assert_eq!(set.len(), 2);
+        assert!(
+            set.clear_jxl().is_empty(),
+            "the late archive is not there yet"
+        );
+        cbz(&late, &[("v/001.jxl", &page)]);
+        assert_eq!(set.clear_jxl(), std::slice::from_ref(&late));
+        assert_eq!(set.len(), 1);
+        assert!(set.contains(&plain));
+        // This run found no cover in `old` either: that record stays.
+        set.insert(&old).unwrap();
+        assert!(set.clear_jxl().is_empty());
+        assert!(set.contains(&old));
+        assert_eq!(NoCoverSet::load(file, lib).len(), 2, "saved");
     }
 
     #[test]

@@ -316,6 +316,15 @@
     margin-right: 0.35rem;
 }
 
+/* OCR keeps failing: its reason is the hover text. */
+.volume-card__badge--failed {
+    color: #7a2e4a;
+    background: #f9dde7;
+    border-color: #e6a8be;
+    margin-right: 0.35rem;
+    cursor: help;
+}
+
 /* Empty State */
 .empty-state {
     text-align: center;
