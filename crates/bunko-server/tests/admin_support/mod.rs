@@ -112,6 +112,7 @@ impl Harness {
             })),
             machine: opts.machine,
             storage: None,
+            analytics: None,
         });
         Harness {
             dir,

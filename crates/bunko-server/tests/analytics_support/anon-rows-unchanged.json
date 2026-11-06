@@ -1,0 +1,2132 @@
+{
+  "overview": {
+    "enabled": true,
+    "kpis": {
+      "bytes_out": 786854,
+      "bytes_in": 44,
+      "est_bytes_out": 0,
+      "requests": 15,
+      "downloads": 7,
+      "downloaders": 5,
+      "reads": 0,
+      "readers": 0,
+      "minutes_read": 0.0,
+      "pages_read": 0,
+      "dau": 7,
+      "wau": 7,
+      "mau": 7,
+      "crawl_episodes": 1,
+      "errors_5xx": 0,
+      "auth_failures": 1,
+      "dropped": 0
+    },
+    "bandwidth": {
+      "series": [
+        {
+          "key": "volume",
+          "label": "Volumes",
+          "values": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            680000
+          ]
+        },
+        {
+          "key": "processor",
+          "label": "OCR processors",
+          "values": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            100000
+          ]
+        },
+        {
+          "key": "metadata",
+          "label": "Navigation & metadata",
+          "values": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            6811
+          ]
+        },
+        {
+          "key": "auth",
+          "label": "Sign-in",
+          "values": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            31
+          ]
+        },
+        {
+          "key": "cover",
+          "label": "Covers",
+          "values": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            12
+          ]
+        }
+      ]
+    },
+    "top_series": [
+      {
+        "series_key": "alpha saga",
+        "title": "Alpha Saga",
+        "downloads": 3,
+        "readers": 0,
+        "minutes": 0.0
+      },
+      {
+        "series_key": "beta days",
+        "title": "Beta Days",
+        "downloads": 2,
+        "readers": 0,
+        "minutes": 0.0
+      },
+      {
+        "series_key": "delta line",
+        "title": "Delta Line",
+        "downloads": 1,
+        "readers": 0,
+        "minutes": 0.0
+      },
+      {
+        "series_key": "gamma run",
+        "title": "Gamma Run",
+        "downloads": 1,
+        "readers": 0,
+        "minutes": 0.0
+      }
+    ]
+  },
+  "principals_split": {
+    "enabled": true,
+    "rows": [
+      {
+        "principal": "a:c7a08e14240e",
+        "label": "Anonymous c7a08e14240e",
+        "kind": "anon",
+        "requests": 2,
+        "bytes_out": 300000,
+        "bytes_in": 0,
+        "by_category": {
+          "volume": 300000
+        },
+        "ips": [
+          "203.0.113.10"
+        ]
+      },
+      {
+        "principal": "u:reader",
+        "label": "reader",
+        "kind": "user",
+        "requests": 1,
+        "bytes_out": 200000,
+        "bytes_in": 0,
+        "by_category": {
+          "volume": 200000
+        },
+        "ips": []
+      },
+      {
+        "principal": "a:b7f83455c5ff",
+        "label": "Anonymous b7f83455c5ff",
+        "kind": "anon",
+        "requests": 2,
+        "bytes_out": 100000,
+        "bytes_in": 0,
+        "by_category": {
+          "volume": 100000
+        },
+        "ips": [
+          "2001:db8:1::5",
+          "2001:db8:1::6"
+        ]
+      },
+      {
+        "principal": "p:ocr",
+        "label": "ocr",
+        "kind": "processor",
+        "requests": 1,
+        "bytes_out": 100000,
+        "bytes_in": 0,
+        "by_category": {
+          "processor": 100000
+        },
+        "ips": []
+      },
+      {
+        "principal": "u:uploader",
+        "label": "uploader",
+        "kind": "user",
+        "requests": 2,
+        "bytes_out": 60000,
+        "bytes_in": 0,
+        "by_category": {
+          "volume": 60000
+        },
+        "ips": []
+      },
+      {
+        "principal": "a:7f7f6212c850",
+        "label": "Anonymous 7f7f6212c850",
+        "kind": "anon",
+        "requests": 4,
+        "bytes_out": 26768,
+        "bytes_in": 0,
+        "by_category": {
+          "volume": 20000,
+          "metadata": 6768
+        },
+        "ips": [
+          "203.0.113.11"
+        ]
+      },
+      {
+        "principal": "a:d91f7e7e1d7c",
+        "label": "Anonymous d91f7e7e1d7c",
+        "kind": "anon",
+        "requests": 2,
+        "bytes_out": 55,
+        "bytes_in": 0,
+        "by_category": {
+          "metadata": 43,
+          "cover": 12
+        },
+        "ips": [
+          "198.51.100.23"
+        ]
+      },
+      {
+        "principal": "a:20a58d57abfc",
+        "label": "Anonymous 20a58d57abfc",
+        "kind": "anon",
+        "requests": 1,
+        "bytes_out": 31,
+        "bytes_in": 44,
+        "by_category": {
+          "auth": 31
+        },
+        "ips": [
+          "198.51.100.50"
+        ]
+      }
+    ],
+    "totals": {
+      "users": 2,
+      "anon": 5,
+      "processor": 1
+    }
+  },
+  "users": {
+    "enabled": true,
+    "series_granularity": "day",
+    "series": [
+      {
+        "key": "dau",
+        "label": "Active accounts",
+        "values": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          2
+        ]
+      }
+    ],
+    "dau": 2,
+    "wau": 2,
+    "mau": 2,
+    "visitors": {
+      "dau": 7,
+      "wau": 7,
+      "mau": 7
+    },
+    "accounts": 2,
+    "rows_limit": 200,
+    "rows": [
+      {
+        "username": "reader",
+        "days_active": 1,
+        "requests": 1,
+        "bytes_out": 200000,
+        "bytes_in": 0,
+        "devices": [],
+        "clients": [
+          "reader-other"
+        ],
+        "minutes": 0.0,
+        "pages": 0,
+        "volumes_read": 0,
+        "reads": 0,
+        "volumes_started": 0,
+        "volumes_completed": 0
+      },
+      {
+        "username": "uploader",
+        "days_active": 1,
+        "requests": 2,
+        "bytes_out": 60000,
+        "bytes_in": 0,
+        "devices": [],
+        "clients": [
+          "webdav-client"
+        ],
+        "minutes": 0.0,
+        "pages": 0,
+        "volumes_read": 0,
+        "reads": 0,
+        "volumes_started": 0,
+        "volumes_completed": 0
+      }
+    ]
+  },
+  "clients": {
+    "enabled": true,
+    "apps": [
+      {
+        "key": "webdav-client",
+        "label": "WebDAV clients",
+        "requests": 10,
+        "bytes_out": 486768,
+        "principals": 4
+      },
+      {
+        "key": "unknown",
+        "label": "Unknown",
+        "requests": 4,
+        "bytes_out": 100086,
+        "principals": 3
+      },
+      {
+        "key": "reader-other",
+        "label": "Mokuro Reader (other origin)",
+        "requests": 1,
+        "bytes_out": 200000,
+        "principals": 1
+      }
+    ],
+    "clients": [
+      {
+        "key": "none",
+        "label": "No user agent",
+        "requests": 11,
+        "bytes_out": 760086,
+        "principals": 7
+      },
+      {
+        "key": "rclone",
+        "label": "rclone",
+        "requests": 4,
+        "bytes_out": 26768,
+        "principals": 1
+      }
+    ],
+    "browsers": [
+      {
+        "key": "-",
+        "label": "Not a browser",
+        "requests": 15,
+        "bytes_out": 786854,
+        "principals": 8
+      }
+    ],
+    "os": [
+      {
+        "key": "-",
+        "label": "Unknown",
+        "requests": 15,
+        "bytes_out": 786854,
+        "principals": 8
+      }
+    ],
+    "protocols": [
+      {
+        "key": "dav",
+        "label": "WebDAV",
+        "requests": 11,
+        "bytes_out": 686768,
+        "principals": 5
+      },
+      {
+        "key": "api",
+        "label": "JSON API",
+        "requests": 3,
+        "bytes_out": 86,
+        "principals": 2
+      },
+      {
+        "key": "processor",
+        "label": "Processor",
+        "requests": 1,
+        "bytes_out": 100000,
+        "principals": 1
+      }
+    ],
+    "dav_clients": [
+      {
+        "key": "none",
+        "label": "No user agent",
+        "requests": 7,
+        "bytes_out": 660000,
+        "principals": 4
+      },
+      {
+        "key": "rclone",
+        "label": "rclone",
+        "requests": 4,
+        "bytes_out": 26768,
+        "principals": 1
+      }
+    ],
+    "dav_apps": [
+      {
+        "key": "webdav-client",
+        "label": "WebDAV clients",
+        "requests": 10,
+        "bytes_out": 486768,
+        "principals": 4
+      },
+      {
+        "key": "reader-other",
+        "label": "Mokuro Reader (other origin)",
+        "requests": 1,
+        "bytes_out": 200000,
+        "principals": 1
+      }
+    ],
+    "origins": [
+      {
+        "origin": "https://reader.example.com",
+        "requests": 1,
+        "hosted_reader": false
+      }
+    ],
+    "by_app": {
+      "series": [
+        {
+          "key": "reader-other",
+          "label": "Mokuro Reader (other origin)",
+          "values": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1
+          ]
+        },
+        {
+          "key": "webdav-client",
+          "label": "WebDAV clients",
+          "values": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            10
+          ]
+        },
+        {
+          "key": "unknown",
+          "label": "Unknown",
+          "values": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            4
+          ]
+        }
+      ]
+    },
+    "totals": {
+      "requests": 15,
+      "bytes_out": 786854
+    },
+    "principals_days": 30,
+    "series_granularity": "day"
+  },
+  "crawlers": {
+    "enabled": true,
+    "thresholds": {
+      "window_hours": 6,
+      "min_series": 3,
+      "min_coverage": 0.25
+    },
+    "catalog_series": 4,
+    "episodes": [
+      {
+        "id": 1,
+        "ip": "203.0.113.11",
+        "country": null,
+        "principals": [
+          "a:7f7f6212c850"
+        ],
+        "client": "rclone",
+        "user_agent": "rclone/v1.68.1",
+        "kind": "mixed",
+        "series": 3,
+        "volumes": 1,
+        "catalog_series": 4,
+        "coverage": 0.75,
+        "bytes_out": 26768,
+        "requests": 4,
+        "status": "open",
+        "active": true
+      }
+    ],
+    "by_ip": [
+      {
+        "ip": "203.0.113.11",
+        "country": null,
+        "episodes": 1,
+        "bytes_out": 26768
+      }
+    ],
+    "episodes_per_day": {
+      "granularity": "day",
+      "series": [
+        {
+          "key": "episodes",
+          "label": "Episodes",
+          "values": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1
+          ]
+        }
+      ]
+    },
+    "tracking": {
+      "ips": 6,
+      "max_ips": 4096,
+      "entries": 17,
+      "max_entries": 300000,
+      "approx_bytes": 3498
+    }
+  },
+  "geo": {
+    "enabled": true,
+    "geo_enabled": false,
+    "status": "off",
+    "countries": []
+  },
+  "health": {
+    "enabled": true,
+    "status": {
+      "series": [
+        {
+          "key": "2xx",
+          "label": "2xx",
+          "values": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            14
+          ]
+        },
+        {
+          "key": "3xx",
+          "label": "3xx",
+          "values": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "key": "4xx",
+          "label": "4xx",
+          "values": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1
+          ]
+        },
+        {
+          "key": "5xx",
+          "label": "5xx",
+          "values": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    "errors": [
+      {
+        "status": 401,
+        "protocol": "api",
+        "method": "POST",
+        "category": "auth",
+        "count": 1
+      }
+    ],
+    "auth_failures": {
+      "values": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1
+      ],
+      "top_ips": [
+        {
+          "ip": "198.51.100.50",
+          "country": null,
+          "count": 1,
+          "usernames": [
+            "reader"
+          ]
+        }
+      ],
+      "top_usernames": [
+        {
+          "username": "reader",
+          "count": 1
+        }
+      ],
+      "ip_days": 30
+    },
+    "efficiency": {
+      "not_modified": 0,
+      "saved_bytes": 0,
+      "gzip_raw_bytes": 0,
+      "gzip_sent_bytes": 0,
+      "aborted": 0,
+      "aborted_bytes": 0,
+      "resumed": 0,
+      "est_bytes_out": 0
+    }
+  },
+  "series": {
+    "enabled": true,
+    "rows": [
+      {
+        "series_key": "alpha saga",
+        "title": "Alpha Saga",
+        "downloads": 3,
+        "downloaders": 2,
+        "readers": 0,
+        "reads": 0,
+        "pages": 0,
+        "minutes": 0.0,
+        "bytes_out": 500000,
+        "prev": {
+          "downloads": 0,
+          "readers": 0
+        },
+        "volumes": 2
+      },
+      {
+        "series_key": "beta days",
+        "title": "Beta Days",
+        "downloads": 2,
+        "downloaders": 2,
+        "readers": 0,
+        "reads": 0,
+        "pages": 0,
+        "minutes": 0.0,
+        "bytes_out": 150000,
+        "prev": {
+          "downloads": 0,
+          "readers": 0
+        },
+        "volumes": 1
+      },
+      {
+        "series_key": "delta line",
+        "title": "Delta Line",
+        "downloads": 1,
+        "downloaders": 1,
+        "readers": 0,
+        "reads": 0,
+        "pages": 0,
+        "minutes": 0.0,
+        "bytes_out": 10000,
+        "prev": {
+          "downloads": 0,
+          "readers": 0
+        },
+        "volumes": 1
+      },
+      {
+        "series_key": "gamma run",
+        "title": "Gamma Run",
+        "downloads": 1,
+        "downloaders": 1,
+        "readers": 0,
+        "reads": 0,
+        "pages": 0,
+        "minutes": 0.0,
+        "bytes_out": 20000,
+        "prev": {
+          "downloads": 0,
+          "readers": 0
+        },
+        "volumes": 1
+      }
+    ],
+    "sort": "downloads"
+  },
+  "traffic": {
+    "enabled": true,
+    "series": [
+      {
+        "key": "volume",
+        "label": "Volumes",
+        "values": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          680000
+        ]
+      },
+      {
+        "key": "processor",
+        "label": "OCR processors",
+        "values": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          100000
+        ]
+      },
+      {
+        "key": "metadata",
+        "label": "Navigation & metadata",
+        "values": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          6811
+        ]
+      },
+      {
+        "key": "auth",
+        "label": "Sign-in",
+        "values": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          31
+        ]
+      },
+      {
+        "key": "cover",
+        "label": "Covers",
+        "values": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          12
+        ]
+      }
+    ],
+    "by": "category",
+    "metric": "bytes_out",
+    "totals": [
+      {
+        "key": "volume",
+        "label": "Volumes",
+        "requests": 8,
+        "bytes_out": 680000,
+        "bytes_in": 0,
+        "est_bytes_out": 0
+      },
+      {
+        "key": "processor",
+        "label": "OCR processors",
+        "requests": 1,
+        "bytes_out": 100000,
+        "bytes_in": 0,
+        "est_bytes_out": 0
+      },
+      {
+        "key": "metadata",
+        "label": "Navigation & metadata",
+        "requests": 4,
+        "bytes_out": 6811,
+        "bytes_in": 0,
+        "est_bytes_out": 0
+      },
+      {
+        "key": "auth",
+        "label": "Sign-in",
+        "requests": 1,
+        "bytes_out": 31,
+        "bytes_in": 44,
+        "est_bytes_out": 0
+      },
+      {
+        "key": "cover",
+        "label": "Covers",
+        "requests": 1,
+        "bytes_out": 12,
+        "bytes_in": 0,
+        "est_bytes_out": 0
+      }
+    ],
+    "sync": {
+      "progress": {
+        "bytes_out": 0,
+        "bytes_in": 0,
+        "requests": 0,
+        "by_detail": []
+      },
+      "profile": {
+        "bytes_out": 0,
+        "bytes_in": 0,
+        "requests": 0,
+        "by_detail": []
+      }
+    },
+    "metadata": {
+      "bytes_out": 6811,
+      "bytes_in": 0,
+      "requests": 4,
+      "by_detail": [
+        {
+          "key": "propfind_1",
+          "label": "PROPFIND depth 1",
+          "requests": 3,
+          "bytes_out": 6768
+        },
+        {
+          "key": "catalog_api",
+          "label": "Catalog API",
+          "requests": 1,
+          "bytes_out": 43
+        }
+      ]
+    },
+    "dav_methods": [
+      {
+        "method": "GET",
+        "requests": 8,
+        "bytes_out": 680000,
+        "bytes_in": 0
+      },
+      {
+        "method": "PROPFIND",
+        "requests": 3,
+        "bytes_out": 6768,
+        "bytes_in": 0
+      }
+    ]
+  },
+  "traffic_dav": {
+    "enabled": true,
+    "series": [
+      {
+        "key": "GET",
+        "label": "GET",
+        "values": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          11
+        ]
+      },
+      {
+        "key": "PROPFIND",
+        "label": "PROPFIND",
+        "values": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          3
+        ]
+      },
+      {
+        "key": "POST",
+        "label": "POST",
+        "values": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          1
+        ]
+      }
+    ],
+    "by": "method",
+    "metric": "requests",
+    "totals": [
+      {
+        "key": "GET",
+        "label": "GET",
+        "requests": 11,
+        "bytes_out": 780055,
+        "bytes_in": 0,
+        "est_bytes_out": 0
+      },
+      {
+        "key": "PROPFIND",
+        "label": "PROPFIND",
+        "requests": 3,
+        "bytes_out": 6768,
+        "bytes_in": 0,
+        "est_bytes_out": 0
+      },
+      {
+        "key": "POST",
+        "label": "POST",
+        "requests": 1,
+        "bytes_out": 31,
+        "bytes_in": 44,
+        "est_bytes_out": 0
+      }
+    ],
+    "sync": {
+      "progress": {
+        "bytes_out": 0,
+        "bytes_in": 0,
+        "requests": 0,
+        "by_detail": []
+      },
+      "profile": {
+        "bytes_out": 0,
+        "bytes_in": 0,
+        "requests": 0,
+        "by_detail": []
+      }
+    },
+    "metadata": {
+      "bytes_out": 6811,
+      "bytes_in": 0,
+      "requests": 4,
+      "by_detail": [
+        {
+          "key": "propfind_1",
+          "label": "PROPFIND depth 1",
+          "requests": 3,
+          "bytes_out": 6768
+        },
+        {
+          "key": "catalog_api",
+          "label": "Catalog API",
+          "requests": 1,
+          "bytes_out": 43
+        }
+      ]
+    },
+    "dav_methods": [
+      {
+        "method": "GET",
+        "requests": 8,
+        "bytes_out": 680000,
+        "bytes_in": 0
+      },
+      {
+        "method": "PROPFIND",
+        "requests": 3,
+        "bytes_out": 6768,
+        "bytes_in": 0
+      }
+    ]
+  },
+  "reading": {
+    "enabled": true,
+    "series_granularity": "day",
+    "series": [
+      {
+        "key": "minutes",
+        "label": "Minutes read",
+        "values": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "key": "pages",
+        "label": "Pages read",
+        "values": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "key": "readers",
+        "label": "Readers",
+        "values": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    ],
+    "totals": {
+      "reads": 0,
+      "readers": 0,
+      "minutes": 0.0,
+      "pages": 0,
+      "chars": 0,
+      "opens": 0
+    },
+    "top_readers": [],
+    "top_volumes": [],
+    "sources": {
+      "positions": 0,
+      "history": 0
+    },
+    "worker": {
+      "queued": 0,
+      "dropped": 0,
+      "pending": 0,
+      "files": 0,
+      "positions": 0,
+      "segments": 0,
+      "volume_data": 0,
+      "device_files": 0,
+      "missing": 0,
+      "too_large": 0,
+      "unknown_format": 0,
+      "malformed": 0,
+      "failed": 0,
+      "coalesced": 0,
+      "pending_dropped": 0,
+      "events_out_of_range": 0
+    }
+  },
+  "funnel": {
+    "enabled": true,
+    "series_key": null,
+    "title": "All series",
+    "in_library": true,
+    "volumes": [],
+    "series": [
+      {
+        "title": "Alpha Saga",
+        "series_key": "alpha saga",
+        "readers_started": 0,
+        "readers_finished": 0,
+        "volumes_started": 0,
+        "downloads": 2
+      },
+      {
+        "title": "Beta Days",
+        "series_key": "beta days",
+        "readers_started": 0,
+        "readers_finished": 0,
+        "volumes_started": 0,
+        "downloads": 2
+      },
+      {
+        "title": "Delta Line",
+        "series_key": "delta line",
+        "readers_started": 0,
+        "readers_finished": 0,
+        "volumes_started": 0,
+        "downloads": 1
+      },
+      {
+        "title": "Gamma Run",
+        "series_key": "gamma run",
+        "readers_started": 0,
+        "readers_finished": 0,
+        "volumes_started": 0,
+        "downloads": 1
+      }
+    ],
+    "readers_started": 0,
+    "readers_finished": 0,
+    "stages": [
+      {
+        "key": "started",
+        "label": "Started",
+        "reads": 0
+      },
+      {
+        "key": "p25",
+        "label": "Read a quarter",
+        "reads": 0
+      },
+      {
+        "key": "p50",
+        "label": "Read half",
+        "reads": 0
+      },
+      {
+        "key": "p75",
+        "label": "Read three quarters",
+        "reads": 0
+      },
+      {
+        "key": "completed",
+        "label": "Finished",
+        "reads": 0
+      }
+    ]
+  },
+  "stored": {
+    "principal_daily": [
+      [
+        0,
+        "a:20a58d57abfc",
+        "auth",
+        1,
+        31,
+        44
+      ],
+      [
+        0,
+        "a:7f7f6212c850",
+        "metadata",
+        3,
+        6768,
+        0
+      ],
+      [
+        0,
+        "a:7f7f6212c850",
+        "volume",
+        1,
+        20000,
+        0
+      ],
+      [
+        0,
+        "a:b7f83455c5ff",
+        "volume",
+        2,
+        100000,
+        0
+      ],
+      [
+        0,
+        "a:c7a08e14240e",
+        "volume",
+        2,
+        300000,
+        0
+      ],
+      [
+        0,
+        "a:d91f7e7e1d7c",
+        "cover",
+        1,
+        12,
+        0
+      ],
+      [
+        0,
+        "a:d91f7e7e1d7c",
+        "metadata",
+        1,
+        43,
+        0
+      ],
+      [
+        0,
+        "p:ocr",
+        "processor",
+        1,
+        100000,
+        0
+      ],
+      [
+        0,
+        "u:reader",
+        "volume",
+        1,
+        200000,
+        0
+      ],
+      [
+        0,
+        "u:uploader",
+        "volume",
+        2,
+        60000,
+        0
+      ]
+    ],
+    "principal_seen": [
+      [
+        "a:20a58d57abfc"
+      ],
+      [
+        "a:7f7f6212c850"
+      ],
+      [
+        "a:b7f83455c5ff"
+      ],
+      [
+        "a:c7a08e14240e"
+      ],
+      [
+        "a:d91f7e7e1d7c"
+      ],
+      [
+        "p:ocr"
+      ],
+      [
+        "u:reader"
+      ],
+      [
+        "u:uploader"
+      ]
+    ],
+    "anon_ips": [
+      [
+        0,
+        "a:20a58d57abfc",
+        "198.51.100.50",
+        1
+      ],
+      [
+        0,
+        "a:7f7f6212c850",
+        "203.0.113.11",
+        4
+      ],
+      [
+        0,
+        "a:b7f83455c5ff",
+        "2001:db8:1::5",
+        1
+      ],
+      [
+        0,
+        "a:b7f83455c5ff",
+        "2001:db8:1::6",
+        1
+      ],
+      [
+        0,
+        "a:c7a08e14240e",
+        "203.0.113.10",
+        2
+      ],
+      [
+        0,
+        "a:d91f7e7e1d7c",
+        "198.51.100.23",
+        2
+      ]
+    ],
+    "ip_daily": [
+      [
+        0,
+        "192.0.2.10",
+        1,
+        200000,
+        0,
+        0,
+        "[\"u:reader\"]",
+        null,
+        null
+      ],
+      [
+        0,
+        "192.0.2.11",
+        2,
+        60000,
+        0,
+        0,
+        "[\"u:uploader\"]",
+        null,
+        null
+      ],
+      [
+        0,
+        "192.0.2.12",
+        1,
+        100000,
+        0,
+        0,
+        "[\"p:ocr\"]",
+        null,
+        null
+      ],
+      [
+        0,
+        "198.51.100.23",
+        2,
+        55,
+        0,
+        0,
+        "[\"a:d91f7e7e1d7c\"]",
+        null,
+        null
+      ],
+      [
+        0,
+        "198.51.100.50",
+        1,
+        31,
+        1,
+        1,
+        "[\"a:20a58d57abfc\"]",
+        null,
+        null
+      ],
+      [
+        0,
+        "2001:db8:1::5",
+        1,
+        50000,
+        0,
+        0,
+        "[\"a:b7f83455c5ff\"]",
+        null,
+        null
+      ],
+      [
+        0,
+        "2001:db8:1::6",
+        1,
+        50000,
+        0,
+        0,
+        "[\"a:b7f83455c5ff\"]",
+        null,
+        null
+      ],
+      [
+        0,
+        "203.0.113.10",
+        2,
+        300000,
+        0,
+        0,
+        "[\"a:c7a08e14240e\"]",
+        null,
+        null
+      ],
+      [
+        0,
+        "203.0.113.11",
+        4,
+        26768,
+        0,
+        0,
+        "[\"a:7f7f6212c850\"]",
+        "rclone/v1.68.1",
+        null
+      ]
+    ],
+    "volume_downloads": [
+      [
+        0,
+        "a:7f7f6212c850",
+        "Gamma Run/Vol 1.cbz",
+        "gamma run",
+        "Gamma Run",
+        20000,
+        20000,
+        1
+      ],
+      [
+        0,
+        "a:b7f83455c5ff",
+        "Beta Days/Vol 1.cbz",
+        "beta days",
+        "Beta Days",
+        100000,
+        50000,
+        1
+      ],
+      [
+        0,
+        "a:c7a08e14240e",
+        "Alpha Saga/Vol 1.cbz",
+        "alpha saga",
+        "Alpha Saga",
+        200000,
+        200000,
+        1
+      ],
+      [
+        0,
+        "a:c7a08e14240e",
+        "Alpha Saga/Vol 2.cbz",
+        "alpha saga",
+        "Alpha Saga",
+        100000,
+        100000,
+        1
+      ],
+      [
+        0,
+        "u:reader",
+        "Alpha Saga/Vol 1.cbz",
+        "alpha saga",
+        "Alpha Saga",
+        200000,
+        200000,
+        1
+      ],
+      [
+        0,
+        "u:uploader",
+        "Beta Days/Vol 1.cbz",
+        "beta days",
+        "Beta Days",
+        50000,
+        50000,
+        1
+      ],
+      [
+        0,
+        "u:uploader",
+        "Delta Line/Vol 1.cbz",
+        "delta line",
+        "Delta Line",
+        10000,
+        10000,
+        1
+      ]
+    ],
+    "auth_failures": [
+      [
+        "198.51.100.50",
+        "reader",
+        1
+      ]
+    ],
+    "client_principals": [
+      [
+        0,
+        "reader-other",
+        "u:reader"
+      ],
+      [
+        0,
+        "unknown",
+        "a:20a58d57abfc"
+      ],
+      [
+        0,
+        "unknown",
+        "a:d91f7e7e1d7c"
+      ],
+      [
+        0,
+        "unknown",
+        "p:ocr"
+      ],
+      [
+        0,
+        "webdav-client",
+        "a:7f7f6212c850"
+      ],
+      [
+        0,
+        "webdav-client",
+        "a:b7f83455c5ff"
+      ],
+      [
+        0,
+        "webdav-client",
+        "a:c7a08e14240e"
+      ],
+      [
+        0,
+        "webdav-client",
+        "u:uploader"
+      ]
+    ],
+    "crawl_episodes": [
+      [
+        "203.0.113.11",
+        "[\"a:7f7f6212c850\"]",
+        "rclone",
+        "mixed",
+        3,
+        1,
+        4,
+        0.75,
+        4,
+        "open"
+      ]
+    ]
+  }
+}

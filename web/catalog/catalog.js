@@ -246,11 +246,44 @@ function renderGenreChips() {
 // --- Sorting ----------------------------------------------------------------
 
 const SORT_PREF_KEY = 'mokuro_catalog_sort';
-const SORT_MODES = ['title', 'newest', 'densest', 'rating'];
+const SORT_MODES = ['title', 'popular', 'newest', 'densest', 'rating'];
 
 function getSortPref() {
-    const value = localStorage.getItem(SORT_PREF_KEY);
+    let value = null;
+    try {
+        value = localStorage.getItem(SORT_PREF_KEY);
+    } catch (_) { /* private mode: the default */ }
     return SORT_MODES.includes(value) ? value : 'title';
+}
+
+// "Popular" ranks series by whole downloads over the last 30 days. The server
+// sends only each series' place (`popular_rank`, 1 = the most downloaded), and
+// only while it keeps analytics: without any rank the option is not offered and
+// a saved "popular" sorts by title (the choice is kept for when ranks return).
+function hasPopularRanks() {
+    return series.some(s => Number.isInteger(s.popular_rank));
+}
+
+function sortMode() {
+    const mode = getSortPref();
+    return mode === 'popular' && !hasPopularRanks() ? 'title' : mode;
+}
+
+function syncPopularOption() {
+    const select = document.getElementById('sort-mode');
+    if (!select) return;
+    let option = select.querySelector('option[value="popular"]');
+    if (hasPopularRanks()) {
+        if (!option) {
+            option = document.createElement('option');
+            option.value = 'popular';
+            option.textContent = 'Popular';
+            select.insertBefore(option, select.options[1] || null);
+        }
+    } else if (option) {
+        option.remove();
+    }
+    select.value = sortMode();
 }
 
 function seriesDensity(s) {
@@ -260,8 +293,17 @@ function seriesDensity(s) {
 
 function sortSeries() {
     const byTitle = (a, b) => titleCollator.compare(displayTitle(a), displayTitle(b));
-    const mode = getSortPref();
-    if (mode === 'newest') {
+    const mode = sortMode();
+    if (mode === 'popular') {
+        // Ranked series first, by rank; equal ranks and the unranked by title.
+        const rank = s => (Number.isInteger(s.popular_rank) && s.popular_rank > 0) ? s.popular_rank : Infinity;
+        series.sort((a, b) => {
+            const ra = rank(a);
+            const rb = rank(b);
+            if (ra !== rb) return ra < rb ? -1 : 1;
+            return byTitle(a, b);
+        });
+    } else if (mode === 'newest') {
         series.sort((a, b) =>
             ((b.latest_volume_modified || 0) - (a.latest_volume_modified || 0)) || byTitle(a, b));
     } else if (mode === 'rating') {
@@ -346,6 +388,7 @@ async function loadCatalog() {
         const userOverride = localStorage.getItem('mokuro_reader_url');
         readerUrl = userOverride || serverReaderUrl;
         series = data.series || [];
+        syncPopularOption();
         sortSeries();
         filtered = series;
         renderGenreChips();

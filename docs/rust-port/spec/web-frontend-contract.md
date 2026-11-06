@@ -22,7 +22,9 @@ Contents: 1 Global conventions - 2 Static serving - 3 Templating - 4 Shared nav.
 - Every authenticated fetch sends `Authorization: Bearer <token>`. Basic auth is never sent by
   the pages (the server must still accept Basic on `/login/api/me` etc. for the reader).
 - localStorage keys (catalog only): `mokuro_catalog_title_lang` (native|english|folder),
-  `mokuro_catalog_sort` (title|newest|densest|rating), `mokuro_reader_url` (user override URL).
+  `mokuro_catalog_sort` (title|popular|newest|densest|rating), `mokuro_reader_url` (user override URL).
+  (0.8: `popular` is offered only when some series carries a `popular_rank`; a saved `popular`
+  without ranks sorts by title.)
 - Page-level guards (client side only): account, admin redirect to `/login` when no token;
   queue redirects to `/login` on 401 or when `public_access=false` and no token.
 - Bearer token invalid/expired/revoked: `/login/api/me` -> 401 `{authenticated:false,error}`;
@@ -272,7 +274,10 @@ search), `tag` (string; appended `" (tag)"` after bracket-stripping, only for al
 `community` (`{score (0-100 number), genres[string], tags, source}` - score shown as `★ x.x`,
 genres drive chips/search/sort), `latest_volume_modified` (sort "newest"), `total_pages`,
 `total_chars` (sort "densest" = chars/pages), `damaged_volumes` (int), `missing_pages` (int;
-badge + "Missing pages" filter chip only when some series has `damaged_volumes>0`).
+badge + "Missing pages" filter chip only when some series has `damaged_volumes>0`),
+`popular_rank` (0.8, int >= 1, only on series with whole downloads in the last 30 days and only
+while `analytics.enabled`; sort "popular" = rank ascending, equal ranks and unranked series by
+title; the server sends the order only, never a count).
 `volumes[]` fields read: `name`, `cover`, `ocr_pending` (bool -> "OCR pending" badge unless that
 volume is the active OCR job), `missing_pages`, `page_count` (damage badge title). Client matches
 `ocrStatus.series === series.name && ocrStatus.volume === volume.name`.

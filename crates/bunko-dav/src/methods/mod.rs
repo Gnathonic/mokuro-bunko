@@ -18,7 +18,7 @@ use crate::hooks::AuditEvent;
 use crate::propfind::resource_key;
 use crate::resource::{FileKind, Resource};
 use crate::response::{self, DavError, DavResult, Resp};
-use crate::{Caller, DavContext, Inner, paths};
+use crate::{Caller, DavContext, DavInfo, DavTarget, Inner, paths};
 
 /// Request bodies DAV parses as XML are read whole up to this size.
 pub(crate) const XML_BODY_LIMIT: usize = 1024 * 1024;
@@ -63,7 +63,35 @@ impl Req {
     }
 }
 
+/// Answer one DAV request, with a [`DavInfo`] on every response (the server's request
+/// accounting reads it, design analytics.md §4.2). A method that resolved the path
+/// itself may have set a finer one ([`read::get`]); it is kept.
 pub(crate) async fn dispatch(inner: Arc<Inner>, req: Request<Body>, ctx: DavContext) -> Resp {
+    let info = request_info(&req);
+    let mut resp = dispatch_method(inner, req, ctx).await;
+    if resp.extensions().get::<DavInfo>().is_none() {
+        resp.extensions_mut().insert(info);
+    }
+    resp
+}
+
+/// What the request addresses, from its path alone (no I/O).
+fn request_info(req: &Request<Body>) -> DavInfo {
+    let Some(path) = paths::decode_request_path(req.uri().path()) else {
+        return DavInfo {
+            target: DavTarget::Other,
+            rel: None,
+            depth: None,
+        };
+    };
+    let (target, rel) = crate::analytics::dav_target_of(&path);
+    let depth = (req.method().as_str() == "PROPFIND")
+        .then(|| crate::analytics::propfind_depth(crate::header_str(req.headers(), "depth")))
+        .flatten();
+    DavInfo { target, rel, depth }
+}
+
+async fn dispatch_method(inner: Arc<Inner>, req: Request<Body>, ctx: DavContext) -> Resp {
     let (parts, body) = req.into_parts();
     let Some(path) = paths::decode_request_path(parts.uri.path()) else {
         return response::status_page(

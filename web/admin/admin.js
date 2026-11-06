@@ -110,6 +110,11 @@ function initTabs() {
             } else {
                 stopStatusRefresh();
             }
+            if (tabId === 'analytics') {
+                window.bunkoAnalytics.open();
+            } else if (window.bunkoAnalytics) {
+                window.bunkoAnalytics.close();
+            }
             if (tabId === 'connectivity') {
                 loadTunnelStatus();
                 loadDynDNSStatus();
@@ -4619,7 +4624,9 @@ function auditToHash() {
     AUDIT_KEYS.forEach((key) => { if (auditState[key]) params.set(key, auditState[key]); });
     const qs = params.toString();
     try {
-        history.replaceState(null, '', '#audit' + (qs ? '?' + qs : ''));
+        // The page's own path: a bare '#...' resolves against the injected
+        // <base href> (the mount root), so a refresh would open the home page.
+        history.replaceState(null, '', window.location.pathname + window.location.search + '#audit' + (qs ? '?' + qs : ''));
     } catch (_) { /* a sandboxed frame may refuse; the filters still apply */ }
 }
 

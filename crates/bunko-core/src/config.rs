@@ -8,6 +8,12 @@ use serde_json::{Map, Value, json};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
+mod analytics;
+pub use analytics::{
+    ANALYTICS_FIELDS, AnalyticsConfig, AnalyticsRetention, CrawlConfig, DEFAULT_GEO_URL, GeoConfig,
+    LibraryScanConfig,
+};
+
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
     #[error("{0}")]
@@ -935,6 +941,8 @@ pub struct Config {
     pub ocr: OcrConfig,
     pub dyndns: DynDnsConfig,
     pub update: UpdateConfig,
+    /// New in 0.8: server-side usage analytics (`analytics.sqlite`).
+    pub analytics: AnalyticsConfig,
     /// Notes about migrated settings (removed engines/detectors), for logs and admin UI.
     pub warnings: Vec<String>,
     /// Sections/keys this version does not know, preserved verbatim on save.
@@ -1392,6 +1400,9 @@ impl Config {
             &["check", "channel", "manifest_url", "auto", "public_key"],
         );
 
+        let (analytics, analytics_extra) = AnalyticsConfig::from_map(section(data, "analytics")?)?;
+        c.analytics = analytics;
+
         // Preserve whatever we did not understand.
         let known_sections = [
             ("server", server_extra),
@@ -1406,6 +1417,7 @@ impl Config {
             ("ocr", ocr_extra),
             ("dyndns", dyndns_extra),
             ("update", update_extra),
+            ("analytics", analytics_extra),
         ];
         for (name, extra) in known_sections {
             if !extra.is_empty() {
@@ -1428,6 +1440,7 @@ impl Config {
                         | "ocr"
                         | "dyndns"
                         | "update"
+                        | "analytics"
                 )
             {
                 c.extra.insert(k.clone(), v.clone());
@@ -1586,6 +1599,14 @@ impl Config {
                 }),
             ),
         );
+        // Written once it differs from the default, so a file that never set it stays as
+        // it was (the admin settings answer shows the section either way).
+        if self.analytics != AnalyticsConfig::default() || self.extra.contains_key("analytics") {
+            out.insert(
+                "analytics".into(),
+                merge("analytics", self.analytics.to_value()),
+            );
+        }
         if self.update != UpdateConfig::default() || self.extra.contains_key("update") {
             out.insert(
                 "update".into(),
@@ -1617,6 +1638,13 @@ impl Config {
         if let Some(field) = key.strip_prefix("storage.library.") {
             self.storage.library.set_field(field, value)?;
             return self.storage.library.validate();
+        }
+        if let Some(field) = key.strip_prefix("analytics.") {
+            let mut next = self.analytics.clone();
+            next.set_field(field, value)?;
+            next.validate()?;
+            self.analytics = next;
+            return Ok(());
         }
         let parts: Vec<&str> = key.split('.').collect();
         if parts.len() != 2 {
@@ -1764,6 +1792,7 @@ impl Config {
                     "ocr",
                     "dyndns",
                     "update",
+                    "analytics",
                 ]
                 .contains(&parts[0]);
                 return Err(ConfigError::UnknownKey(if section_ok {
@@ -1826,6 +1855,19 @@ impl Config {
         "update.manifest_url",
         "update.auto",
         // Not `update.public_key`: a key is trusted only from the config file itself.
+        "analytics.enabled",
+        "analytics.flush_seconds",
+        "analytics.retention.ip_days",
+        "analytics.retention.hourly_days",
+        "analytics.retention.host_minute_days",
+        "analytics.retention.crawl_days",
+        "analytics.crawl.window_hours",
+        "analytics.crawl.min_series",
+        "analytics.crawl.min_coverage",
+        "analytics.library_scan.interval_hours",
+        "analytics.library_scan.page_formats",
+        "analytics.geo.enabled",
+        "analytics.geo.url",
     ];
 
     /// Apply `MOKURO_<SECTION>_<KEY>` variables plus the `MOKURO_HOST`/`PORT`/`STORAGE` aliases.
