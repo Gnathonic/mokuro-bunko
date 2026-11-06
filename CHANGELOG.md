@@ -9,34 +9,41 @@
   entry addresses that entry. Two names are one when any of those hosts would make
   them one: full Unicode case folding and canonical normalization, so `Straße` and
   `STRASSE`, `ſ` and `s`, `ς` and `σ`, `ı` and `i`, and a decomposed and a composed
-  `é` are one name too. Whether a name exists, and which entry it addresses, is
+  `é` are one name too, and the Unicode default-ignorable characters do not count
+  (zero width space and joiners, direction marks, variation selectors, the soft
+  hyphen, the Hangul fillers: Linux casefold drops them all), so `Vol 1` with one of
+  them in it is `Vol 1`. Whether a name exists, and which entry it addresses, is
   decided from folder listings, never by opening the name and seeing what the host
   answers. Bunko makes no second spelling of a name: a PUT, or a COPY or MOVE
-  destination, whose folder lists the name only in another spelling (one a
-  concurrent request made after this one was resolved, or a hidden one, below)
-  answers 409 `case-variant` (sent again, it reaches that entry), and an MKCOL of such
-  a name answers 405, on every host. Where a case-sensitive disk already holds two
-  spellings of one name (made outside Bunko or before 0.5.3), every request, the
-  exact spelling of the other included, reaches one of them: the byte-smallest
-  locally, the spelling a cloud store's case merge keeps there. The others are hidden
-  until they are merged by hand, and so are the files of a hidden archive: the
-  sidecars, layers, cover, `.nocover` and account corrections its exact stem names
-  (`v.mokuro`, `v.fast.mokuro`, `v.webp`, `v.edit.mokuro` for a hidden `v.cbz`) and
-  its upload record. WebDAV, the catalog, OCR and covers never list, read, write or
-  delete a hidden entry, through any spelling: a read of one answers 404, a write 409
-  (403 for an account's correction kept under `users/`), and a DELETE of a folder holding one, or a MOVE or COPY with `Overwrite: T` onto
-  such a folder, answers 409 (a MOVE of the folder itself takes them along). A volume
-  whose OCR or cover name is a hidden archive's gets none until the merge, and an
-  account that has corrections in a hidden series cannot save corrections in the
-  series that hides it until then (its correction folder would be the same folder on
-  a disk that folds names). A case-fixing MOVE is refused (409) while its folder lists
-  another spelling of the name besides the source. `doctor` and the startup log name
-  each set. Sidecar names rule v1, shared with Mokuro Reader, is unchanged: a sidecar
-  belongs to the archive whose stem it spells up to NFC and lowercase, and a layer id
-  is matched exactly. A file that is one name with a volume's OCR, cover or layer
-  file only by the wider fold (`STRASSE.mokuro` beside `Straße.cbz`) or only by the
-  id's case (`Vol.FAST.mokuro`) is not that volume's, and Bunko writes none beside it
-  either (it would be a second spelling): that volume owes no such OCR or cover.
+  destination, whose folder lists the name only in another spelling (one a concurrent
+  request made after this one was resolved, or one of the caller's own corrections
+  listed beside it) answers 409 `case-variant` (sent again, it reaches that entry), and
+  an MKCOL of such a name answers 405, on every host. Where a case-sensitive disk
+  already holds two spellings of one name (made outside Bunko or before 0.5.3), every
+  request, the exact spelling of the other included, reads one of them: the
+  byte-smallest locally, the spelling a cloud store's case merge keeps there. The
+  others are hidden, and so are the files of a hidden archive: the sidecars, layers,
+  cover, `.nocover` and account corrections its exact stem names (`v.mokuro`,
+  `v.fast.mokuro`, `v.webp`, `v.edit.mokuro` for a hidden `v.cbz`); a read of one
+  answers 404. Each such set is **frozen** until it is merged (by hand, or by a cloud
+  store's case merge): every member, the one in use included, every file sidecar names
+  rule v1 gives or would give to an archive of the set (or to an archive whose own
+  files are such a set: `Vol.cbz` beside `VOL.mokuro` and `vol.mokuro`), and everything
+  inside a member folder. A PUT, DELETE, MKCOL, COPY, MOVE (from or onto), PROPPATCH or
+  LOCK of any of them answers 409 naming the set, new names included (`v.mokuro.gz`,
+  `V.hayai.mokuro`, an account's `V.edit.mokuro`), and so does a DELETE, COPY or MOVE of
+  a folder holding a set, or onto one (a MOVE of such a folder no longer takes it
+  along). Bunko itself does nothing there either: no OCR is owed or installed, no
+  upgrade, no cover or `.nocover`, no orphan, kept-layer or corrupt-sidecar sweep, no
+  correction adoption, no `series.json`, and no upload, OCR or identity record is
+  re-keyed or dropped. Reads keep serving the one in use. `doctor` and the startup log
+  name each set, with the files it holds, and the merge (MIGRATING-0.7). Sidecar names
+  rule v1, shared with Mokuro Reader, is unchanged: a sidecar belongs to the archive
+  whose stem it spells up to NFC and lowercase, and a layer id is matched exactly. A
+  file that is one name with a volume's OCR, cover or layer file only by the wider
+  fold (`STRASSE.mokuro` beside `Straße.cbz`) or only by the id's case
+  (`Vol.FAST.mokuro`) is not that volume's, and Bunko writes none beside it either (it
+  would be a second spelling): that volume owes no such OCR or cover.
 - **The reader's per-user names are reserved in any spelling.** `History/`,
   `Goals.json`, `Volume-Data.json` and the like are the caller's own `history/`,
   `goals.json` and `volume-data.json`, never library paths. A series folder spelled
@@ -45,12 +52,17 @@
   a cloud library the progress user's own entries are the canonical `history/`,
   `goals.json`, ... in the cloud folder; while that folder holds one only in another
   spelling (a `History/` from 0.7), that entry is the name, and the progress user's
-  writes to it are refused (409) until it is renamed, never written beside it.
+  writes to it are refused (409) until it is renamed, never written beside it. Under
+  `users/<u>/` a `Goals.json` or `History/` made by hand is the account's own
+  `goals.json` or `history/`, read and written in its spelling, on every host. Nothing
+  Bunko does on its own touches a series spelled like a per-user name (no OCR, covers,
+  sweeps or correction adoption).
 - **No `thumbnails/` folder in the library.** Every start made an empty
   `library/thumbnails/` (0.5.2's cover cache; covers have long lived beside their
   archives). 0.8 makes none. The first 0.8 start removes the empty one an earlier
   release left (once: the storage folder then holds `.legacy-thumbnails-checked`);
-  one that holds anything stays as an ordinary folder. After that `thumbnails` is no
+  one that holds anything, or sits beside another spelling of it, stays as an
+  ordinary folder. After that `thumbnails` is no
   special name, in any spelling, on any store: a series `Thumbnails/` is a series like
   any other, where before a request for it reached Bunko's own folder on a local disk,
   and an empty `thumbnails/` series made later stays across restarts, on a local
@@ -251,13 +263,13 @@
   written: `Vol.EDIT.mokuro` is an ordinary shared file. When a cloud folder's two
   spellings both have a different `curated` file, the younger one moves in as
   `curated-2`, as `edit` already did.
-- **`history` is a reserved series name.** `/mokuro-reader/history` is each account's
-  reading history now, so a series folder named exactly `history` in a library on this
-  disk can no longer be reached; `doctor` warns about it (and the server logs it at
-  startup) with the rename to make. A cloud folder's `history/` is never compiled,
-  counted or case-merged as a series (`History/` stays an ordinary series), never
-  OCR'd and never given covers, whatever its files are named, and its changes keep the
-  cached library listing. The server logs a cloud folder's `history/` series with the
+- **`history` is a reserved series name, in any spelling.** `/mokuro-reader/history`
+  is each account's reading history now, so a series folder named `history`, `History`
+  or any other spelling of it in a library on this disk can no longer be reached;
+  `doctor` warns about it (and the server logs it at startup) with the rename to make.
+  A cloud folder's `history/`, in any spelling, is never compiled, counted or
+  case-merged as a series, never OCR'd and never given covers, whatever its files are
+  named, and its changes keep the cached library listing. The server logs a cloud folder's `history/` series with the
   rename to make once the folder is in sync.
 - **Bunko merges duplicate folders in Google Drive and MEGA libraries, and merges
   never pause it.** Google Drive and MEGA can hold two `mokuro-reader` folders, or two
@@ -373,6 +385,22 @@
   taken in.
 
 ### Fixed
+- **The numbered-OCR clean-up decides from the folder listing whether a name is free.**
+  It asked the disk whether `<Vol>.<layer>.mokuro` existed: beside a `Vol.FAST.mokuro`
+  a case-insensitive disk said yes and the numbered `Vol.fast_1.mokuro` was deleted
+  (its OCR lost), a case-sensitive one said no and it became a second spelling
+  `Vol.fast.mokuro`. Now it is left in place, counted, on every host.
+- **Deleting a volume deletes only the files its folder lists for it.** It also removed
+  `<stem>.mokuro`, `<stem>.webp` and the like as built names, which a disk that folds
+  names opens as another file (`STRASSE.mokuro` beside `Straße.cbz`).
+- **A volume's cover and `.nocover` marker are written under the WebDAV write lock of
+  their name**, as OCR results are: a client writing the cover in another spelling at
+  that moment no longer races Bunko into a second spelling or an overwrite.
+- **A folder holding two spellings of a volume, moved in the cloud, keeps both
+  uploaders' records** (the first volume's move deleted the other spelling's record).
+- **Layers an earlier beta's upgrade kept are found through the folder listings** at
+  start, in any spelling the audit log has, never by opening that spelling (a folder
+  respelled since was missed on case-sensitive disks; a hidden one was entered).
 - **A case-only rename takes effect on Linux casefold disks** (and between hard links),
   where `rename(2)` between two names of one file does nothing: renaming `kingdom/` to
   `Kingdom/` over WebDAV used to leave the folder as it was while the database and the

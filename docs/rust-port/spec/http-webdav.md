@@ -721,7 +721,7 @@ Physical layout: `<base>/library/` (shared), `<base>/inbox/` (never exposed), `<
 | `/mokuro-reader` | virtual **merged** collection | none |
 | `/mokuro-reader/volume-data.json`, `.../profiles.json`, `.../goals.json` | file; **only visible to an authenticated user**; maps to that user's own file | `users/<username>/<name>` |
 | 0.8: `/mokuro-reader/positions.json`, `/mokuro-reader/history/**` | the same per-user rule: `positions.json` a file, `history` and `history/<device>` collections the reader creates (MKCOL 201; 405 when it exists; 409 without its parent), `history/<device>/<file>` files (PUT ≤ 16 MiB, 413; ≤ 256 MiB an account, 507). Depth 1 on `/mokuro-reader` lists `history/` to its owner only; Depth infinity on `/` and `/mokuro-reader` adds the caller's own tree and nobody else's | `users/<username>/…`; for a cloud library's `progress_user`, the cloud root itself (0.8 design §10) |
-| 0.8: `/mokuro-reader/<folder>/<Vol>.edit[-<n>].mokuro` (D27: the id exactly as written, and no listed `.cbz`'s own primary, sidecar names rule v1) | a **personal correction**: each signed-in caller's own file at the same path, anonymous none (404). Listed (Depth 1 and infinity) only to its owner and only beside its `.cbz`. PUT: the `.cbz` must be listed (409 `no-volume`), plain lowercase `.mokuro` (`.gz` 403, other spellings 409), body a JSON object with a `pages` array and no `ocr_engine` (422 `not-a-layer`), ≤ 32 MiB (413); `curated` takes the same checks. MOVE/COPY only to another correction name (403 otherwise), with no archive check. No upload record, no OCR row, no provenance rewrite; audited as `personal`. Every account's overlays follow their volume (`PersonalOverlays`): an archive MOVE renames them to the new stem, a folder MOVE carries them, and so do the same changes made in a cloud folder and a case merge (a trashed byte-identical loser's go to the kept spelling); a duplicate-folder merge keeps the path, so they stay valid. One already at the destination is kept and the moving one takes the next free `edit-<n>`. A deleted archive or folder takes them along (rule 6 decides which stem is the archive's); an overlay folder is matched to the library folder in any case, except one spelled like a library folder of its own (a shadowed case variant on a case-sensitive disk): that stays that folder's, untouched by anything done to the one that shadows it, and while it is the account's only overlay folder of that name the shadowing folder's corrections are refused (403 on PUT, 404 on GET; on a folding `users/` disk they would be one folder) and a hook moving a volume there leaves the correction in place (a case merge: the folder is the winner's once the loser is gone); a `Depth: infinity` listing shows each overlay under the library folder's listed spelling, as `Depth: 1` does; a self-delete removes `users/<u>/` with them, an admin soft delete keeps them | `users/<username>/edits/<rel>`; for a cloud library's `progress_user`, the physical `library/<rel>` (hidden from everyone else) |
+| 0.8: `/mokuro-reader/<folder>/<Vol>.edit[-<n>].mokuro` (D27: the id exactly as written, and no listed `.cbz`'s own primary, sidecar names rule v1) | a **personal correction**: each signed-in caller's own file at the same path, anonymous none (404). Listed (Depth 1 and infinity) only to its owner and only beside its `.cbz`. PUT: the `.cbz` must be listed (409 `no-volume`), plain lowercase `.mokuro` (`.gz` 403, other spellings 409), body a JSON object with a `pages` array and no `ocr_engine` (422 `not-a-layer`), ≤ 32 MiB (413); `curated` takes the same checks. MOVE/COPY only to another correction name (403 otherwise), with no archive check. No upload record, no OCR row, no provenance rewrite; audited as `personal`. Every account's overlays follow their volume (`PersonalOverlays`): an archive MOVE renames them to the new stem, a folder MOVE carries them, and so do the same changes made in a cloud folder and a case merge (a trashed byte-identical loser's go to the kept spelling); a duplicate-folder merge keeps the path, so they stay valid. One already at the destination is kept and the moving one takes the next free `edit-<n>`. A deleted archive or folder takes them along (rule 6 decides which stem is the archive's); an overlay folder is matched to the library folder in any case, except one spelled like a library folder of its own (a shadowed case variant on a case-sensitive disk): that stays that folder's, untouched by anything done to the one that shadows it, and while it is the account's only overlay folder of that name the shadowing folder's corrections are not read (404 on GET; on a folding `users/` disk they would be one folder) and their writes answer 409 (the two library folders are a frozen case-variant group) and a hook moving a volume there leaves the correction in place (a case merge: the folder is the winner's once the loser is gone); a `Depth: infinity` listing shows each overlay under the library folder's listed spelling, as `Depth: 1` does; a self-delete removes `users/<u>/` with them, an admin soft delete keeps them | `users/<username>/edits/<rel>`; for a cloud library's `progress_user`, the physical `library/<rel>` (hidden from everyone else) |
 | `/mokuro-reader/<anything else>` | shared library file/collection | `library/<rel>` via `safe_resolve_under` |
 | `/inbox`, `/inbox/*` | **nothing**: `get_resource_inst` returns `None` => GET/PROPFIND/DELETE 404 (PathMapper maps it but the provider never serves it) | |
 | every other path | `None` => 404 | |
@@ -736,7 +736,11 @@ symlink-out), `is_dir()` -> folder resource, `exists()` -> file resource, else `
 existence is decided from the listings: every segment must be listed exactly as requested, as the
 entry a request for it reaches (`path_case::reachable_as_spelled`), else `None`, never by opening the
 requested spelling (so `Vol 2.cbz` beside a listed `vol 2.cbz` is missing on APFS, NTFS and casefold
-too, and a hidden entry, below, is missing for everyone).
+too, and a hidden entry, below, is missing for everyone). A per-user path (`Target::Progress`) is
+found the same way: under `users/<u>/` its per-user name is the entry that folder lists in any
+spelling (a `Goals.json` made there outside Bunko is the account's `goals.json`, read and written
+under its own spelling), and each segment must be listed exactly so; in the cloud-root owner's
+folder the name is the canonical one, so a listed `Goals.json` is not found there on any host.
 
 Per-user isolation: two users PUT/GET the same URL and get different files. `users/<username>` is
 created lazily by the first PUT of a progress file (`create_empty_resource`, `resources.py:1313-1317`).
@@ -770,10 +774,22 @@ auth gate (4.3 step 5/6, 4.4 steps 2-3).
   `.bunko-case-*` name of an interrupted case-only rename are never listed (nor copied, nor entered by
   the OCR walk; doctor names the latter); a shadowed case variant is never listed, nor is a file sidecar
   names rule v1 gives to a shadowed archive (`v.mokuro`, `v.webp`, `v.edit.mokuro` beside a hidden
-  `v.cbz`; `sidecar_names::hidden_names`). No request reaches either: PathCase never resolves a
-  spelling onto one, a read answers 404, a write 409 (a correction overlay of one 403), and a folder
-  DELETE, or a MOVE or COPY with `Overwrite: T` onto a folder, answers 409 while it holds one
-  anywhere below.
+  `v.cbz`; `FoldGroups::hidden`). No request reads either: PathCase never resolves a spelling onto
+  one, a read answers 404. Writes: the freeze, below.
+* **The freeze (0.8, `bunko_core::fold_groups`).** A folder listing two or more names that fold alike
+  (the filename fold) holds a case-variant group. Until it is merged by hand it is frozen: every
+  member (the reachable winner included), every file rule v1 gives, or would give once written, to
+  an archive of the group or to an archive whose own files hold a member (`Vol.cbz` beside
+  `VOL.mokuro` and `vol.mokuro`), files tied to such an archive by the wider filename fold
+  (`STRASSE.mokuro` beside `Straße.cbz`), and everything inside a member folder. A PUT, DELETE,
+  MKCOL, COPY, MOVE, PROPPATCH or LOCK whose target, COPY/MOVE source or destination is frozen, in
+  any folder on the way, answers `409 Conflict` before anything else in DAV (after PathCase and the
+  auth gate), its body naming the folder and the members and pointing to doctor and MIGRATING-0.7's
+  manual merge (`methods::frozen_refusal`); so does a DELETE, COPY or MOVE of a folder holding a group
+  anywhere below it, and a COPY or MOVE onto one. A correction (overlay) of a frozen archive's name
+  answers 409 too. Reads (GET, HEAD, PROPFIND) are unchanged: the winner is served, the losers stay
+  hidden. Decided from the folder listings alone, the same on every host; a case-insensitive disk can
+  hold no group, so nothing is frozen there.
 * `OSError` while listing -> empty list.
 Child kind comes from the DirEntry (`is_dir(follow_symlinks=True)`), with `stat` pre-populated
 (`follow_symlinks=True`). Listing therefore does **not** apply `safe_resolve_under`: a symlink pointing
@@ -916,7 +932,9 @@ Order of checks and effects:
    operation") + audit `lock_conflict` (`operation: "write"`). **0.8:** the lock is keyed by the folded path,
    and a library file that is not there as spelled is checked again under it, from the folder listing: when
    the folder lists the name in another spelling (an upload in that spelling took it after PathCase
-   resolved this request, or a hidden entry), the PUT answers `409`, reason `case-variant`, retry true,
+   resolved this request; a group is refused before, by the freeze), or the caller's own correction
+   in that folder does (`V.edit.mokuro` in its overlay, for a library file `v.EDIT.mokuro`: its listings
+   show both), the PUT answers `409`, reason `case-variant`, retry true,
    nothing staged; sent again, it reaches that file and is judged as a write to it. The same answer on
    every host (a case-insensitive disk no longer writes over the other spelling's file). A COPY or MOVE
    destination is checked the same way under its write lock (409), and an MKCOL under the folder name's
@@ -1038,8 +1056,9 @@ Bunko-specific handlers (authoritative semantics):
   14.1). Locks `[src, dst]` (sorted by casefolded resolved path; `423` + audit on conflict). 0.8: a MOVE that
   only changes the case of its source answers `409 Conflict` before anything is deleted while the destination
   still exists as another entry, or (checked under the locks, from the listing) while the source's folder lists
-  any other spelling of the name besides the source (a shadowed variant, which only a case-sensitive disk or a
-  cloud folder holds): the name would pass to that entry. Steps:
+  any other spelling of the name besides the source (a case-variant group: the freeze refuses it first). A
+  file DELETE or MOVE takes only the sidecars the folder lists (rule v1), never a constructed
+  `<stem>.mokuro` opened on the chance it exists. Steps:
   `_remember_primary_uuid`; `mkdir -p dst.parent`; `os.replace(src, dst)` (atomic; overwrites); `archives_removed += [src]`
   if `.cbz`; `archive_written = dst` if `.cbz` in library; DB `rename_volume_upload(old, new)` (ownership follows
   the file; upsert); `_forget_ocr_records(old)` (archive => all sidecar rows of the old volume) and
@@ -1074,9 +1093,9 @@ Bunko-specific handlers (authoritative semantics):
   (RFC 9.8.4 no-merge); `Depth: 0` creates only the destination folder. **0.8:** members pair by name in any
   case, as on a case-insensitive disk, on every host: a destination member is absent only when no source member
   folds like it, a source member is copied onto the destination member spelled in any case (which keeps its
-  spelling), and the delete hooks get the paths really listed. Hidden source members are never copied; a
-  destination folder holding a hidden entry anywhere below it is never copied onto (409), and a member
-  whose name the destination lists only in another spelling answers 409 rather than making a second one. Folder `copy_move_single` creates the
+  spelling), and the delete hooks get the paths really listed. A source or destination folder holding a
+  case-variant group anywhere below it answers 409 (the freeze), and a member whose name the
+  destination lists only in another spelling answers 409 rather than making a second one. Folder `copy_move_single` creates the
   destination directory only if it is a library path (`dest_type == "library"`).
 * The auth gate only requires `MODIFY_DELETE` (or progress write for per-user *source*) and checks the
   Destination only for compiled metadata paths (4.3 step 6).
