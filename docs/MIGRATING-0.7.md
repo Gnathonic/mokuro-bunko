@@ -228,24 +228,33 @@ told which image to pull.
 As on Windows, `kingdom/` and `Kingdom/` are one folder: a request in any case
 reaches the spelling already on disk, an upload spelled in another case lands in the
 existing folder, and a folder or file can be renamed to fix its case (0.8 also on a
-Linux casefold disk). Bunko never creates a second spelling of a name. 0.8 behaves the
-same on every host and probes none: which entry a name addresses is decided from
-folder listings, never by opening the name and seeing what the host answers. A volume or series folder renamed to another
-case outside Bunko stays its uploader's.
+Linux casefold disk). Two names are one whenever any supported host would make them
+one: full Unicode case folding and canonical normalization (`Straße` and `STRASSE`,
+`ſ` and `s`, `ı` and `i`, a decomposed and a composed `é`). 0.8 behaves the same on
+every host and probes none: whether a name exists, and which entry it addresses, is
+decided from folder listings, never by opening the name and seeing what the host
+answers. Bunko makes no second spelling of a name: a write to a name its folder lists
+only in another spelling (made by a concurrent request, or hidden, below) answers 409
+(`case-variant`; MKCOL 405) on every host. A volume or series folder renamed to
+another case outside Bunko stays its uploader's.
 
 Coming straight from 0.5.2 on a case-sensitive host (Linux, Docker), the library may
 hold folders or files whose names differ only in case. Run `mokuro-bunko doctor` (or
 read the server's startup log): its "Case variants" rows name each set. Only one
 spelling is listed and reachable, the byte-smallest (`Kingdom/` before `kingdom/`),
-in DAV, the catalog, OCR and covers; the others are hidden until merged, and nothing
-is ever written to, moved out of or deleted from them. Nothing of theirs is used for
-the reachable one either: a hidden `v.cbz` keeps the files its exact stem names
-(`v.mokuro`, `v.webp`, `v.nocover`), its accounts' corrections (`users/<u>/edits/`
-under its own spelling) and its upload record, so a reachable `V.cbz` beside it gets
-no OCR or cover until the merge, an account with corrections in a hidden `kingdom/`
-cannot save corrections in the reachable `Kingdom/` until then (403), and a
-case-fixing rename (MOVE) of a reachable entry
-is refused (409) while a hidden spelling of it is listed beside it. Merge them while
+in DAV, the catalog, OCR and covers; the others are hidden until merged, and so are
+the files of a hidden archive: a hidden `v.cbz` keeps the files its exact stem names
+(`v.mokuro`, its layers, `v.webp`, `v.nocover`, and the cloud-root owner's
+`v.edit.mokuro`), its accounts' corrections (its `users/<u>/edits/` entries) and its
+upload record. Nothing hidden is listed, read, written or deleted through any
+spelling: a request for one answers 404 (read) or 409 (write; 403 for an account's
+correction kept under `users/`), a DELETE of a folder
+holding one, or a MOVE or COPY with `Overwrite: T` onto such a folder, answers 409,
+and a MOVE of the folder itself takes everything in it along. So a reachable `V.cbz`
+beside a hidden `v.cbz` gets no OCR or cover until the merge, an account with
+corrections in a hidden `kingdom/` cannot save corrections in the reachable
+`Kingdom/` until then (403), and a case-fixing rename (MOVE) of a reachable entry is
+refused (409) while a hidden spelling of it is listed beside it. Merge them while
 the server is stopped: move each volume with all its files (`<stem>.cbz`, its `.mokuro[.gz]` and
 layer files `<stem>.<layer>.mokuro[.gz]`, `<stem>.webp`, any `<stem>.nocover`) into
 the reachable folder; the next metadata pass picks it up. Upload ownership and OCR
@@ -260,6 +269,14 @@ inviter deletes the merged copy first. Doctor also names any hidden
 `.bunko-case-<token>-<name>` entry a case-only rename left when it was interrupted,
 with the rename that finishes it.
 
+Sidecar names rule v1 (which files are a volume's, shared with Mokuro Reader) is
+unchanged: stems compare up to NFC and lowercase, layer ids exactly. A file that is
+one name with a volume's OCR, cover or layer file only by the wider fold
+(`STRASSE.mokuro` beside `Straße.cbz`) or only by the case of the layer id
+(`Vol.FAST.mokuro`) is not that volume's; Bunko writes no such file beside it either
+(it would be a second spelling), so that volume is owed none. Rename such a file to
+the volume's exact stem and a lowercase id to have it count.
+
 Series folders spelled like a reader's per-user name (`history`, `History`,
 `goals.json`, `Goals.json`, `volume-data.json`, ...) are hidden in 0.8, from WebDAV
 and the catalog alike: those names are each account's own files in every spelling.
@@ -269,8 +286,9 @@ library the progress user's reading history and settings are the cloud folder's
 `History/` from 0.7), the progress user's writes to it answer 409 until it is renamed.
 
 The empty `library/thumbnails/` folder every earlier start made is removed at the
-first 0.8 start; one that holds anything stays as an ordinary folder.
-`thumbnails`/`Thumbnails` is an ordinary series name in 0.8.
+first 0.8 start, once (the storage folder then holds `.legacy-thumbnails-checked`);
+one that holds anything stays as an ordinary folder. `thumbnails`/`Thumbnails` is an
+ordinary series name in 0.8: an empty `thumbnails/` series made later stays.
 
 ### First-run setup from another computer
 
