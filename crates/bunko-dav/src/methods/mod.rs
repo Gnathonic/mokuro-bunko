@@ -18,7 +18,7 @@ use crate::hooks::AuditEvent;
 use crate::propfind::resource_key;
 use crate::resource::Resource;
 use crate::response::{self, DavError, DavResult, Resp};
-use crate::{DavContext, Inner, paths};
+use crate::{Caller, DavContext, Inner, paths};
 
 /// Request bodies DAV parses as XML are read whole up to this size.
 pub(crate) const XML_BODY_LIMIT: usize = 1024 * 1024;
@@ -37,6 +37,11 @@ pub(crate) struct Req {
 impl Req {
     pub fn username(&self) -> Option<&str> {
         self.ctx.username.as_deref()
+    }
+
+    /// Who per-user paths resolve for.
+    pub fn caller(&self) -> Option<Caller<'_>> {
+        self.ctx.caller()
     }
 
     pub fn header(&self, name: &str) -> Option<&str> {
@@ -125,15 +130,16 @@ pub(crate) async fn read_body(body: Body, limit: usize) -> DavResult<Bytes> {
     }
 }
 
+/// Resolve `path` for the requesting account. Blocking work, off the async workers.
 pub(crate) async fn lookup(
     inner: &Arc<Inner>,
     path: &str,
-    username: Option<&str>,
+    req: &Req,
 ) -> DavResult<Option<Resource>> {
     let inner = inner.clone();
     let path = path.to_string();
-    let user = username.map(str::to_string);
-    blocking(move || inner.roots.lookup(&path, user.as_deref())).await
+    let ctx = req.ctx.clone();
+    blocking(move || inner.roots.lookup(&path, ctx.caller())).await
 }
 
 /// HTTP conditionals and the DAV `If:` header against an existing resource (WsgiDAV
@@ -187,12 +193,17 @@ pub(crate) fn file_audit_target(inner: &Inner, vpath: &str, phys: &Path) -> (&'s
         return ("library", format!("/{}/{rel}", paths::READER_ROOT));
     }
     let norm = paths::normalize(vpath);
-    let ty = if paths::is_per_user_name(paths::uri_name(&norm)) {
+    let ty = if is_progress_path(&norm) {
         "progress"
     } else {
         "webdav"
     };
     (ty, norm)
+}
+
+/// A path of the caller's own tree (root files, `history/**`).
+pub(crate) fn is_progress_path(vpath: &str) -> bool {
+    matches!(paths::classify(vpath), paths::Target::Progress(_))
 }
 
 /// The audit target of a folder (0.5.2 `MokuroFolderResource._audit`).
@@ -206,6 +217,7 @@ pub(crate) fn folder_audit_target(
         .filter(|r| !r.is_empty())
     {
         Some(rel) => ("library_folder", format!("/{}/{rel}", paths::READER_ROOT)),
+        None if is_progress_path(vpath) => ("progress", paths::normalize(vpath)),
         None => ("webdav_folder", paths::normalize(vpath)),
     }
 }
@@ -288,18 +300,24 @@ pub(crate) struct Effects {
 
 impl Effects {
     pub fn note_removed(&mut self, inner: &Inner, phys: &Path) {
-        if phys.starts_with(&inner.roots.library) {
+        if inner.roots.library_rel(phys).is_some() {
             self.removed.push(phys.to_path_buf());
         }
     }
 
     pub fn note_arrived(&mut self, inner: &Inner, phys: &Path) {
-        if is_cbz(phys) && phys.starts_with(&inner.roots.library) {
+        if is_cbz(phys) && inner.roots.library_rel(phys).is_some() {
             self.arrived.push(phys.to_path_buf());
         }
     }
 
+    /// A write changed `vpath`. The caller's own tree is in no shared listing and is no
+    /// library change, so a progress or history write evicts nothing (a reader saving
+    /// its goals used to drop the whole-library `Depth: infinity` listing).
     pub fn touch(&mut self, vpath: &str, phys: Option<&Path>) {
+        if is_progress_path(vpath) {
+            return;
+        }
         self.listings.push(paths::normalize(vpath));
         if let Some(p) = phys {
             self.changed.push(p.to_path_buf());
@@ -320,7 +338,7 @@ impl Effects {
         let changed: Vec<PathBuf> = self
             .changed
             .into_iter()
-            .filter(|p| p.starts_with(&inner.roots.library))
+            .filter(|p| inner.roots.library_rel(p).is_some())
             .collect();
         if !changed.is_empty() {
             req.ctx.hooks.library_changed(&changed);

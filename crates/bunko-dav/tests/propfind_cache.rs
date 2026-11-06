@@ -187,6 +187,7 @@ async fn budget_bounds_the_cache() {
             max_entries: 2,
             ..CacheConfig::default()
         },
+        ..DavConfig::default()
     };
     let dav = Dav::new(&StorageLayout::new(&base), cfg).unwrap();
     let env = Env {
@@ -229,6 +230,7 @@ async fn stale_entries_are_served_while_one_refresh_runs() {
             ttl: Duration::from_millis(50),
             ..CacheConfig::default()
         },
+        ..DavConfig::default()
     };
     let dav = Dav::new(&StorageLayout::new(&base), cfg).unwrap();
     let env = Env {

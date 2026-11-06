@@ -523,3 +523,64 @@ async fn copying_onto_its_own_case_variant_is_refused() {
     assert_eq!(r.code(), 403);
     assert!(!names(&env.lib("")).contains(&"MANGA1.cbz".to_string()));
 }
+
+// --- The per-user tree is never reached by a case fold (0.8) -------------------------
+
+#[tokio::test]
+async fn history_paths_are_never_case_canonicalised() {
+    let env = Env::new();
+    std::fs::create_dir_all(env.lib("History/Dev")).unwrap();
+    let pc = env.dav.path_case();
+    assert_eq!(
+        pc.canonical_path("/mokuro-reader/history/Dev/x", None),
+        "/mokuro-reader/history/Dev/x"
+    );
+    assert_eq!(
+        pc.canonical_path("/mokuro-reader/history/dev/x", None),
+        "/mokuro-reader/history/dev/x"
+    );
+}
+
+/// A library series spelled like a per-user name (`HISTORY/`, `Goals.json`) never folds
+/// into the cloud-root owner's own `history/` or `goals.json` at the library root.
+#[tokio::test]
+async fn a_case_fold_never_routes_into_the_per_user_tree() {
+    let env = Env::new();
+    std::fs::create_dir_all(env.lib("history/dev")).unwrap();
+    std::fs::write(env.lib("goals.json"), b"{}").unwrap();
+    let pc = env.dav.path_case();
+    assert_eq!(
+        pc.canonical_path("/mokuro-reader/HISTORY/v.cbz", None),
+        "/mokuro-reader/HISTORY/v.cbz"
+    );
+    assert_eq!(
+        pc.canonical_path("/mokuro-reader/Goals.json", None),
+        "/mokuro-reader/Goals.json"
+    );
+    // With a library series beside it, the request lands in the series. A series
+    // `History/` beside `history/` needs a case-sensitive filesystem (not the default on
+    // Windows or macOS, where both are one folder).
+    if env.lib("HISTORY").exists() {
+        return;
+    }
+    std::fs::create_dir_all(env.lib("History")).unwrap();
+    for spelling in ["HISTORY", "hIstory"] {
+        let path = format!("/mokuro-reader/{spelling}/v.cbz");
+        assert_eq!(
+            pc.canonical_path(&path, None),
+            "/mokuro-reader/History/v.cbz"
+        );
+    }
+    let r = req(
+        &env,
+        Some("uploader"),
+        "PUT",
+        "/mokuro-reader/HISTORY/v.cbz",
+        &[],
+        &cbz_bytes(1),
+    )
+    .await;
+    assert_eq!(r.code(), 201);
+    assert!(env.lib("History/v.cbz").is_file());
+    assert!(!env.lib("history/v.cbz").exists());
+}

@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 
+use bunko_core::reader_tree::Caller;
+
 use crate::locks::LockManager;
 use crate::resource::{FileKind, Resource, Roots, content_type, http_date, now_secs, rfc3339};
 use crate::xml::{self, DAV_NS, Element};
@@ -123,11 +125,15 @@ impl DeadProps {
 }
 
 /// The lock / dead-property key of a resource: its normalised path, with the username for
-/// a per-user file (so two users' copies at the same URL are distinct).
+/// a per-user file or folder (so two users' copies at the same URL are distinct).
 pub fn resource_key(res: &Resource, username: Option<&str>) -> String {
     let path = crate::paths::normalize(res.path());
     match res {
         Resource::File {
+            kind: FileKind::Progress,
+            ..
+        }
+        | Resource::Folder {
             kind: FileKind::Progress,
             ..
         } => format!("{path}\0{}", username.unwrap_or("")),
@@ -137,9 +143,16 @@ pub fn resource_key(res: &Resource, username: Option<&str>) -> String {
 
 /// Everything property values may consult besides the resource itself.
 pub struct PropCtx<'a> {
-    pub username: Option<&'a str>,
+    /// Whose per-user tree a listing shows (`None`: the shared, anonymous view).
+    pub caller: Option<Caller<'a>>,
     pub locks: Option<&'a LockManager>,
     pub dead: Option<&'a DeadProps>,
+}
+
+impl PropCtx<'_> {
+    fn username(&self) -> Option<&str> {
+        self.caller.map(|c| c.username)
+    }
 }
 
 /// One `<D:response>` for `res`.
@@ -179,13 +192,13 @@ pub fn write_response(out: &mut String, res: &Resource, mode: &Mode, ctx: &PropC
                 let ns = el.ns.as_deref();
                 let value = if ns == Some(DAV_NS) {
                     match el.local.as_str() {
-                        "lockdiscovery" => ctx.locks.map(|l| lockdiscovery(res, l, ctx.username)),
+                        "lockdiscovery" => ctx.locks.map(|l| lockdiscovery(res, l, ctx.username())),
                         "supportedlock" => Some(SUPPORTED_LOCK.to_string()),
                         name => live_value(res, name),
                     }
                 } else {
                     ctx.dead
-                        .and_then(|d| d.get(&resource_key(res, ctx.username), ns, &el.local))
+                        .and_then(|d| d.get(&resource_key(res, ctx.username()), ns, &el.local))
                         .map(|e| dead_inner(&e))
                 };
                 match value {
@@ -325,7 +338,7 @@ fn walk_inner(
         return;
     }
     let child_depth = depth.map(|d| d.saturating_sub(1));
-    for child in roots.members(res, ctx.username) {
+    for child in roots.members(res, ctx.caller) {
         if !child.is_collection() || child_depth == Some(0) {
             write_response(buf, &child, mode, ctx);
             if buf.len() >= 64 * 1024 {
@@ -335,7 +348,7 @@ fn walk_inner(
             continue;
         }
         match &child {
-            Resource::Folder { .. } => match roots.walkable(&child, ancestors) {
+            Resource::Folder { .. } => match roots.walkable(&child, ancestors, ctx.caller) {
                 Some(canon) => {
                     ancestors.push(canon);
                     walk_inner(roots, &child, child_depth, mode, ctx, sink, buf, ancestors);

@@ -1,8 +1,8 @@
 //! Path predicates the authorisation table is written in (0.5.2 `middleware/auth.py`,
 //! `metadata/paths.py`). Paths are percent-decoded UTF-8.
 
-pub const READER_ROOT: &str = "mokuro-reader";
-pub const PER_USER_FILES: &[&str] = &["volume-data.json", "profiles.json", "goals.json"];
+use bunko_core::reader_tree;
+pub use bunko_core::reader_tree::READER_ROOT;
 
 fn normalized(path: &str) -> String {
     format!("/{}", path.trim_matches('/'))
@@ -13,12 +13,19 @@ fn reader_relative(path: &str) -> Option<String> {
     p.strip_prefix("/mokuro-reader/").map(str::to_string)
 }
 
-pub fn is_progress_file(path: &str) -> bool {
-    reader_relative(path).is_some_and(|r| PER_USER_FILES.contains(&r.as_str()))
+/// The caller's own tree: a root file (`goals.json`, ...) or `history/**`.
+pub fn is_progress_path(path: &str) -> bool {
+    reader_relative(path).is_some_and(|r| reader_tree::is_per_user_rel(&r))
+}
+
+/// `history` or below it: the account's reading history.
+pub fn is_history_path(path: &str) -> bool {
+    reader_relative(path).is_some_and(|r| reader_tree::is_history_rel(&r))
 }
 
 pub fn is_library_path(path: &str) -> bool {
-    reader_relative(path).is_some_and(|r| !r.is_empty() && !PER_USER_FILES.contains(&r.as_str()))
+    reader_relative(path)
+        .is_some_and(|r| !r.trim_matches('/').is_empty() && !reader_tree::is_per_user_rel(&r))
 }
 
 pub fn is_inbox_path(path: &str) -> bool {
@@ -55,7 +62,7 @@ pub fn posix_normpath(path: &str) -> String {
 fn library_relative_normalized(path: &str) -> Option<String> {
     let n = posix_normpath(&format!("/{}", path.trim_matches('/')));
     let rel = n.strip_prefix("/mokuro-reader/")?;
-    if rel.is_empty() || PER_USER_FILES.contains(&rel) {
+    if rel.is_empty() || reader_tree::is_per_user_rel(rel) {
         return None;
     }
     Some(rel.to_string())
@@ -108,11 +115,37 @@ mod tests {
 
     #[test]
     fn progress_and_library() {
-        assert!(is_progress_file("/mokuro-reader/volume-data.json"));
-        assert!(!is_progress_file("/mokuro-reader/Volume-Data.json"));
+        assert!(is_progress_path("/mokuro-reader/volume-data.json"));
+        assert!(!is_progress_path("/mokuro-reader/Volume-Data.json"));
         assert!(is_library_path("/mokuro-reader/Volume-Data.json"));
         assert!(!is_library_path("/mokuro-reader/"));
         assert!(!is_library_path("/mokuro-reader/profiles.json"));
+        // The reader's position index is the user's own, like their progress.
+        assert!(is_progress_path("/mokuro-reader/positions.json"));
+        assert!(!is_library_path("/mokuro-reader/positions.json"));
+    }
+
+    #[test]
+    fn history_paths() {
+        for p in [
+            "/mokuro-reader/history",
+            "/mokuro-reader/history/",
+            "/mokuro-reader/history/d/2026-10.events",
+        ] {
+            assert!(is_progress_path(p), "{p}");
+            assert!(is_history_path(p), "{p}");
+            assert!(!is_library_path(p), "{p}");
+        }
+        assert!(is_progress_path("/mokuro-reader/goals.json"));
+        assert!(!is_history_path("/mokuro-reader/goals.json"));
+        for p in ["/mokuro-reader/History/v.cbz", "/mokuro-reader/historyx"] {
+            assert!(!is_progress_path(p), "{p}");
+            assert!(!is_history_path(p), "{p}");
+            assert!(is_library_path(p), "{p}");
+        }
+        assert!(!is_compiled_metadata_path(
+            "/mokuro-reader/history/series.json"
+        ));
     }
 
     #[test]
@@ -131,6 +164,9 @@ mod tests {
         );
         assert!(series_title_from_series_file_path("/mokuro-reader/a/b/series.json").is_none());
         assert!(series_title_from_series_file_path("/mokuro-reader/ /series.json").is_none());
+        // The reading-history tree is the account's own, never compiled metadata.
+        assert!(!is_series_file_path("/mokuro-reader/history/series.json"));
+        assert!(is_series_file_path("/mokuro-reader/History/series.json"));
     }
 
     #[test]
