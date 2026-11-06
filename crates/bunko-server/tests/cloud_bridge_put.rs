@@ -13,7 +13,8 @@
 //!   the admin storage status says the same; while another Bunko holds the lease it
 //!   is a 503 naming that.
 //! - No PUT, failed or not, leaves a staging file or a `state.sqlite` staging row.
-//! - A volume's MOVE answers with the cover Bunko made for it already moved along.
+//! - A volume's MOVE answers with the cover Bunko made for it already moved along;
+//!   a cover Bunko made at the new name gives way to it (its node moves).
 
 // Fixtures are checked with std::fs on purpose (the store's state folder is local).
 #![allow(clippy::disallowed_methods)]
@@ -603,6 +604,61 @@ async fn a_bridge_move_answers_with_bunkos_cover_moved_along() {
     .await;
     let moved = fake.node_at(&format!("{ROOT}/Series/Vol 1 renamed.webp"));
     assert_eq!(moved.map(|n| n.pid), Some(cover), "the same node, moved");
+    server.stop().await;
+}
+
+/// The hook that takes Bunko's cover along finds a cover Bunko made at the new name.
+/// Here the MOVE replaces another volume Bunko had covered; on Windows the cover
+/// worker, woken by the archive's arrival, covers the new name before the hook runs
+/// (`a_bridge_move_answers_with_bunkos_cover_moved_along` failed there: the moved
+/// cover was deleted, and the new name's uploaded as a new node). The moved cover's
+/// node takes the name, and the other cover goes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_bridge_move_over_a_covered_volume_moves_bunkos_cover_node() {
+    let fake = fake_library(FakeBackend::drive_like());
+    fake.reader_put(&format!("{ROOT}/Series/Vol 2.cbz"), &cbz(3, 2));
+    let server = Server::start(&fake, no_lease).await;
+    eventually(
+        "Bunko's covers in the cloud",
+        Duration::from_secs(30),
+        || {
+            cloud(&fake, "Series/Vol 1.webp").is_some()
+                && cloud(&fake, "Series/Vol 2.webp").is_some()
+        },
+    )
+    .await;
+    server.idle().await;
+    let node = |name: &str| fake.node_at(&format!("{ROOT}/Series/{name}"));
+    let (cover, replaced) = (node("Vol 1.webp").unwrap(), node("Vol 2.webp").unwrap());
+    let picture = cloud(&fake, "Series/Vol 1.webp");
+    assert_ne!(picture, cloud(&fake, "Series/Vol 2.webp"));
+    let dest = format!("{}/mokuro-reader/Series/Vol%202.cbz", server.url);
+    let r = server
+        .dav(
+            "MOVE",
+            "/mokuro-reader/Series/Vol%201.cbz",
+            &[("destination", &dest), ("overwrite", "T")],
+            None,
+        )
+        .await;
+    assert_eq!(r.status, 204, "{}", r.text());
+    server.idle().await;
+    eventually(
+        "the cover moved in the cloud",
+        Duration::from_secs(30),
+        || cloud(&fake, "Series/Vol 1.webp").is_none(),
+    )
+    .await;
+    assert_eq!(
+        node("Vol 2.webp").map(|n| n.pid),
+        Some(cover.pid),
+        "the moved cover's node"
+    );
+    assert_eq!(cloud(&fake, "Series/Vol 2.webp"), picture);
+    assert!(
+        fake.deleted_log().contains(&replaced.pid) || fake.trashed_log().contains(&replaced.pid),
+        "the replaced volume's cover went"
+    );
     server.stop().await;
 }
 

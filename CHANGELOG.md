@@ -358,7 +358,12 @@
   name, or removed when the new name has a cover already; a deleted archive takes
   it too. Covers a reader uploaded stay where they are. This works on Windows too, and
   wherever the storage folder is reached through a link (macOS temporary folders
-  among them).
+  among them). When the new name already has a cover Bunko made (it covered the
+  renamed archive before the rename finished, which happens often on Windows, or the
+  move replaced a volume it had covered), the moved cover takes its place: on a cloud
+  library the cover is no longer uploaded again under the new name while the one the
+  reader knew is deleted, and a replaced volume's cover no longer stays beside the
+  volume moved over it.
 - **A volume renamed while Bunko makes its cover leaves no stray cover behind.** A
   cover made from an archive that a reader moved away meanwhile (a volume rename, then
   its series') was still written under the old name, beside nothing, and the old

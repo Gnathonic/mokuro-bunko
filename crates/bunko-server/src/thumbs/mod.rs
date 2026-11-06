@@ -133,9 +133,39 @@ impl MadeCovers {
             .then_some((cover, size))
     }
 
+    /// When `cover` is one this process made and is still as made (by size), it is
+    /// removed and its record taken; anything else stays.
+    fn remove_own(made: &mut HashMap<PathBuf, (u64, Instant)>, cover: &Path) {
+        let key = Self::key(cover);
+        let Some(&(size, _)) = made.get(&key) else {
+            return;
+        };
+        if !fs::metadata(cover).is_ok_and(|m| m.is_file() && m.len() == size) {
+            return;
+        }
+        match fs::remove_file(cover) {
+            Ok(()) => {
+                made.remove(&key);
+            }
+            Err(e) => warn!(
+                "could not replace the cover {} with the one of the archive moved there: {e}",
+                cover.display()
+            ),
+        }
+    }
+
     /// The archive `from` was moved to `to`: the cover made for it goes along, or goes
     /// when `to` has a cover already (the reader moved its own there first). A case
     /// merge moves covers itself.
+    ///
+    /// A cover at `to` that this process made gives way to the one moving along. The
+    /// archive's arrival under `to` wakes the cover worker, which can cover it before
+    /// this hook runs (the MOVE's store write is still finishing: on Windows, where a
+    /// state database commit waits for the disk, it often does); or the move replaced
+    /// an archive Bunko had covered. Either way that cover is Bunko's, not the
+    /// reader's: on a cloud library keeping it re-uploaded the cover as a new node and
+    /// deleted the one the reader knew, and a replaced archive's cover would stay
+    /// beside the archive moved over it.
     pub fn archive_moved(&self, from: &Path, to: &Path) {
         if crate::ocr::owed::merge_busy(from) || crate::ocr::owed::merge_busy(to) {
             return;
@@ -145,6 +175,7 @@ impl MadeCovers {
             return;
         };
         let dest = cover_path(to);
+        Self::remove_own(&mut made, &dest);
         if !fs::exists(&dest) && fs::rename(&cover, &dest).is_ok() {
             made.insert(Self::key(&dest), (size, Instant::now()));
             return;
@@ -1492,6 +1523,56 @@ mod tests {
             };
             assert_eq!(names_in(&series), want, "delete: {delete}");
         }
+    }
+
+    /// The archive's arrival under its new name woke the cover worker, which covered
+    /// it before the MOVE's hook ran (Windows CI: the MOVE's store commit is slow
+    /// there). The cover that came with the archive replaces that one and still goes
+    /// along on the next move; on a cloud library keeping the worker's re-uploaded the
+    /// cover as a new node and deleted the moved one (`cloud_bridge_put.rs`). A cover
+    /// Bunko did not make at the new name (the reader moved its own first) stays.
+    #[test]
+    fn a_cover_made_under_the_new_name_before_the_hook_gives_way() {
+        let tmp = tempfile::tempdir().unwrap();
+        let series = tmp.path().join("Series");
+        std::fs::create_dir_all(&series).unwrap();
+        let (from, to) = (series.join("Vol 1.cbz"), series.join("Vol 1 renamed.cbz"));
+        cbz(&from, &[("a.png", &png(10, 10))]);
+        let thumb = |w| {
+            bunko_thumb::make_thumbnail_limited(&png(w, 10), MAX_DECODE_BYTES, MAX_SIDE).unwrap()
+        };
+        let (moving, worker) = (thumb(10), thumb(12));
+        assert_ne!(moving, worker);
+        let made = MadeCovers::default();
+        assert!(publish_cover(&from, &moving, &|_| false, &made).unwrap());
+        std::fs::rename(&from, &to).unwrap();
+        // The worker runs before the hook.
+        assert!(publish_cover(&to, &worker, &|_| false, &made).unwrap());
+        made.archive_moved(&from, &to);
+        assert_eq!(
+            names_in(&series),
+            ["Vol 1 renamed.cbz", "Vol 1 renamed.webp"]
+        );
+        assert_eq!(
+            std::fs::read(cover_path(&to)).unwrap(),
+            moving,
+            "the moved cover"
+        );
+        let back = series.join("Vol 1.cbz");
+        std::fs::rename(&to, &back).unwrap();
+        made.archive_moved(&to, &back);
+        assert_eq!(names_in(&series), ["Vol 1.cbz", "Vol 1.webp"]);
+        assert_eq!(std::fs::read(cover_path(&back)).unwrap(), moving);
+
+        // The reader's own cover at the new name wins over the one Bunko made.
+        std::fs::write(cover_path(&to), b"the reader's").unwrap();
+        std::fs::rename(&back, &to).unwrap();
+        made.archive_moved(&back, &to);
+        assert_eq!(
+            names_in(&series),
+            ["Vol 1 renamed.cbz", "Vol 1 renamed.webp"]
+        );
+        assert_eq!(std::fs::read(cover_path(&to)).unwrap(), b"the reader's");
     }
 
     /// A folder removed or moved away is no archive: the cover made for a loose archive
