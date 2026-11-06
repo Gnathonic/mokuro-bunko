@@ -356,7 +356,9 @@
   moved, and the reader then refused to rename the series, taking the stray cover for a
   volume it did not have. A cover Bunko made lately now follows its archive: to the new
   name, or removed when the new name has a cover already; a deleted archive takes
-  it too. Covers a reader uploaded stay where they are.
+  it too. Covers a reader uploaded stay where they are. This works on Windows too, and
+  wherever the storage folder is reached through a link (macOS temporary folders
+  among them).
 - **A volume renamed while Bunko makes its cover leaves no stray cover behind.** A
   cover made from an archive that a reader moved away meanwhile (a volume rename, then
   its series') was still written under the old name, beside nothing, and the old

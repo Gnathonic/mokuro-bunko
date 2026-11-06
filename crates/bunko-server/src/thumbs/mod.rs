@@ -88,6 +88,24 @@ type Busy<'a> = &'a dyn Fn(&Path) -> bool;
 pub struct MadeCovers(Mutex<HashMap<PathBuf, (u64, Instant)>>);
 
 impl MadeCovers {
+    /// The record of `cover` is kept under its folder as the disk names it, plus its
+    /// name. The cover worker finds archives under the library root as configured; a
+    /// WebDAV MOVE or DELETE names them under the root bunko-dav canonicalized. The two
+    /// differ on Windows always (the `\\?\` final path, 8.3 names expanded) and on any
+    /// host whose root goes through a link (macOS temp folders: `/var` is
+    /// `/private/var`): keyed as given, the hook never found the cover it made. A cloud
+    /// library's paths are mount paths, one spelling already, and are kept as given
+    /// (so no store lookup runs under the lock).
+    fn key(cover: &Path) -> PathBuf {
+        if bunko_store::store_for(cover).is_some_and(|s| s.caps().remote) {
+            return cover.to_path_buf();
+        }
+        let (Some(dir), Some(name)) = (cover.parent(), cover.file_name()) else {
+            return cover.to_path_buf();
+        };
+        fs::canonicalize(dir).map_or_else(|_| cover.to_path_buf(), |d| d.join(name))
+    }
+
     /// Forget the covers made longer ago than [`MADE_KEPT`].
     fn prune(made: &mut HashMap<PathBuf, (u64, Instant)>) {
         made.retain(|_, (_, at)| at.elapsed() < MADE_KEPT);
@@ -105,10 +123,11 @@ impl MadeCovers {
             return None;
         }
         let cover = cover_path(cbz);
-        if !made.contains_key(&cover) || fs::exists(cbz) {
+        let key = Self::key(&cover);
+        if !made.contains_key(&key) || fs::exists(cbz) {
             return None;
         }
-        let (size, _) = made.remove(&cover)?;
+        let (size, _) = made.remove(&key)?;
         fs::metadata(&cover)
             .is_ok_and(|m| m.is_file() && m.len() == size)
             .then_some((cover, size))
@@ -127,7 +146,7 @@ impl MadeCovers {
         };
         let dest = cover_path(to);
         if !fs::exists(&dest) && fs::rename(&cover, &dest).is_ok() {
-            made.insert(dest, (size, Instant::now()));
+            made.insert(Self::key(&dest), (size, Instant::now()));
             return;
         }
         if let Err(e) = fs::remove_file(&cover) {
@@ -613,7 +632,7 @@ fn publish_cover_with(
     }
     before_record(cbz);
     MadeCovers::prune(&mut made);
-    made.insert(out, (webp.len() as u64, Instant::now()));
+    made.insert(MadeCovers::key(&out), (webp.len() as u64, Instant::now()));
     Ok(true)
 }
 
@@ -1520,7 +1539,7 @@ mod tests {
             .insert(tmp.path().join("Old.webp"), (3, long_ago));
         assert!(publish_cover(&cbz_path, &webp, &|_| false, &made).unwrap());
         let kept: Vec<PathBuf> = made.0.lock().keys().cloned().collect();
-        assert_eq!(kept, [cover_path(&cbz_path)]);
+        assert_eq!(kept, [MadeCovers::key(&cover_path(&cbz_path))]);
     }
 
     /// The cloud's hooks (on its events thread) hand a MOVE's two follow-ups over in
