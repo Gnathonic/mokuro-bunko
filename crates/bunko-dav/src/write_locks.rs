@@ -168,6 +168,18 @@ impl AccountWriteLocks {
         }
     }
 
+    /// [`Self::lock`], from blocking code (a `spawn_blocking` thread, never an async
+    /// task).
+    pub fn blocking_lock(&self, base: PathBuf) -> AccountWriteGuard {
+        let mutex = self.held.lock().entry(base.clone()).or_default().clone();
+        let guard = mutex.blocking_lock_owned();
+        AccountWriteGuard {
+            locks: self.clone(),
+            key: base,
+            guard: Some(guard),
+        }
+    }
+
     /// Number of accounts held or waited for (tests).
     pub fn held_count(&self) -> usize {
         self.held.lock().len()

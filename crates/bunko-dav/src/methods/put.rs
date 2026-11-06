@@ -345,6 +345,22 @@ async fn put_inner(inner: &Arc<Inner>, req: &Req, body: Body) -> Result<Resp, Pu
     if let Some(recheck) = req.ctx.ownership_recheck.clone() {
         staging.recheck_before_publish(Box::new(move || recheck()));
     }
+    // One volume name per fold, asked again from the folder as it is when this archive
+    // lands, for every account: an archive that landed while this body was read (dispatch
+    // judged the listing before it) and that the fold makes one volume name with this
+    // one keeps it. One archive publish per folder at a time, so of two such uploads only
+    // the first to land is published.
+    if super::lands_library_archive(inner, &dest) {
+        let dest2 = dest.clone();
+        staging.check_name_before_publish(
+            inner.archive_publishes.clone(),
+            super::archive_publish_key(&dest),
+            Box::new(move || {
+                super::archive_name_check(&dest2, None)
+                    .map(|detail| Rejection::new(409, "ambiguous-name", detail, false))
+            }),
+        );
+    }
     // The client's precondition travels with the publish (spec §10 PUT): a remote
     // store checks it against the provider's version, so a change made in the cloud
     // since the client's If-Match (or a file created since its If-None-Match: *) is a

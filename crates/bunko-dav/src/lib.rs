@@ -168,6 +168,11 @@ pub(crate) struct Inner {
     pub roots: Roots,
     pub write_locks: PathWriteLocks,
     pub history_writers: AccountWriteLocks,
+    /// One archive publish per library folder at a time, from the last check of its
+    /// name against the folder's archives to the publish
+    /// ([`methods::archive_name_check`]): two archives the filename fold makes one
+    /// volume name never both land. Keyed by the folder's physical path, folded.
+    pub archive_publishes: AccountWriteLocks,
     pub locks: LockManager,
     pub dead: DeadProps,
     pub damage: DamageMemory,
@@ -215,6 +220,7 @@ impl Dav {
                 roots,
                 write_locks: PathWriteLocks::new(),
                 history_writers: AccountWriteLocks::default(),
+                archive_publishes: AccountWriteLocks::default(),
                 locks: LockManager::new(),
                 dead: DeadProps::default(),
                 damage: DamageMemory::default(),

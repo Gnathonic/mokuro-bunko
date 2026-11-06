@@ -1382,8 +1382,12 @@ async fn a_hand_made_archive_the_fold_ties_to_a_layer_never_blocks_corrections()
 /// `\u{131}X.curated.cbz`, `X\u{200B}.edit.cbz` beside `X.cbz`, `Stra\u{df}e.cbz`,
 /// `Vols.cbz`, `iX.cbz` (a nested archive is the volume of its shorter stem), and
 /// `X.5.cbz` beside `X\u{200B}.cbz` (layer `5` of one is the other's primary on every
-/// host).
-const VOLUME_NAME_TIES: [(&str, &str); 8] = [
+/// host), `Q.cura\u{200B}ted.curated.cbz` beside `Q.curated.cbz` and
+/// `Q.ed\u{200B}it.curated.cbz`, `Q.ed\u{131}t.curated.cbz` beside `Q.edit.cbz` (one
+/// base stem, but the primary of one is the other's curated layer on every host), and
+/// `\u{39F}\u{394}\u{39F}\u{3C2}.gcv.cbz` beside `\u{39F}\u{394}\u{39F}\u{3A3}.cbz` (a
+/// final sigma: the primary of one is the other's layer `gcv` on every host).
+const VOLUME_NAME_TIES: [(&str, &str); 12] = [
     ("X\u{200B}.curated.cbz", "X.cbz"),
     ("STRASSE.curated.cbz", "Stra\u{df}e.cbz"),
     ("Vol\u{17F}.curated.cbz", "Vols.cbz"),
@@ -1392,6 +1396,13 @@ const VOLUME_NAME_TIES: [(&str, &str); 8] = [
     ("X\u{200B}.edit-2.cbz", "X.cbz"),
     ("STRASSE.EDIT.cbz", "Stra\u{df}e.cbz"),
     ("X.5.cbz", "X\u{200B}.cbz"),
+    ("Q.cura\u{200B}ted.curated.cbz", "Q.curated.cbz"),
+    ("Q.ed\u{200B}it.curated.cbz", "Q.edit.cbz"),
+    ("Q.ed\u{131}t.curated.cbz", "Q.edit.cbz"),
+    (
+        "\u{39F}\u{394}\u{39F}\u{3C2}.gcv.cbz",
+        "\u{39F}\u{394}\u{39F}\u{3A3}.cbz",
+    ),
 ];
 
 /// One volume name per filename fold, first come first served, as on a
@@ -1492,6 +1503,7 @@ async fn one_volume_name_per_fold_first_come_first_served() {
         for (user, name) in [
             ("alice", format!("{stem}.mokuro")),
             ("alice", format!("{stem}.curated.mokuro")),
+            ("alice", format!("{stem}.gcv.mokuro")),
             ("reader", format!("{stem}.edit.mokuro")),
             ("bob", format!("{stem}.edit.mokuro")),
         ] {
@@ -1557,10 +1569,33 @@ async fn a_volume_name_tie_already_listed_holds_both_volumes_files() {
             .put("reader", &at(&format!("{stem}.edit.mokuro")), body.clone())
             .await;
         assert_eq!(r.status, 201, "{}", r.text());
-        // The archives themselves: replaced, then one deleted, by their controller.
+        // The archives themselves: replaced (by PUT, and by a COPY onto them), then one
+        // deleted, by their controller.
         for archive in [squat, volume] {
             let r = env.put("editor", &at(archive), cbz(2)).await;
             assert_eq!(r.status, 204, "replace {archive:?}: {}", r.text());
+        }
+        std::fs::create_dir_all(env.lib("Src")).unwrap();
+        std::fs::write(env.lib("Src/W.cbz"), cbz(3)).unwrap();
+        for archive in [squat, volume] {
+            let to = format!("http://localhost:8080{}", enc(&at(archive)));
+            let r = env
+                .send(
+                    "editor",
+                    "COPY",
+                    "/mokuro-reader/Src/W.cbz",
+                    &[("destination", to.as_str())],
+                    Vec::new(),
+                )
+                .await;
+            assert_eq!(r.status, 204, "COPY onto {archive:?}: {}", r.text());
+        }
+        // (A COPY onto an archive deletes it first, with its files, as ever.)
+        for archive in [squat, volume] {
+            assert!(
+                env.lib(&format!("{folder}/{archive}")).is_file(),
+                "{archive:?}"
+            );
         }
         let (gone, kept) = if i % 2 == 0 {
             (squat, volume)
@@ -1605,4 +1640,259 @@ async fn a_volume_name_tie_already_listed_holds_both_volumes_files() {
         )
         .await;
     assert_eq!(r.status, 201, "{}", r.text());
+}
+
+/// A PUT whose body is held open: [`SlowPut::start`] returns once the server has read
+/// its first bytes (the request passed every check made before the body, and the body
+/// is being staged); [`SlowPut::finish`] sends the rest and takes the answer.
+struct SlowPut {
+    tx: tokio::sync::mpsc::Sender<Result<axum::body::Bytes, std::io::Error>>,
+    rest: Vec<u8>,
+    task: tokio::task::JoinHandle<Resp>,
+}
+
+impl SlowPut {
+    async fn start(env: &Env, user: &str, path: &str, body: Vec<u8>) -> SlowPut {
+        // One slot: the second chunk is taken only once the first was read.
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<axum::body::Bytes, std::io::Error>>(1);
+        let stream = futures_util::stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|item| (item, rx))
+        });
+        let req = Request::builder()
+            .method("PUT")
+            .uri(enc(path))
+            .header("host", "localhost:8080")
+            .header("authorization", basic(user))
+            .header("content-length", body.len().to_string())
+            .body(Body::from_stream(stream))
+            .unwrap();
+        let app = env.app.clone();
+        let task = tokio::spawn(async move {
+            let resp = app.oneshot(req).await.unwrap();
+            let status = resp.status().as_u16();
+            let body = resp
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec();
+            Resp { status, body }
+        });
+        let third = body.len() / 3;
+        for part in [&body[..third], &body[third..2 * third]] {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(20),
+                tx.send(Ok(axum::body::Bytes::copy_from_slice(part))),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("the upload of {path:?} was never read"))
+            .unwrap_or_else(|_| panic!("the upload of {path:?} was answered before its body"));
+        }
+        SlowPut {
+            tx,
+            rest: body[2 * third..].to_vec(),
+            task,
+        }
+    }
+
+    async fn finish(self) -> Resp {
+        self.tx
+            .send(Ok(axum::body::Bytes::from(self.rest)))
+            .await
+            .unwrap();
+        drop(self.tx);
+        self.task.await.unwrap()
+    }
+}
+
+/// The volume name is the first archive's to LAND: one listed while another archive's
+/// body is still read (dispatch judged the listing before it) refuses that archive
+/// when it would be published, 409 `ambiguous-name`, for every account, in either
+/// order, however long the slow upload was held open. Nothing of the refused upload
+/// stays, the archive that landed keeps every one of its files, and its controller
+/// keeps replacing and deleting it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_volume_name_taken_mid_upload_refuses_the_upload() {
+    let env = Env::new();
+    let body = br#"{"pages":[]}"#.to_vec();
+    for (i, (squat, volume)) in VOLUME_NAME_TIES.iter().enumerate() {
+        let stem = volume.strip_suffix(".cbz").unwrap();
+        // Alice's volume is mid-upload when bob's squatter lands.
+        let folder = format!("A{i}");
+        std::fs::create_dir_all(env.lib(&folder)).unwrap();
+        let at = |name: &str| format!("/mokuro-reader/{folder}/{name}");
+        let slow = SlowPut::start(&env, "alice", &at(volume), cbz(2)).await;
+        let r = env.put("bob", &at(squat), cbz(1)).await;
+        assert_eq!(r.status, 201, "bob PUT {squat:?}: {}", r.text());
+        let r = slow.finish().await;
+        assert_eq!(
+            r.status,
+            409,
+            "alice's {volume:?} after {squat:?}: {}",
+            r.text()
+        );
+        assert_eq!(r.json()["reason"], "ambiguous-name", "{volume:?}");
+        let detail = r.json()["detail"].as_str().unwrap().to_string();
+        assert!(detail.contains(&format!("{squat:?}")), "{detail}");
+        assert_eq!(names(&env.lib(&folder)), [squat.to_string()]);
+        assert_eq!(
+            env.services
+                .db
+                .get_volume_owner(&format!("{folder}/{volume}"))
+                .unwrap(),
+            None
+        );
+        let r = env.put("bob", &at(squat), cbz(3)).await;
+        assert_eq!(r.status, 204, "bob replaces {squat:?}: {}", r.text());
+        let r = env.delete("bob", &at(squat)).await;
+        assert_eq!(r.status, 204, "bob deletes {squat:?}: {}", r.text());
+
+        // Bob's squatter is mid-upload when alice's volume lands, and her OCR file;
+        // so is an editor's (who controls everything: the name alone refuses it).
+        let (folder, editors) = (format!("B{i}"), format!("C{i}"));
+        let at = |name: &str| format!("/mokuro-reader/{folder}/{name}");
+        let at_c = |name: &str| format!("/mokuro-reader/{editors}/{name}");
+        std::fs::create_dir_all(env.lib(&folder)).unwrap();
+        std::fs::create_dir_all(env.lib(&editors)).unwrap();
+        let slow_bob = SlowPut::start(&env, "bob", &at(squat), cbz(1)).await;
+        let slow_editor = SlowPut::start(&env, "editor", &at_c(squat), cbz(1)).await;
+        for at in [&at as &dyn Fn(&str) -> String, &at_c] {
+            let r = env.put("alice", &at(volume), cbz(2)).await;
+            assert_eq!(r.status, 201, "alice PUT {volume:?}: {}", r.text());
+            let r = env
+                .put("alice", &at(&format!("{stem}.mokuro")), body.clone())
+                .await;
+            assert_eq!(r.status, 201, "alice PUT {stem:?}.mokuro: {}", r.text());
+        }
+        let r = slow_bob.finish().await;
+        // Bob controls no volume here once alice's landed: refused, whichever check
+        // comes first; never published.
+        assert!(
+            matches!(r.status, 403 | 409),
+            "bob's {squat:?} after {volume:?}: {} {}",
+            r.status,
+            r.text()
+        );
+        if r.status == 409 {
+            assert_eq!(r.json()["reason"], "ambiguous-name", "{squat:?}");
+        }
+        let r = slow_editor.finish().await;
+        assert_eq!(r.status, 409, "editor's {squat:?}: {}", r.text());
+        assert_eq!(r.json()["reason"], "ambiguous-name", "{squat:?}");
+        let detail = r.json()["detail"].as_str().unwrap().to_string();
+        assert!(detail.contains(&format!("{volume:?}")), "{detail}");
+        let mut want = [format!("{stem}.mokuro"), volume.to_string()];
+        want.sort();
+        for dir in [&folder, &editors] {
+            assert_eq!(names(&env.lib(dir)), want, "{dir}");
+        }
+        // Every file of alice's volume is written, and the archive stays hers.
+        for (user, name) in [
+            ("alice", format!("{stem}.mokuro")),
+            ("alice", format!("{stem}.curated.mokuro")),
+            ("alice", format!("{stem}.gcv.mokuro")),
+            ("alice", format!("{stem}.webp")),
+            ("reader", format!("{stem}.edit.mokuro")),
+        ] {
+            let r = env.put(user, &at(&name), body.clone()).await;
+            assert!(
+                matches!(r.status, 201 | 204),
+                "{user} PUT {name:?}: {} {}",
+                r.status,
+                r.text()
+            );
+        }
+        let r = env.put("alice", &at(volume), cbz(1)).await;
+        assert_eq!(r.status, 204, "alice replaces {volume:?}: {}", r.text());
+        let r = env.delete("alice", &at(volume)).await;
+        assert_eq!(r.status, 204, "alice deletes {volume:?}: {}", r.text());
+    }
+}
+
+/// Two archives the fold makes one volume name, both mid-upload, finishing together:
+/// one is published, the other refused (409 `ambiguous-name`), never both.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn of_two_racing_archives_of_one_volume_name_one_lands() {
+    let env = Env::new();
+    for round in 0..4 {
+        for (i, (squat, volume)) in VOLUME_NAME_TIES.iter().enumerate() {
+            let folder = format!("R{round}-{i}");
+            std::fs::create_dir_all(env.lib(&folder)).unwrap();
+            let at = |name: &str| format!("/mokuro-reader/{folder}/{name}");
+            let a = SlowPut::start(&env, "editor", &at(volume), cbz(2)).await;
+            let b = SlowPut::start(&env, "editor", &at(squat), cbz(1)).await;
+            let (a, b) = if (round + i) % 2 == 0 {
+                tokio::join!(a.finish(), b.finish())
+            } else {
+                let (b, a) = tokio::join!(b.finish(), a.finish());
+                (a, b)
+            };
+            let landed: Vec<&str> = [(&a, *volume), (&b, *squat)]
+                .iter()
+                .filter(|(r, _)| r.status == 201)
+                .map(|(_, n)| *n)
+                .collect();
+            assert_eq!(
+                landed.len(),
+                1,
+                "{volume:?} {} {}, {squat:?} {} {}",
+                a.status,
+                a.text(),
+                b.status,
+                b.text()
+            );
+            for r in [&a, &b] {
+                if r.status != 201 {
+                    assert_eq!(r.status, 409, "{}", r.text());
+                    assert_eq!(r.json()["reason"], "ambiguous-name");
+                }
+            }
+            assert_eq!(names(&env.lib(&folder)), [landed[0].to_string()]);
+        }
+    }
+}
+
+/// An account keeps full control of its own archive whatever sits beside it: in a
+/// volume name tie made outside Bunko, each archive is replaced and deleted by its own
+/// controller, by rule v1, and by nobody else (the filename fold alone would hand
+/// `X\u{200B}.curated.cbz` up to the `X.cbz` beside it).
+#[tokio::test]
+async fn an_archive_in_a_volume_name_tie_stays_its_controllers() {
+    let env = Env::new();
+    for (i, (squat, volume)) in VOLUME_NAME_TIES.iter().enumerate() {
+        // Bob's archive, the volume's made beside it by hand.
+        let folder = format!("K{i}");
+        std::fs::create_dir_all(env.lib(&folder)).unwrap();
+        let at = |name: &str| format!("/mokuro-reader/{folder}/{name}");
+        let r = env.put("bob", &at(squat), cbz(1)).await;
+        assert_eq!(r.status, 201, "bob PUT {squat:?}: {}", r.text());
+        std::fs::write(env.lib(&format!("{folder}/{volume}")), cbz(1)).unwrap();
+        let r = env.put("bob", &at(squat), cbz(2)).await;
+        assert_eq!(r.status, 204, "bob replaces {squat:?}: {}", r.text());
+        for user in ["alice", "reader"] {
+            let r = env.delete(user, &at(squat)).await;
+            assert_eq!(r.status, 403, "{user} deletes {squat:?}: {}", r.text());
+            let r = env.put(user, &at(squat), cbz(3)).await;
+            assert_eq!(r.status, 403, "{user} replaces {squat:?}: {}", r.text());
+        }
+        let r = env.delete("bob", &at(squat)).await;
+        assert_eq!(r.status, 204, "bob deletes {squat:?}: {}", r.text());
+        assert_eq!(names(&env.lib(&folder)), [volume.to_string()]);
+
+        // Alice's volume, the squatter made beside it by hand.
+        let folder = format!("L{i}");
+        std::fs::create_dir_all(env.lib(&folder)).unwrap();
+        let at = |name: &str| format!("/mokuro-reader/{folder}/{name}");
+        let r = env.put("alice", &at(volume), cbz(1)).await;
+        assert_eq!(r.status, 201, "alice PUT {volume:?}: {}", r.text());
+        std::fs::write(env.lib(&format!("{folder}/{squat}")), cbz(1)).unwrap();
+        let r = env.put("alice", &at(volume), cbz(2)).await;
+        assert_eq!(r.status, 204, "alice replaces {volume:?}: {}", r.text());
+        let r = env.delete("bob", &at(volume)).await;
+        assert_eq!(r.status, 403, "bob deletes {volume:?}: {}", r.text());
+        let r = env.delete("alice", &at(volume)).await;
+        assert_eq!(r.status, 204, "alice deletes {volume:?}: {}", r.text());
+        assert_eq!(names(&env.lib(&folder)), [squat.to_string()]);
+    }
 }

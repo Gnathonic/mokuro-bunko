@@ -700,7 +700,9 @@ async fn disputed_refusal(inner: &Arc<Inner>, r: &Req) -> Option<Resp> {
 ///   pair is listed (made before this release, or outside Bunko).
 ///
 /// An archive already listed is replaced, deleted and moved away as ever: that is how
-/// a pair is cleared up. Reads are never refused.
+/// a pair is cleared up. Reads are never refused. Asked at dispatch, from the listing
+/// before the body is read, and again right before an archive lands
+/// ([`archive_name_check`]).
 fn volume_name_refusal(name: &str, files: &[&str], source: Option<&str>) -> Option<String> {
     use bunko_core::sidecar_names::{
         cbz_stem, governing_archives_by_either_fold, volume_name_ties,
@@ -749,6 +751,40 @@ fn volume_name_refusal(name: &str, files: &[&str], source: Option<&str>) -> Opti
         ));
     }
     None
+}
+
+/// Does an archive landing at `dest` (physical) take a name in a library folder, so
+/// one volume name per fold ([`archive_name_check`]) is asked again right before it
+/// lands?
+pub(crate) fn lands_library_archive(inner: &Inner, dest: &Path) -> bool {
+    is_cbz(dest) && dest.parent().is_some() && inner.roots.library_rel(dest).is_some()
+}
+
+/// The [`Inner::archive_publishes`] key of the folder an archive lands in at `dest`:
+/// its physical path, folded, so every spelling of one folder is one key.
+pub(crate) fn archive_publish_key(dest: &Path) -> PathBuf {
+    let dir = dest.parent().unwrap_or(dest);
+    PathBuf::from(crate::fold_name(&dir.to_string_lossy()))
+}
+
+/// One volume name per filename fold ([`volume_name_refusal`]), asked again from a
+/// fresh listing of the folder right before an archive lands at `dest` (a PUT's
+/// publish, a COPY's or MOVE's rename; `source`: a MOVE's source, which leaves the
+/// folder when it is the same one), the caller holding the folder's
+/// [`Inner::archive_publishes`] lock through the publish. What dispatch checked was the
+/// listing before the body was read or the file copied: an archive that landed since
+/// (a racing upload, however long it was held open) is seen here, and of two archives
+/// the fold makes one volume name only the first to land is published, the other
+/// refused (`Some`: the 409 `ambiguous-name` detail), for every account. Blocking.
+pub(crate) fn archive_name_check(dest: &Path, source: Option<&Path>) -> Option<String> {
+    let (dir, name) = (dest.parent()?, dest.file_name()?.to_str()?);
+    let files = crate::personal::names_in(dir);
+    let refs: Vec<&str> = files.iter().map(String::as_str).collect();
+    let source = source
+        .filter(|src| src.parent() == Some(dir))
+        .and_then(|src| src.file_name())
+        .and_then(|n| n.to_str());
+    volume_name_refusal(name, &refs, source)
 }
 
 /// 0.5.2 `_forget_ocr_records`.

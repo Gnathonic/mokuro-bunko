@@ -253,6 +253,10 @@ pub type BeforePublish = Box<dyn FnOnce(&Path) + Send>;
 /// What [`Staging::recheck_before_publish`] asks: may the write still land? Blocking.
 pub type Recheck = Box<dyn FnOnce() -> Result<(), crate::Refusal> + Send>;
 
+/// What [`Staging::check_name_before_publish`] asks under its lock: is the name still
+/// the write's to take (`Some`: the refusal)? Blocking.
+pub type NameCheck = Box<dyn FnOnce() -> Option<Rejection> + Send>;
+
 /// One body being staged at `<dest dir>/.<name>.upload-<random>.tmp`. Dropping it before
 /// [`Staging::commit`] discards the staged bytes (an aborted or rejected upload never
 /// touches the destination).
@@ -271,6 +275,8 @@ pub struct Staging {
     before_publish: Option<BeforePublish>,
     /// Asked once the body is checked, right before it is compared and published.
     recheck: Option<Recheck>,
+    /// Asked last, under the lock of its key, held through the publish.
+    name_check: Option<(crate::AccountWriteLocks, PathBuf, NameCheck)>,
 }
 
 impl Drop for Staging {
@@ -350,6 +356,7 @@ impl Staging {
                         mode: Mode::Replace { base: None },
                         before_publish: None,
                         recheck: None,
+                        name_check: None,
                     });
                 }
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
@@ -383,6 +390,18 @@ impl Staging {
     /// may refuse the write after all (a 403 with the refusal's detail).
     pub fn recheck_before_publish(&mut self, f: Recheck) {
         self.recheck = Some(f);
+    }
+
+    /// At commit, last before the publish: `check` asked under `locks`' lock of `key`,
+    /// which is held until the file is published, so writers holding one key are
+    /// checked and published one at a time. A refusal discards the staged body.
+    pub fn check_name_before_publish(
+        &mut self,
+        locks: crate::AccountWriteLocks,
+        key: PathBuf,
+        check: NameCheck,
+    ) {
+        self.name_check = Some((locks, key, check));
     }
 
     /// The publish's precondition (default: replace whatever is there).
@@ -513,6 +532,26 @@ impl Staging {
                 ));
             }
         }
+        let _held = match self.name_check.take() {
+            Some((locks, key, check)) => {
+                let held = locks.lock(key).await;
+                let refused = tokio::task::spawn_blocking(move || bunko_store::interactive(check))
+                    .await
+                    .map_err(|_| {
+                        Rejection::new(
+                            500,
+                            "server-error",
+                            "The server failed checking the upload: name check panicked.",
+                            true,
+                        )
+                    })?;
+                if let Some(rejection) = refused {
+                    return Err(rejection);
+                }
+                Some(held)
+            }
+            None => None,
+        };
         if self.keep_identical {
             let (temp, dest) = (self.temp.clone(), self.dest.clone());
             let same = tokio::task::spawn_blocking(move || same_bytes(&temp, &dest))

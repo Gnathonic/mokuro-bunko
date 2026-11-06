@@ -318,25 +318,34 @@ volume's own primary (`V.EDIT.mokuro` beside `V.EDIT.cbz`) is not such a file.
 
 **One volume name per fold.** An archive's volume name is its stem without the
 trailing `.edit`, `.edit-<n>`, `.curated` or `.curated-<n>` ids the wider fold reads in
-it (`STRASSE.curated.cbz` belongs to a volume `STRASSE`). Two archives of a folder whose
-volume names the wider fold joins while they are spelled differently
-(`STRASSE.curated.cbz` and `Straße.cbz`, `Volſ.curated.cbz` and `Vols.cbz`,
-`ıX.curated.cbz` and `iX.cbz`, `X.edit.cbz` with a zero width space after `X` and
-`X.cbz`, `v.curated.cbz` and `V.cbz`), or one of whose files would be one name with a
-file of the other only by the wider fold (`X.cbz` with a zero width space after `X`,
-and `X.5.cbz`), are one volume name, as a case-insensitive disk would have it: 0.8
-keeps the one listed first and refuses the other (an upload, or a COPY or MOVE onto
+it (`STRASSE.curated.cbz` belongs to a volume `STRASSE`). Two archives of a folder are
+one volume name, as a case-insensitive disk would have it, when their volume names
+the wider fold joins while they are spelled differently (`STRASSE.curated.cbz` and
+`Straße.cbz`, `Volſ.curated.cbz` and `Vols.cbz`, `ıX.curated.cbz` and `iX.cbz`,
+`X.edit.cbz` with a zero width space after `X` and `X.cbz`, `v.curated.cbz` and
+`V.cbz`), or when the OCR file of one is, only by the wider fold, one name with a
+layer of the other that rule v1 gives to that other archive (the layer named from the
+other's stem as spelled): `X.cbz` with a zero width space after `X` and `X.5.cbz`;
+`Q.curated.curated.cbz` with a zero width space inside the first `curated` beside
+`Q.curated.cbz`, or `Q.edıt.curated.cbz` beside `Q.edit.cbz` (the OCR file of the
+first is the curated layer of the second); `ΟΔΟς.gcv.cbz` with a final sigma and `ΟΔΟΣ.cbz` (rule v1 makes
+`ΟΔΟΣ.gcv.mokuro` the second's `gcv` layer). Personal layers (`edit`, `edit-<n>`)
+make no pair, since corrections are kept in each account's own copy. 0.8 keeps the
+archive that landed first and refuses the other (an upload, or a COPY or MOVE onto
 it, answers 409 `ambiguous-name`, whichever came first, for every account that may
-add it). Where a
-library already holds such a pair (made by hand, or by an earlier release), both
-archives stay readable, and every other write to either volume's files (OCR files,
-layers, covers, `.nocover`, a curated publish) answers 409 `ambiguous-name` naming the
-pair; each account's own correction still goes to its own copy. On a local library
-doctor names each pair ("Ambiguous volume names"). To clear one, rename one archive
-with its sidecars, cover and layers so that both spell the volume name alike
-(`STRASSE.curated.cbz` to `Straße.curated.cbz`) or the names differ, or delete the one
-that should not be there; whoever controls an archive may still replace, move or
-delete it.
+add it). This is checked again from the folder right before an archive lands, one
+archive per folder at a time, so an upload still in progress when another archive of
+that volume name lands is refused when it finishes. Where a library already holds
+such a pair (made by hand, or by an earlier release), both archives stay readable,
+and every other write to either volume's files (OCR files, layers, covers,
+`.nocover`, a curated publish) answers 409 `ambiguous-name` naming the pair; each
+account's own correction still goes to its own copy. Each archive of the pair is
+governed by rule v1 alone, so the account that controls it by rule v1 may still
+replace, move or delete it. On a local library doctor names each pair ("Ambiguous
+volume names"). To clear one, rename one archive with its sidecars, cover and layers
+so that both spell the volume name alike (`STRASSE.curated.cbz` to
+`Straße.curated.cbz`) or the names differ, or delete the one that should not be
+there.
 
 Series folders spelled like a reader's per-user name (`history`, `History`,
 `goals.json`, `Goals.json`, `volume-data.json`, ...) are hidden in 0.8, from WebDAV

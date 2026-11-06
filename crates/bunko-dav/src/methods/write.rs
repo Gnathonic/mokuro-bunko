@@ -742,7 +742,14 @@ pub(crate) async fn copy_move(inner: &Arc<Inner>, req: &Req, is_move: bool) -> D
                     if let Some(d) = &dest {
                         delete_resource(&inner2, &req2, d, &mut effects)?;
                     }
-                    copy_file(&inner2, &req2, phys, &dest_norm, &dest_phys, &mut effects)?;
+                    copy_file(
+                        &inner2,
+                        &req2,
+                        phys,
+                        (&dest_norm, &dest_phys),
+                        dest_exists,
+                        &mut effects,
+                    )?;
                     if dest_exists {
                         StatusCode::NO_CONTENT
                     } else {
@@ -844,6 +851,7 @@ fn move_file(
         return Err(write_lock_conflict(req, target, "move", Some(dest_v)));
     };
     dest_spelling_allowed(inner, req, Some(src), dest)?;
+    let _publish = archive_name_held(inner, dest, Some(src))?;
     let old_rel = inner.roots.library_rel(src);
     let new_rel = inner.roots.library_rel(dest);
     primary_leaving(inner, req, src);
@@ -879,6 +887,27 @@ fn move_file(
     effects.touch(dest_v, Some(dest));
     audit(req, "move", target, Some(json!({ "destination": dest_v })));
     Ok(())
+}
+
+/// One volume name per fold, asked again right before a COPY or MOVE puts an archive at
+/// `dest` in a library folder ([`super::archive_name_check`]), under that folder's
+/// archive publish lock, which the returned guard holds until the rename is done: an
+/// archive that landed since dispatch judged the listing keeps its volume name (409).
+fn archive_name_held(
+    inner: &Inner,
+    dest: &Path,
+    source: Option<&Path>,
+) -> DavResult<Option<crate::AccountWriteGuard>> {
+    if !super::lands_library_archive(inner, dest) {
+        return Ok(None);
+    }
+    let held = inner
+        .archive_publishes
+        .blocking_lock(super::archive_publish_key(dest));
+    match super::archive_name_check(dest, source) {
+        Some(detail) => Err(DavError::new(StatusCode::CONFLICT, &detail)),
+        None => Ok(Some(held)),
+    }
 }
 
 /// MOVE or COPY of the caller's own correction to another of its correction names
@@ -918,12 +947,15 @@ fn move_personal(
 
 /// 0.5.2 file `copy_move_single(is_move=False)`: the copy is untracked (no owner row);
 /// sidecars are not copied. Written to a staging file and renamed (never a torn file).
+///
+/// `replacing`: the destination was a listed file, deleted just before (an archive's
+/// name already listed is never refused by one volume name per fold).
 fn copy_file(
     inner: &Inner,
     req: &Req,
     src: &Path,
-    dest_v: &str,
-    dest: &Path,
+    (dest_v, dest): (&str, &Path),
+    replacing: bool,
     effects: &mut Effects,
 ) -> DavResult<()> {
     let target = file_audit_target(inner, dest_v, dest);
@@ -931,6 +963,11 @@ fn copy_file(
         return Err(write_lock_conflict(req, target, "copy", Some(dest_v)));
     };
     dest_spelling_allowed(inner, req, None, dest)?;
+    let _publish = if replacing {
+        None
+    } else {
+        archive_name_held(inner, dest, None)?
+    };
     copy_one(src, dest)?;
     effects.note_arrived(inner, dest);
     forget_ocr_records(req, inner.roots.library_rel(dest).as_deref(), false);
@@ -1150,7 +1187,7 @@ fn copy_folder(
                     if exists {
                         delete_file(inner, req, &v, &t, effects)?;
                     }
-                    copy_file(inner, req, &f, &v, &t, effects)?;
+                    copy_file(inner, req, &f, (&v, &t), exists, effects)?;
                 }
                 Err(_) => {}
             }

@@ -152,28 +152,47 @@
   a case-insensitive disk, when their volume names fold alike but are not spelled
   alike byte for byte (`STRASSE.curated.cbz` and `Straße.cbz`, `Volſ.curated.cbz` and
   `Vols.cbz`, `ıX.curated.cbz` and `iX.cbz`, `X` + a zero width space + `.edit.cbz` and
-  `X.cbz`, `v.curated.cbz` and `V.cbz`), or when a file name rule v1 gives one of them
-  is one name with a file name it gives the other by the fold only (`X` + a zero width
-  space + `.cbz` and `X.5.cbz`: layer `5` of the first is the primary of the second on
-  every host). An upload of an archive that is not listed yet, or a COPY or MOVE onto
-  one (a MOVE inside the folder judged without its own source), answers 409 `ambiguous-name` when it
-  would be one volume name with a listed archive, whichever was there first, for every
-  account the rest of the rules let through, the volume's own uploader included (it
-  got 403 before for a `STRASSE.curated.cbz` beside its `Straße.cbz`). Before, the
+  `X.cbz`, `v.curated.cbz` and `V.cbz`), or when the OCR file of one, `<s>.mokuro`, is
+  one name by the fold with a layer of the other, `<t>.<r>.mokuro`, that rule v1 gives
+  to the other archive and not to the first, the layer named as a client names it,
+  from `<t>` as spelled (`X` + a zero width space + `.cbz` and `X.5.cbz`: layer `5` of
+  the first is the primary of the second on every host; `Q.cura` + a zero width space
+  + `ted.curated.cbz` and `Q.curated.cbz`, `Q.edıt.curated.cbz` and `Q.edit.cbz`: the
+  primary of the first is the curated layer of the second; `ΟΔΟς.gcv.cbz`, with a final
+  sigma, and `ΟΔΟΣ.cbz`: rule v1 lowercases a sigma by its place in the stem, so
+  `ΟΔΟΣ.gcv.mokuro` is the second's layer `gcv`, one name with the first's primary;
+  `V.cura` + a zero width space + `ted.cbz` and `V.cbz`). A personal layer (`edit`,
+  `edit-<n>`) makes no pair: each account's correction is kept in its own copy, never
+  in the library (`V.ed` + a zero width space + `it.cbz` beside `V.cbz` is not one, and
+  Bunko creates no such archive anyway). Where rule v1 itself reads the layer name as
+  the first archive's primary (`V.5.cbz` and `ΟΔΟΣ.gcv.cbz` beside `V.cbz` and
+  `ΟΔΟΣ.cbz`), or reads one volume spelled alike (`V.curated.cbz` beside `V.cbz`,
+  governed by `V`'s uploader as before), and for two spellings of one whole name (a
+  case-variant group), there is no such pair. An upload of an archive that is not
+  listed yet, or a COPY or MOVE onto one (a MOVE inside the folder judged without its
+  own source), answers 409 `ambiguous-name` when it would be one volume name with a
+  listed archive, whichever was there first, for every account the rest of the rules
+  let through, the volume's own uploader and editors included (it got 403 before for
+  a `STRASSE.curated.cbz` beside its `Straße.cbz`). This is asked when the request
+  arrives and again from the folder as it is right before the archive lands (a PUT's
+  publish, once its body is read and checked; a COPY's or MOVE's rename), one archive
+  landing per folder at a time: an upload held open while another archive of that
+  volume name lands is refused when it finishes and nothing of it stays, and of two
+  such uploads finishing together only the first to land is published. Before, the
   later archive was written, and then its own curated, edit and OCR writes were
   refused, and the earlier archive's uploader could no longer delete or replace it.
-  The first archive stays its uploader's to replace, delete or move as before. One
-  volume name spelled alike (`V.curated.cbz` beside `V.cbz`, governed by `V`'s
-  uploader as before) and two spellings of one whole name (a case-variant group) are
-  not such a pair. A pair already listed (made before this release, or outside Bunko)
-  is read as before; a PUT, MKCOL, PROPPATCH or LOCK of any other name either archive
-  governs by rule v1 or the wider fold (its OCR file, layers, cover, `.nocover`, a
-  curated publish, a name nested under it), or a COPY or MOVE onto one, answers 409
-  `ambiguous-name` naming the pair, for every account, until one of the two archives
-  is renamed or deleted (by whoever controls it, as before). An account's own
-  correction still goes to its own copy (on a cloud library the progress user's, the
-  cloud folder's file, is refused too). On a local library `doctor` names each pair
-  ("Ambiguous volume names").
+  The first archive stays its uploader's to replace, delete or move as before. A pair
+  already listed (made before this release, or outside Bunko) is read as before; a
+  PUT, MKCOL, PROPPATCH or LOCK of any other name either archive governs by rule v1 or
+  the wider fold (its OCR file, layers, cover, `.nocover`, a curated publish, a name
+  nested under it), or a COPY or MOVE onto one, answers 409 `ambiguous-name` naming the
+  pair, for every account, until one of the two archives is renamed or deleted. Each
+  archive of such a pair is governed by rule v1 alone, so whoever controls it by rule
+  v1 replaces, moves and deletes it (the wider fold no longer hands `X` + a zero width
+  space + `.curated.cbz` up to the `X.cbz` beside it, which locked both accounts out of
+  it). An account's own correction still goes to its own copy (on a cloud library the
+  progress user's, the cloud folder's file, is refused too). On a local library
+  `doctor` names each pair ("Ambiguous volume names").
 - **The OCR queue file and the cloud lease marker are recognised in every spelling the
   filename fold joins.** A write of `/mokuro-reader/.MOKURO-QUEUE.JSON`,
   `.mokuro-queue.jſon` or one with a zero width space in it answers 405 for every
