@@ -1388,25 +1388,35 @@ fn an_older_processor_is_offered_work_after_one_batch_of_page_format_reads() {
     assert!(volume_ops(&drain(&mut old)).is_empty());
     assert!(sched.suffixes_reading, "a batch is being read");
     assert!(sched.suffixes_wanted.len() <= SUFFIX_BATCH);
-    // The first batch's answer arrives once its reads are done; the next batch cannot
-    // start before the actor has taken it, so the read log holds that batch only.
-    let batch = loop {
+    // The first batch's answer arrives once its reads are done, and the next batch
+    // cannot start before the actor has taken it: the read log, taken as the answer
+    // arrives, holds that batch's archives only. (Taking the answer starts the next
+    // batch on a helper at once, so the log is read before it is handled.)
+    let (batch, read) = loop {
         let msg = rx
             .recv_timeout(Duration::from_secs(20))
             .expect("a helper's answer");
-        if let Msg::PageSuffixesRead(read) = &msg {
-            let n = read.len();
+        if let Msg::PageSuffixesRead(answer) = &msg {
+            let read: std::collections::HashSet<_> =
+                fake.read_log().iter().map(|r| r.pid.clone()).collect();
+            let batch: Vec<String> = answer.iter().map(|(rel, _, _)| rel.clone()).collect();
             sched.handle(msg);
-            break n;
+            break (batch, read);
         }
         sched.handle(msg);
     };
-    assert!((1..=SUFFIX_BATCH).contains(&batch), "batch of {batch}");
-    let read: std::collections::HashSet<_> =
-        fake.read_log().iter().map(|r| r.pid.clone()).collect();
     assert!(
-        read.len() <= SUFFIX_BATCH,
-        "{} archives read before the first offer",
+        (1..=SUFFIX_BATCH).contains(&batch.len()),
+        "batch of {}",
+        batch.len()
+    );
+    let batch_pids: std::collections::HashSet<_> = batch
+        .iter()
+        .map(|rel| fake.node_at(&format!("{ROOT}/{rel}")).unwrap().pid)
+        .collect();
+    assert!(
+        read.len() <= SUFFIX_BATCH && read.is_subset(&batch_pids),
+        "{} archives read before the first offer, not all of the batch {batch:?}",
         read.len()
     );
     let got = volume_ops(&drain(&mut old));
