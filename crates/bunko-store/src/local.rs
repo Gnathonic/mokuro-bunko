@@ -87,7 +87,7 @@ impl LibraryStore for LocalStore {
     }
 
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
-        std::fs::rename(from, to)
+        crate::fs::local_rename(from, to)
     }
 
     fn copy(&self, from: &Path, to: &Path) -> io::Result<u64> {
