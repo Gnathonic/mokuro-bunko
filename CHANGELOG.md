@@ -327,6 +327,11 @@
   every record: a volume in which nothing decodes was offered again, at once, to the
   release that had just failed it, the backoff never grew, and the catalog never marked
   the volume as failing. The archive is now looked for in the cloud library's index.
+- **Covers for JPEG XL volumes in a cloud library.** The start-up pass that clears the
+  `.nocover` marker of a JPEG XL volume did not reach a cloud library, which keeps those
+  records in Bunko's own data rather than as files beside the volumes: a volume of
+  `.jxl` pages an earlier 0.8 build had recorded as coverless stayed without a cover.
+  The first cover pass now drops those records and makes the covers.
 - **Checking a cloud volume's page formats no longer holds up the OCR queue.** Whether a
   processor older than a page format (JPEG XL before 0.7.5) can read a volume is
   decided from the archive's page names. In a cloud library they are now read on a
