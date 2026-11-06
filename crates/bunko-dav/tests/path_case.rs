@@ -783,7 +783,7 @@ async fn a_put_never_makes_a_second_spelling() {
             "PUT",
             "/mokuro-reader/series/Vol%202.cbz",
             &[],
-            b"second",
+            &cbz_bytes(1),
         )
         .await;
     let spellings: Vec<String> = names(&env.lib("series"))

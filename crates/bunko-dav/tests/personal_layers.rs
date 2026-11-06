@@ -886,7 +886,9 @@ async fn a_respelled_folders_corrections_list_under_its_spelling() {
 
 /// A shadowed series' corrections are its own (a case-sensitive disk holding `Kingdom/`
 /// and `kingdom/`): what happens to the winner never reads, overwrites, moves or deletes
-/// `edits/kingdom/`.
+/// `edits/kingdom/`. The winner gets no correction folder of its own beside it (a disk
+/// under `users/` that folds names would make that the same folder): its corrections
+/// are refused until the two series are merged.
 #[tokio::test]
 async fn a_shadowed_series_keeps_its_corrections() {
     let env = Env::new();
@@ -920,12 +922,13 @@ async fn a_shadowed_series_keeps_its_corrections() {
             &layer("winner"),
         )
         .await;
-    assert_eq!(put.code(), 201, "{}", put.text());
+    assert_eq!(put.code(), 403, "{}", put.text());
     assert_eq!(std::fs::read(&hidden).unwrap(), layer("hidden"));
-    assert_eq!(
-        std::fs::read(env.overlay("alice", "Kingdom/v.edit.mokuro")).unwrap(),
-        layer("winner")
-    );
+    let overlays: Vec<String> = std::fs::read_dir(env.overlay("alice", ""))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(overlays, ["kingdom"]);
     let r = env
         .req(
             Some("admin"),

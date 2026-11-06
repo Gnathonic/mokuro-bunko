@@ -242,7 +242,9 @@ is ever written to, moved out of or deleted from them. Nothing of theirs is used
 the reachable one either: a hidden `v.cbz` keeps the files its exact stem names
 (`v.mokuro`, `v.webp`, `v.nocover`), its accounts' corrections (`users/<u>/edits/`
 under its own spelling) and its upload record, so a reachable `V.cbz` beside it gets
-no OCR or cover until the merge, and a case-fixing rename (MOVE) of a reachable entry
+no OCR or cover until the merge, an account with corrections in a hidden `kingdom/`
+cannot save corrections in the reachable `Kingdom/` until then (403), and a
+case-fixing rename (MOVE) of a reachable entry
 is refused (409) while a hidden spelling of it is listed beside it. Merge them while
 the server is stopped: move each volume with all its files (`<stem>.cbz`, its `.mokuro[.gz]` and
 layer files `<stem>.<layer>.mokuro[.gz]`, `<stem>.webp`, any `<stem>.nocover`) into

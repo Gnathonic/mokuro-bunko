@@ -16,7 +16,10 @@
   deleted from them, and nothing of theirs is used for the one that hides them: the
   sidecars, cover and `.nocover` its exact stem names (`v.mokuro`, `v.webp` for a
   hidden `v.cbz`), its account corrections and its upload record stay its own. A
-  volume whose OCR or cover name is a hidden archive's gets none until the merge. A
+  volume whose OCR or cover name is a hidden archive's gets none until the merge, and
+  an account that has corrections in a hidden series cannot save corrections in the
+  series that hides it until then (its correction folder would be the same folder on
+  a disk that folds names). A
   case-fixing MOVE is refused (409) while its folder lists another spelling of the
   name besides the source. `doctor` and the startup log name each set.
 - **The reader's per-user names are reserved in any spelling.** `History/`,
