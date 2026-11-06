@@ -499,13 +499,14 @@ async fn frozen_refusal(inner: &Arc<Inner>, r: &Req) -> Option<Resp> {
 /// it, or a COPY or MOVE onto it, answers 409, for every account. Every host makes
 /// `S/STRASSE.mokuro` one name with `S/Straße.mokuro`, the OCR file of a listed
 /// `S/Straße.cbz`, but rule v1 (Mokuro Reader's) does not give it to that volume: such
-/// a file would take the volume's name without being its file, governed by nobody. The
-/// same for an archive whose files by the fold would be such names
-/// (`S/Straße.cbz` beside `S/STRASSE.mokuro`), and for a name only the fold gives a
-/// volume file suffix (`V.mo\u{212A}uro`). Decided from the folder's listing, the
-/// name in the spelling the folder lists it in (the one a write reaches), so every
-/// host answers alike. Reads, DELETE and a MOVE away are left alone: they are how such
-/// a name is cleared up.
+/// a file would take the volume's name without being its file. The same for a name
+/// only the fold gives a volume file suffix (`V.mo\u{212A}uro`). An archive is never
+/// refused for such a name already listed beside it (`S/Straße.cbz` beside a
+/// `S/STRASSE.mokuro` made first): the name is then the archive's for authorization,
+/// and Bunko writes nothing for the volume in its place. Decided from the folder's
+/// listing, the name in the spelling the folder lists it in (the one a write reaches),
+/// so every host answers alike. Reads, DELETE and a MOVE away are left alone: they are
+/// how such a name is cleared up.
 async fn disputed_refusal(inner: &Arc<Inner>, r: &Req) -> Option<Resp> {
     let target = match r.method.as_str() {
         "PUT" | "MKCOL" | "PROPPATCH" | "LOCK" => r.path.clone(),

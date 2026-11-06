@@ -292,12 +292,14 @@ one name with a volume's OCR, cover or layer file only by the wider fold
 volume's; Bunko writes no such file beside it either (it would be a second spelling),
 so that volume is owed none. 0.8 no longer makes such a file: a PUT, MKCOL, PROPPATCH
 or LOCK of one, or a COPY or MOVE onto one, answers 409 (`ambiguous-name`) for every
-account, and so does an archive whose own files would be such names (`Straße.cbz`
-beside `STRASSE.mokuro`) and a name that only the wider fold gives a `.cbz`, `.mokuro`,
-`.webp` or `.nocover` ending. For who may write or delete such a file it counts as the
-volume's: an uploader needs control of that volume, as for its own files. One already
-there (made by hand or before 0.8) stays readable and deletable. Rename such a file to
-the volume's exact stem and a lowercase id to have it count.
+account, and so does a name that only the wider fold gives a `.cbz`, `.mokuro`,
+`.webp` or `.nocover` ending. The archive itself is never refused for one already
+listed beside it: a new or replaced `Straße.cbz` beside a `STRASSE.mokuro` (made by
+hand, before 0.8, or before the volume existed) is written as in 0.7. For who may
+write or delete such a file it counts as the volume's: an uploader needs control of
+that volume, as for its own files. One already there stays readable and deletable,
+and doctor names it ("Ambiguous name") with its volume. Rename such a file to the
+volume's exact stem and a lowercase id to have it count.
 
 Series folders spelled like a reader's per-user name (`history`, `History`,
 `goals.json`, `Goals.json`, `volume-data.json`, ...) are hidden in 0.8, from WebDAV

@@ -578,10 +578,15 @@ fn v1_suffix(name: &str) -> Option<&'static str> {
 /// * the fold joins `name` with a file of a listed archive (its sidecars, layers,
 ///   cover, `.nocover`: [`Folder::volume_files`] over the folded listing) that rule v1
 ///   does not give it to (`STRASSE.mokuro`, `Vol\u{200B}1.webp`, `V.EDIT.mokuro` beside
-///   `Stra\u{df}e.cbz`, `Vol1.cbz`, `V.cbz`): that archive;
-/// * `name` is an archive whose files by the fold would be listed names rule v1 does
-///   not give it (`Stra\u{df}e.cbz` beside `STRASSE.mokuro`, `C\u{200D}.cbz` beside
-///   `C.mokuro`): those names.
+///   `Stra\u{df}e.cbz`, `Vol1.cbz`, `V.cbz`): that archive.
+///
+/// An archive is never disputed for the names already listed beside it: a new or
+/// replaced `Stra\u{df}e.cbz` beside a `STRASSE.mokuro` (made before it, by hand, by
+/// 0.7 or before 0.8) is written. Such a name is the archive's for authorization
+/// ([`governing_archives_by_either_fold`]: its controller may delete it), never its
+/// file by rule v1, and Bunko writes nothing for the volume in its place
+/// (`bunko_library::sidecar::listed_sibling_in`): the volume is owed that file until
+/// the name is renamed or deleted (doctor names it).
 ///
 /// Where the folds agree (ASCII names but for a layer id's case) nothing is disputed.
 pub fn fold_disputed(name: &str, names: &[&str]) -> Vec<String> {
@@ -605,10 +610,7 @@ pub fn fold_disputed(name: &str, names: &[&str]) -> Vec<String> {
             b.len() > stem.len() && b.starts_with(stem) && b[stem.len()..].starts_with('.')
         })
     };
-    if !folded
-        .iter()
-        .any(|f| *f != target && (related(f, &target) || related(&target, f)))
-    {
+    if !folded.iter().any(|f| *f != target && related(f, &target)) {
         return Vec::new();
     }
     let refs: Vec<&str> = folded.iter().map(String::as_str).collect();
@@ -630,10 +632,6 @@ pub fn fold_disputed(name: &str, names: &[&str]) -> Vec<String> {
         }
         // `name` joined with the files of the archive `other`.
         if related(other_fold, &target) && joined(other_fold, &target) && !given(other, name) {
-            out.push(other.to_string());
-        }
-        // `name` an archive, `other` joined with its files.
-        if related(&target, other_fold) && joined(&target, other_fold) && !given(name, other) {
             out.push(other.to_string());
         }
     }
@@ -1097,15 +1095,22 @@ mod tests {
         // A layer id only the fold reads (rule v1 matches ids exactly).
         assert_eq!(d("V.EDIT.mokuro", &["V.cbz"]), s(&["V.cbz"]));
         assert_eq!(d("V.edit\u{200B}.mokuro", &["V.cbz"]), s(&["V.cbz"]));
-        // An archive whose files by the fold are listed names rule v1 gives it not.
-        assert_eq!(
-            d("Stra\u{df}e.cbz", &["STRASSE.mokuro"]),
-            s(&["STRASSE.mokuro"])
-        );
-        assert_eq!(
-            d("C\u{200D}.cbz", &["C.cbz", "C.mokuro", "C.webp"]),
-            s(&["C.mokuro", "C.webp"])
-        );
+        // An archive is never disputed for the names listed beside it, new or
+        // replaced: whoever made `STRASSE.mokuro` or `V.EDIT.mokuro` first does not
+        // keep `Stra\u{df}e.cbz` or `V.cbz` out.
+        for (archive, listing) in [
+            ("Stra\u{df}e.cbz", &["STRASSE.mokuro"][..]),
+            (
+                "Stra\u{df}e.cbz",
+                &["Stra\u{df}e.cbz", "STRASSE.mokuro"][..],
+            ),
+            ("V.cbz", &["V.EDIT.mokuro", "V.Fast.mokuro"][..]),
+            ("V.cbz", &["V.cbz", "V.Fast.mokuro"][..]),
+            ("Vol1.cbz", &["Vol\u{200B}1.webp"][..]),
+            ("C\u{200D}.cbz", &["C.mokuro", "C.webp"][..]),
+        ] {
+            assert!(d(archive, listing).is_empty(), "{archive:?} {listing:?}");
+        }
         // A rule v1 suffix only the fold sees.
         assert_eq!(d("V.mo\u{212A}uro", &[]), s(&["V.mo\u{212A}uro"]));
         assert_eq!(d("V.cb\u{200B}z", &["V.mokuro"]), s(&["V.cb\u{200B}z"]));

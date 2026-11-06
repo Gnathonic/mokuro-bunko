@@ -107,11 +107,15 @@
   beside a final `Σ`, a name with a default-ignorable character in it, a layer id in
   another case: `V.EDIT.mokuro`), but sidecar names rule v1 does not give it to that
   volume. A PUT, MKCOL, PROPPATCH or LOCK of such a name, or a COPY or MOVE onto it,
-  answers 409 (`ambiguous-name` in a PUT's verdict) for every account; so does an
-  archive whose own files by the fold would be listed names rule v1 does not give it
-  (`Straße.cbz` beside a `STRASSE.mokuro`), and a name only the fold gives a `.cbz`,
-  `.mokuro`, `.mokuro.gz`, `.webp` or `.nocover` ending (`V.mo` + a Kelvin sign +
-  `uro`). Reads, DELETE and a MOVE away still work on one already there.
+  answers 409 (`ambiguous-name` in a PUT's verdict) for every account; so does a name
+  only the fold gives a `.cbz`, `.mokuro`, `.mokuro.gz`, `.webp` or `.nocover` ending
+  (`V.mo` + a Kelvin sign + `uro`). Reads, DELETE and a MOVE away still work on one
+  already there. An archive is never refused for such a name already listed beside it
+  (made before the volume, by hand, or by 0.7): a new or replaced `Straße.cbz` beside a
+  `STRASSE.mokuro`, or `V.cbz` beside a `V.EDIT.mokuro`, is written as before. The
+  stray then counts as that volume's for who may write or delete it (an account that
+  does not control the volume, its maker included, no longer may), Bunko writes no file for the volume in
+  its place, and `doctor` names it with the volume ("Ambiguous name").
 - **Existing series get owners once, at startup.** A series folder whose volumes were
   all uploaded by one account, with no archive without a recorded uploader, becomes
   that account's. Every other folder (volumes from several accounts, archives copied

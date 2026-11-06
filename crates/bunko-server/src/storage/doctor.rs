@@ -1,8 +1,9 @@
 //! `doctor`'s library storage rows (0.8 §7, §11, D25): where the library lives, the
 //! Google pairing (and a pairing change waiting for its Disconnect), whether the spool
 //! can hold what OCR spools at once, how the credentials file is protected, a local
-//! series named like the reader's reading history (0.8), and names a local library
-//! holds in two spellings (case variants, which only a case-sensitive disk can hold).
+//! series named like the reader's reading history (0.8), names a local library holds in
+//! two spellings (case variants, which only a case-sensitive disk can hold), and files
+//! the filename fold ties to a volume that sidecar names rule v1 does not give it.
 //! Offline: no provider is asked.
 
 use std::path::Path;
@@ -200,8 +201,12 @@ pub fn reserved_series_rows(library: &Path, cloud_folder: Option<&str>) -> Vec<R
 /// folder are never written, moved, deleted or re-keyed, by a client (409) or by Bunko
 /// (no OCR, cover, sweep or adoption). Also the hidden names a case-only rename leaves behind when
 /// it is interrupted between its two steps (`.bunko-case-<token>-<name>`), with the
-/// rename that finishes it. Walks folders only (no file is read). A remote store merges
-/// its own case variants (spec §5.9): not for it.
+/// rename that finishes it. Also, one Warn row each, a file the filename fold ties to a
+/// listed volume's files that sidecar names rule v1 does not give it (`STRASSE.mokuro`
+/// beside `Straße.cbz`, `V.EDIT.mokuro` beside `V.cbz`: Bunko writes nothing for the
+/// volume in its place) or that only the fold gives a volume file suffix
+/// ([`bunko_core::sidecar_names::fold_disputed`]). Walks folders only (no file is
+/// read). A remote store merges its own case variants (spec §5.9): not for it.
 pub fn case_variant_rows(library: &Path) -> Vec<Row> {
     let mut out = Vec::new();
     let mut todo = vec![String::new()];
@@ -320,6 +325,53 @@ pub fn case_variant_rows(library: &Path) -> Vec<Row> {
                     dir.join(&group.winner).display()
                 )),
             ));
+        }
+        // Names the filename fold ties to a volume's files without rule v1 doing so
+        // (`STRASSE.mokuro` beside `Straße.cbz`, `V.EDIT.mokuro` beside `V.cbz`), and
+        // names only the fold gives a volume file suffix. A frozen group's are its row's.
+        let files: Vec<&str> = reachable
+            .iter()
+            .filter(|(_, is_dir)| !is_dir)
+            .map(|(n, _)| n.as_str())
+            .collect();
+        for name in &files {
+            if groups.is_frozen(name) {
+                continue;
+            }
+            let disputed = bunko_core::sidecar_names::fold_disputed(name, &files);
+            if disputed.is_empty() {
+                continue;
+            }
+            let path = dir.join(name);
+            out.push(if disputed == [name.to_string()] {
+                row(
+                    Verdict::Warn,
+                    "Ambiguous name",
+                    format!(
+                        "{} ends in a volume file suffix (.cbz, .mokuro, .mokuro.gz, .webp, .nocover) only as case-insensitive filesystems join names: it is no volume's file, and Bunko writes no such name",
+                        child(name)
+                    ),
+                    Some(format!("Rename or delete {}.", path.display())),
+                )
+            } else {
+                let volumes = disputed
+                    .iter()
+                    .map(|n| child(n))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                row(
+                    Verdict::Warn,
+                    "Ambiguous name",
+                    format!(
+                        "{} is one name with a file of {volumes} on every host (Bunko joins names as case-insensitive filesystems do), but not that volume's file by the sidecar naming rule Mokuro Reader shares: Bunko writes nothing for the volume in its place, and only the volume's controller or an editor may change or delete it",
+                        child(name)
+                    ),
+                    Some(format!(
+                        "If it is that volume's file, rename {} to the volume's exact stem with a lowercase layer id; otherwise delete it or rename it apart.",
+                        path.display()
+                    )),
+                )
+            });
         }
         for (name, is_dir) in reachable {
             if *is_dir && !losers.contains(name) {
@@ -652,6 +704,54 @@ mod tests {
             rows[0].hint.as_deref().unwrap().contains("V.cbz"),
             "{rows:?}"
         );
+    }
+
+    /// A file the filename fold ties to a volume's files without rule v1 doing so (made
+    /// before the volume, by hand, or by 0.7) is named, with the volume; nothing else is.
+    #[test]
+    fn ambiguous_names_are_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let library = dir.path().join("library");
+        bunko_store::fs::create_dir_all(library.join("S")).unwrap();
+        for name in [
+            "V.cbz",
+            "V.mokuro",
+            "V.webp",
+            "V.EDIT.mokuro",
+            "Stra\u{df}e.cbz",
+            "STRASSE.mokuro",
+            "W.mo\u{212A}uro",
+            "Notes.txt",
+        ] {
+            bunko_store::fs::write(library.join("S").join(name), "x").unwrap();
+        }
+        let mut rows: Vec<Row> = case_variant_rows(&library)
+            .into_iter()
+            .filter(|r| r.label == "Ambiguous name")
+            .collect();
+        rows.sort_by(|a, b| a.detail.cmp(&b.detail));
+        let details: Vec<&str> = rows.iter().map(|r| r.detail.as_str()).collect();
+        assert_eq!(rows.len(), 3, "{details:?}");
+        assert!(
+            details
+                .iter()
+                .any(|d| d.starts_with("S/V.EDIT.mokuro is one name with a file of S/V.cbz")),
+            "{details:?}"
+        );
+        assert!(
+            details
+                .iter()
+                .any(|d| d
+                    .starts_with("S/STRASSE.mokuro is one name with a file of S/Stra\u{df}e.cbz")),
+            "{details:?}"
+        );
+        assert!(
+            details
+                .iter()
+                .any(|d| d.starts_with("S/W.mo\u{212A}uro ends in")),
+            "{details:?}"
+        );
+        assert!(rows.iter().all(|r| r.verdict == Verdict::Warn));
     }
 
     /// A cloud folder can hold a `history/` series too (uploaded under 0.7, or by a
