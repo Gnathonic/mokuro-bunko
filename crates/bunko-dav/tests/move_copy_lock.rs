@@ -216,12 +216,13 @@ async fn file_and_collection_never_replace_each_other() {
         )
         .await;
     assert_eq!(r.code(), 409);
+    std::fs::create_dir_all(env.lib("folder")).unwrap();
     let r = env
         .req(
             Some("admin"),
             "MOVE",
             "/mokuro-reader/series/big.bin",
-            &[("destination", &dest("/mokuro-reader/thumbnails"))],
+            &[("destination", &dest("/mokuro-reader/folder"))],
             b"",
         )
         .await;

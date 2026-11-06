@@ -199,8 +199,7 @@ pub enum DavInitError {
 }
 
 impl Dav {
-    /// Build the handler over `layout` (creates `library/`, `inbox/`, `users/` and
-    /// `library/thumbnails/` like 0.5.2). Call inside a tokio runtime so the PROPFIND cache
+    /// Build the handler over `layout` (creates `library/`, `inbox/` and `users/`). Call inside a tokio runtime so the PROPFIND cache
     /// can schedule background refreshes.
     pub fn new(layout: &StorageLayout, config: DavConfig) -> Result<Dav, DavInitError> {
         layout.ensure_directories()?;
@@ -342,7 +341,7 @@ pub enum LibraryChange {
     Library,
     /// Inside the series folder of this name.
     Series(String),
-    /// Under `thumbnails/`, or the cloud-root owner's per-user tree.
+    /// The cloud-root owner's per-user tree.
     Ignore,
 }
 
@@ -363,9 +362,6 @@ pub fn classify_change(library_root: &Path, path: &Path) -> LibraryChange {
     }
     if parts.len() < 2 {
         return LibraryChange::Library;
-    }
-    if parts[0] == "thumbnails" {
-        return LibraryChange::Ignore;
     }
     LibraryChange::Series(parts[0].clone())
 }
@@ -405,10 +401,6 @@ mod tests {
             LibraryChange::Library
         );
         assert_eq!(
-            classify_change(root, Path::new("/lib/thumbnails/a.webp")),
-            LibraryChange::Ignore
-        );
-        assert_eq!(
             classify_change(root, Path::new("/lib/S/v.cbz")),
             LibraryChange::Series("S".into())
         );
@@ -429,12 +421,14 @@ mod tests {
             classify_change(root, Path::new("/lib/History/v.cbz")),
             LibraryChange::Ignore
         );
-        // The cover cache is `thumbnails/` exactly; it is no reserved name (a series
-        // may be called `Thumbnails`), the same on every host.
-        assert_eq!(
-            classify_change(root, Path::new("/lib/Thumbnails/a.webp")),
-            LibraryChange::Series("Thumbnails".into())
-        );
+        // `thumbnails` is no reserved name in any spelling (covers live beside their
+        // archives; 0.5.2's cover cache folder is gone): a series like any, everywhere.
+        for name in ["thumbnails", "Thumbnails"] {
+            assert_eq!(
+                classify_change(root, &Path::new("/lib").join(name).join("a.webp")),
+                LibraryChange::Series(name.into())
+            );
+        }
         assert!(is_relevant_change(Path::new("/lib/S/v.mokuro.gz"), false));
         assert!(is_relevant_change(Path::new("/lib/S/v.webp"), false));
         assert!(!is_relevant_change(Path::new("/lib/S/series.json"), false));

@@ -69,9 +69,6 @@ impl StorageLayout {
     pub fn users(&self) -> PathBuf {
         self.base.join("users")
     }
-    pub fn thumbnails(&self) -> PathBuf {
-        self.library().join("thumbnails")
-    }
     pub fn database(&self) -> PathBuf {
         self.base.join("mokuro.db")
     }
@@ -87,8 +84,9 @@ impl StorageLayout {
         self.base.join("cloud")
     }
 
-    /// The directories the server needs. A cloud library gets no `library/` or
-    /// `library/thumbnails/` on disk.
+    /// The directories the server needs. A cloud library gets no `library/` on disk. No
+    /// folder is ever made inside the library (covers live beside their archives): a
+    /// name Bunko made there could be a second spelling of a series folder.
     pub fn ensure_directories(&self) -> io::Result<()> {
         if self.cloud_library {
             std::fs::create_dir_all(&self.base)?;
@@ -99,8 +97,27 @@ impl StorageLayout {
         std::fs::create_dir_all(self.library())?;
         std::fs::create_dir_all(self.inbox())?;
         std::fs::create_dir_all(self.users())?;
-        std::fs::create_dir_all(self.thumbnails())?;
+        self.drop_legacy_cover_folder();
         Ok(())
+    }
+
+    /// Every start before 0.8 made an empty `library/thumbnails/` (0.5.2's cover cache;
+    /// covers have long lived beside their archives). Left alone it would be an empty
+    /// series folder in every reader. Removed when the library lists exactly that name
+    /// and it is an empty folder; one holding anything, or any other spelling (a series
+    /// `Thumbnails/`), is an ordinary folder and stays. From the listing, never by
+    /// opening the name, so every host answers alike.
+    fn drop_legacy_cover_folder(&self) {
+        let library = self.library();
+        let listed = std::fs::read_dir(&library).is_ok_and(|entries| {
+            entries
+                .flatten()
+                .any(|e| e.file_name() == "thumbnails" && e.file_type().is_ok_and(|t| t.is_dir()))
+        });
+        let folder = library.join("thumbnails");
+        if listed && std::fs::read_dir(&folder).is_ok_and(|mut e| e.next().is_none()) {
+            let _ = std::fs::remove_dir(&folder);
+        }
     }
 
     /// Fail unless `path` is an existing directory we can create files in.
@@ -255,7 +272,8 @@ mod tests {
         out
     }
 
-    /// A local library gets `library/` and `library/thumbnails/` as before.
+    /// A local library gets `library/`, and nothing inside it: no `thumbnails/` (0.5.2
+    /// made one; a series `Thumbnails/` would have gained a second spelling).
     #[test]
     fn local_layout_creates_the_library() {
         let dir = tempfile::tempdir().unwrap();
@@ -263,7 +281,29 @@ mod tests {
         assert!(!layout.cloud_library());
         layout.ensure_directories().unwrap();
         assert_eq!(names(&layout.base), ["inbox", "library", "users"]);
+        assert!(names(&layout.library()).is_empty());
+        std::fs::create_dir_all(layout.library().join("Thumbnails")).unwrap();
+        layout.ensure_directories().unwrap();
+        assert_eq!(names(&layout.library()), ["Thumbnails"]);
+    }
+
+    /// An earlier start's empty `thumbnails/` goes; one that holds anything, or a
+    /// series spelled otherwise, stays (an ordinary folder).
+    #[test]
+    fn an_empty_legacy_cover_folder_goes() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = StorageLayout::new(dir.path().join("data"));
+        std::fs::create_dir_all(layout.library().join("thumbnails")).unwrap();
+        layout.ensure_directories().unwrap();
+        assert!(names(&layout.library()).is_empty());
+        std::fs::create_dir_all(layout.library().join("thumbnails")).unwrap();
+        std::fs::write(layout.library().join("thumbnails/v.cbz"), b"x").unwrap();
+        layout.ensure_directories().unwrap();
         assert_eq!(names(&layout.library()), ["thumbnails"]);
+        std::fs::remove_dir_all(layout.library().join("thumbnails")).unwrap();
+        std::fs::create_dir_all(layout.library().join("Thumbnails")).unwrap();
+        layout.ensure_directories().unwrap();
+        assert_eq!(names(&layout.library()), ["Thumbnails"]);
     }
 
     /// A cloud library never gets `library/` on disk; the rest is still created.
@@ -289,12 +329,6 @@ mod tests {
         assert_eq!(
             layout.cloud_store_dir(),
             Some(layout.base.join("cloud/0123456789abcdef"))
-        );
-        assert_eq!(
-            layout.thumbnails(),
-            layout
-                .base
-                .join("cloud/0123456789abcdef/library/thumbnails")
         );
         layout.ensure_directories().unwrap();
         assert_eq!(names(&layout.base), ["inbox", "users"]);

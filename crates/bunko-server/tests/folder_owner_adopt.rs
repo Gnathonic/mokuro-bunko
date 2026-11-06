@@ -21,7 +21,7 @@ impl Lib {
     fn new() -> Lib {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("library");
-        std::fs::create_dir_all(root.join("thumbnails")).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
         let path = dir.path().join("mokuro.db");
         let db = Database::open_with(&path, &DbOptions::default()).unwrap();
         db.with_writer_connection(|c| c.execute("DELETE FROM series_folder_adoption", []))

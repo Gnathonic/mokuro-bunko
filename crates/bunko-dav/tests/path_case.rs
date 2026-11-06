@@ -685,3 +685,39 @@ async fn a_reserved_name_in_any_spelling_is_the_per_user_entry() {
     assert_eq!(listing.code(), 207);
     assert!(!listing.text().contains("History"), "{}", listing.text());
 }
+
+/// `Thumbnails` is a series like any, on every store: no cover folder is made in the
+/// library (a second spelling of it), and a request for it reaches the series.
+#[tokio::test]
+async fn a_series_named_thumbnails_is_a_series() {
+    let env = Env::new();
+    let r = req(
+        &env,
+        Some("admin"),
+        "MKCOL",
+        "/mokuro-reader/Thumbnails",
+        &[],
+        b"",
+    )
+    .await;
+    assert_eq!(r.code(), 201, "{}", r.text());
+    let r = req(
+        &env,
+        Some("admin"),
+        "PUT",
+        "/mokuro-reader/thumbnails/v.cbz",
+        &[],
+        &cbz_bytes(1),
+    )
+    .await;
+    assert_eq!(r.code(), 201, "{}", r.text());
+    // A restart makes nothing beside it.
+    let again = Env::with_base(tempfile::tempdir().unwrap(), env.base.clone());
+    drop(again);
+    let spellings: Vec<String> = names(&env.lib(""))
+        .into_iter()
+        .filter(|n| n.eq_ignore_ascii_case("thumbnails"))
+        .collect();
+    assert_eq!(spellings, ["Thumbnails"]);
+    assert_eq!(names(&env.lib("Thumbnails")), ["v.cbz"]);
+}

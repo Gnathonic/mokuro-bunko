@@ -75,7 +75,7 @@ pub enum LibraryChange {
     /// A top-level entry appeared/disappeared/moved (or the path could not be
     /// classified): run the full pass, which is what prunes deleted series.
     Library,
-    /// Generated content that never feeds compilation.
+    /// The cloud-root owner's per-user tree: never compiled.
     Ignore,
 }
 
@@ -98,7 +98,6 @@ pub fn classify_change(library_root: &Path, path: &Path) -> LibraryChange {
         return LibraryChange::Library;
     }
     match parts[0].as_os_str().to_str() {
-        Some("thumbnails") => LibraryChange::Ignore,
         Some(first) => LibraryChange::Series(first.to_owned()),
         None => LibraryChange::Library,
     }
@@ -160,10 +159,6 @@ mod tests {
             LibraryChange::Series("A".into())
         );
         assert_eq!(
-            classify_change(root, Path::new("/lib/thumbnails/x.webp")),
-            LibraryChange::Ignore
-        );
-        assert_eq!(
             classify_change(root, Path::new("/elsewhere/x")),
             LibraryChange::Library
         );
@@ -182,11 +177,13 @@ mod tests {
             classify_change(root, Path::new("/lib/History/v.cbz")),
             LibraryChange::Ignore
         );
-        // The cover cache is `thumbnails/` exactly; it is no reserved name (a series
-        // may be called `Thumbnails`), the same on every host.
-        assert_eq!(
-            classify_change(root, Path::new("/lib/Thumbnails/x.webp")),
-            LibraryChange::Series("Thumbnails".into())
-        );
+        // `thumbnails` is no reserved name in any spelling (covers live beside their
+        // archives; 0.5.2's cover cache folder is gone): a series like any, everywhere.
+        for name in ["thumbnails", "Thumbnails"] {
+            assert_eq!(
+                classify_change(root, &Path::new("/lib").join(name).join("x.webp")),
+                LibraryChange::Series(name.into())
+            );
+        }
     }
 }

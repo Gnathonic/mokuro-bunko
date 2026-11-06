@@ -263,8 +263,7 @@ pub fn case_variant_rows(library: &Path) -> Vec<Row> {
             .iter()
             .filter(|(n, _)| {
                 !n.starts_with('.')
-                    && !(rel.is_empty()
-                        && (bunko_core::reader_tree::is_per_user_root_name(n) || n == "thumbnails"))
+                    && !(rel.is_empty() && bunko_core::reader_tree::is_per_user_root_name(n))
             })
             .collect();
         let losers =

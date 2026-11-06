@@ -67,7 +67,7 @@ async fn a_large_listing_streams_identically_in_both_encodings() {
         .for_each(|s| *s = s.trim_end_matches("</D:multistatus>"));
     a.sort();
     b.sort();
-    assert_eq!(a.len(), 7 + 40 * 61);
+    assert_eq!(a.len(), 6 + 40 * 61);
     assert_eq!(a, b);
 }
 

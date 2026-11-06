@@ -55,7 +55,6 @@ async fn propfind_reader_root_shows_own_progress_first() {
     let m1 = t.find("/mokuro-reader/manga1.cbz").unwrap();
     assert!(vd < m1);
     assert!(t.contains("<D:href>/mokuro-reader/series/</D:href>"));
-    assert!(t.contains("<D:href>/mokuro-reader/thumbnails/</D:href>"));
     // Anonymous: no per-user files.
     let anon = env
         .req(None, "PROPFIND", "/mokuro-reader", &[("depth", "1")], b"")
@@ -989,7 +988,6 @@ async fn options_allow_follows_the_account() {
         (Some("reader"), "/mokuro-reader/history", WRITE),
         (Some("reader"), "/mokuro-reader/history/dev/", WRITE),
         (Some("reader"), "/mokuro-reader/series/", PUT),
-        (Some("reader"), "/mokuro-reader/thumbnails", PUT),
         // Outside the reader root nothing changes, whoever asks.
         (Some("uploader"), "/", BASE),
         (Some("reader"), "/", BASE),

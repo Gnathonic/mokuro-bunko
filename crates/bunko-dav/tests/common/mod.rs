@@ -131,11 +131,12 @@ pub struct Env {
 }
 
 impl Env {
-    /// The fixture of `tests/integration/test_webdav_ops.py`.
+    /// The fixture of `tests/integration/test_webdav_ops.py` (without its empty
+    /// `library/thumbnails/`, which a start removes since 0.8).
     pub fn new() -> Env {
         let dir = tempfile::tempdir().unwrap();
         let base = dir.path().join("storage");
-        std::fs::create_dir_all(base.join("library/thumbnails")).unwrap();
+        std::fs::create_dir_all(base.join("library")).unwrap();
         std::fs::create_dir_all(base.join("inbox")).unwrap();
         std::fs::create_dir_all(base.join("users/reader")).unwrap();
         std::fs::create_dir_all(base.join("users/uploader")).unwrap();

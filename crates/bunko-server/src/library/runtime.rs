@@ -697,7 +697,7 @@ impl LibraryRuntime {
     }
 
     /// A file inside a series recompiles that series; a top-level entry takes the full
-    /// pass, which also prunes deleted series; `thumbnails/` is ignored.
+    /// pass, which also prunes deleted series; the cloud-root owner's own tree is ignored.
     fn route_change(&self, path: &Path) {
         let root = if path.starts_with(&self.library) {
             self.library.clone()
