@@ -824,8 +824,9 @@
     // Horizontal bar list
     // ------------------------------------------------------------------
 
-    // rows: [{key,label,value,sub?,color?,title?,badge?}]; opts: {kind,
-    // color, onSelect(row), selectedKey, limit, emptyText, label}
+    // rows: [{key,label,value,sub?,color?,title?,badge?, toggle?, open?,
+    // children?, childLabel?} | {note}]; opts: {kind, color, onSelect(row),
+    // selectedKey, limit, emptyText, label}
     function barList(rows, opts) {
         const o = opts || {};
         const fmt = formatter(o.kind);
@@ -834,7 +835,21 @@
         const shown = o.limit ? list.slice(0, o.limit) : list;
         const max = Math.max(...shown.map((r) => num(r.value)), 1);
         const ul = h('ul', { class: 'bc-bars', 'aria-label': o.label || null });
+        drawBars(ul, shown, max, fmt, o);
+        const wrap = h('div', { class: 'bc-barlist' }, ul);
+        if (o.limit && list.length > o.limit) wrap.appendChild(h('p', { class: 'bc-note', text: (list.length - o.limit) + ' more not shown.' }));
+        return wrap;
+    }
+
+    // One bar list's rows. A row with `toggle` is a disclosure button
+    // (`open`: expanded) whose `children` (rows, or a node such as a loading
+    // note) are listed under it, on the same scale.
+    function drawBars(ul, shown, max, fmt, o) {
         shown.forEach((row) => {
+            if (row.note) {
+                ul.appendChild(h('li', { class: 'bc-note', text: row.note }));
+                return;
+            }
             const fill = h('span', { class: 'bc-bars__fill' });
             fill.style.width = Math.max(num(row.value) > 0 ? 0.5 : 0, (100 * num(row.value)) / max) + '%';
             fill.style.setProperty('--c', row.color || o.color || 'var(--an-s1)');
@@ -846,7 +861,15 @@
             const parts = [label, value, h('span', { class: 'bc-bars__track', 'aria-hidden': 'true' }, fill)];
             if (row.sub) parts.push(h('span', { class: 'bc-bars__sub', text: row.sub }));
             let item;
-            if (o.onSelect) {
+            if (row.toggle) {
+                label.insertBefore(h('span', { class: 'bc-bars__caret', 'aria-hidden': 'true', text: row.open ? '▾' : '▸' }), label.firstChild);
+                item = h('button', {
+                    type: 'button',
+                    class: 'bc-bars__row bc-bars__row--btn bc-bars__row--toggle',
+                    'aria-expanded': row.open ? 'true' : 'false',
+                    onclick: () => row.toggle(),
+                }, parts);
+            } else if (o.onSelect) {
                 item = h('button', {
                     type: 'button',
                     class: 'bc-bars__row bc-bars__row--btn' + (o.selectedKey && o.selectedKey === row.key ? ' is-selected' : ''),
@@ -856,11 +879,18 @@
             } else {
                 item = h('div', { class: 'bc-bars__row' }, parts);
             }
-            ul.appendChild(h('li', null, item));
+            const li = h('li', null, item);
+            if (row.toggle && row.open && row.children) {
+                if (Array.isArray(row.children)) {
+                    const nested = h('ul', { class: 'bc-bars bc-bars--nested', 'aria-label': row.childLabel || null });
+                    drawBars(nested, row.children, max, fmt, {});
+                    li.appendChild(nested);
+                } else {
+                    li.appendChild(row.children);
+                }
+            }
+            ul.appendChild(li);
         });
-        const wrap = h('div', { class: 'bc-barlist' }, ul);
-        if (o.limit && list.length > o.limit) wrap.appendChild(h('p', { class: 'bc-note', text: (list.length - o.limit) + ' more not shown.' }));
-        return wrap;
     }
 
     // ------------------------------------------------------------------
@@ -1082,9 +1112,18 @@
                 });
             }
             if (o.limit) rows = rows.slice(0, o.limit);
+            // A row's children (`childRows`) follow it, in their own order, whatever
+            // the table is sorted by.
+            const withChildren = [];
             rows.forEach((row) => {
+                withChildren.push(row);
+                const kids = o.childRows ? o.childRows(row) : null;
+                if (kids) kids.forEach((kid) => withChildren.push(Object.assign({}, kid, { __child: true })));
+            });
+            withChildren.forEach((row) => {
                 const key = o.rowKey ? o.rowKey(row) : null;
-                const tr = h('tr', { class: o.selectedKey && key === o.selectedKey ? 'is-selected' : null });
+                const classes = [o.selectedKey && key === o.selectedKey ? 'is-selected' : '', row.__child ? 'bc-table__child' : ''].filter(Boolean).join(' ');
+                const tr = h('tr', { class: classes || null });
                 columns.forEach((c) => {
                     const numeric = c.num || (c.kind && c.kind !== 'text');
                     const content = cell(c, row);
@@ -1111,6 +1150,8 @@
 
         drawHead();
         drawBody();
+        // Draw the rows again (a row's children came in).
+        wrap.redraw = drawBody;
         return wrap;
     }
 

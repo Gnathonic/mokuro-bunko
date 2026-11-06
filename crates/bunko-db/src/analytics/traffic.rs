@@ -315,6 +315,22 @@ pub struct DownloadRow<'a> {
 /// [`ANON_PER_DAY`]: their traffic still counts, but no longer one row each.
 pub const ANON_OTHER: &str = "a:other";
 
+/// The one row [`AnonRows::Grouped`] lists every anonymous visitor under (no stored
+/// principal is ever this: anonymous ids are `a:<12 hex>` or [`ANON_OTHER`]).
+pub const ANON_GROUP: &str = "a:*";
+
+/// How a per-principal usage list shows anonymous visitors (a display grouping:
+/// nothing stored or counted changes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnonRows {
+    /// Each anonymous visitor its own row, ranked among the accounts.
+    Each,
+    /// All of them one [`ANON_GROUP`] row (their sums), ranked among the accounts.
+    Grouped,
+    /// The anonymous visitors alone.
+    Only,
+}
+
 /// Most anonymous visitors a UTC day keeps rows of their own for (design §3). The
 /// daily tables are kept forever and anyone can make up new addresses; past this a
 /// day's newcomers fold into [`ANON_OTHER`], so a flood adds a bounded number of rows
@@ -1051,6 +1067,130 @@ impl AnalyticsDb {
         to_day: i64,
         limit: usize,
     ) -> Result<Vec<PrincipalAgg>> {
+        self.principals_with(from_day, to_day, limit, AnonRows::Each)
+    }
+
+    /// [`AnalyticsDb::principals`] with the anonymous visitors shown as `anon` says.
+    /// [`AnonRows::Grouped`]: one [`ANON_GROUP`] row holds their sums (its `last_seen`
+    /// the latest of theirs) and takes one place in `limit`, so any number of them
+    /// leaves the accounts their places; [`AnonRows::Only`]: they alone.
+    pub fn principals_with(
+        &self,
+        from_day: i64,
+        to_day: i64,
+        limit: usize,
+        anon: AnonRows,
+    ) -> Result<Vec<PrincipalAgg>> {
+        match anon {
+            AnonRows::Each => self.principals_each(from_day, to_day, limit),
+            AnonRows::Grouped => self.principals_keyed(
+                from_day,
+                to_day,
+                limit,
+                &format!(
+                    "CASE WHEN substr(principal, 1, 2) = 'a:' THEN '{ANON_GROUP}' ELSE principal END"
+                ),
+                "",
+            ),
+            AnonRows::Only => self.principals_keyed(
+                from_day,
+                to_day,
+                limit,
+                "principal",
+                "AND principal >= 'a:' AND principal < 'a;'",
+            ),
+        }
+    }
+
+    /// The grouped and anonymous-only lists: principals keyed by `key` (an SQL
+    /// expression over `principal`), rows of `principal_daily` narrowed by `filter`.
+    fn principals_keyed(
+        &self,
+        from_day: i64,
+        to_day: i64,
+        limit: usize,
+        key: &str,
+        filter: &str,
+    ) -> Result<Vec<PrincipalAgg>> {
+        self.read(|c| {
+            let keyed = format!(
+                "SELECT {key} AS k, category, requests, bytes_out, bytes_in FROM principal_daily \
+                 WHERE day >= ?1 AND day <= ?2 {filter}"
+            );
+            let top = format!(
+                "SELECT k, SUM(requests), SUM(bytes_out) AS b, SUM(bytes_in) FROM ({keyed}) \
+                 GROUP BY k ORDER BY b DESC, k ASC LIMIT ?3"
+            );
+            let mut out: Vec<PrincipalAgg> = c
+                .prepare_cached(&top)?
+                .query_map(params![from_day, to_day, limit as i64], |r| {
+                    Ok(PrincipalAgg {
+                        principal: r.get(0)?,
+                        totals: PrincipalCounts {
+                            requests: uint(r.get(1)?),
+                            bytes_out: uint(r.get(2)?),
+                            bytes_in: uint(r.get(3)?),
+                        },
+                        by_category: Vec::new(),
+                        last_seen: None,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let at: std::collections::HashMap<String, usize> = out
+                .iter()
+                .enumerate()
+                .map(|(i, p)| (p.principal.clone(), i))
+                .collect();
+            let split = format!(
+                "SELECT k, category, SUM(requests), SUM(bytes_out), SUM(bytes_in) FROM ({keyed}) \
+                 WHERE k IN (SELECT k FROM ({keyed}) GROUP BY k ORDER BY SUM(bytes_out) DESC, k ASC LIMIT ?3) \
+                 GROUP BY k, category"
+            );
+            let mut stmt = c.prepare_cached(&split)?;
+            let mut rows = stmt.query(params![from_day, to_day, limit as i64])?;
+            while let Some(r) = rows.next()? {
+                let k: String = r.get(0)?;
+                if let Some(&i) = at.get(&k) {
+                    out[i].by_category.push((
+                        r.get(1)?,
+                        PrincipalCounts {
+                            requests: uint(r.get(2)?),
+                            bytes_out: uint(r.get(3)?),
+                            bytes_in: uint(r.get(4)?),
+                        },
+                    ));
+                }
+            }
+            let mut seen =
+                c.prepare_cached("SELECT last_seen FROM principal_seen WHERE principal = ?1")?;
+            let mut group_seen = c.prepare_cached(
+                "SELECT MAX(last_seen) FROM principal_seen WHERE principal >= 'a:' AND principal < 'a;' \
+                 AND principal IN (SELECT principal FROM principal_daily WHERE day >= ?1 AND day <= ?2 \
+                 AND principal >= 'a:' AND principal < 'a;')",
+            )?;
+            for p in &mut out {
+                p.by_category.sort_by(|a, b| {
+                    b.1.bytes_out
+                        .cmp(&a.1.bytes_out)
+                        .then_with(|| a.0.cmp(&b.0))
+                });
+                p.last_seen = if p.principal == ANON_GROUP {
+                    group_seen.query_row(params![from_day, to_day], |r| r.get(0))?
+                } else {
+                    seen.query_row([&p.principal], |r| r.get(0)).optional()?
+                };
+            }
+            Ok(out)
+        })
+    }
+
+    /// Every principal on its own ([`AnonRows::Each`]).
+    fn principals_each(
+        &self,
+        from_day: i64,
+        to_day: i64,
+        limit: usize,
+    ) -> Result<Vec<PrincipalAgg>> {
         self.read(|c| {
             let mut stmt = c.prepare_cached(
                 "SELECT principal, SUM(requests), SUM(bytes_out) AS b, SUM(bytes_in) \
@@ -1490,6 +1630,81 @@ mod tests {
             })
             .unwrap();
         assert_eq!(series, [(2, 4)]);
+    }
+
+    #[test]
+    fn anonymous_visitors_group_into_one_row_or_list_alone() {
+        let (_d, db) = temp_db();
+        db.write(|tx| {
+            let c = |b| PrincipalCounts {
+                requests: 1,
+                bytes_out: b,
+                bytes_in: 2,
+            };
+            tx.add_principal(2, "u:alice", "volume", &c(100))?;
+            tx.add_principal(2, "u:bob", "volume", &c(30))?;
+            tx.add_principal(2, "p:worker", "processor", &c(70))?;
+            for (i, b) in [60u64, 50, 40].iter().enumerate() {
+                let id = format!("a:00000000000{i}");
+                tx.add_principal(2, &id, "volume", &c(*b))?;
+                tx.add_principal(3, &id, "cover", &c(1))?;
+                tx.see_principal(&id, 10, 100 + i as i64)?;
+            }
+            tx.add_principal(2, ANON_OTHER, "metadata", &c(5))?;
+            // Outside the range: neither counted nor seen.
+            tx.add_principal(9, "a:00000000000f", "volume", &c(1000))?;
+            tx.see_principal("a:00000000000f", 10, 900)
+        })
+        .unwrap();
+        let each = db.principals_with(0, 5, 3, AnonRows::Each).unwrap();
+        assert_eq!(each, db.principals(0, 5, 3).unwrap());
+        let ids = |rows: &[PrincipalAgg]| -> Vec<String> {
+            rows.iter().map(|r| r.principal.clone()).collect()
+        };
+        assert_eq!(ids(&each), ["u:alice", "p:worker", "a:000000000000"]);
+        let grouped = db.principals_with(0, 5, 3, AnonRows::Grouped).unwrap();
+        assert_eq!(ids(&grouped), [ANON_GROUP, "u:alice", "p:worker"]);
+        let g = &grouped[0];
+        assert_eq!(
+            g.totals,
+            PrincipalCounts {
+                requests: 7,
+                bytes_out: 60 + 50 + 40 + 3 + 5,
+                bytes_in: 14,
+            }
+        );
+        assert_eq!(
+            g.by_category
+                .iter()
+                .map(|(c, n)| (c.as_str(), n.bytes_out))
+                .collect::<Vec<_>>(),
+            [("volume", 150), ("metadata", 5), ("cover", 3)]
+        );
+        assert_eq!(g.last_seen, Some(102));
+        let all = db.principals_with(0, 5, 50, AnonRows::Grouped).unwrap();
+        assert_eq!(ids(&all), [ANON_GROUP, "u:alice", "p:worker", "u:bob"]);
+        let only = db.principals_with(0, 5, 3, AnonRows::Only).unwrap();
+        assert_eq!(
+            ids(&only),
+            ["a:000000000000", "a:000000000001", "a:000000000002"]
+        );
+        assert_eq!(only[0].totals.bytes_out, 61);
+        assert_eq!(only[0].last_seen, Some(100));
+        assert_eq!(
+            only,
+            db.principals_with(0, 5, 50, AnonRows::Each)
+                .unwrap()
+                .into_iter()
+                .filter(|r| r.principal.starts_with("a:"))
+                .take(3)
+                .collect::<Vec<_>>()
+        );
+        // No anonymous traffic in the range: no group row.
+        assert!(
+            db.principals_with(7, 8, 5, AnonRows::Grouped)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// The heaviest principals with their per-category split: the cost does not grow

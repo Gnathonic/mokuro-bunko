@@ -70,7 +70,12 @@
   period, with each series' completion funnel), Reading, Users, Library, Clients &
   geography, Health, Server, Crawlers and Settings, over 24 hours to all time. The
   charts are plain inline SVG with a hover and keyboard readout and a table view
-  under each; it works at phone width.
+  under each; it works at phone width. In the bandwidth-by-visitor lists (Users,
+  and the Overview's "Most bandwidth") anonymous visitors are one row, "Anonymous
+  visitors · N visitors", ranked by their summed bytes among the accounts, so many of
+  them never push an account off the list; it opens to each visitor with their IPs
+  (`principals?anon=group|split|only`). Every visitor count, the client mix, crawl
+  detection, geography and the failed sign-ins per IP stay per visitor.
 - **Analytics: reading, active accounts and the completion funnel.** The files Mokuro
   Reader syncs over WebDAV (any client writing them counts the same) are read back
   about ten seconds after they are written: `positions.json` for who opened which

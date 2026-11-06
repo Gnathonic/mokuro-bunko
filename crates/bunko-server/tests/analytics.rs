@@ -1156,7 +1156,20 @@ async fn the_admin_api_answers_the_design_shapes() {
             "principals.rows",
         );
     }
-    let anon = rows.iter().find(|r| r["kind"] == "anon").unwrap();
+    // The anonymous visitors are one row by default; `anon=only` lists each.
+    assert_eq!(p["anon"], "group");
+    let group = rows.iter().find(|r| r["kind"] == "anon_group").unwrap();
+    assert_eq!(
+        (&group["principal"], &group["visitors"]),
+        (&json!("a:*"), &json!(1))
+    );
+    assert!(group["by_category"]["volume"].as_u64().unwrap() >= SIZE as u64);
+    assert!(rows.iter().all(|r| r["kind"] != "anon"));
+    let each = env
+        .admin("/_admin/api/analytics/principals?anon=only")
+        .await;
+    let anon = &each["rows"][0];
+    assert_eq!(anon["kind"], "anon");
     assert!(anon["ips"].as_array().unwrap().iter().any(|i| i == IP_B));
     assert!(anon["by_category"]["volume"].as_u64().unwrap() >= SIZE as u64);
     assert!(

@@ -128,6 +128,9 @@ pub fn label(principal: &str) -> String {
     if principal == bunko_db::analytics::traffic::ANON_OTHER {
         return "Other anonymous visitors".to_string();
     }
+    if principal == bunko_db::analytics::traffic::ANON_GROUP {
+        return "Anonymous visitors".to_string();
+    }
     match PrincipalKind::of(principal) {
         PrincipalKind::Anon => format!("Anonymous {}", principal.get(2..).unwrap_or("")),
         _ => principal.get(2..).unwrap_or(principal).to_string(),

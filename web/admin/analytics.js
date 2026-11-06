@@ -141,8 +141,83 @@
         popular: { sort: 'downloads', q: '', series: '' },
         health: { protocol: '' },
         clients: { metric: 'requests' },
+        // The anonymous visitors' row of the per-visitor lists: expanded or not
+        // (remembered per browser), and the visitors it expands to, per range.
+        anon: { open: anonOpenPref(), lists: {} },
     };
     const els = {};
+
+    // ------------------------------------------------------------------
+    // Anonymous visitors: one row in the per-visitor lists
+    // ------------------------------------------------------------------
+
+    // The server lists every anonymous visitor as one row (`kind:
+    // "anon_group"`, `visitors`: how many) in the bandwidth lists; the row
+    // expands to each visitor (`principals?anon=only`). Display only: every
+    // count elsewhere stays per visitor.
+    const ANON_OPEN_KEY = 'bunko.analytics.anonExpanded';
+    const ANON_LIST_MAX = 100;
+    const ANON_OVERVIEW_MAX = 10;
+
+    function anonOpenPref() {
+        try {
+            return localStorage.getItem(ANON_OPEN_KEY) === '1';
+        } catch (_) {
+            return false;
+        }
+    }
+
+    function setAnonOpen(open) {
+        state.anon.open = open;
+        try {
+            if (open) localStorage.setItem(ANON_OPEN_KEY, '1');
+            else localStorage.removeItem(ANON_OPEN_KEY);
+        } catch (_) { /* private mode: the choice just isn't kept */ }
+    }
+
+    function isAnonGroup(row) {
+        return !!row && row.kind === 'anon_group';
+    }
+
+    // The anonymous visitors of this range, heaviest first (at most `limit`):
+    // fetched once per range and limit, `{rows}` or `{error}`.
+    function anonVisitors(limit) {
+        const key = state.range + ':' + limit;
+        if (!state.anon.lists[key]) {
+            state.anon.lists[key] = tryGet('principals', { anon: 'only', limit }).then((r) => (r.error ? { error: r.error } : { rows: (r.data && r.data.rows) || [] }));
+        }
+        return state.anon.lists[key];
+    }
+
+    // Run `redraw` (which rebuilds `selector`'s control inside `root`) and give
+    // the new control the focus the old one had.
+    function keepFocus(root, selector, redraw) {
+        const had = !!root && root.contains(document.activeElement) && document.activeElement.matches(selector);
+        redraw();
+        if (!had) return;
+        const next = root.querySelector(selector);
+        if (next) next.focus();
+    }
+
+    function visitorsText(row) {
+        return many(row.visitors, 'visitor', C.fmtNum);
+    }
+
+    // The group row's name in the Users table: a disclosure button.
+    function anonGroupCell(row, onToggle) {
+        const open = state.anon.open;
+        return h('button', {
+            type: 'button',
+            class: 'an-disclosure',
+            'aria-expanded': open ? 'true' : 'false',
+            title: open ? 'Hide the anonymous visitors' : 'List the anonymous visitors one by one',
+            onclick: onToggle,
+        }, [
+            h('span', { class: 'an-disclosure__caret', 'aria-hidden': 'true', text: open ? '▾' : '▸' }),
+            h('span', { class: 'an-principal__name', text: row.label || 'Anonymous visitors' }),
+            h('span', { class: 'an-muted', text: ' · ' + visitorsText(row) }),
+        ]);
+    }
 
     // ------------------------------------------------------------------
     // Fetching
@@ -645,6 +720,7 @@
     // ------------------------------------------------------------------
 
     async function renderOverview() {
+        state.anon.lists = {};
         const data = await get('overview');
         if (data.available === false) return notCollected('traffic');
         const k = data.kpis || {};
@@ -686,14 +762,63 @@
             })), { kind: 'count', emptyText: 'No downloads in this range.', label: 'Downloads per series', onSelect: (row) => setView('popular', { series: row.key }) }),
         });
         const topPeople = card('Most bandwidth', {
-            sub: 'Accounts and anonymous visitors, ' + dayRangeLong(),
+            sub: 'Accounts and anonymous visitors (one row for them all), ' + dayRangeLong(),
             actions: [viewLink('users', 'Users')],
-            body: C.barList((data.top_principals || []).map((r) => ({
-                key: r.principal, label: r.label || r.principal, value: r.bytes_out, title: r.principal,
-                badge: r.kind && r.kind !== 'user' && !String(r.label || '').startsWith(KIND[r.kind] || r.kind) ? KIND[r.kind] || r.kind : null,
-            })), { kind: 'bytes', emptyText: 'No traffic in this range.', label: 'Bytes sent per visitor' }),
+            body: topPrincipalsList(data.top_principals || []),
         });
         return stack([tiles].concat(notes, [bandwidth, grid([topSeries, topPeople])]));
+    }
+
+    // The overview's heaviest visitors; the anonymous visitors' row opens to
+    // the heaviest of them (all of them: the Users view).
+    function topPrincipalsList(top) {
+        const slot = h('div');
+        let expanded = null;
+        const bar = (r) => ({
+            key: r.principal, label: r.label || r.principal, value: r.bytes_out, title: r.principal,
+            badge: r.kind && r.kind !== 'user' && r.kind !== 'anon_group' && !String(r.label || '').startsWith(KIND[r.kind] || r.kind) ? KIND[r.kind] || r.kind : null,
+        });
+        const draw = () => {
+            const rows = top.map((r) => {
+                const row = bar(r);
+                if (!isAnonGroup(r)) return row;
+                row.sub = visitorsText(r);
+                row.open = state.anon.open;
+                row.childLabel = 'Bytes sent per anonymous visitor';
+                row.toggle = () => {
+                    setAnonOpen(!state.anon.open);
+                    load();
+                    draw();
+                    const btn = slot.querySelector('.bc-bars__row--toggle');
+                    if (btn) btn.focus();
+                };
+                if (row.open) {
+                    if (!expanded) row.children = h('p', { class: 'bc-note', text: 'Loading the anonymous visitors…' });
+                    else if (expanded.error) row.children = h('p', { class: 'bc-note', text: 'The anonymous visitors could not be loaded.' });
+                    else {
+                        row.children = expanded.rows.map((v) => Object.assign(bar(v), { sub: (v.ips || []).slice(0, 2).join(', ') || null }));
+                        if (C.num(r.visitors) > expanded.rows.length) {
+                            row.children.push({ note: 'The ' + C.fmtNum(expanded.rows.length) + ' heaviest of ' + visitorsText(r) + '; the Users view lists more.' });
+                        }
+                    }
+                }
+                return row;
+            });
+            clear(slot);
+            slot.appendChild(C.barList(rows, { kind: 'bytes', emptyText: 'No traffic in this range.', label: 'Bytes sent per visitor' }));
+        };
+        const load = () => {
+            if (!state.anon.open || expanded) return;
+            const want = state.range;
+            anonVisitors(ANON_OVERVIEW_MAX).then((r) => {
+                if (want !== state.range) return;
+                expanded = r;
+                keepFocus(slot, '.bc-bars__row--toggle', draw);
+            });
+        };
+        if (top.some(isAnonGroup)) load();
+        draw();
+        return slot;
     }
 
     function viewLink(view, label) {
@@ -1042,7 +1167,8 @@
     // ------------------------------------------------------------------
 
     async function renderUsers() {
-        const [users, principals] = await Promise.all([tryGet('users'), tryGet('principals', { limit: 50 })]);
+        state.anon.lists = {};
+        const [users, principals] = await Promise.all([tryGet('users'), tryGet('principals', { limit: 50, anon: 'group' })]);
         const parts = [];
         parts.push(panelFor(users, 'active users', (data) => {
             const rows = data.rows || [];
@@ -1083,23 +1209,64 @@
         }, () => render()));
         parts.push(panelFor(principals, 'per-visitor bandwidth', (data) => {
             const tot = data.totals || {};
+            const rows = data.rows || [];
+            const group = rows.find(isAnonGroup);
+            // What the expanded group row lists: its visitors, or a note while
+            // they load (or if they could not be).
+            let expanded = null;
+            let table = null;
+            const load = () => {
+                if (!group || !state.anon.open || expanded) return;
+                const want = state.range;
+                anonVisitors(ANON_LIST_MAX).then((r) => {
+                    if (want !== state.range) return;
+                    expanded = r;
+                    if (table) keepFocus(table, '.an-disclosure', table.redraw);
+                });
+            };
+            const toggle = () => {
+                setAnonOpen(!state.anon.open);
+                load();
+                if (!table) return;
+                table.redraw();
+                const btn = table.querySelector('.an-disclosure');
+                if (btn) btn.focus();
+            };
+            const childRows = (row) => {
+                if (!isAnonGroup(row) || !state.anon.open) return null;
+                if (!expanded) return [{ kind: 'note', label: 'Loading the anonymous visitors…' }];
+                if (expanded.error) return [{ kind: 'note', label: 'The anonymous visitors could not be loaded.' }];
+                const list = expanded.rows.map((r) => Object.assign({}, r, { child: true }));
+                if (C.num(row.visitors) > list.length) list.push({ kind: 'note', label: 'The ' + C.fmtNum(list.length) + ' heaviest of ' + visitorsText(row) + '.' });
+                return list;
+            };
+            const cell = (r, fn) => (r.kind === 'note' ? '' : fn(r));
+            table = C.table([
+                {
+                    key: 'label', label: 'Visitor',
+                    render: (r) => {
+                        if (r.kind === 'note') return h('span', { class: 'an-muted', text: r.label });
+                        if (isAnonGroup(r)) return anonGroupCell(r, toggle);
+                        return principalCell(r);
+                    },
+                },
+                { key: 'requests', label: 'Requests', num: true, render: (r) => cell(r, (x) => C.fmtInt(x.requests)) },
+                { key: 'bytes_out', label: 'Sent', num: true, render: (r) => cell(r, (x) => C.fmtBytes(x.bytes_out)) },
+                { key: 'bytes_in', label: 'Received', num: true, render: (r) => cell(r, (x) => C.fmtBytes(x.bytes_in)) },
+                { key: 'by_category', label: 'Sent by category', sortable: false, className: 'an-col-seg', render: (r) => cell(r, (x) => categoryBar(x.by_category)) },
+                { key: 'last_seen', label: 'Last seen', num: true, render: (r) => cell(r, (x) => h('span', { text: C.fmtAgo(x.last_seen), title: C.fmtDateTime(x.last_seen) })) },
+                { key: 'ips', label: 'IPs', sortable: false, render: (r) => cell(r, (x) => (x.ips && x.ips.length ? h('span', { class: 'an-ips' }, x.ips.slice(0, 3).map((ip) => mono(ip))) : '-')) },
+            ], { rows, sortKey: 'bytes_out', childRows, emptyText: 'No traffic in this range.' });
+            load();
             return card('Bandwidth by visitor', {
-                sub: 'Accounts, anonymous visitors (a pseudonymous id per IPv4 address or IPv6 /64, renewed every IP retention period) and OCR processors, ' + dayRangeLong() + '. IPs of anonymous visitors are kept for the IP retention period only.',
+                sub: 'Accounts, anonymous visitors (a pseudonymous id per IPv4 address or IPv6 /64, renewed every IP retention period) and OCR processors, ' + dayRangeLong() + '. Anonymous visitors share one row; open it to list them one by one, with their IPs (kept for the IP retention period only).',
                 body: [
                     C.kpis([
                         { label: 'Accounts', value: C.fmtNum(tot.users) },
                         { label: 'Anonymous visitors', value: C.fmtNum(tot.anon) },
                         { label: 'Processors', value: C.fmtNum(tot.processor) },
                     ]),
-                    C.table([
-                        { key: 'label', label: 'Visitor', render: principalCell },
-                        { key: 'requests', label: 'Requests', kind: 'int' },
-                        { key: 'bytes_out', label: 'Sent', kind: 'bytes' },
-                        { key: 'bytes_in', label: 'Received', kind: 'bytes' },
-                        { key: 'by_category', label: 'Sent by category', sortable: false, className: 'an-col-seg', render: (r) => categoryBar(r.by_category) },
-                        { key: 'last_seen', label: 'Last seen', num: true, render: (r) => h('span', { text: C.fmtAgo(r.last_seen), title: C.fmtDateTime(r.last_seen) }) },
-                        { key: 'ips', label: 'IPs', sortable: false, render: (r) => (r.ips && r.ips.length ? h('span', { class: 'an-ips' }, r.ips.slice(0, 3).map((ip) => mono(ip))) : '-') },
-                    ], { rows: data.rows || [], sortKey: 'bytes_out', emptyText: 'No traffic in this range.' }),
+                    table,
                 ],
                 wide: true,
             });

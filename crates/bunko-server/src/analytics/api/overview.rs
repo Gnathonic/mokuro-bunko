@@ -1,12 +1,12 @@
 //! `GET /_admin/api/analytics/overview`: the KPIs, bandwidth by category (top 6 and
-//! `other`), the top series and the heaviest principals.
+//! `other`), the top series and the heaviest principals (anonymous visitors as one
+//! row, `anon=group|split|only` as `principals` takes it).
 
 use super::{ApiQuery, answer, category_label, query, time_series, top_with_other};
 use crate::analytics::Analytics;
-use crate::analytics::principal::{PrincipalKind, label};
 use axum::response::Response;
 use bunko_db::analytics::keys;
-use bunko_db::analytics::traffic::{TrafficCounts, TrafficDim, TrafficFilter};
+use bunko_db::analytics::traffic::{ANON_GROUP, TrafficCounts, TrafficDim, TrafficFilter};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 
@@ -14,6 +14,11 @@ use std::collections::HashMap;
 const BANDWIDTH_TOP: usize = 6;
 
 pub(super) async fn get(a: &Analytics, q: &ApiQuery) -> Response {
+    // `top_principals` groups the anonymous visitors as `principals` does.
+    let (anon_rows, anon_name) = match super::principals::anon_mode(q) {
+        Ok(m) => m,
+        Err(r) => return r,
+    };
     let db = a.db().clone();
     let range = q.range;
     let now = q.now;
@@ -97,16 +102,18 @@ pub(super) async fn get(a: &Analytics, q: &ApiQuery) -> Response {
                 json!({"series_key": key, "title": title, "downloads": downloads, "readers": readers, "minutes": round1(minutes)})
             })
             .collect();
-        let top_principals: Vec<Value> = db
-            .principals(d0, d1, 5)?
-            .into_iter()
+        let top = db.principals_with(d0, d1, 5, anon_rows)?;
+        let anon_visitors = if top.iter().any(|p| p.principal == ANON_GROUP) {
+            db.principal_kinds(d0, d1)?.1
+        } else {
+            0
+        };
+        let top_principals: Vec<Value> = top
+            .iter()
             .map(|p| {
-                json!({
-                    "principal": p.principal,
-                    "label": label(&p.principal),
-                    "kind": PrincipalKind::of(&p.principal).as_str(),
-                    "bytes_out": p.totals.bytes_out,
-                })
+                let mut m = super::principals::head(p, anon_visitors);
+                m.insert("bytes_out".into(), json!(p.totals.bytes_out));
+                Value::Object(m)
             })
             .collect();
         Ok(json!({
@@ -136,6 +143,7 @@ pub(super) async fn get(a: &Analytics, q: &ApiQuery) -> Response {
             "bandwidth": bandwidth,
             "top_series": top_series,
             "top_principals": top_principals,
+            "anon": anon_name,
         }))
     })
     .await;

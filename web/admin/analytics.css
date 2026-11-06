@@ -364,6 +364,54 @@
     color: var(--text-primary);
 }
 
+/* The anonymous visitors' row: one row for them all, opened to each. */
+.an-disclosure {
+    display: inline-flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.3rem;
+    background: none;
+    border: 0;
+    border-radius: var(--radius-sm);
+    padding: 0.1rem 0.3rem;
+    margin: -0.1rem -0.3rem;
+    font: inherit;
+    color: var(--text-primary);
+    text-align: left;
+    cursor: pointer;
+}
+
+.an-disclosure:hover {
+    background: var(--bg-hover);
+}
+
+.an-disclosure:focus-visible {
+    outline: 2px solid var(--accent-primary);
+    outline-offset: 1px;
+}
+
+.an-disclosure__caret,
+.bc-bars__caret {
+    flex: none;
+    width: 0.8rem;
+    color: var(--text-muted);
+}
+
+.bc-table tr.bc-table__child td {
+    background: var(--bg-hover);
+}
+
+.bc-table tr.bc-table__child td:first-child {
+    padding-left: 2rem;
+}
+
+.bc-bars--nested {
+    margin: 0.5rem 0 0 1.1rem;
+    padding-left: 0.6rem;
+    border-left: 2px solid var(--border-default);
+    gap: 0.45rem;
+}
+
 .an-details summary {
     cursor: pointer;
     white-space: nowrap;

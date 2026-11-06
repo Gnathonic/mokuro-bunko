@@ -27,7 +27,7 @@ The metrics the owner asked for, and the extras they chose:
 | 1 | Most downloaded series (all time, last week/month, trending) | archive GETs, per (principal, volume, day) |
 | 2 | Most read series (readers, reads, minutes, pages) | `positions.json` and `history/**` uploads |
 | 3 | Bandwidth graphs (hourly/daily, by category / protocol / method) | response and request body bytes |
-| 4 | Bandwidth by user (anonymous visitors by pseudonymous id) | same, per principal |
+| 4 | Bandwidth by user (anonymous visitors by pseudonymous id; listed as one row that opens to each) | same, per principal |
 | 5 | Bytes spent on progress / profile sync | categories `progress_sync`, `profile_sync` |
 | 6 | Bytes spent on navigation / metadata | category `metadata`, by detail |
 | 7 | Process memory (RSS, peak), CPU, connections | host sampler |
@@ -706,9 +706,9 @@ about 48 h), and those answers add `series_granularity: "day"`.
 
 | Endpoint | Body (in addition to the common fields) |
 |---|---|
-| `GET overview` | `kpis{bytes_out, bytes_in, est_bytes_out, requests, downloads, downloaders, reads, readers, minutes_read, pages_read, dau, wau, mau, crawl_episodes, errors_5xx, auth_failures, rss_bytes, rss_peak_bytes, cpu_pct, uptime_s, dropped}` (`dau`/`wau`/`mau`: accounts and anonymous visitors, today and the last 7 and 30 days; `dropped`: all time), `bandwidth` (time series of bytes out by category, top 6 + `other`), `top_series[5]{series_key,title,downloads,readers,minutes}`, `top_principals[5]{principal,label,kind,bytes_out}` |
+| `GET overview` | `kpis{bytes_out, bytes_in, est_bytes_out, requests, downloads, downloaders, reads, readers, minutes_read, pages_read, dau, wau, mau, crawl_episodes, errors_5xx, auth_failures, rss_bytes, rss_peak_bytes, cpu_pct, uptime_s, dropped}` (`dau`/`wau`/`mau`: accounts and anonymous visitors, today and the last 7 and 30 days; `dropped`: all time), `bandwidth` (time series of bytes out by category, top 6 + `other`), `top_series[5]{series_key,title,downloads,readers,minutes}`, `top_principals[5]{principal,label,kind,bytes_out,visitors (the anonymous row)}` (anonymous visitors as one row, as `principals` groups them; `anon=group\|split\|only` as there, echoed as `anon`) |
 | `GET traffic?by=category\|protocol\|method\|detail&metric=bytes_out\|bytes_in\|requests&category=` | time series by `by` (top 12 + `(other)`); `by`, `metric`; `totals[]{key,label,requests,bytes_out,bytes_in,est_bytes_out}`; `sync{progress:{bytes_out,bytes_in,requests,by_detail[]{key,label,requests,bytes_out,bytes_in}}, profile:{...}}`; `metadata{bytes_out,bytes_in,requests,by_detail[]{key,label,requests,bytes_out}}`; `dav_methods[]{method,requests,bytes_out,bytes_in}` |
-| `GET principals?limit=50` | `rows[]{principal,label,kind(user\|anon\|processor),requests,bytes_out,bytes_in,by_category{category: bytes_out},last_seen,ips[] (anon only, within IP retention)}`, `totals{users,anon,processor}` |
+| `GET principals?limit=50&anon=group\|split\|only` | `anon` (the mode, echoed; another value: 400), `rows[]{principal,label,kind(user\|anon\|processor\|anon_group),requests,bytes_out,bytes_in,by_category{category: bytes_out},last_seen,ips[] (anon only, within IP retention),visitors (anon_group only)}` (heaviest first, at most `limit`), `totals{users,anon,processor}`. **Built:** `group` (the default) lists every anonymous visitor as ONE row, `{"principal": "a:*", "label": "Anonymous visitors", "kind": "anon_group", "visitors": N, ...}`: their summed requests, bytes and `by_category`, the latest `last_seen` of theirs, `ips: []`, `visitors` = `totals.anon`; it takes one place in `limit`, ranked by its bytes among the accounts and processors, so a crowd of visitors never pushes an account off the list. `split` lists each anonymous visitor on its own (the list before the grouping); `only` lists the anonymous visitors alone, heaviest first (what the UI's grouped row expands to). A display grouping only: the stored rows, `totals` and every other count (active visitors, client mix, crawl detection, geography, failed sign-ins per IP, the IP lists) stay per visitor |
 | `GET series?sort=downloads\|downloaders\|readers\|reads\|minutes\|pages\|bytes&limit=50&q=` | `rows[]{series_key,title,downloads,downloaders,readers,reads,pages,minutes,bytes_out,prev{downloads,readers},volumes}`, `sort` (prev = the previous period of the same length, for trending; `volumes` = distinct volumes downloaded; `downloads` = completed (day, principal, volume) rows; `bytes_out` = every byte sent, partial downloads included) |
 | `GET funnel?series=<any spelling>` | `series_key,title,in_library,volumes[]{volume_key,title,started,finished,downloads,in_library,page_count}`, `readers_started`, `readers_finished`, `stages[]{key(started\|p25\|p50\|p75\|completed),label,reads}`; without `series`: `series[]{series_key,title,readers_started,readers_finished,volumes_started,downloads}` (top 50) |
 | `GET reading` | time series `minutes` (0.1 min), `pages`, `readers`; `totals{reads,readers,minutes,pages,chars,opens}`; `top_readers[]{username,minutes,pages,volumes,reads,days,chars}`; `top_volumes[]{volume_key (null: not in the library),volume_uuid,title,series_key,series_title,readers,reads,pages,minutes}`; `sources{positions,history}` (each read once); `worker{queued,dropped,pending,files,positions,segments,volume_data,device_files,missing,too_large,unknown_format,malformed,failed,coalesced,pending_dropped,events_out_of_range}` (since start) |
@@ -726,6 +726,13 @@ Every view answers its data. The only `available` field left is `page_formats`'s
 (with a `reason`). The UI still shows "Not collected yet" for a top-level
 `{"available": false}`, which development builds of 0.8 answered for an area that did
 not exist yet, and an older server's 404 for a view it does not have.
+
+**Built (anonymous visitors in the user lists):** the per-principal usage lists, the
+Users view's "Bandwidth by visitor" table and the Overview's "Most bandwidth" list,
+show the anonymous visitors as one row, "Anonymous visitors · N visitors", placed by
+its summed bytes among the accounts. It opens (collapsed by default; the choice is kept
+per browser in `localStorage`) to the individual visitors, heaviest first, with their
+IPs: up to 100 in Users, 10 in the Overview. Nothing else is grouped.
 
 Settings: the `analytics:` section is editable through the existing admin settings flow
 (`admin/settings.rs`: an `analytics` editor like the others, live, saved to config).
