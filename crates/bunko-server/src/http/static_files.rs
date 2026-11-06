@@ -2,12 +2,19 @@
 
 use axum::body::Body;
 use axum::response::{IntoResponse, Response};
+pub use embedded::WebAssets;
 use http::{HeaderValue, StatusCode, header};
-use rust_embed::RustEmbed;
 
-#[derive(RustEmbed)]
-#[folder = "../../web/"]
-pub struct WebAssets;
+// unmounted: the derive's impl reads the web UI from disk in debug builds, not the
+// library (a module, since the impl is generated beside the struct).
+#[allow(clippy::disallowed_methods)]
+mod embedded {
+    use rust_embed::RustEmbed;
+
+    #[derive(RustEmbed)]
+    #[folder = "../../web/"]
+    pub struct WebAssets;
+}
 
 pub fn content_type(name: &str) -> &'static str {
     let ext = name

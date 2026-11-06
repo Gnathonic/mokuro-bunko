@@ -260,7 +260,7 @@ fn float_json(f: f64) -> String {
 
 /// `json.encoder.py_encode_basestring` (ensure_ascii=False): `"`, `\` and the
 /// C0 controls are escaped, nothing else (not `/`, not U+2028).
-fn write_string(out: &mut String, s: &str) {
+pub(crate) fn write_string(out: &mut String, s: &str) {
     out.push('"');
     for c in s.chars() {
         match c {

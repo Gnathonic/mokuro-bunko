@@ -1,0 +1,21 @@
+{
+  "body_text": "<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.01//EN\" \"http://www.w3.org/TR/html4/strict.dtd\">\n<html><head>\n  <meta http-equiv=\"Content-Type\" content=\"text/html; charset=utf-8\">\n  <title>201 Created</title>\n</head><body>\n  <h1>201 Created</h1>\n  <p>201 Created</p>\n<hr/>\n<p>mokuro-bunko</p>\n</body></html>",
+  "headers": {
+    "content-type": "text/html; charset=utf-8",
+    "etag": "\"etag\"",
+    "x-mokuro-digest-verified": "sha-256",
+    "x-mokuro-size": "25",
+    "x-mokuro-upload": "stored"
+  },
+  "request": {
+    "auth": "basic:progress",
+    "body_text": "contract reading history\n",
+    "headers": {
+      "content-digest": "<digest>",
+      "content-type": "application/octet-stream"
+    },
+    "method": "PUT",
+    "path": "/mokuro-reader/history/0f6c-dev/2026-10.events"
+  },
+  "status": 201
+}

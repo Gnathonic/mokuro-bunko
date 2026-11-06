@@ -29,6 +29,8 @@ tar = "0.4"
 # torch-pack: .tar.zst archives and the dynamic-link closure check (ELF/PE/Mach-O).
 zstd = { version = "0.13", features = ["zstdmt"] }
 goblin = "0.10"
+# interop: interop/budgets.toml.
+toml = "0.8"
 
 [dev-dependencies]
 tempfile.workspace = true

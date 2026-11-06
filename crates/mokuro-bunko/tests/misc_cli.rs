@@ -102,6 +102,24 @@ fn unknown_command_is_usage_error() {
     Env::new().cmd().arg("frobnicate").assert().code(2);
 }
 
+/// The rig's fake processor is in the testing build only, and never in the help.
+#[test]
+fn processor_fake_is_hidden_and_only_in_the_testing_build() {
+    Env::new()
+        .cmd()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("processor-fake").not());
+    let fake = Env::new().cmd().args(["processor-fake", "--help"]).assert();
+    if cfg!(feature = "testing") {
+        fake.success();
+    } else {
+        fake.code(2)
+            .stderr(predicate::str::contains("unrecognized subcommand"));
+    }
+}
+
 #[cfg(feature = "ocr")]
 #[test]
 fn install_ocr_lists_and_checks_its_sources() {

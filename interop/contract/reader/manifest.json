@@ -1,0 +1,35 @@
+{
+  "expect": {
+    "body_fields": [
+      "version",
+      "series",
+      "volume",
+      "archive.url",
+      "archive.size",
+      "archive.modified",
+      "ocr.url",
+      "ocr.size",
+      "layers.0.id",
+      "layers.0.url",
+      "cover.url",
+      "series_file.url",
+      "series_file.size",
+      "series_file.modified",
+      "pending"
+    ],
+    "nullable_fields": [
+      "recheck_after",
+      "cover",
+      "ocr"
+    ],
+    "status": [
+      200
+    ]
+  },
+  "request": {
+    "auth": "basic:reader",
+    "headers": {},
+    "method": "GET",
+    "path": "/catalog/api/manifest?series=Contract%20Series&volume=Volume%2001"
+  }
+}

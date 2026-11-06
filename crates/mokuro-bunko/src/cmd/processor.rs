@@ -195,7 +195,7 @@ fn serve(ctx: &Ctx, config: &Path, verbose: bool) -> CmdResult {
             control.set_update(started.view);
             control.set_update_problems(started.problems);
             options.control = Some(control.clone());
-            crate::control::start(&control, config_path, Some(processor_config)).await
+            crate::control::start(&control, config_path, Some(processor_config), None).await
         } else {
             if owns_storage {
                 ocr_installer.start_if_needed();

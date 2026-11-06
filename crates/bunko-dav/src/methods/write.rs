@@ -6,19 +6,22 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use bunko_store::fs;
 use http::StatusCode;
 use serde_json::json;
 
 use super::{
     Effects, Req, audit, blocking, check_dav_locks, eval_if, file_audit_target,
-    folder_audit_target, forget_ocr_records, is_cbz, is_virtual_root, lookup, primary_leaving,
-    write_lock_conflict,
+    folder_audit_target, forget_ocr_records, is_cbz, is_virtual_root, lookup, ownership_holds,
+    personal_audit_target, personal_grant_holds, primary_leaving, write_lock_conflict,
 };
 use crate::paths::{self, PathClass};
 use crate::propfind::resource_key;
 use crate::resource::{FileKind, Resource};
 use crate::response::{self, DavError, DavResult, Resp};
 use crate::{Inner, sidecars};
+use bunko_core::reader_tree::{self, HistoryShape};
+use bunko_core::sidecar_names;
 
 pub(crate) async fn delete(inner: &Arc<Inner>, req: &Req) -> DavResult<Resp> {
     if is_virtual_root(&req.path) {
@@ -27,9 +30,10 @@ pub(crate) async fn delete(inner: &Arc<Inner>, req: &Req) -> DavResult<Resp> {
             "The library root cannot be deleted.",
         ));
     }
-    let res = lookup(inner, &req.path, req.username())
+    let res = lookup(inner, &req.path, req)
         .await?
         .ok_or_else(|| DavError::new(StatusCode::NOT_FOUND, &req.path))?;
+    personal_grant_holds(req, res.kind())?;
     if req.content_length() != 0 {
         return Err(DavError::new(
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
@@ -53,6 +57,7 @@ pub(crate) async fn delete(inner: &Arc<Inner>, req: &Req) -> DavResult<Resp> {
     }
     let (inner2, req2) = (inner.clone(), req.clone());
     blocking(move || {
+        ownership_holds(&req2)?;
         let mut effects = Effects::default();
         delete_resource(&inner2, &req2, &res, &mut effects)?;
         inner2.locks.remove_tree(&key);
@@ -74,20 +79,28 @@ fn delete_resource(
 ) -> DavResult<()> {
     match res {
         Resource::Virtual { .. } => Ok(()),
+        Resource::File {
+            path,
+            phys,
+            kind: FileKind::Personal,
+            ..
+        } => delete_personal(inner, req, path, phys, effects),
         Resource::File { path, phys, .. } => delete_file(inner, req, path, phys, effects),
         Resource::Folder { path, phys, .. } => {
-            if !phys.exists() {
+            if !fs::exists(phys) {
                 return Ok(());
             }
             let target = folder_audit_target(inner, path, Some(phys));
             let Some(_guard) = inner.write_locks.try_lock(phys) else {
                 return Err(write_lock_conflict(req, target, "delete", None));
             };
-            std::fs::remove_dir_all(phys)?;
+            fs::remove_dir_all(phys)?;
             if let Some(rel) = inner.roots.library_rel(phys).filter(|r| !r.is_empty()) {
                 req.ctx.hooks.forget_volume_uploads_under_prefix(&rel);
                 req.ctx.hooks.forget_ocr_sidecars_under_prefix(&rel);
                 req.ctx.hooks.forget_volume_uuids_under_prefix(&rel);
+                req.ctx.hooks.series_folder_removed(&rel);
+                inner.overlays().forget_prefix(&rel);
             }
             effects.note_removed(inner, phys);
             effects.touch(path, Some(phys));
@@ -104,7 +117,7 @@ fn delete_file(
     phys: &Path,
     effects: &mut Effects,
 ) -> DavResult<()> {
-    if !phys.exists() {
+    if !fs::exists(phys) {
         return Ok(());
     }
     let target = file_audit_target(inner, vpath, phys);
@@ -113,13 +126,14 @@ fn delete_file(
     };
     let rel = inner.roots.library_rel(phys);
     primary_leaving(inner, req, phys);
-    let cbz = is_cbz(phys);
+    // Only a library archive is a volume with sidecars and records.
+    let cbz = rel.is_some() && is_cbz(phys);
     if cbz {
         for sidecar in sidecars::siblings(phys) {
-            let _ = std::fs::remove_file(&sidecar);
+            let _ = fs::remove_file(&sidecar);
         }
     }
-    match std::fs::remove_file(phys) {
+    match fs::remove_file(phys) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e.into()),
@@ -129,10 +143,35 @@ fn delete_file(
         if let Some(rel) = rel.as_deref() {
             req.ctx.hooks.forget_volume_upload(rel);
             req.ctx.hooks.forget_volume_uuid(rel);
+            // Every account's corrections of the volume go with it (the owner's
+            // physical one went with the sidecars).
+            inner.overlays().forget_volume(rel);
         }
     }
     forget_ocr_records(req, rel.as_deref(), true);
     effects.touch(vpath, Some(phys));
+    audit(req, "delete", target, None);
+    Ok(())
+}
+
+/// Delete the caller's own correction (D27): nothing else changes.
+fn delete_personal(
+    inner: &Inner,
+    req: &Req,
+    vpath: &str,
+    phys: &Path,
+    effects: &mut Effects,
+) -> DavResult<()> {
+    let target = personal_audit_target(vpath);
+    let Some(_guard) = inner.write_locks.try_lock(phys) else {
+        return Err(write_lock_conflict(req, target, "delete", None));
+    };
+    match fs::remove_file(phys) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
+    }
+    effects.touch_personal(inner, vpath, phys);
     audit(req, "delete", target, None);
     Ok(())
 }
@@ -147,14 +186,14 @@ pub(crate) async fn mkcol(inner: &Arc<Inner>, req: &Req) -> DavResult<Resp> {
     if req.header("depth").is_some_and(|d| d != "0") {
         return Err(DavError::new(StatusCode::BAD_REQUEST, "Depth must be '0'."));
     }
-    if lookup(inner, &req.path, req.username()).await?.is_some() {
+    if lookup(inner, &req.path, req).await?.is_some() {
         return Err(DavError::new(
             StatusCode::METHOD_NOT_ALLOWED,
             "MKCOL can only be executed on an unmapped URL.",
         ));
     }
     let parent = match paths::uri_parent(&req.path) {
-        Some(p) => lookup(inner, &p, req.username()).await?,
+        Some(p) => lookup(inner, &p, req).await?,
         None => None,
     };
     let Some(parent) = parent.filter(Resource::is_collection) else {
@@ -165,26 +204,60 @@ pub(crate) async fn mkcol(inner: &Arc<Inner>, req: &Req) -> DavResult<Resp> {
     };
     check_dav_locks(inner, req, &resource_key(&parent, req.username()), false)?;
     let name = paths::uri_name(&req.path).to_string();
-    if paths::is_per_user_name(&name)
-        && matches!(paths::classify(&req.path), paths::Target::Progress(_))
+    // In the caller's own tree only the history collections can be created: `history`
+    // and one level of device folders below it.
+    if let paths::Target::Progress(rel) = paths::classify(&req.path)
+        && reader_tree::history_shape_of_rel(&rel) != Some(HistoryShape::Collection)
     {
         return Err(DavError::new(StatusCode::FORBIDDEN, "Forbidden"));
     }
     let (inner2, req2) = (inner.clone(), req.clone());
+    // A series folder (a top-level library folder) is owned by the request that
+    // created it (0.8).
+    let series_folder = matches!(parent, Resource::Virtual { .. });
     blocking(move || {
-        let Some((dir, FileKind::Library)) =
-            inner2.roots.member_path(&parent, &name, req2.username())
+        let Some((dir, kind)) = inner2
+            .roots
+            .member_path(&parent, &name, req2.caller())
+            .filter(|(_, kind)| *kind != FileKind::Personal)
         else {
             return Err(DavError::new(StatusCode::FORBIDDEN, "Forbidden"));
         };
-        std::fs::create_dir_all(&dir)?;
+        if kind == FileKind::Library {
+            // An owner rule admitted it: ask again where the folder is made (OWN-6).
+            ownership_holds(&req2)?;
+        }
+        if series_folder && kind == FileKind::Library {
+            create_series_folder(&inner2, &req2, &dir)?;
+        } else if kind == FileKind::Library {
+            // The parent was checked above, but may have gone since: a MKCOL never
+            // makes it again (an unowned series folder, made by nobody's MKCOL), it
+            // answers 409 as RFC 4918 has it (OWN-6, as C9 for a PUT). A concurrent
+            // MKCOL of the same folder is not an error.
+            match fs::create_dir(&dir) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(DavError::new(
+                        StatusCode::CONFLICT,
+                        "Parent must be an existing collection.",
+                    ));
+                }
+                Err(e) => return Err(e.into()),
+            }
+        } else {
+            // Also creates `users/<u>/` on an account's first use; a concurrent MKCOL of
+            // the same collection is not an error.
+            fs::create_dir_all(&dir)?;
+        }
         let member = paths::join_uri(parent.path(), &name);
-        audit(
-            &req2,
-            "mkdir",
-            folder_audit_target(&inner2, parent.path(), parent.phys()),
-            Some(json!({ "path": member })),
-        );
+        let target = match kind {
+            FileKind::Progress => ("progress", paths::normalize(&member)),
+            FileKind::Library | FileKind::Personal => {
+                folder_audit_target(&inner2, parent.path(), parent.phys())
+            }
+        };
+        audit(&req2, "mkdir", target, Some(json!({ "path": member })));
         let mut effects = Effects::default();
         effects.touch(&member, Some(&dir));
         effects.fire(&inner2, &req2);
@@ -192,6 +265,30 @@ pub(crate) async fn mkcol(inner: &Arc<Inner>, req: &Req) -> DavResult<Resp> {
     })
     .await??;
     Ok(response::status_page(StatusCode::CREATED, ""))
+}
+
+/// One series folder MKCOL at a time, from its create to its owner record: a store
+/// whose create is a lookup and then a make (a cloud index) would otherwise let two
+/// concurrent requests both create it, and the later one take it.
+static SERIES_FOLDER_CREATE: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+/// MKCOL of a top-level library folder. The request that creates it tells the hooks who
+/// did; one that finds it there already (a concurrent MKCOL) is not an error and owns
+/// nothing. Blocking.
+fn create_series_folder(inner: &Inner, req: &Req, dir: &Path) -> DavResult<()> {
+    let _one = SERIES_FOLDER_CREATE.lock();
+    let created = match fs::create_dir(dir) {
+        Ok(()) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => false,
+        Err(e) => return Err(e.into()),
+    };
+    if created
+        && let (Some(rel), Some(actor)) = (inner.roots.library_rel(dir), req.username())
+        && !rel.is_empty()
+    {
+        req.ctx.hooks.series_folder_created(&rel, actor);
+    }
+    Ok(())
 }
 
 /// The `Destination` header as a decoded path (WsgiDAV rules; spec §8.3.7).
@@ -248,9 +345,10 @@ pub(crate) async fn copy_move(inner: &Arc<Inner>, req: &Req, is_move: bool) -> D
             "The library root cannot be moved or copied.",
         ));
     }
-    let src = lookup(inner, &req.path, user)
+    let src = lookup(inner, &req.path, req)
         .await?
         .ok_or_else(|| DavError::new(StatusCode::NOT_FOUND, &req.path))?;
+    personal_grant_holds(req, src.kind())?;
     let mut dest_path = destination_path(req)?;
     let overwrite = match req
         .header("overwrite")
@@ -298,6 +396,14 @@ pub(crate) async fn copy_move(inner: &Arc<Inner>, req: &Req, is_move: bool) -> D
         dest_path = format!("{}/", dest_path.trim_end_matches('/'));
     }
 
+    // The reading history is written file by file and never rearranged: nothing moves
+    // or copies into, out of or inside it.
+    if paths::is_history_path(&req.path) || paths::is_history_path(&dest_path) {
+        return Err(DavError::new(
+            StatusCode::FORBIDDEN,
+            "Reading history cannot be moved or copied.",
+        ));
+    }
     // 14.1 / 14.3: both ends in the same class (library or progress), never a virtual root.
     let src_class = paths::class_of(&req.path);
     let dest_class = paths::class_of(&dest_path);
@@ -317,7 +423,7 @@ pub(crate) async fn copy_move(inner: &Arc<Inner>, req: &Req, is_move: bool) -> D
     let renames_source = is_move
         && src_norm != dest_norm
         && crate::fold_name(&src_norm) == crate::fold_name(&dest_norm);
-    let mut dest = lookup(inner, &dest_path, user).await?;
+    let mut dest = lookup(inner, &dest_path, req).await?;
     if renames_source
         && let (Some(s), Some(d)) = (src.phys(), dest.as_ref().and_then(Resource::phys))
     {
@@ -327,7 +433,7 @@ pub(crate) async fn copy_move(inner: &Arc<Inner>, req: &Req, is_move: bool) -> D
         }
     }
     let dest_parent = match paths::uri_parent(&dest_path) {
-        Some(p) => lookup(inner, &p, user).await?,
+        Some(p) => lookup(inner, &p, req).await?,
         None => None,
     };
     let Some(dest_parent) = dest_parent.filter(Resource::is_collection) else {
@@ -382,13 +488,37 @@ pub(crate) async fn copy_move(inner: &Arc<Inner>, req: &Req, is_move: bool) -> D
     let (inner2, req2) = (inner.clone(), req.clone());
     let dest_exists = dest.is_some();
     let status = blocking(move || -> DavResult<StatusCode> {
-        let Some((dest_phys, _)) =
+        let Some((dest_phys, dest_kind)) =
             inner2
                 .roots
-                .destination_path(&dest_parent, &dest_name, req2.username())
+                .destination_path(&dest_parent, &dest_name, req2.caller())
         else {
             return Err(DavError::new(StatusCode::FORBIDDEN, "Forbidden"));
         };
+        personal_grant_holds(&req2, Some(dest_kind))?;
+        // A correction is the caller's own (D27): it moves or copies to another
+        // correction name only, and nothing else becomes one.
+        if (src.kind() == Some(FileKind::Personal)) != (dest_kind == FileKind::Personal) {
+            return Err(DavError::new(
+                StatusCode::FORBIDDEN,
+                "Corrections can only move between correction files.",
+            ));
+        }
+        // Stored under the one spelling a PUT takes: a plain `.mokuro` (critique C18).
+        if dest_kind == FileKind::Personal {
+            if sidecar_names::strip_suffix_ci(&dest_name, ".gz").is_some() {
+                return Err(DavError::new(
+                    StatusCode::FORBIDDEN,
+                    "Corrections are saved as plain .mokuro files.",
+                ));
+            }
+            if !dest_name.ends_with(".mokuro") {
+                return Err(DavError::new(
+                    StatusCode::CONFLICT,
+                    "A correction's name must end in .mokuro.",
+                ));
+            }
+        }
         // The virtual paths differed; the files may not (`a//x`, `a/./x`, a symlink, a
         // case-insensitive filesystem). Overwriting the source with itself deletes it. A
         // rename that only changes the case is the source on a case-insensitive filesystem
@@ -411,6 +541,30 @@ pub(crate) async fn copy_move(inner: &Arc<Inner>, req: &Req, is_move: bool) -> D
         }
         let mut effects = Effects::default();
         let status = match &src {
+            Resource::File {
+                path,
+                phys,
+                kind: FileKind::Personal,
+                ..
+            } => {
+                if let Some(d) = &dest {
+                    delete_resource(&inner2, &req2, d, &mut effects)?;
+                }
+                move_personal(
+                    &inner2,
+                    &req2,
+                    (path, phys),
+                    (&dest_norm, &dest_phys),
+                    is_move,
+                    &mut effects,
+                )?;
+                // A file MOVE answers 204 like the library's (WsgiDAV `handle_move`).
+                if is_move || dest_exists {
+                    StatusCode::NO_CONTENT
+                } else {
+                    StatusCode::CREATED
+                }
+            }
             Resource::File { path, phys, .. } => {
                 if is_move {
                     move_file(
@@ -493,14 +647,14 @@ fn same_physical(a: &Path, b: &Path) -> bool {
 
 /// Is `dest` (which may not exist yet) inside the folder `src` on disk?
 fn physically_below(dest: &Path, src: &Path) -> bool {
-    let Ok(src) = std::fs::canonicalize(src) else {
+    let Ok(src) = fs::canonicalize(src) else {
         return dest.starts_with(src);
     };
     // The deepest existing ancestor of `dest`, canonical, with the rest re-attached.
     let mut probe = dest.to_path_buf();
     let mut tail: Vec<std::ffi::OsString> = Vec::new();
     loop {
-        if let Ok(canon) = std::fs::canonicalize(&probe) {
+        if let Ok(canon) = fs::canonicalize(&probe) {
             let mut full = canon;
             full.extend(tail.iter().rev());
             return full.starts_with(&src);
@@ -533,21 +687,70 @@ fn move_file(
     let new_rel = inner.roots.library_rel(dest);
     primary_leaving(inner, req, src);
     if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent)?;
+        fs::create_dir_all(parent)?;
     }
-    std::fs::rename(src, dest)?;
+    let volume = is_cbz(src) && is_cbz(dest) && old_rel.is_some() && new_rel.is_some();
+    // Told before the rename and kept until its hook ran: a failed rename drops it here.
+    let moving = volume.then(|| req.ctx.hooks.archive_moving(src, dest));
+    fs::rename(src, dest)?;
+    if volume {
+        req.ctx.hooks.archive_moved(src, dest);
+    }
+    drop(moving);
     if is_cbz(src) {
         effects.note_removed(inner, src);
     }
     effects.note_arrived(inner, dest);
     if let (Some(old), Some(new)) = (old_rel.as_deref(), new_rel.as_deref()) {
         req.ctx.hooks.rename_volume_upload(old, new);
+        // Every account's corrections follow the archive, the cloud-root owner's
+        // physical one included. The reader's own MOVE of its `<Old>.edit.mokuro`
+        // then finds it already there.
+        if is_cbz(src) {
+            let overlays = inner.overlays();
+            overlays.rename_volume(old, new);
+            overlays.rename_physical(old, new);
+        }
     }
     forget_ocr_records(req, old_rel.as_deref(), true);
     forget_ocr_records(req, new_rel.as_deref(), false);
     effects.touch(src_v, Some(src));
     effects.touch(dest_v, Some(dest));
     audit(req, "move", target, Some(json!({ "destination": dest_v })));
+    Ok(())
+}
+
+/// MOVE or COPY of the caller's own correction to another of its correction names
+/// (D27): the file only, no record of any kind.
+fn move_personal(
+    inner: &Inner,
+    req: &Req,
+    (src_v, src): (&str, &Path),
+    (dest_v, dest): (&str, &Path),
+    is_move: bool,
+    effects: &mut Effects,
+) -> DavResult<()> {
+    let target = personal_audit_target(src_v);
+    let operation = if is_move { "move" } else { "copy" };
+    let Some(_guard) = inner.write_locks.try_lock_all(&[src, dest]) else {
+        return Err(write_lock_conflict(req, target, operation, Some(dest_v)));
+    };
+    if is_move {
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::rename(src, dest)?;
+        effects.touch_personal(inner, src_v, src);
+    } else {
+        copy_one(src, dest)?;
+    }
+    effects.touch_personal(inner, dest_v, dest);
+    audit(
+        req,
+        operation,
+        target,
+        Some(json!({ "destination": dest_v })),
+    );
     Ok(())
 }
 
@@ -578,34 +781,36 @@ fn copy_file(
     Ok(())
 }
 
-/// Copy bytes, permissions and times (Python `shutil.copy2`), atomically.
-fn copy_one(src: &Path, dest: &Path) -> std::io::Result<()> {
+/// Copy bytes, permissions and times (Python `shutil.copy2`), atomically. A failed read
+/// of the source is answered as a GET's is ([`DavError::from_read_io`]: a file changed
+/// behind the index is a retry, not a 412).
+fn copy_one(src: &Path, dest: &Path) -> DavResult<()> {
     let dir = dest
         .parent()
         .ok_or_else(|| std::io::Error::other("no parent"))?;
-    std::fs::create_dir_all(dir)?;
+    fs::create_dir_all(dir)?;
     let temp = dir.join(format!(
         ".{}.upload-copy{}.tmp",
         paths::file_name(dest),
         std::process::id()
     ));
-    let result = (|| {
-        std::fs::copy(src, &temp)?;
-        let meta = std::fs::metadata(src)?;
-        let file = std::fs::File::options().write(true).open(&temp)?;
+    let result = (|| -> DavResult<()> {
+        fs::copy(src, &temp).map_err(|e| DavError::from_read_io(&e))?;
+        let meta = fs::metadata(src)?;
+        let file = fs::File::options().write(true).open(&temp)?;
         let mut times = std::fs::FileTimes::new();
         if let Ok(m) = meta.modified() {
             times = times.set_modified(m);
         }
-        if let Ok(a) = meta.accessed() {
+        if let Some(a) = meta.as_std().and_then(|m| m.accessed().ok()) {
             times = times.set_accessed(a);
         }
         file.set_times(times)?;
         drop(file);
-        std::fs::rename(&temp, dest)
+        Ok(fs::rename(&temp, dest)?)
     })();
     if result.is_err() {
-        let _ = std::fs::remove_file(&temp);
+        let _ = fs::remove_file(&temp);
     }
     result
 }
@@ -629,9 +834,9 @@ fn move_folder(
     let new_prefix = inner.roots.library_rel(dest);
     let volumes = cbz_under(src);
     if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent)?;
+        fs::create_dir_all(parent)?;
     }
-    std::fs::rename(src, dest)?;
+    fs::rename(src, dest)?;
     effects.note_removed(inner, src);
     match (old_prefix.as_deref(), new_prefix.as_deref()) {
         (Some(old_prefix), Some(new_prefix)) => {
@@ -653,10 +858,14 @@ fn move_folder(
             req.ctx
                 .hooks
                 .rename_volume_uuids_under_prefix(old_prefix, new_prefix);
+            req.ctx.hooks.series_folder_moved(old_prefix, new_prefix);
+            inner.overlays().rename_prefix(old_prefix, new_prefix);
         }
         (Some(old_prefix), None) => {
             req.ctx.hooks.forget_ocr_sidecars_under_prefix(old_prefix);
             req.ctx.hooks.forget_volume_uuids_under_prefix(old_prefix);
+            req.ctx.hooks.series_folder_removed(old_prefix);
+            inner.overlays().forget_prefix(old_prefix);
         }
         _ => {}
     }
@@ -674,7 +883,7 @@ fn cbz_under(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&d) else {
+        let Ok(entries) = fs::read_dir(&d) else {
             continue;
         };
         for e in entries.flatten() {
@@ -712,7 +921,7 @@ fn copy_folder(
     {
         prune_unmatched(inner, req, existing, src_phys, dest_phys, effects)?;
     }
-    std::fs::create_dir_all(dest_phys)?;
+    fs::create_dir_all(dest_phys)?;
     effects.touch(dest_v, Some(dest_phys));
     if !infinity {
         return Ok(());
@@ -723,7 +932,7 @@ fn copy_folder(
         dest_v.trim_end_matches('/').to_string(),
     )];
     while let Some((from, to, vto)) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&from) else {
+        let Ok(entries) = fs::read_dir(&from) else {
             continue;
         };
         let mut entries: Vec<_> = entries.flatten().collect();
@@ -734,18 +943,18 @@ fn copy_folder(
                 continue;
             }
             let (f, t, v) = (e.path(), to.join(&name), format!("{vto}/{name}"));
-            match std::fs::metadata(&f) {
+            match fs::metadata(&f) {
                 Ok(m) if m.is_dir() => {
                     // Never descend into a symlink leading out of the library.
-                    if std::fs::canonicalize(&f).is_ok_and(|c| {
+                    if fs::canonicalize(&f).is_ok_and(|c| {
                         c.starts_with(&inner.roots.library) && !dest_phys.starts_with(&c)
                     }) {
-                        std::fs::create_dir_all(&t)?;
+                        fs::create_dir_all(&t)?;
                         stack.push((f, t, v));
                     }
                 }
                 Ok(_) => {
-                    if t.exists() {
+                    if fs::exists(&t) {
                         delete_file(inner, req, &v, &t, effects)?;
                     }
                     copy_file(inner, req, &f, &v, &t, effects)?;
@@ -769,7 +978,7 @@ fn prune_unmatched(
     let base_v = existing.path().trim_end_matches('/').to_string();
     let mut stack = vec![(src.to_path_buf(), dest.to_path_buf(), base_v)];
     while let Some((s, d, v)) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&d) else {
+        let Ok(entries) = fs::read_dir(&d) else {
             continue;
         };
         for e in entries.flatten() {
@@ -779,8 +988,8 @@ fn prune_unmatched(
                 e.path(),
                 format!("{v}/{}", name.to_string_lossy()),
             );
-            let d_is_dir = std::fs::metadata(&dp).map(|m| m.is_dir()).unwrap_or(false);
-            let s_meta = std::fs::metadata(&sp).ok();
+            let d_is_dir = fs::metadata(&dp).map(|m| m.is_dir()).unwrap_or(false);
+            let s_meta = fs::metadata(&sp).ok();
             match s_meta {
                 Some(m) if m.is_dir() == d_is_dir => {
                     if d_is_dir {
@@ -788,13 +997,14 @@ fn prune_unmatched(
                     }
                 }
                 _ => {
-                    let stat = std::fs::metadata(&dp).map(|m| crate::resource::Stat::from_meta(&m));
+                    let stat = fs::metadata(&dp).map(|m| crate::resource::Stat::from_meta(&m));
                     if let Ok(stat) = stat {
                         let res = if d_is_dir {
                             Resource::Folder {
                                 path: vp,
                                 phys: dp,
                                 stat,
+                                kind: FileKind::Library,
                             }
                         } else {
                             Resource::File {

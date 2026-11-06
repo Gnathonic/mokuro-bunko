@@ -10,6 +10,8 @@
 //!   filesystem watcher and the community fetcher; `stop()` keeps 0.5.2's shutdown order.
 //! * [`series_put`]: the `PUT /mokuro-reader/<Series>/series.json` handler the WebDAV
 //!   fallback calls after authorisation.
+//! * [`owners`]: the series folder owner records (0.8) kept in step with the folders,
+//!   and given once to the folders that existed before them.
 //! * [`router`] (`GET /catalog/api/manifest`, always on) and [`catalog_middleware`]
 //!   (every other `/catalog*` path, only while `catalog.enabled`; otherwise the request
 //!   falls through exactly as in 0.5.2).
@@ -31,16 +33,22 @@
 //! // shutdown: runtime.stop().await, before the PROPFIND cache stops
 //! ```
 
+mod adopt;
 mod catalog;
 mod community;
+pub mod owners;
 mod runtime;
 mod series_put;
 mod store;
 mod util;
 mod watcher;
 
+pub use adopt::{CorrectionSweep, adopt_unowned_corrections};
 pub use catalog::{catalog_middleware, router};
 pub use community::{CommunityFetcher, CommunitySettings, normalize_anilist, normalize_jikan};
+pub use owners::{
+    FolderAdoption, adopt_series_folder_owners, adopt_series_folder_owners_until_done,
+};
 pub use runtime::{LibraryHooks, LibraryRuntime, RuntimeDeps};
 pub use series_put::{is_series_put, series_put};
 pub use store::DbMetadataStore;
@@ -51,6 +59,16 @@ use bunko_db::Database;
 use serde_json::{Map, Value};
 use std::path::Path;
 use std::sync::Arc;
+
+/// Mount the on-disk library at `root` as a [`bunko_store::LocalStore`] (whose `watch`
+/// translates events as [`LibraryWatcher`] does). The library's filesystem calls route
+/// through it while the guard lives; every one is still the std call it was.
+pub fn mount_local(root: &Path) -> bunko_store::MountGuard {
+    let translate: bunko_store::Translate = Arc::new(watcher::translate);
+    bunko_store::mount(Arc::new(bunko_store::LocalStore::with_translator(
+        root, translate,
+    )))
+}
 
 /// Archive arrivals/removals the filesystem WATCHER saw (out-of-band changes: a copy
 /// into the library folder, a sync tool), for the OCR queue. Called on the watcher

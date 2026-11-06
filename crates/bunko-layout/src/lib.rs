@@ -11,6 +11,8 @@
 //!   glyph room, engine-only verdicts, seam trim, raw dump;
 //! * [`sidecar`] — page/volume dicts, the `ocr_engine` block, the runner's
 //!   atomic write and the server's normalising rewrite;
+//! * [`seal`] / [`canon`] — the content seal on an installed sidecar, over its
+//!   RFC 8785 canonical JSON;
 //! * [`json`] / [`py`] — Python's `json` and float semantics, which the
 //!   byte-for-byte output depends on.
 //!
@@ -26,6 +28,7 @@
 //! * A JSON string holding a lone surrogate (`"\ud800"`) loads in Python but
 //!   cannot be a Rust `String`; [`json::Value::parse`] rejects it.
 
+pub mod canon;
 pub mod difflib;
 pub mod json;
 pub mod layout;
@@ -34,6 +37,7 @@ pub mod reconcile;
 pub mod records;
 pub mod road;
 pub mod script;
+pub mod seal;
 pub mod sidecar;
 
 pub use json::{Separators, Value};

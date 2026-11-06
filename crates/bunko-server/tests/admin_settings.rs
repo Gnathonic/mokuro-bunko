@@ -1,6 +1,9 @@
 //! `GET /api/settings` and the settings editors: live config, saved config, round trips;
 //! `GET /api/status`; DynDNS/tunnel wrappers.
 
+// Fixtures are set up and checked with std::fs on purpose.
+#![allow(clippy::disallowed_methods)]
+
 mod admin_support;
 
 use admin_support::Harness;
@@ -333,13 +336,15 @@ async fn status_and_absent_services() {
             "user_count",
             "volume_count",
             "stats",
-            "version"
+            "version",
+            "library"
         ]
     );
     assert_eq!(s["user_count"], 1);
     // Every immediate directory, `thumbnails/` included (0.5.2 counts it too).
     assert_eq!(s["volume_count"], 3);
     assert_eq!(s["port"], 8080);
+    assert_eq!(s["library"]["storage"]["backend"], "local");
     assert!(s["disk_total"].as_u64().unwrap() > 0);
     assert!(s["uptime"].as_f64().unwrap() >= 0.0);
 

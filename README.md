@@ -91,7 +91,7 @@ docker logs mokuro-bunko      # First run: … /setup (setup code: XXXXX-XXXXX);
 
 The server answers within seconds. **First admin**: open `http://<host>:8080/setup` and enter the one-time setup code from the log (needed even from a browser on the Docker host: the container does not see it as localhost).
 
-**OCR backend**: downloaded in the background while the server already serves (on a first run, once the setup is finished): ~80 MB for the CPU, ~2 GB for NVIDIA (~350 MB from the release, the rest NVIDIA's CUDA libraries from PyPI), ~3 GB for AMD, then the models of the enabled engines. The log and the admin panel (This server, and Settings → OCR → Processors) show the progress; local OCR starts by itself when it is done; a failed download is shown there with a Retry button (and retried by itself after 5, 15 and 60 minutes, unless the cause needs fixing first, such as disk space or the NVIDIA driver). Later starts of the same version reuse it; a new version downloads its own pack again in the background (~80 MB for the CPU, ~350 MB for NVIDIA as unchanged CUDA libraries are taken from the old pack, ~3 GB for AMD) and removes the old one; the models are kept. Starting the container with a different GPU (or setting `MOKURO_OCR_BACKEND` to a GPU it now sees) installs that GPU's backend the same way.
+**OCR backend**: downloaded in the background while the server already serves (on a first run, once the setup is finished): ~80 MB for the CPU, ~2 GB for NVIDIA (~350 MB from the release, the rest NVIDIA's CUDA libraries from PyPI), ~3 GB for AMD, then the models of the enabled engines. The log and the admin panel (This server, and Settings → OCR → Processors) show the progress; local OCR starts by itself when it is done; a failed download is shown there with a Retry button (and retried by itself after 5, 15 and 60 minutes, unless the cause needs fixing first, such as disk space or the NVIDIA driver). Later starts reuse it, and so does an update while the backend is unchanged (the packs of 0.7.4 to 0.8 are the same); an update that changes it downloads the new pack in the background (~80 MB for the CPU, ~350 MB for NVIDIA as unchanged CUDA libraries are taken from the old pack, ~3 GB for AMD) and removes the old one; the models are kept. Starting the container with a different GPU (or setting `MOKURO_OCR_BACKEND` to a GPU it now sees) installs that GPU's backend the same way.
 
 **NVIDIA GPU**: the host needs an NVIDIA driver **580 or newer** (CUDA 13), the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) and a Turing (GTX 16xx / RTX 20xx) or newer GPU. Check with `docker run --rm --gpus all ghcr.io/gnathonic/mokuro-bunko:latest install-ocr --list` (it prints the driver and GPU it sees, and the pack it would install).
 
@@ -228,7 +228,7 @@ From a terminal: `mokuro-bunko update check` and `mokuro-bunko update apply [--y
 |------|--------|----------|--------|-------------|--------|-------|
 | Anonymous | configurable | configurable | -- | -- | -- | -- |
 | Registered | yes | yes | -- | -- | -- | -- |
-| Uploader | yes | yes | yes | own uploads | -- | -- |
+| Uploader | yes | yes | yes, not into another account's series | own uploads and series | -- | -- |
 | Editor | yes | yes | yes | all | -- | -- |
 | Inviter | yes | yes | yes | all | yes | -- |
 | Admin | yes | yes | yes | all | yes | yes |
@@ -273,6 +273,8 @@ cargo build --release -p mokuro-bunko --no-default-features     # lite: server o
 cargo run -p xtask -- torch-pack --variant cpu --out dist       # an OCR backend pack (cpu|cu130|rocm7.1)
 mokuro-bunko install-ocr --from dist --variant cpu              # install it (same --variant)
 ```
+
+Google Drive's built-in sign-in needs the Google client secrets, which are not in the repository: the release builds compile them in from `BUNKO_GOOGLE_RELEASE_DESKTOP_SECRET`, `BUNKO_GOOGLE_RELEASE_DEVICE_SECRET`, `BUNKO_GOOGLE_BETA_DESKTOP_SECRET` and `BUNKO_GOOGLE_BETA_DEVICE_SECRET`. A build without them works the same except that it signs in to Google Drive only with your own client (`storage.library.oauth.google`, see [docs/configuration.md](docs/configuration.md)).
 
 Cargo features of `mokuro-bunko`: `ocr` (on by default: ONNX Runtime on the CPU, the libtorch pack loader, local OCR and the `processor` command) and `tray` (on by default: the desktop tray). The ONNX Runtime binaries are fetched at build time; libtorch only by `xtask torch-pack` (the binary never links it). The ONNX Runtime GPU execution providers `cuda`, `webgpu`, `directml`, `coreml` remain as features but no release ships them (CI checks only `cuda` and `webgpu`). Release archives, backend packs, the manifest and signatures are built with `cargo run -p xtask -- <command>`; Docker images with `docker build -f deploy/docker/Dockerfile[.lite] .` (see [docs/rust-port/PACKAGING.md](docs/rust-port/PACKAGING.md)); the design is in [docs/rust-port/ARCHITECTURE.md](docs/rust-port/ARCHITECTURE.md).
 

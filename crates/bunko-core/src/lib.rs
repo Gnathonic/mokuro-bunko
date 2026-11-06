@@ -6,11 +6,13 @@
 pub mod config;
 pub mod engines;
 pub mod generations;
+pub mod reader_tree;
 pub mod roles;
+pub mod sidecar_names;
 pub mod storage;
 
-pub use config::{Config, ConfigError};
-pub use roles::Role;
+pub use config::{Config, ConfigError, LibraryBackend};
+pub use roles::{Perm, Role, has_perm};
 pub use storage::StorageLayout;
 
 /// The version string reported everywhere (`generator`, update checks, `/api/version`).

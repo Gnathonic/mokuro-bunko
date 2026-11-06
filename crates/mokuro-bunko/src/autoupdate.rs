@@ -1,17 +1,19 @@
 //! Automatic updates in the binary (opt-in: `update.auto` for the server,
 //! `processor.auto_update` for a processor; docs/configuration.md "Automatic updates").
 //!
-//! A release is one unit: the `mokuro-bunko` binary, its OCR backend pack (a pack runs
-//! only with the binary of its own release) and the models its compiled-in manifests
-//! name. [`Installer`] installs one:
+//! A release is one unit: the `mokuro-bunko` binary, its OCR backend pack (a binary opens
+//! the packs of `abi::OLDEST_PACK_RELEASE` up to its own release) and the models its
+//! compiled-in manifests name. [`Installer`] installs one:
 //!
 //! 1. fetch release X's signed `release.json`, download and check X's executable next
 //!    to the running one (`bunko_update::Updater::stage`) — never a downgrade;
 //! 2. run that NEW executable's `update prefetch` (hidden command): it stages X's pack
 //!    for the variant installed here (`<backends>/.staging-<variant>`, signature +
 //!    sha256 + every file, the host's requirements, the disk space), loads it in that
-//!    process (a GPU pack must find its GPU), and fetches X's models with it. Nothing
-//!    installed has changed yet; any failure ends the attempt here;
+//!    process (a GPU pack must find its GPU), and fetches X's models with it. When the
+//!    installed pack is one X opens (the same pack), it loads that one instead and stages
+//!    nothing: only the executable switches. Nothing installed has changed yet; any
+//!    failure ends the attempt here;
 //! 3. switch both together: the running executable is copied aside
 //!    (`.mokuro-bunko-previous`), the installed pack moves to `.prev-<name>`, the staged
 //!    one takes its place, the executable is replaced, and `<storage>/.update.json`

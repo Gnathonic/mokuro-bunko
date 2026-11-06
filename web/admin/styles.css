@@ -1935,28 +1935,6 @@ details[open] > .bench-res__summary::before {
     font-variant-numeric: tabular-nums;
 }
 
-.upgrade-edited {
-    list-style: none;
-    margin: 0.5rem 0;
-    padding: 0;
-    max-height: 14rem;
-    overflow-y: auto;
-}
-
-.upgrade-edited li {
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 0.5rem;
-    padding: 0.25rem 0;
-    font-size: 0.8125rem;
-}
-
-.upgrade-edited__name {
-    flex: 1 1 14rem;
-    overflow-wrap: anywhere;
-}
-
 .gen-dirty {
     margin-left: auto;
     font-size: 0.75rem;
@@ -2316,3 +2294,37 @@ details[open] > .bench-res__summary::before {
     font-size: 0.75rem;
     color: var(--text-muted);
 }
+
+/* Storage tab (0.8) */
+.storage-live {
+    margin-top: 1rem;
+    padding: 0.875rem 1rem;
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+    background: var(--bg-tertiary);
+}
+
+.storage-live p { margin: 0.25rem 0; font-size: 0.875rem; color: var(--text-secondary); }
+.storage-paste .form-input { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+
+.storage-code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 1.6rem;
+    font-weight: 700;
+    letter-spacing: 0.15em;
+    margin: 0.5rem 0;
+    color: var(--text-primary);
+    user-select: all;
+}
+
+.storage-list {
+    margin: 0.5rem 0 0 1.25rem;
+    font-size: 0.8125rem;
+    color: var(--text-secondary);
+    word-break: break-word;
+}
+
+#storage-problems .alert { margin-bottom: 0.75rem; }
+
+/* Classes such as .btn set display, which beats the hidden attribute. */
+#storage-tab [hidden] { display: none !important; }

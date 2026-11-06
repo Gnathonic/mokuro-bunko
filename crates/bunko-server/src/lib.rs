@@ -19,6 +19,7 @@ pub mod ocr;
 pub mod ops;
 pub mod rt;
 pub mod serve;
+pub mod storage;
 pub mod thumbs;
 pub mod tls;
 

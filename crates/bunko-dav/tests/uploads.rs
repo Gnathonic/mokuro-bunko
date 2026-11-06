@@ -1,5 +1,8 @@
 //! Ported from `tests/unit/test_upload_verdicts.py` and `tests/unit/test_atomic_writes_locks.py`.
 
+// Fixtures are set up and checked with std::fs on purpose.
+#![allow(clippy::disallowed_methods)]
+
 mod common;
 
 use std::sync::Arc;
@@ -498,4 +501,77 @@ fn path_write_locks_are_shared_with_other_writers() {
     assert!(dav.write_locks().try_lock(&env.lib("s/v1.CBZ")).is_none());
     drop(guard);
     assert!(dav.write_locks().try_lock(&env.lib("S/V1.cbz")).is_some());
+}
+
+/// Two history PUTs of one account to different files each measured the tree before the
+/// other landed, so together they overran the account's cap. The second now waits for
+/// the first and is measured after it; another account is not held up.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_history_puts_of_one_account_stay_within_its_cap() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("storage");
+    let dev = base.join("users/reader/history/dev");
+    std::fs::create_dir_all(&dev).unwrap();
+    std::fs::create_dir_all(base.join("users/uploader/history/dev")).unwrap();
+    std::fs::create_dir_all(base.join("library")).unwrap();
+    let env = Arc::new(Env::with_config(
+        dir,
+        base,
+        bunko_dav::DavConfig {
+            history: bunko_dav::HistoryLimits {
+                max_file_bytes: 100,
+                max_total_bytes: 150,
+            },
+            ..Default::default()
+        },
+    ));
+    let (tx, body) = channel_body();
+    let req = Request::builder()
+        .method("PUT")
+        .uri("/mokuro-reader/history/dev/a")
+        .header("content-length", "100")
+        .body(body)
+        .unwrap();
+    let env2 = env.clone();
+    let first = tokio::spawn(async move { env2.send(Some("reader"), req).await });
+    tx.send(Ok(Bytes::from(vec![b'a'; 50]))).await.unwrap();
+    for _ in 0..200 {
+        if !leftovers(&dev).is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(!leftovers(&dev).is_empty(), "the first upload is staging");
+    // There is room for this one only while the first has not landed.
+    let env3 = env.clone();
+    let second = tokio::spawn(async move {
+        env3.req(
+            Some("reader"),
+            "PUT",
+            "/mokuro-reader/history/dev/b",
+            &[],
+            &[b'b'; 100],
+        )
+        .await
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!second.is_finished(), "measured only once the first lands");
+    let other = env
+        .req(
+            Some("uploader"),
+            "PUT",
+            "/mokuro-reader/history/dev/c",
+            &[],
+            &[b'c'; 100],
+        )
+        .await;
+    assert_eq!(other.code(), 201, "another account's history is its own");
+    tx.send(Ok(Bytes::from(vec![b'a'; 50]))).await.unwrap();
+    drop(tx);
+    assert_eq!(first.await.unwrap().code(), 201);
+    let r = second.await.unwrap();
+    assert_eq!(r.code(), 507);
+    assert_eq!(r.json()["reason"], "quota-exceeded");
+    assert!(!dev.join("b").exists());
+    assert_eq!(std::fs::read(dev.join("a")).unwrap(), vec![b'a'; 100]);
 }

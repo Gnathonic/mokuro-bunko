@@ -1,0 +1,16 @@
+{
+  "body_text": "<?xml version=\"1.0\" encoding=\"utf-8\" ?>\n<D:multistatus xmlns:D=\"DAV:\"><D:response><D:href>/mokuro-reader/</D:href><D:propstat><D:prop><D:current-user-privilege-set /></D:prop><D:status>HTTP/1.1 404 Not Found</D:status></D:propstat></D:response></D:multistatus>",
+  "headers": {
+    "content-type": "application/xml; charset=utf-8"
+  },
+  "request": {
+    "auth": "basic:reader",
+    "body_text": "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<D:propfind xmlns:D=\"DAV:\">\n  <D:prop>\n    <D:current-user-privilege-set/>\n  </D:prop>\n</D:propfind>",
+    "headers": {
+      "depth": "0"
+    },
+    "method": "PROPFIND",
+    "path": "/mokuro-reader/"
+  },
+  "status": 207
+}

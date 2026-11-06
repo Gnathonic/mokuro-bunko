@@ -1,6 +1,9 @@
 //! The metadata runtime: startup compile, watcher-triggered recompiles, the store over
 //! bunko-db, and shutdown.
 
+// Fixtures are set up and checked with std::fs on purpose.
+#![allow(clippy::disallowed_methods)]
+
 mod library_support;
 
 use bunko_library::MetadataStore;
@@ -154,7 +157,7 @@ async fn watcher_recompiles_a_series_after_a_volume_arrives() {
     );
 
     // The index sees the new volume too (it was invalidated).
-    let snapshot = env.runtime.index().get_snapshot();
+    let snapshot = env.runtime.index().get_snapshot_fresh();
     assert_eq!(snapshot.series_by_name("Aria").unwrap().volumes.len(), 2);
     assert_eq!(env.runtime.counts().total_volumes().unwrap(), 2);
 
@@ -173,13 +176,93 @@ async fn watcher_recompiles_a_series_after_a_volume_arrives() {
 }
 
 #[derive(Default)]
-struct Archives(parking_lot::Mutex<Vec<String>>);
+struct Archives(parking_lot::Mutex<Vec<String>>, AtomicUsize);
 
 impl bunko_server::library::ArchiveEvents for Archives {
     fn archive_added(&self, cbz: &std::path::Path) {
         self.0.lock().push(cbz.display().to_string());
     }
     fn archive_removed(&self, _cbz: &std::path::Path) {}
+    fn rescan(&self) {
+        self.1.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// A cloud progress user's `history/` sits at the library root and may hold names
+/// ending in `.cbz`: the watcher's events there tell OCR nothing, refresh no listing
+/// and schedule no pass. A series beside it still does all three.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn watcher_events_in_the_per_user_tree_are_not_library_changes() {
+    use bunko_store::WatchEvent;
+    let archives = Arc::new(Archives::default());
+    let refreshed = Arc::new(AtomicUsize::new(0));
+    let hooks = bunko_server::library::LibraryHooks {
+        propfind_refresh: Some({
+            let r = refreshed.clone();
+            Arc::new(move || {
+                r.fetch_add(1, Ordering::SeqCst);
+            })
+        }),
+        archive_events: Some(archives.clone()),
+        ..Default::default()
+    };
+    let env = Env::with(
+        |_| {},
+        Options {
+            hooks,
+            ..Options::default()
+        },
+    );
+    let dir = env.series_dir("Aria");
+    write_cbz(&dir.join("Aria 01.cbz"), 2);
+    env.runtime.start();
+    assert!(wait_for(Duration::from_secs(5), || dir.join("series.json").is_file()).await);
+    assert!(env.runtime.wait_idle(Duration::from_secs(5)));
+    let refreshes = refreshed.load(Ordering::SeqCst);
+    let rescans = archives.1.load(Ordering::SeqCst);
+
+    let history = env.library.join("history/dev-1");
+    std::fs::create_dir_all(&history).unwrap();
+    write_cbz(&history.join("x.cbz"), 1);
+    for event in [
+        WatchEvent::Added {
+            path: env.library.join("history"),
+            is_dir: true,
+        },
+        WatchEvent::Added {
+            path: history.clone(),
+            is_dir: true,
+        },
+        WatchEvent::Added {
+            path: history.join("x.cbz"),
+            is_dir: false,
+        },
+        WatchEvent::Removed {
+            path: history.join("x.cbz"),
+            is_dir: false,
+        },
+        WatchEvent::Added {
+            path: env.library.join("goals.json"),
+            is_dir: false,
+        },
+    ] {
+        env.runtime.on_watch_event(event);
+    }
+    assert!(archives.0.lock().is_empty(), "{:?}", archives.0.lock());
+    assert_eq!(archives.1.load(Ordering::SeqCst), rescans);
+    assert_eq!(refreshed.load(Ordering::SeqCst), refreshes);
+    assert!(!env.runtime.has_pending_pass());
+
+    // The control: the same event for a series volume reaches all of them.
+    write_cbz(&dir.join("Aria 02.cbz"), 1);
+    env.runtime.on_watch_event(WatchEvent::Added {
+        path: dir.join("Aria 02.cbz"),
+        is_dir: false,
+    });
+    assert!(archives.0.lock().iter().any(|p| p.ends_with("Aria 02.cbz")));
+    assert!(refreshed.load(Ordering::SeqCst) > refreshes);
+    assert!(env.runtime.has_pending_pass());
+    env.runtime.stop().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -454,5 +537,92 @@ async fn case_variant_folders_each_keep_their_own_catalog_row() {
     env.runtime.recompile_all_now().await;
     let names: Vec<String> = rows(&env).into_iter().map(|r| r.0).collect();
     assert_eq!(names, ["Kingdom"]);
+    env.runtime.stop().await;
+}
+
+/// A cloud library's first sync reports every file before the library services start:
+/// held, the runtime arms no pass for them (the startup pass covers them all).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_held_runtime_arms_no_pass_before_it_starts() {
+    let env = Env::with(
+        |_| {},
+        Options {
+            hold_until_start: true,
+            ..Options::default()
+        },
+    );
+    let dir = env.series_dir("Held");
+    write_cbz(&dir.join("Held 01.cbz"), 1);
+    bunko_dav::DavHooks::library_changed(env.runtime.as_ref(), &[dir.join("Held 01.cbz")]);
+    env.runtime
+        .schedule_series_regeneration("Held", Some(Duration::from_millis(1)));
+    assert!(!env.runtime.has_pending_pass());
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!dir.join("series.json").exists(), "no pass before start");
+    env.runtime.start();
+    assert!(
+        wait_for(Duration::from_secs(5), || dir.join("series.json").is_file()).await,
+        "the startup pass compiles what arrived before"
+    );
+    env.runtime.stop().await;
+}
+
+/// A series that lost its last archive over WebDAV keeps no `series.json` (the reader
+/// would keep showing it) and leaves `catalog.json`; its facts stay, so the next upload
+/// publishes them again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deleting_the_last_volume_retires_the_series_file() {
+    let env = Env::new(|_| {});
+    env.user("editor", bunko_core::Role::Editor);
+    let gone = env.series_dir("Gone");
+    let kept = env.series_dir("Kept");
+    write_cbz(&gone.join("Gone 01.cbz"), 1);
+    write_cbz(&kept.join("Kept 01.cbz"), 1);
+    assert!(env.runtime.recompile_all_now().await > 0);
+    const FACTS: &str = r#"{"version":2,"updated_at":"2026-08-18T19:36:24.324Z","external_ids":{"anilist":98416},"spine_offset":-40}"#;
+    let r = env
+        .send(
+            req("PUT", "/mokuro-reader/Gone/series.json")
+                .header("authorization", basic("editor"))
+                .header("content-length", FACTS.len().to_string())
+                .body(axum::body::Body::from(FACTS))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(r.status, 204, "{}", r.text());
+    let series_file = gone.join("series.json");
+    assert!(series_file.is_file());
+    let kept_before = std::fs::read(kept.join("series.json")).unwrap();
+
+    // What bunko-dav reports after a DELETE of the last archive commits.
+    std::fs::remove_file(gone.join("Gone 01.cbz")).unwrap();
+    bunko_dav::DavHooks::library_changed(env.runtime.as_ref(), &[gone.join("Gone 01.cbz")]);
+    assert!(
+        wait_for(Duration::from_secs(5), || !series_file.exists()).await,
+        "series.json of the emptied folder stays"
+    );
+    let runtime = env.runtime.clone();
+    assert!(
+        tokio::task::spawn_blocking(move || runtime.wait_idle(Duration::from_secs(5)))
+            .await
+            .unwrap()
+    );
+    let catalog = std::fs::read_to_string(env.library.join("catalog.json")).unwrap();
+    assert!(!catalog.contains(r#""series_title":"Gone""#), "{catalog}");
+    assert!(catalog.contains(r#""series_title":"Kept""#), "{catalog}");
+    assert_eq!(
+        std::fs::read(kept.join("series.json")).unwrap(),
+        kept_before
+    );
+    assert!(gone.is_dir(), "the folder stays");
+    assert!(env.db.get_series_facts("gone").unwrap().is_some());
+
+    // A re-upload publishes the stored facts again.
+    write_cbz(&gone.join("Gone 02.cbz"), 1);
+    bunko_dav::DavHooks::library_changed(env.runtime.as_ref(), &[gone.join("Gone 02.cbz")]);
+    assert!(wait_for(Duration::from_secs(5), || series_file.is_file()).await);
+    let back = std::fs::read_to_string(&series_file).unwrap();
+    assert!(back.contains(r#""anilist":98416"#), "{back}");
+    assert!(back.contains(r#""spine_offset":-40"#), "{back}");
     env.runtime.stop().await;
 }

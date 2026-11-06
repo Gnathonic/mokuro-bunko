@@ -1,0 +1,20 @@
+{
+  "after": "history-put",
+  "expect": {
+    "headers": [
+      "content-type"
+    ],
+    "status": [
+      207
+    ]
+  },
+  "request": {
+    "auth": "basic:progress",
+    "headers": {
+      "accept": "text/plain,application/xml",
+      "depth": "infinity"
+    },
+    "method": "PROPFIND",
+    "path": "/mokuro-reader/"
+  }
+}

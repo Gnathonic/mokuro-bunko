@@ -201,6 +201,12 @@ async fn root_for_browsers_and_webdav_clients() {
     assert_eq!(r.status, 200);
     assert!(r.header("content-type").unwrap().contains("text/html"));
     assert!(r.text().contains("<!DOCTYPE html>") && r.text().contains("Mokuro Bunko"));
+    // Under a sub-path mount the page's URLs resolve from the mount root.
+    assert!(
+        r.text().contains(r#"<head><base href="./">"#),
+        "{}",
+        r.text()
+    );
     // WebDAV clients and non-GET methods fall through to WebDAV.
     let r = env
         .send(empty(req("GET", "/").header("user-agent", "davfs2/1.5.6")))
@@ -227,7 +233,7 @@ async fn root_redirects_to_the_catalog_when_it_is_the_homepage() {
     let r = env
         .send(empty(req("GET", "/").header("accept", "text/html")))
         .await;
-    assert_eq!((r.status, r.header("location")), (302, Some("/catalog/")));
+    assert_eq!((r.status, r.header("location")), (302, Some("catalog/")));
     assert!(r.body.is_empty());
     // use_as_homepage without catalog.enabled is ignored.
     env.config().catalog.enabled = false;
@@ -237,4 +243,37 @@ async fn root_redirects_to_the_catalog_when_it_is_the_homepage() {
             .status,
         200
     );
+}
+
+/// Pages carry a `<base href>` leading back to the mount root from wherever they were
+/// asked for; JSON answers and WebDAV's are left byte for byte as they were.
+#[tokio::test]
+async fn pages_resolve_from_the_mount_root() {
+    let env = seeded();
+    let page = |path: &'static str| {
+        let env = &env;
+        async move {
+            let r = env
+                .send(empty(req("GET", path).header("accept", "text/html")))
+                .await;
+            assert_eq!(r.status, 200, "{path}");
+            if let Some(len) = r.header("content-length") {
+                assert_eq!(len, r.body.len().to_string(), "{path}");
+            }
+            r.text()
+        }
+    };
+    assert!(page("/").await.contains(r#"<base href="./">"#));
+    assert!(page("/login").await.contains(r#"<base href="./">"#));
+    assert!(page("/login/").await.contains(r#"<base href="../">"#));
+    assert!(page("/account/").await.contains(r#"<base href="../">"#));
+    assert!(page("/register").await.contains(r#"<base href="./">"#));
+    assert_eq!(page("/").await.matches("<base ").count(), 1);
+
+    let r = env.send(empty(req("GET", "/api/health"))).await;
+    assert!(r.text().starts_with('{') && !r.text().contains("<base"));
+    let r = env
+        .send(empty(req("PROPFIND", "/").header("depth", "1")))
+        .await;
+    assert_eq!((r.status, r.text().as_str()), (418, "dav"));
 }

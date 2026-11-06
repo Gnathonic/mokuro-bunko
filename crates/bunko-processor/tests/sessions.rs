@@ -610,3 +610,123 @@ async fn a_bench_runs_beside_sessions_and_a_repeated_bid_is_ignored() {
     quiet_for(&mut link.events, 300).await;
     link.shutdown().await;
 }
+
+/// `hold_file` (the interop rig's "rename during OCR"): each claimed volume starts, then
+/// waits until the file exists, and completes once it does; `engine_revision` is the
+/// revision its sidecar's `ocr_engine` block carries, right after the id.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_hold_file_holds_each_volume_until_it_appears() {
+    let dir = tempfile::tempdir().unwrap();
+    let results = dir.path().join("results");
+    let go = dir.path().join("go");
+    let a = write_volume(dir.path(), "a.cbz", 2);
+    let (mut link, _fake) = start(
+        FakeConfig {
+            hold_file: Some(go.clone()),
+            engine_revision: Some(3),
+            ..Default::default()
+        },
+        &results,
+    );
+    send(&link, open("s1")).await;
+    send(&link, volume_op("s1", "v1", &a)).await;
+    loop {
+        if let Event::VolumeStarted { id, .. } = next_event(&mut link.events, 10).await {
+            assert_eq!(id, "v1");
+            break;
+        }
+    }
+    // Held, however long: no page and no result while the file is missing.
+    let held_until = tokio::time::Instant::now() + Duration::from_millis(500);
+    while let Ok(Some(e)) = tokio::time::timeout_at(held_until, link.events.recv()).await {
+        assert!(
+            !matches!(
+                e,
+                Event::Page { .. } | Event::VolumeDone { .. } | Event::VolumeFailed { .. }
+            ),
+            "the volume ran while held: {e:?}"
+        );
+    }
+    std::fs::write(&go, b"").unwrap();
+    send(&link, Op::CloseSession { sid: "s1".into() }).await;
+    let events = until_exit(&mut link.events, "s1", 10).await;
+    assert!(
+        names(&events).contains(&"volume_done:v1".to_string()),
+        "{events:#?}"
+    );
+    let sidecar: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(results.join("s1").join("v1").join(bunko_proto::RESULT_FILE)).unwrap(),
+    )
+    .unwrap();
+    let block = sidecar["ocr_engine"].as_object().unwrap();
+    let keys: Vec<&str> = block.keys().map(String::as_str).collect();
+    assert_eq!(keys[..2], ["id", "revision"], "{block:?}");
+    assert_eq!(block["revision"], 3);
+    link.shutdown().await;
+}
+
+/// `page_text` (the interop rig's edited volumes): every page carries one text block
+/// reading it, so a reader has a block to correct; without it, pages are blank.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn page_text_gives_every_page_one_block() {
+    let dir = tempfile::tempdir().unwrap();
+    let results = dir.path().join("results");
+    let a = write_volume(dir.path(), "a.cbz", 2);
+    let (mut link, _fake) = start(
+        FakeConfig {
+            page_text: Some("偽の文字".into()),
+            ..Default::default()
+        },
+        &results,
+    );
+    send(&link, open("s1")).await;
+    send(&link, volume_op("s1", "v1", &a)).await;
+    loop {
+        if let Event::VolumeDone { id, .. } = next_event(&mut link.events, 10).await {
+            assert_eq!(id, "v1");
+            break;
+        }
+    }
+    send(&link, Op::CloseSession { sid: "s1".into() }).await;
+    until_exit(&mut link.events, "s1", 10).await;
+    let sidecar: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(results.join("s1").join("v1").join(bunko_proto::RESULT_FILE)).unwrap(),
+    )
+    .unwrap();
+    let pages = sidecar["pages"].as_array().unwrap();
+    assert_eq!(pages.len(), 2);
+    for page in pages {
+        let blocks = page["blocks"].as_array().unwrap();
+        assert_eq!(blocks.len(), 1, "{page}");
+        assert_eq!(blocks[0]["lines"], serde_json::json!(["偽の文字"]));
+        assert_eq!(blocks[0]["lines_coords"].as_array().unwrap().len(), 1);
+    }
+    link.shutdown().await;
+}
+
+/// Without `engine_revision` the block carries this build's revision of its engine: a
+/// processor always says which revision made its output (provenance, B4.2).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_fake_names_this_builds_revision_unless_given_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let results = dir.path().join("results");
+    let a = write_volume(dir.path(), "a.cbz", 1);
+    let (mut link, _fake) = start(FakeConfig::default(), &results);
+    send(&link, open("s1")).await;
+    send(&link, volume_op("s1", "v1", &a)).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    send(&link, Op::CloseSession { sid: "s1".into() }).await;
+    until_exit(&mut link.events, "s1", 10).await;
+    let sidecar: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(results.join("s1").join("v1").join(bunko_proto::RESULT_FILE)).unwrap(),
+    )
+    .unwrap();
+    let block = &sidecar["ocr_engine"];
+    let engine = block["id"].as_str().unwrap();
+    assert_eq!(
+        block["revision"],
+        bunko_layout::sidecar::engine_revision(engine),
+        "{sidecar}"
+    );
+    link.shutdown().await;
+}

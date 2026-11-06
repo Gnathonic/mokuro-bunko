@@ -10,6 +10,7 @@
 mod archive;
 mod dist;
 mod docker;
+mod interop;
 mod licenses;
 mod manifest;
 mod names;
@@ -56,6 +57,8 @@ enum Cmd {
     TorchPack(torch_pack::TorchPackArgs),
     /// Build the Vulkan backend pack (ncnn + ONNX Runtime WebGPU, docs/rust-port/VULKAN.md).
     VulkanPack(vulkan_pack::VulkanPackArgs),
+    /// The cross-party test rig: performance and interop suites against a real server.
+    Interop(interop::InteropArgs),
 }
 
 #[derive(clap::Args)]
@@ -86,6 +89,7 @@ fn main() -> Result<()> {
         Cmd::DockerContext(a) => docker::run(&a),
         Cmd::TorchPack(a) => torch_pack::run(&a).map(drop),
         Cmd::VulkanPack(a) => vulkan_pack::run(&a).map(drop),
+        Cmd::Interop(a) => interop::run(&a),
     }
 }
 

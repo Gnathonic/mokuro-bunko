@@ -29,6 +29,12 @@ cuda = ["ocr", "bunko-engines/cuda"]
 webgpu = ["ocr", "bunko-engines/webgpu"]
 directml = ["ocr", "bunko-engines/directml"]
 coreml = ["ocr", "bunko-engines/coreml"]
+# Test hooks for the interop rig: the `MOKURO_TEST_CLOUD_*` settings that point the
+# cloud drivers at cloudsim (bunko-server's storage::test_cloud). A build without it
+# refuses to start while one is set.
+# Also the hidden `processor-fake` subcommand: a remote processor with no models
+# (bunko-processor's FakePipeline), which the rig can hold mid-volume.
+testing = ["bunko-server/testing", "dep:bunko-processor"]
 
 [dependencies]
 bunko-core.workspace = true
@@ -87,6 +93,8 @@ mslnk = "0.1"
 
 [dev-dependencies]
 tempfile.workspace = true
+# processor-fake's test volume
+zip.workspace = true
 tower = { workspace = true, features = ["util"] }
 assert_cmd = "2"
 predicates = "3"

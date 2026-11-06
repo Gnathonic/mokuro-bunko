@@ -74,7 +74,7 @@
 
   async function logout() {
     if (window.mokuroAuth) await window.mokuroAuth.signOut();
-    window.location.href = "/";
+    window.location.href = "./";
   }
 
   async function updateNav() {
@@ -1311,7 +1311,7 @@
       document.body.dataset.level = level;
     }
     setHidden($backendLine, !data.backend);
-    setText($backend, backendLabel(data.backend));
+    setText($backend, backendLabel(data.backend) + (data.backend_installing ? " (installing)" : ""));
     renderRunOrder(data.generations);
     renderMachines(data);
     renderHeldRows(data.held_rows);
@@ -1342,10 +1342,10 @@
     if (etag) headers["If-None-Match"] = etag;
     // `no-store`: the browser's own cache stays out of it, so a 304 reaches
     // this code as a 304 and costs no parse and no render.
-    fetch("/queue/api/status", { headers: headers, cache: "no-store" })
+    fetch("queue/api/status", { headers: headers, cache: "no-store" })
       .then(function (r) {
         if (r.status === 401) {
-          window.location.href = "/login";
+          window.location.href = "login";
           return null;
         }
         // The stored login no longer works (a changed password, a removed
@@ -1373,7 +1373,7 @@
 
   function init() {
     setInterval(tick, TICK_MS);
-    fetch("/queue/api/config")
+    fetch("queue/api/config")
       .then(function (r) { return r.json(); })
       .then(function (cfg) {
         queueConfig = cfg || queueConfig;
@@ -1381,7 +1381,7 @@
       })
       .then(function () {
         if (!queueConfig.public_access && !getSessionAuth()) {
-          window.location.href = "/login";
+          window.location.href = "login";
           return;
         }
         poll();

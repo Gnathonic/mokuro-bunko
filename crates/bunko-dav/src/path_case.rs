@@ -22,6 +22,8 @@
 
 use std::path::{Path, PathBuf};
 
+use bunko_core::reader_tree;
+use bunko_store::fs;
 use http::{Uri, request::Parts};
 use unicode_normalization::UnicodeNormalization;
 
@@ -53,21 +55,16 @@ fn swapcase(name: &str) -> String {
 /// Do `a` and `b` name one existing file or folder (Python `os.path.samefile`)? `false`
 /// when either is missing.
 pub(crate) fn same_file(a: &Path, b: &Path) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        match (std::fs::metadata(a), std::fs::metadata(b)) {
-            (Ok(x), Ok(y)) => x.dev() == y.dev() && x.ino() == y.ino(),
-            _ => false,
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        // Windows: the final path of an open handle carries the on-disk spelling.
-        matches!(
-            (std::fs::canonicalize(a), std::fs::canonicalize(b)),
-            (Ok(x), Ok(y)) if x == y
-        )
+    match (fs::metadata(a), fs::metadata(b)) {
+        (Ok(x), Ok(y)) => match (x.dev().zip(x.ino()), y.dev().zip(y.ino())) {
+            (Some(p), Some(q)) => p == q,
+            // Windows: the final path of an open handle carries the on-disk spelling.
+            _ => matches!(
+                (fs::canonicalize(a), fs::canonicalize(b)),
+                (Ok(x), Ok(y)) if x == y
+            ),
+        },
+        _ => false,
     }
 }
 
@@ -115,15 +112,21 @@ impl LibraryPathCanonicalizer {
 
     /// The name `name` is spelled with in `parent`, or `None` when absent. The exact
     /// spelling wins over a variant (a library that already holds both keeps both
-    /// addressable); among variants only, the first in sorted order, so the choice is
-    /// stable.
-    fn on_disk_name(&self, parent: &Path, name: &str) -> Option<String> {
-        if self.case_sensitive && std::fs::symlink_metadata(parent.join(name)).is_ok() {
+    /// addressable); among variants only, the store's case winner
+    /// ([`bunko_store::LibraryStore::case_winner`]: on a remote store the oldest
+    /// spelling, the one a case merge keeps), else the first in sorted order, so the
+    /// choice is stable.
+    ///
+    /// At the library root (`top`) a per-user name (`history`, `goals.json`: the
+    /// cloud-root owner's own files) is never a variant: a request for a library
+    /// `HISTORY/` must not be rewritten into another account's tree.
+    fn on_disk_name(&self, parent: &Path, name: &str, top: bool) -> Option<String> {
+        if self.case_sensitive && fs::symlink_metadata(parent.join(name)).is_ok() {
             return Some(name.to_string());
         }
         let target = fold_name(name);
         let mut variants: Vec<String> = Vec::new();
-        for entry in std::fs::read_dir(parent).ok()?.flatten() {
+        for entry in fs::read_dir(parent).ok()?.flatten() {
             let entry_name = entry.file_name();
             // A name that is not UTF-8 can never be what a (UTF-8) request spells.
             let Some(entry_name) = entry_name.to_str() else {
@@ -132,9 +135,21 @@ impl LibraryPathCanonicalizer {
             if entry_name == name {
                 return Some(name.to_string());
             }
+            if top && reader_tree::is_per_user_root_name(entry_name) {
+                continue;
+            }
             if fold_name(entry_name) == target {
                 variants.push(entry_name.to_string());
             }
+        }
+        // Several variants: a remote store names its case-merge winner, the oldest
+        // spelling (spec §5.9); a local library keeps the first in sorted order.
+        if variants.len() > 1
+            && let Some(w) =
+                bunko_store::store_for(parent).and_then(|s| s.case_winner(parent, &target))
+            && variants.contains(&w)
+        {
+            return Some(w);
         }
         variants.into_iter().min()
     }
@@ -157,7 +172,7 @@ impl LibraryPathCanonicalizer {
         let mut resolved: Vec<String> = Vec::new();
         for (position, &index) in named.iter().enumerate() {
             let part = parts[index].clone();
-            let Some(on_disk) = self.on_disk_name(&parent, &part) else {
+            let Some(on_disk) = self.on_disk_name(&parent, &part, position == 0) else {
                 break;
             };
             let is_last = position + 1 == named.len();
@@ -185,11 +200,11 @@ impl LibraryPathCanonicalizer {
 const LIBRARY_PREFIX: &str = "/mokuro-reader/";
 
 /// The library-relative part of a decoded request path, or `None` for anything that is
-/// not a library path (the roots, the per-user files, other trees).
+/// not a library path (the roots, the caller's own tree, other trees).
 fn library_relative(path: &str) -> Option<&str> {
     debug_assert_eq!(LIBRARY_PREFIX, format!("/{READER_ROOT}/"));
     let relative = path.strip_prefix(LIBRARY_PREFIX)?;
-    if relative.trim_matches('/').is_empty() || paths::is_per_user_name(relative) {
+    if relative.trim_matches('/').is_empty() || reader_tree::is_per_user_rel(relative) {
         return None;
     }
     Some(relative)
@@ -306,6 +321,7 @@ fn with_path(uri: &Uri, encoded_path: &str) -> Option<Uri> {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // fixtures are written with std::fs
 mod tests {
     use super::*;
 

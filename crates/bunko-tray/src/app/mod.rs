@@ -62,6 +62,7 @@ pub mod id {
     pub const ADMIN: &str = "admin";
     pub const PROCESSOR: &str = "processor";
     pub const LIBRARY: &str = "library";
+    pub const SIGN_IN: &str = "sign_in";
     pub const SETUP: &str = "setup";
     pub const AUTOSTART: &str = "autostart";
     pub const QUIT: &str = "quit";
@@ -128,6 +129,8 @@ pub struct App {
     last_good: HashMap<String, (Status, Instant)>,
     /// Which "the update needs you" alarms were already shown.
     notified: Notified,
+    /// Which cloud library states were already notified (on transitions only).
+    storage_notices: crate::model::StorageNotices,
     /// Following an update of this program's own executable (`selfupdate`).
     follow: Follow,
 }
@@ -282,6 +285,7 @@ impl App {
             first_run_checked: false,
             last_good: HashMap::new(),
             notified: Notified::default(),
+            storage_notices: crate::model::StorageNotices::default(),
             follow,
         };
         (app, lock)
@@ -646,6 +650,11 @@ impl App {
                 tracing::warn!("update needs the owner ({}): {}", a.role, a.text);
                 notify::alarm(Alarm::TITLE, &a.body());
             }
+            // A cloud library that needs the owner (0.8): on transitions only.
+            if let Some((title, body)) = self.storage_notices.observe(&l.control.role, s) {
+                tracing::warn!("library storage needs the owner: {body}");
+                notify::alarm(&title, &body);
+            }
         }
     }
 
@@ -935,6 +944,11 @@ impl App {
             id::PROCESSOR => self.open_processor(),
             id::LIBRARY => {
                 if let Some(url) = self.model.as_ref().and_then(|m| m.library_url.clone()) {
+                    open_url(&url, &self.monitor);
+                }
+            }
+            id::SIGN_IN => {
+                if let Some(url) = self.model.as_ref().and_then(|m| m.sign_in_url.clone()) {
                     open_url(&url, &self.monitor);
                 }
             }

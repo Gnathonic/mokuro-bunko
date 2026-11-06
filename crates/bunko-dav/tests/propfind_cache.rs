@@ -1,6 +1,9 @@
 //! The Depth:infinity PROPFIND cache (spec §10; `tests/unit/test_propfind_cache.py` for the
 //! timer lifecycle).
 
+// Fixtures are set up and checked with std::fs on purpose.
+#![allow(clippy::disallowed_methods)]
+
 mod common;
 
 use std::time::Duration;
@@ -187,6 +190,7 @@ async fn budget_bounds_the_cache() {
             max_entries: 2,
             ..CacheConfig::default()
         },
+        ..DavConfig::default()
     };
     let dav = Dav::new(&StorageLayout::new(&base), cfg).unwrap();
     let env = Env {
@@ -229,6 +233,7 @@ async fn stale_entries_are_served_while_one_refresh_runs() {
             ttl: Duration::from_millis(50),
             ..CacheConfig::default()
         },
+        ..DavConfig::default()
     };
     let dav = Dav::new(&StorageLayout::new(&base), cfg).unwrap();
     let env = Env {
@@ -371,4 +376,148 @@ async fn per_user_paths_bypass_the_cache() {
         404
     );
     assert_eq!(env.dav.propfind_cache().usage().0, 0);
+}
+
+/// A correction layer body.
+fn correction(text: &str) -> Vec<u8> {
+    format!(r#"{{"pages": [{{"blocks": [{{"lines": ["{text}"]}}]}}]}}"#).into_bytes()
+}
+
+/// The hrefs of `<Vol>.edit*.mokuro` files in a multistatus.
+fn edit_hrefs(xml: &str) -> Vec<String> {
+    let mut v: Vec<String> = xml
+        .split("<D:href>")
+        .skip(1)
+        .filter_map(|s| s.split("</D:href>").next())
+        .filter(|h| h.contains(".edit"))
+        .map(str::to_string)
+        .collect();
+    v.sort();
+    v
+}
+
+async fn listing(env: &Env, ctx: bunko_dav::DavContext, path: &str, depth: &str) -> String {
+    let r = env
+        .send_ctx(ctx, request("PROPFIND", path, &[("depth", depth)], b""))
+        .await;
+    assert_eq!(r.code(), 207, "{path} depth {depth}");
+    r.text()
+}
+
+/// D27: the shared `Depth: infinity` listing is the anonymous one, cached once; each
+/// caller's own corrections are appended to it per request, at every collection.
+#[tokio::test]
+async fn each_caller_sees_its_own_corrections_in_the_cached_listing() {
+    let env = Env::new();
+    std::fs::create_dir_all(env.lib("series/deeper")).unwrap();
+    std::fs::write(env.lib("series/deeper/v.cbz"), b"x").unwrap();
+    for (path, user) in [
+        ("/mokuro-reader/series/vol1.edit.mokuro", "alice"),
+        ("/mokuro-reader/series/deeper/v.edit-2.mokuro", "alice"),
+        ("/mokuro-reader/manga1.edit.mokuro", "alice"),
+        ("/mokuro-reader/series/vol1.edit.mokuro", "bob"),
+    ] {
+        let r = env
+            .req(Some(user), "PUT", path, &[], &correction(user))
+            .await;
+        assert_eq!(r.code(), 201, "{user} {path}: {}", r.text());
+    }
+    let alice_all = [
+        "/mokuro-reader/manga1.edit.mokuro",
+        "/mokuro-reader/series/deeper/v.edit-2.mokuro",
+        "/mokuro-reader/series/vol1.edit.mokuro",
+    ];
+    for _ in 0..2 {
+        let got =
+            edit_hrefs(&listing(&env, env.ctx(Some("alice")), "/mokuro-reader", "infinity").await);
+        assert_eq!(got, alice_all);
+        let got =
+            edit_hrefs(&listing(&env, env.ctx(Some("bob")), "/mokuro-reader/", "infinity").await);
+        assert_eq!(got, ["/mokuro-reader/series/vol1.edit.mokuro"]);
+        let got = edit_hrefs(&listing(&env, env.ctx(None), "/mokuro-reader", "infinity").await);
+        assert!(got.is_empty(), "{got:?}");
+        let got = edit_hrefs(&listing(&env, env.ctx(Some("alice")), "/", "infinity").await);
+        assert_eq!(got, alice_all);
+        let got = edit_hrefs(
+            &listing(
+                &env,
+                env.ctx(Some("alice")),
+                "/mokuro-reader/series",
+                "infinity",
+            )
+            .await,
+        );
+        assert_eq!(got, &alice_all[1..]);
+    }
+    // One cached entry per key, shared by every caller.
+    assert_eq!(env.dav.propfind_cache().usage().0, 3);
+
+    // Depth 1 agrees with the infinity answer, folder by folder.
+    let got =
+        edit_hrefs(&listing(&env, env.ctx(Some("alice")), "/mokuro-reader/series", "1").await);
+    assert_eq!(got, ["/mokuro-reader/series/vol1.edit.mokuro"]);
+    let got = edit_hrefs(&listing(&env, env.ctx(Some("alice")), "/mokuro-reader", "1").await);
+    assert_eq!(got, ["/mokuro-reader/manga1.edit.mokuro"]);
+
+    // An overlay whose archive went (outside DAV) is listed nowhere.
+    std::fs::remove_file(env.lib("series/deeper/v.cbz")).unwrap();
+    env.dav.propfind_cache().invalidate();
+    let got =
+        edit_hrefs(&listing(&env, env.ctx(Some("alice")), "/mokuro-reader", "infinity").await);
+    assert_eq!(
+        got,
+        [
+            "/mokuro-reader/manga1.edit.mokuro",
+            "/mokuro-reader/series/vol1.edit.mokuro"
+        ]
+    );
+    let got = edit_hrefs(
+        &listing(
+            &env,
+            env.ctx(Some("alice")),
+            "/mokuro-reader/series/deeper",
+            "1",
+        )
+        .await,
+    );
+    assert!(got.is_empty(), "{got:?}");
+}
+
+/// The cloud-root owner's correction is the physical file: hidden from the shared
+/// listing, kept with the cached entry for the owner alone, and gone from it once
+/// deleted (a physical change drops the entry).
+#[tokio::test]
+async fn the_owners_physical_correction_is_listed_to_the_owner_only() {
+    let env = Env::new();
+    let owner = || {
+        let mut ctx = env.ctx(Some("alice"));
+        ctx.owns_cloud_root = true;
+        ctx
+    };
+    let path = "/mokuro-reader/series/vol1.edit.mokuro";
+    let r = env
+        .send_ctx(owner(), request("PUT", path, &[], &correction("owner")))
+        .await;
+    assert_eq!(r.code(), 201, "{}", r.text());
+    assert!(env.lib("series/vol1.edit.mokuro").exists());
+    for _ in 0..2 {
+        let got = edit_hrefs(&listing(&env, owner(), "/mokuro-reader", "infinity").await);
+        assert_eq!(got, [path]);
+        for ctx in [env.ctx(Some("alice")), env.ctx(Some("bob")), env.ctx(None)] {
+            let got = edit_hrefs(&listing(&env, ctx, "/mokuro-reader", "infinity").await);
+            assert!(got.is_empty(), "{got:?}");
+        }
+    }
+    let got = edit_hrefs(&listing(&env, owner(), "/mokuro-reader/series", "1").await);
+    assert_eq!(got, [path]);
+    let got = edit_hrefs(&listing(&env, env.ctx(Some("bob")), "/mokuro-reader/series", "1").await);
+    assert!(got.is_empty(), "{got:?}");
+
+    let r = env
+        .send_ctx(owner(), request("DELETE", path, &[], b""))
+        .await;
+    assert_eq!(r.code(), 204);
+    assert!(!env.lib("series/vol1.edit.mokuro").exists());
+    let got = edit_hrefs(&listing(&env, owner(), "/mokuro-reader", "infinity").await);
+    assert!(got.is_empty(), "{got:?}");
 }

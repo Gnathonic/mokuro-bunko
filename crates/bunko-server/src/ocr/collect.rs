@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use bunko_core::generations::Generation;
 use bunko_db::{AuditDetails, Database, NewAuditEvent, OcrSidecar};
+use bunko_store::{Durability, Mode, Origin, Version, WriteIntent, fs};
 use serde_json::{Map, Value};
 use sha2::Digest;
 
@@ -56,6 +57,63 @@ pub enum Outcome {
     Discarded,
     /// The destination is locked by a WebDAV write: retry the job this scan.
     Busy(String),
+    /// A remote library store did not take the result (offline, refused, or a write
+    /// it cannot do yet): not a failure of the volume; the job goes back to the queue
+    /// and is tried again next scan (spec §3.5: the queue holds, nothing is recorded).
+    Held(String),
+    /// A sidecar arrived at the destination while the job ran (a reader's rename, a
+    /// person's upload) and stays: the result is discarded, nothing is recorded, and
+    /// the next walk finds the row done.
+    Superseded(String),
+}
+
+/// Why a result was discarded for a file already at its destination.
+pub const SUPERSEDED: &str = "a sidecar was already at the destination; the result was discarded";
+
+/// What is at a result's destination: nothing, a file that stays, or Bunko's own older
+/// output that the result replaces (on a remote store, exactly the version read).
+pub(crate) enum Existing {
+    Absent,
+    Keep,
+    Replace(Option<Version>),
+}
+
+/// Never `<stem>_<n>.mokuro` beside a file already there (a reader's rename moved a
+/// volume's sidecars in during the job, a person uploaded one): only Bunko's own sealed
+/// output of the same engine at a lower revision is replaced
+/// ([`super::upgrade::superseded_own_output`]); anything else is kept, and so is a
+/// `.gz` alone (the result would sit beside it as a second copy).
+pub(crate) fn reconcile_existing(
+    plain: &Path,
+    gz: &Path,
+    result: Option<&(String, u32)>,
+) -> Existing {
+    let Some(meta) = fs::metadata(plain).ok() else {
+        return if fs::exists(gz) {
+            Existing::Keep
+        } else {
+            Existing::Absent
+        };
+    };
+    let Some((engine, revision)) = result else {
+        return Existing::Keep;
+    };
+    let remote = bunko_store::store_for(plain).filter(|s| s.caps().remote);
+    let max = bunko_library::sidecar::MAX_SIDECAR_BYTES;
+    let bytes = match (remote, meta.version()) {
+        (Some(store), Some(version)) => store
+            .local_path(plain, Some(version))
+            .ok()
+            .and_then(|pinned| bunko_library::sidecar::read_capped(pinned.path(), max).ok()),
+        (Some(_), None) => None,
+        (None, _) => bunko_library::sidecar::read_capped(plain, max).ok(),
+    };
+    match bytes {
+        Some(b) if super::upgrade::superseded_own_output(&b, engine, *revision) => {
+            Existing::Replace(meta.version().cloned())
+        }
+        _ => Existing::Keep,
+    }
 }
 
 #[derive(Debug)]
@@ -98,7 +156,7 @@ pub fn audit_rejected(req: &CollectRequest, reason: &str) {
 
 pub fn sha256_file(path: &Path) -> std::io::Result<String> {
     use std::io::Read;
-    let mut f = std::fs::File::open(path)?;
+    let mut f = fs::File::open(path)?;
     let mut hasher = sha2::Sha256::new();
     let mut buf = vec![0u8; 1 << 20];
     loop {
@@ -155,7 +213,7 @@ pub fn volume_uuid_for(
             let Some(uuid) = sidecar_volume_uuid(&candidate) else {
                 continue;
             };
-            let Some(mtime) = std::fs::metadata(&candidate)
+            let Some(mtime) = fs::metadata(&candidate)
                 .ok()
                 .and_then(|m| m.modified().ok())
             else {
@@ -179,35 +237,12 @@ pub fn volume_uuid_for(
     bunko_layout::sidecar::deterministic_uuid(&format!("{series}/{stem}"))
 }
 
-/// `_get_unique_path`: `<stem>_<n><suffix>` (Python `Path.stem` / `Path.suffix`).
-pub fn unique_path(path: &Path) -> PathBuf {
-    if !path.exists() {
-        return path.to_path_buf();
-    }
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let (stem, suffix) = match name.rfind('.') {
-        Some(i) if i > 0 => (name[..i].to_string(), name[i..].to_string()),
-        _ => (name.clone(), String::new()),
-    };
-    let parent = path.parent().map(Path::to_path_buf).unwrap_or_default();
-    let mut n = 1;
-    loop {
-        let candidate = parent.join(format!("{stem}_{n}{suffix}"));
-        if !candidate.exists() {
-            return candidate;
-        }
-        n += 1;
-    }
-}
-
-/// Move `from` to `to`: a rename, or a copy into a temp file beside `to` then a rename
-/// when they are on different filesystems.
-pub fn move_into_place(from: &Path, to: &Path) -> std::io::Result<()> {
-    match std::fs::rename(from, to) {
-        Ok(()) => Ok(()),
+/// Move `from` to `to`: a publish (a rename on a local library), or a copy into a temp
+/// file beside `to` then a publish when they are on different filesystems (the
+/// rename's `CrossesDevices`). `intent` is what the store is told about the write.
+pub fn move_into_place(from: &Path, to: &Path, intent: &WriteIntent) -> std::io::Result<()> {
+    match fs::publish(from, to, intent) {
+        Ok(_) => Ok(()),
         Err(_) => {
             let tmp = to.with_file_name(format!(
                 ".{}.part",
@@ -215,9 +250,9 @@ pub fn move_into_place(from: &Path, to: &Path) -> std::io::Result<()> {
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_default()
             ));
-            std::fs::copy(from, &tmp)?;
-            std::fs::rename(&tmp, to)?;
-            let _ = std::fs::remove_file(from);
+            fs::copy(from, &tmp)?;
+            fs::publish(&tmp, to, intent)?;
+            let _ = fs::remove_file(from);
             Ok(())
         }
     }
@@ -235,12 +270,17 @@ pub fn lock_with_patience(locks: &PathLocks, path: &Path) -> Option<Box<dyn Send
 }
 
 /// Install one result.
+// unmounted: the cleanup removes the result's `.processing` spool directory.
+#[allow(clippy::disallowed_methods)]
 pub fn run(req: CollectRequest) -> CollectDone {
     let outcome = install(&req);
     match &outcome {
         Outcome::Installed(_) => {}
         Outcome::Discarded => audit_rejected(&req, super::sched::DISCARDED),
-        Outcome::Failed(reason) | Outcome::Busy(reason) => audit_rejected(&req, reason),
+        Outcome::Failed(reason)
+        | Outcome::Busy(reason)
+        | Outcome::Held(reason)
+        | Outcome::Superseded(reason) => audit_rejected(&req, reason),
     }
     if !matches!(outcome, Outcome::Installed(_)) {
         let _ = std::fs::remove_file(&req.result);
@@ -265,14 +305,17 @@ fn install(req: &CollectRequest) -> Outcome {
     // 1. The archive is still the one the claim read.
     let current = match req.stamp {
         Some(stamp) => stamp_of(&cbz) == Some(stamp),
-        None => cbz.is_file(),
+        None => fs::is_file(&cbz),
     };
     if !current {
         return Outcome::Discarded;
     }
     let row = &req.row;
     // 2. The bytes are the ones announced.
-    if !req.result.is_file() {
+    // unmounted: the result is in the `.processing` spool.
+    #[allow(clippy::disallowed_methods)]
+    let arrived = req.result.is_file();
+    if !arrived {
         return Outcome::Failed(format!("no valid {} sidecar generated", row.name));
     }
     if let Some(expected) = &req.expected_sha256 {
@@ -332,6 +375,13 @@ fn install(req: &CollectRequest) -> Outcome {
         volume: req.job.volume().to_string(),
         volume_uuid,
         stamp,
+        // `ocr_engine.created`: when this library installed the file (inside the seal).
+        created: Some(bunko_sched::py::iso_utc(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.0),
+        )),
     };
     if let Err(e) = bunko_layout::sidecar::normalize_sidecar_file(&req.result, &norm) {
         return Outcome::Failed(format!(
@@ -339,10 +389,24 @@ fn install(req: &CollectRequest) -> Outcome {
             row.name
         ));
     }
+    // D4's proof that the file is Bunko's own output: the content seal
+    // (`ocr_engine.seal`), set before it leaves the spool. Taken AFTER normalisation,
+    // which stamps `generation` into a layer's block (the block is inside the seal). It
+    // travels with the file, so any Bunko or reader can check it; an edit of the pages
+    // or the block breaks it, a rename or a re-serialisation does not.
+    if let Err(e) = bunko_layout::seal::seal_sidecar_file(&req.result) {
+        return Outcome::Failed(format!("the {} sidecar could not be sealed: {e}", row.name));
+    }
     // 5. Into place, under the DAV write lock.
+    let mut mode = None;
     let destination = if req.job.upgrade {
         match super::upgrade::swap_in_generated(req, &cbz) {
-            Ok(path) => path,
+            Ok((path, swapped)) => {
+                if swapped == super::upgrade::Swapped::EditedMainLayer {
+                    mode = Some("edited-main-layer");
+                }
+                path
+            }
             Err(outcome) => return outcome,
         }
     } else {
@@ -350,12 +414,34 @@ fn install(req: &CollectRequest) -> Outcome {
         let Some(_guard) = lock_with_patience(&req.locks, &plain) else {
             return Outcome::Busy(format!("{} is locked by a WebDAV write", plain.display()));
         };
-        let dest = if plain.exists() || gz.exists() {
-            unique_path(&plain)
-        } else {
-            plain
+        let result_facts = bunko_library::sidecar::read_capped(
+            &req.result,
+            bunko_library::sidecar::MAX_SIDECAR_BYTES,
+        )
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        .as_ref()
+        .and_then(super::upgrade::engine_of);
+        let (mode, durability) = match reconcile_existing(&plain, &gz, result_facts.as_ref()) {
+            Existing::Absent => (Mode::CreateNew, Durability::Deferred),
+            Existing::Keep => return Outcome::Superseded(SUPERSEDED.into()),
+            Existing::Replace(base) => (Mode::Replace { base }, Durability::Sync),
         };
-        if let Err(e) = move_into_place(&req.result, &dest) {
+        let dest = plain;
+        let intent = WriteIntent::new(
+            mode,
+            Origin::Ocr {
+                claim: req.claim.clone(),
+            },
+            durability,
+        );
+        if let Err(e) = move_into_place(&req.result, &dest, &intent) {
+            if bunko_store::store_for(&dest).is_some_and(|s| s.caps().remote) {
+                return Outcome::Held(format!(
+                    "the cloud library did not take the {} sidecar: {e}",
+                    row.name
+                ));
+            }
             return Outcome::Failed(format!(
                 "could not move the {} sidecar to {}: {e}",
                 row.name,
@@ -365,19 +451,37 @@ fn install(req: &CollectRequest) -> Outcome {
         dest
     };
     // 6. Provenance + audit; 7. metadata.
-    record_written(req, &cbz, &destination, detector, precision, facts_pages);
+    record_written(
+        req,
+        &cbz,
+        &destination,
+        Written {
+            detector,
+            precision,
+            facts_pages,
+            mode,
+        },
+    );
     req.facts.sidecar_installed(&cbz);
     Outcome::Installed(destination)
 }
 
-fn record_written(
-    req: &CollectRequest,
-    cbz: &Path,
-    sidecar: &Path,
+/// What one installation wrote, for its provenance row.
+struct Written {
     detector: Option<String>,
     precision: Option<String>,
     facts_pages: Option<i64>,
-) {
+    /// `edited-main-layer` for an EDITED main's new OCR written beside it.
+    mode: Option<&'static str>,
+}
+
+fn record_written(req: &CollectRequest, cbz: &Path, sidecar: &Path, written: Written) {
+    let Written {
+        detector,
+        precision,
+        facts_pages,
+        mode,
+    } = written;
     let Some(db) = &req.db else { return };
     let (Some(sidecar_rel), Some(volume_key)) = (
         crate::ocr::types::rel_of(&req.library, sidecar),
@@ -427,6 +531,10 @@ fn record_written(
             "runner_build",
             req.runner_build.clone().map_or(Value::Null, Value::String),
         );
+    let details = match mode {
+        Some(mode) => details.with("mode", mode),
+        None => details,
+    };
     let event = NewAuditEvent::new("ocr_sidecar_written")
         .actor(req.account.as_deref())
         .target_type("sidecar")
@@ -434,22 +542,5 @@ fn record_written(
         .details(details);
     if let Err(e) = db.log_audit_event(&event) {
         tracing::warn!("could not audit {}: {e}", sidecar.display());
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn unique_names() {
-        let dir = tempfile::tempdir().unwrap();
-        let p = dir.path().join("Vol.mokuro");
-        assert_eq!(unique_path(&p), p);
-        std::fs::write(&p, b"x").unwrap();
-        assert_eq!(unique_path(&p), dir.path().join("Vol_1.mokuro"));
-        let layer = dir.path().join("Vol.fast.mokuro");
-        std::fs::write(&layer, b"x").unwrap();
-        assert_eq!(unique_path(&layer), dir.path().join("Vol.fast_1.mokuro"));
     }
 }

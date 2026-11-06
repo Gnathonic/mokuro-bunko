@@ -1,0 +1,7 @@
+{
+  "description": "The smallest sealable document: a block and a pages array.",
+  "document": "{\"ocr_engine\":{\"id\":\"hayai-nova\",\"seal\":\"v1:944b0b795aeb2be94b780e04fc96fbfd17a7d9df1383e4eed4fa5be9c8c5a856\"},\"pages\":[]}",
+  "seal_input": "{\"ocr_engine\":{\"id\":\"hayai-nova\"},\"pages\":[]}",
+  "seal": "v1:944b0b795aeb2be94b780e04fc96fbfd17a7d9df1383e4eed4fa5be9c8c5a856",
+  "is_sealed": true
+}

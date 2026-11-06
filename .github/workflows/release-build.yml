@@ -4,8 +4,11 @@
 # backend packs and (opt-in) the Android APK, each uploaded as a workflow artifact
 # (`dist-*`, `pack-*`, `android-apk`), and the static x64 server the lite Docker image
 # is made from (`docker-*`: not a release file). It signs, publishes and pushes nothing, uses no
-# secret except the optional Android keystore, and needs only `contents: read`: the
-# caller's release job signs release.json and drafts the release from these artifacts.
+# secret except the optional Android keystore and the optional Google client secrets the
+# binaries embed (BUNKO_GOOGLE_*_SECRET, compiled in by bunko-remote's auth::clients; a
+# build without them cannot sign in to Google Drive with the built-in clients), and needs
+# only `contents: read`: the caller's release job signs release.json and drafts the
+# release from these artifacts.
 # See docs/rust-port/PACKAGING.md §5.
 name: Release build
 
@@ -41,8 +44,21 @@ on:
         required: false
       ANDROID_KEY_PASSWORD:
         required: false
+      BUNKO_GOOGLE_RELEASE_DESKTOP_SECRET:
+        required: false
+      BUNKO_GOOGLE_RELEASE_DEVICE_SECRET:
+        required: false
+      BUNKO_GOOGLE_BETA_DESKTOP_SECRET:
+        required: false
+      BUNKO_GOOGLE_BETA_DEVICE_SECRET:
+        required: false
 
 env:
+  # Compile-time only (option_env!): every cargo build of the workflow embeds them.
+  BUNKO_GOOGLE_RELEASE_DESKTOP_SECRET: ${{ secrets.BUNKO_GOOGLE_RELEASE_DESKTOP_SECRET }}
+  BUNKO_GOOGLE_RELEASE_DEVICE_SECRET: ${{ secrets.BUNKO_GOOGLE_RELEASE_DEVICE_SECRET }}
+  BUNKO_GOOGLE_BETA_DESKTOP_SECRET: ${{ secrets.BUNKO_GOOGLE_BETA_DESKTOP_SECRET }}
+  BUNKO_GOOGLE_BETA_DEVICE_SECRET: ${{ secrets.BUNKO_GOOGLE_BETA_DEVICE_SECRET }}
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
   SOURCE_DATE_EPOCH: ${{ inputs.epoch }}

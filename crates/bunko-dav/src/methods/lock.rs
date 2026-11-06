@@ -7,11 +7,12 @@ use axum::body::Body;
 use http::StatusCode;
 
 use super::{
-    Req, XML_BODY_LIMIT, blocking, check_dav_locks, eval_if, is_virtual_root, lookup, read_body,
+    Req, XML_BODY_LIMIT, blocking, check_dav_locks, eval_if, is_virtual_root, lookup,
+    personal_grant_holds, read_body,
 };
 use crate::locks::{self, AcquireError, Scope};
 use crate::propfind::{self, resource_key};
-use crate::resource::Resource;
+use crate::resource::{FileKind, Resource};
 use crate::response::{self, DavError, DavResult, Resp};
 use crate::xml::{self, DAV_NS};
 use crate::{Inner, paths};
@@ -25,15 +26,47 @@ fn lockdiscovery_body(activelocks: &str) -> Vec<u8> {
 }
 
 /// The lock key and href for a URL that may not exist yet (lock-null).
-fn key_for_unmapped(req: &Req) -> (String, String) {
+fn key_for_unmapped(req: &Req, kind: FileKind) -> (String, String) {
     let norm = paths::normalize(&req.path);
-    match paths::classify(&norm) {
-        paths::Target::Progress(_) => (
+    match kind {
+        FileKind::Progress | FileKind::Personal => (
             format!("{norm}\0{}", req.ctx.principal()),
             paths::href(&norm, false),
         ),
-        _ => (norm.clone(), paths::href(&norm, false)),
+        FileKind::Library => (norm.clone(), paths::href(&norm, false)),
     }
+}
+
+/// Whose an unmapped URL's lock is: the caller's own for a per-user file or a
+/// correction (as [`Roots::member_path`](crate::resource::Roots::member_path) resolves
+/// it), else the shared path's.
+async fn unmapped_key(inner: &Arc<Inner>, req: &Req) -> DavResult<String> {
+    let kind = match paths::classify(&req.path) {
+        paths::Target::Progress(_) => FileKind::Progress,
+        paths::Target::Library(rel) => {
+            let inner2 = inner.clone();
+            let personal = blocking(move || inner2.roots.personal(&rel).is_some()).await?;
+            if personal {
+                FileKind::Personal
+            } else {
+                FileKind::Library
+            }
+        }
+        _ => FileKind::Library,
+    };
+    Ok(key_for_unmapped(req, kind).0)
+}
+
+/// LOCK, UNLOCK and PROPPATCH have no business in the reading history (the reader
+/// writes it file by file, last write wins).
+fn refuse_history(req: &Req) -> DavResult<()> {
+    if paths::is_history_path(&req.path) {
+        return Err(DavError::new(
+            StatusCode::FORBIDDEN,
+            "Not supported for reading history.",
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) async fn lock(inner: &Arc<Inner>, req: &Req, body: Body) -> DavResult<Resp> {
@@ -43,6 +76,7 @@ pub(crate) async fn lock(inner: &Arc<Inner>, req: &Req, body: Body) -> DavResult
             "The library root cannot be locked.",
         ));
     }
+    refuse_history(req)?;
     let infinite = match req.header("depth") {
         None | Some("infinity") => true,
         Some("0") => false,
@@ -54,8 +88,9 @@ pub(crate) async fn lock(inner: &Arc<Inner>, req: &Req, body: Body) -> DavResult
         }
     };
     let user = req.username();
-    let res = lookup(inner, &req.path, user).await?;
+    let res = lookup(inner, &req.path, req).await?;
     if let Some(r) = &res {
+        personal_grant_holds(req, r.kind())?;
         eval_if(inner, req, r)?;
     }
     let timeout = locks::parse_timeout(req.header("timeout"));
@@ -65,7 +100,7 @@ pub(crate) async fn lock(inner: &Arc<Inner>, req: &Req, body: Body) -> DavResult
         // Refresh: exactly one submitted token, which must lock this URL.
         let key = match &res {
             Some(r) => resource_key(r, user),
-            None => key_for_unmapped(req).0,
+            None => unmapped_key(inner, req).await?,
         };
         let tokens = req.if_tokens();
         if tokens.len() != 1 {
@@ -141,7 +176,7 @@ pub(crate) async fn lock(inner: &Arc<Inner>, req: &Req, body: Body) -> DavResult
             // Lock-null: the parent must be a collection the name can live in; nothing is
             // created on disk (the first PUT creates the file).
             let parent = match paths::uri_parent(&req.path) {
-                Some(p) => lookup(inner, &p, user).await?,
+                Some(p) => lookup(inner, &p, req).await?,
                 None => None,
             };
             let Some(parent) = parent.filter(Resource::is_collection) else {
@@ -152,14 +187,14 @@ pub(crate) async fn lock(inner: &Arc<Inner>, req: &Req, body: Body) -> DavResult
             };
             let name = paths::uri_name(&req.path).to_string();
             let inner2 = inner.clone();
-            let user2 = user.map(str::to_string);
-            if blocking(move || inner2.roots.member_path(&parent, &name, user2.as_deref()))
-                .await?
-                .is_none()
-            {
+            let ctx2 = req.ctx.clone();
+            let Some((_, kind)) =
+                blocking(move || inner2.roots.member_path(&parent, &name, ctx2.caller())).await?
+            else {
                 return Err(DavError::new(StatusCode::FORBIDDEN, "Forbidden"));
-            }
-            let (key, href) = key_for_unmapped(req);
+            };
+            personal_grant_holds(req, Some(kind))?;
+            let (key, href) = key_for_unmapped(req, kind);
             (key, href, true)
         }
     };
@@ -202,6 +237,7 @@ pub(crate) async fn lock(inner: &Arc<Inner>, req: &Req, body: Body) -> DavResult
 }
 
 pub(crate) async fn unlock(inner: &Arc<Inner>, req: &Req) -> DavResult<Resp> {
+    refuse_history(req)?;
     if req.content_length() != 0 {
         return Err(DavError::new(
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
@@ -209,10 +245,13 @@ pub(crate) async fn unlock(inner: &Arc<Inner>, req: &Req) -> DavResult<Resp> {
         ));
     }
     let user = req.username();
-    let res = lookup(inner, &req.path, user).await?;
+    let res = lookup(inner, &req.path, req).await?;
+    if let Some(r) = &res {
+        personal_grant_holds(req, r.kind())?;
+    }
     let key = match &res {
         Some(r) => resource_key(r, user),
-        None => key_for_unmapped(req).0,
+        None => unmapped_key(inner, req).await?,
     };
     let token = req.header("lock-token").map(|t| {
         t.trim()
@@ -261,13 +300,15 @@ pub(crate) async fn proppatch(inner: &Arc<Inner>, req: &Req, body: Body) -> DavR
             "The library root's properties cannot be changed.",
         ));
     }
+    refuse_history(req)?;
     if req.header("depth").is_some_and(|d| d != "0") {
         return Err(DavError::new(StatusCode::BAD_REQUEST, "Depth must be '0'."));
     }
     let user = req.username();
-    let res = lookup(inner, &req.path, user)
+    let res = lookup(inner, &req.path, req)
         .await?
         .ok_or_else(|| DavError::new(StatusCode::NOT_FOUND, &req.path))?;
+    personal_grant_holds(req, res.kind())?;
     eval_if(inner, req, &res)?;
     let key = resource_key(&res, user);
     check_dav_locks(inner, req, &key, false)?;

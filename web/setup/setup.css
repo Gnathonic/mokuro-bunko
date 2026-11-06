@@ -243,3 +243,58 @@ details summary.form-label { cursor: pointer; }
 .toggle__text span { color: var(--text-muted); font-size: 0.8125rem; }
 .radio-card input:checked + .radio-card__content span { color: var(--text-secondary); }
 details summary.form-label { display: list-item; }
+
+/* 0.8: where the library lives, Connect and Check, the first sync */
+.connect-live {
+    padding: 1rem;
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+    background: var(--bg-tertiary);
+    text-align: center;
+}
+
+.connect-code {
+    display: block;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 1.75rem;
+    font-weight: 700;
+    letter-spacing: 0.15em;
+    margin: 0.5rem 0;
+    color: var(--text-primary);
+    user-select: all;
+}
+
+.connect-live p { margin: 0.25rem 0; font-size: 0.875rem; color: var(--text-secondary); }
+.connect-live .btn { margin-top: 0.5rem; }
+
+/* The paste flow's field: kept outside .connect-live, which every poll redraws. */
+.connect-paste .form-input { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.connect-paste .btn { margin-top: 0.5rem; }
+
+.check-summary {
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin: 0.5rem 0 0.75rem;
+}
+
+.done-progress { margin-top: 1rem; text-align: center; }
+.done-line { margin: 0.35rem 0; color: var(--text-secondary); font-size: 0.9rem; }
+.done-progress .progress-bar { height: 6px; border-radius: 3px; background: var(--bg-tertiary); overflow: hidden; }
+.done-progress .progress-bar__fill { height: 100%; width: 0; background: var(--accent-primary); transition: width 0.4s; }
+
+.done-pairing { margin-top: 1.25rem; }
+.done-command {
+    white-space: pre-wrap;
+    word-break: break-all;
+    background: var(--bg-tertiary);
+    padding: 0.5rem 0.75rem;
+    border-radius: var(--radius-md);
+    font-size: 0.8125rem;
+}
+.done-kv { display: grid; grid-template-columns: auto 1fr; gap: 0.25rem 0.75rem; font-size: 0.875rem; }
+.done-kv dt { color: var(--text-muted); }
+.done-kv dd { margin: 0; word-break: break-all; }
+
+/* Classes such as .btn set display, which beats the hidden attribute. */
+.setup-card [hidden] { display: none !important; }

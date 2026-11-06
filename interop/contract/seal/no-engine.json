@@ -1,0 +1,7 @@
+{
+  "description": "No ocr_engine block: nothing to seal.",
+  "document": "{\"version\": \"0.2.5\", \"title\": \"T\", \"volume\": \"V\", \"pages\": []}",
+  "seal_input": null,
+  "seal": null,
+  "is_sealed": false
+}

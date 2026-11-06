@@ -1,5 +1,8 @@
 //! The community fetcher against a local mock of AniList and Jikan.
 
+// Fixtures are set up and checked with std::fs on purpose.
+#![allow(clippy::disallowed_methods)]
+
 mod library_support;
 
 use axum::Json;

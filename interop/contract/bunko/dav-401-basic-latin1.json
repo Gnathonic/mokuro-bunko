@@ -1,0 +1,16 @@
+{
+  "body_text": "Invalid authorization header",
+  "headers": {
+    "content-type": "text/plain; charset=utf-8",
+    "www-authenticate": "Basic realm=\"mokuro-bunko\", charset=\"UTF-8\""
+  },
+  "request": {
+    "auth": "raw:Basic cmVhZGVyOmNvbnRyYWN0LXDkc3N39nJk",
+    "headers": {
+      "depth": "0"
+    },
+    "method": "PROPFIND",
+    "path": "/mokuro-reader/"
+  },
+  "status": 401
+}

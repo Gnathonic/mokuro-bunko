@@ -249,7 +249,11 @@ CREATE INDEX IF NOT EXISTS idx_audit_actor_created       ON audit_logs(actor_use
 CREATE INDEX IF NOT EXISTS idx_volume_uploads_uploader   ON volume_uploads(uploader_username);
 CREATE INDEX IF NOT EXISTS idx_series_entry_cache_series ON series_entry_cache(series_key);
 ```
-(plus `idx_auth_tokens_username`, `idx_ocr_sidecars_volume` above). `test_audit_search.py:192-215` pins
+(plus `idx_auth_tokens_username`, `idx_ocr_sidecars_volume` above). **0.8 (Rust)** adds, with the
+series folder owner tables (schema version 7), `idx_volume_uploads_uploader_nocase ON
+volume_uploads(uploader_username COLLATE NOCASE)`: `/login/api/me` looks an uploader's archives up
+by name, matched ASCII case-insensitively as auth matches it, which the binary index above
+cannot serve. `test_audit_search.py:192-215` pins
 that the three audit indexes exist and are re-created on an existing DB where they were dropped.
 `idx_audit_created_at` is referenced by name in an `INDEXED BY` hint (8.4), so it MUST exist under
 that exact name (or the Rust query must drop the hint).
@@ -970,6 +974,47 @@ else `revoke_auth_token(t)` -> 200 `{"revoked": true|false}` (false if unknown/a
 `metadata` is nested INSIDE `permissions` (reader's `identity.ts` reads `permissions.metadata`). Key
 order in the JSON object: canWriteProgress, canAddFiles, canModifyDelete, metadata. `created_at` is the
 raw DB string. Pinned by `tests/integration/test_login_me.py`.
+
+**0.8 (Rust).** `P` gains a fifth key after `metadata`: `"curated": {"scope": C}`, who may
+publish a volume's shared `<Vol>.curated.mokuro` (D27; auth enforces it): `C` = `"all"` for a role
+with `MODIFY_DELETE`, `"owned"` for `uploader` (the volumes it uploaded; a 403 on any other is
+final), else `"none"`. Both 200 bodies end with three more keys, signed in or not:
+`"per_user_files"` = `bunko_core::reader_tree::advertised()`, i.e.
+`["volume-data.json","profiles.json","goals.json","positions.json","history/"]` (a trailing `/` is a
+per-account directory tree), then `"per_user_layers"` = `bunko_core::sidecar_names::per_user_layers()`,
+i.e. `["edit"]` (the layer ids each account keeps its own copy of; a reader pushes its `edit` layer
+only when it is listed), then `"version"` = the running `bunko_core::VERSION` (`0.8.0-beta.1` and
+on). Key order signed in: authenticated, username, role, created_at, permissions, per_user_files,
+per_user_layers, version; anonymous: authenticated, role, permissions, per_user_files,
+per_user_layers, version. The 401/429 bodies are unchanged. `version` is reported only by builds
+that keep reading history per account: the reader turns history sync on when its numeric core
+(`/^v?(\d+)\.(\d+)\.(\d+)/`, a pre-release counting as its core) is ≥ 0.8.0, and uses
+`positions.json` only when it is listed. Pinned by `crates/bunko-server/tests/accounts_login.rs` and
+the `login-me-*` contract fixtures (where `version` is the sentinel `0.0.0`).
+
+**0.8 series owners (Rust).** `P` ends with `"addFiles"`: `{"scope":"all"}` for `MODIFY_DELETE`,
+`{"scope":"open","closedSeries":[...]}` for `uploader` (the recorded folders of series another
+account owns, listed now), else `{"scope":"none"}`; an uploader's `metadata.ownedSeries` is the
+series it owns by record, listed now. What cannot be read is never reported as a shorter list (a
+reader acts on it as true, and takes a failed `/me` for a server without owners, so `/me` still
+answers 200): with the library root unlistable, every record of another account is closed and
+none is owned; with the records unreadable, `addFiles` is `{"scope":"none"}` and `ownedSeries`
+empty. Auth answers those requests 503 meanwhile; the reader's next `/me` corrects the lists.
+
+**0.8 curated volumes (Rust, D1).** With `"scope":"owned"` (and only then) `curated` gains a
+second key, `"volumes": [{"series": S, "volume": V}, ...]`: the volumes the uploader may publish
+the curated layer of outside the series it owns (those are `metadata.ownedSeries`), so a reader
+can offer Publish per volume in a shared series. `S` is the series folder as listed, `V` the
+archive's stem (the `.cbz` name without `.cbz`); sorted by `S`, then `V`, code point. An entry is
+an archive listed directly in a series folder (listed at the root, not owned by the account)
+that auth would let it publish `<V>.curated.mokuro` for: every archive governing that name
+(`sidecar_names::governing_archives`, the nearest listed one) is the account's recorded upload
+(`volume_uploads`, name matched ASCII case-insensitively, as auth matches it), and in a series
+another account owns the layer is listed already (a new one there is refused). Here a shorter
+list only offers less, so a folder or the upload records that cannot be read add nothing; an
+empty list is normal. Bunko stays the judge: a 403 on a publish stays final. Pinned by
+`accounts::login` unit tests, `tests/folder_ownership.rs` (the list agrees with auth's PUT
+decision) and the `login-me-closed-series` contract fixture.
 
 ### 15.5 `GET /api/nav/config` (:361-383) - no auth
 Response 200: `{"home_enabled": bool, "catalog_enabled": bool, "queue_show_in_nav": bool,

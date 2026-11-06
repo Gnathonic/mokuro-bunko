@@ -2,15 +2,13 @@
 //! `DavHooks`, request builders and archive makers.
 #![allow(dead_code)]
 
-pub mod diff;
-
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use axum::body::Body;
 use bunko_core::{Role, StorageLayout};
-use bunko_dav::{AuditEvent, Dav, DavConfig, DavContext, DavHooks, PutFollowUp};
+use bunko_dav::{AuditEvent, Dav, DavConfig, DavContext, DavHooks, HookGuard, PutFollowUp};
 use http::{HeaderMap, Request, Response, StatusCode};
 use http_body_util::BodyExt;
 use parking_lot::Mutex;
@@ -21,9 +19,25 @@ pub struct Recorder {
     pub calls: Mutex<Vec<String>>,
     pub audits: Mutex<Vec<AuditEvent>>,
     pub follow_up: Mutex<Option<PutFollowUp>>,
+    /// `ocr_sidecar_staged` calls, as `<parent>/<name>` of the destination (kept apart
+    /// from `calls`, whose exact lists other tests compare).
+    pub staged: Mutex<Vec<String>>,
+    /// An archive MOVE's notices, in order (apart from `calls` too): `moving a b` before
+    /// the rename, `moved a b` (the hook after it), `over a b` when the notice's guard
+    /// is dropped.
+    pub moves: Arc<Mutex<Vec<String>>>,
+    /// `archive_moving` removes the source first: the rename that follows fails.
+    pub fail_moves: std::sync::atomic::AtomicBool,
+}
+
+fn file_name(p: &Path) -> String {
+    p.file_name().unwrap().to_string_lossy().into_owned()
 }
 
 impl Recorder {
+    pub fn moves(&self) -> Vec<String> {
+        self.moves.lock().clone()
+    }
     pub fn calls(&self) -> Vec<String> {
         self.calls.lock().clone()
     }
@@ -81,6 +95,15 @@ impl DavHooks for Recorder {
     fn rename_volume_uuids_under_prefix(&self, o: &str, n: &str) {
         self.push(format!("rename_volume_uuids_under_prefix {o} {n}"));
     }
+    fn series_folder_created(&self, rel: &str, actor: &str) {
+        self.push(format!("series_folder_created {rel} {actor}"));
+    }
+    fn series_folder_removed(&self, rel: &str) {
+        self.push(format!("series_folder_removed {rel}"));
+    }
+    fn series_folder_moved(&self, old: &str, new: &str) {
+        self.push(format!("series_folder_moved {old} {new}"));
+    }
     fn primary_sidecar_leaving(&self, rel: &str, _sidecar: &Path) {
         self.push(format!("primary_sidecar_leaving {rel}"));
     }
@@ -98,12 +121,37 @@ impl DavHooks for Recorder {
             cbz.file_name().unwrap().to_string_lossy()
         ));
     }
+    fn archive_moving(&self, from: &Path, to: &Path) -> HookGuard {
+        let pair = format!("{} {}", file_name(from), file_name(to));
+        self.moves.lock().push(format!("moving {pair}"));
+        if self.fail_moves.load(std::sync::atomic::Ordering::SeqCst) {
+            std::fs::remove_file(from).unwrap();
+        }
+        struct Over(Arc<Mutex<Vec<String>>>, String);
+        impl Drop for Over {
+            fn drop(&mut self) {
+                self.0.lock().push(format!("over {}", self.1));
+            }
+        }
+        HookGuard::new(Over(self.moves.clone(), pair))
+    }
+    fn archive_moved(&self, from: &Path, to: &Path) {
+        self.moves
+            .lock()
+            .push(format!("moved {} {}", file_name(from), file_name(to)));
+    }
     fn put_follow_up(&self, _cbz: &Path, series: &str, volume: &str) -> Option<PutFollowUp> {
         self.push(format!("put_follow_up {series} {volume}"));
         self.follow_up.lock().clone()
     }
     fn library_changed(&self, _paths: &[PathBuf]) {
         self.push("library_changed".to_string());
+    }
+    fn ocr_sidecar_staged(&self, dest: &Path, _staged: &Path) {
+        let name = |p: &Path| p.file_name().unwrap().to_string_lossy().into_owned();
+        self.staged
+            .lock()
+            .push(format!("{}/{}", name(dest.parent().unwrap()), name(dest)));
     }
 }
 
@@ -136,7 +184,11 @@ impl Env {
     }
 
     pub fn with_base(dir: tempfile::TempDir, base: PathBuf) -> Env {
-        let dav = Dav::new(&StorageLayout::new(&base), DavConfig::default()).unwrap();
+        Self::with_config(dir, base, DavConfig::default())
+    }
+
+    pub fn with_config(dir: tempfile::TempDir, base: PathBuf, config: DavConfig) -> Env {
+        let dav = Dav::new(&StorageLayout::new(&base), config).unwrap();
         Env {
             dir,
             base,

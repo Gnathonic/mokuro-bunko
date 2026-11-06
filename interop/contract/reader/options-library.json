@@ -1,0 +1,17 @@
+{
+  "expect": {
+    "headers": [
+      "allow",
+      "x-mokuro-put"
+    ],
+    "status": [
+      200
+    ]
+  },
+  "request": {
+    "auth": "basic:reader",
+    "headers": {},
+    "method": "OPTIONS",
+    "path": "/mokuro-reader/"
+  }
+}

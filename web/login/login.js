@@ -24,15 +24,23 @@ async function updateNav() {
 
 async function logout() {
     await window.mokuroAuth.signOut();
-    window.location.href = '/';
+    window.location.href = './';
 }
 
 updateNav();
 
-// `?next=/_admin#server`: a path on this server only (never another origin).
+// `?next=_admin#server` (an old link's `/_admin#server` too): a page under this
+// server's mount only, never another origin.
 function safeNext() {
     const next = new URLSearchParams(window.location.search).get('next') || '';
-    return /^\/(?![\/\\])[^\s]*$/.test(next) ? next : '/';
+    const root = new URL('.', document.baseURI);
+    try {
+        const url = new URL(next.replace(/^\//, ''), root);
+        if (next && url.origin === root.origin && url.pathname.startsWith(root.pathname)) {
+            return url.href;
+        }
+    } catch (_) { /* not a URL */ }
+    return './';
 }
 
 form.addEventListener('submit', async (e) => {
@@ -53,7 +61,9 @@ form.addEventListener('submit', async (e) => {
         window.location.href = safeNext();
         
     } catch (err) {
-        errorMsg.textContent = err.message;
+        // An empty password works only for an account with none, from this computer.
+        errorMsg.textContent = !password && err.message === 'Missing credentials'
+            ? 'Enter your password.' : err.message;
         submitBtn.disabled = false;
         submitBtn.textContent = 'Sign In';
     }

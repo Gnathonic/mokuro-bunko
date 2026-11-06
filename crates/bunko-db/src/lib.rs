@@ -1,10 +1,10 @@
-//! `mokuro.db`: the SQLite database of mokuro-bunko, a drop-in over 0.5.2 files.
+//! `mokuro.db`: the SQLite database of mokuro-bunko.
 //!
-//! The same file keeps working in both directions: this crate opens any 0.5.2 (or older)
-//! database and upgrades it with 0.5.2's own idempotent steps, and a database it created
-//! or touched opens in Python 0.5.2 (a rollback) with identical schema text, row formats
-//! and JSON spellings. `tests/golden/` holds the Python-made fixtures and the scripts that
-//! check both directions.
+//! This crate opens any database Python 0.5.x (or older) made and upgrades it in place;
+//! `tests/golden/` holds the Python-made fixtures that pin the upgrade. The other direction
+//! is not kept: a database this crate created or touched is not meant to open in Python
+//! 0.5.x again (going back to 0.5.x is not supported), so the schema can change with a
+//! migration of its own.
 //!
 //! Everything is synchronous. [`Database`] is `Send + Sync`; share it as
 //! `Arc<Database>` and call it from `spawn_blocking`. See [`database`] for the connection
@@ -18,6 +18,7 @@
 //! | [`invites`] | `invites` |
 //! | [`audit`] | `audit_logs` |
 //! | [`uploads`] | `volume_uploads` (volume and series ownership) |
+//! | [`folders`] | `series_folder_owners`, `series_folder_adoption` (series folder owners, 0.8) |
 //! | [`ocr`] | `ocr_sidecars` |
 //! | [`identities`] | `volume_identities` |
 //! | [`series`] | `series_facts`, `series_entry_cache`, `catalog_folders`, `community_details` |
@@ -26,6 +27,7 @@
 pub mod audit;
 pub mod database;
 pub mod error;
+pub mod folders;
 pub mod identities;
 pub mod invites;
 pub mod ocr;
@@ -44,6 +46,7 @@ pub use audit::{
 };
 pub use database::{Database, DbOptions};
 pub use error::{DbError, Result};
+pub use folders::SeriesFolderOwner;
 pub use invites::{
     INVALID_INVITE_MESSAGE, INVITABLE_ROLES, Invite, InviteInfo, InviteStatus, parse_duration,
 };

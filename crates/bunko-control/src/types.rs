@@ -85,6 +85,10 @@ pub struct LibraryView {
     /// an engine on a machine, before its first volume). None: nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activity: Option<String>,
+    /// 0.8: where the library lives and how its store is doing (the admin status's
+    /// `library.storage` block; never secrets). None: not reported (a processor).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage: Option<serde_json::Value>,
 }
 
 /// One volume this machine is reading now.

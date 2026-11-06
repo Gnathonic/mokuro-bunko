@@ -1,0 +1,117 @@
+{
+  "body": {
+    "ok": false,
+    "reason": "forbidden",
+    "detail": "This account may not upload this file.",
+    "retry": false
+  },
+  "headers": {
+    "cache-control": "no-store",
+    "content-type": "application/json"
+  },
+  "request": {
+    "auth": "basic:progress",
+    "body": {
+      "version": "0.2.2",
+      "title": "Contract Series",
+      "title_uuid": "11111111-1111-4111-8111-111111111111",
+      "volume": "Volume 01",
+      "volume_uuid": "22222222-2222-4222-8222-222222222222",
+      "pages": [
+        {
+          "img_path": "001.jpg",
+          "img_width": 100,
+          "img_height": 150,
+          "blocks": [
+            {
+              "box": [
+                1,
+                1,
+                50,
+                50
+              ],
+              "vertical": true,
+              "font_size": 12,
+              "lines": [
+                "日本語です"
+              ],
+              "lines_coords": [
+                [
+                  [
+                    1,
+                    1
+                  ],
+                  [
+                    50,
+                    1
+                  ],
+                  [
+                    50,
+                    50
+                  ],
+                  [
+                    1,
+                    50
+                  ]
+                ]
+              ]
+            }
+          ]
+        },
+        {
+          "img_path": "002.jpg",
+          "img_width": 100,
+          "img_height": 150,
+          "blocks": [
+            {
+              "box": [
+                1,
+                1,
+                50,
+                50
+              ],
+              "vertical": true,
+              "font_size": 12,
+              "lines": [
+                "日本語です"
+              ],
+              "lines_coords": [
+                [
+                  [
+                    1,
+                    1
+                  ],
+                  [
+                    50,
+                    1
+                  ],
+                  [
+                    50,
+                    50
+                  ],
+                  [
+                    1,
+                    50
+                  ]
+                ]
+              ]
+            }
+          ]
+        }
+      ],
+      "edited": {
+        "by": "mokuro-reader",
+        "at": "2000-01-01T00:00:00.000Z",
+        "base_sha256": null,
+        "base_seal": null
+      }
+    },
+    "headers": {
+      "content-digest": "<digest>",
+      "content-type": "application/octet-stream"
+    },
+    "method": "PUT",
+    "path": "/mokuro-reader/Contract%20Series/Volume%2001.curated.mokuro"
+  },
+  "status": 403
+}

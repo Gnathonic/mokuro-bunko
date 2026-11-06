@@ -60,25 +60,18 @@ pub fn normalize_volume_key(path: &str) -> Option<String> {
 }
 
 /// `S/Vol 1.cbz` for the OCR layer file `S/Vol 1.hayai-nova.mokuro[.gz]`, else `None`.
-/// The layer id has 1-32 of `[a-z0-9-]` with at least one letter, so a decimal volume
-/// number (`Vol 01.5.mokuro`) is not a layer.
+///
+/// A heuristic: with no folder listing it cannot apply sidecar names rule v1
+/// (`bunko_core::sidecar_names::classify`), so on top of the rule's grammar (suffixes in
+/// any ASCII case, the id exact) the id needs a letter. A decimal volume number
+/// (`Vol 01.5.mokuro`) is then never a layer here, while a listing may read it as layer
+/// `5`; readers never mint an all-digit id.
 pub fn layer_sidecar_volume_path(path: &str) -> Option<String> {
-    let name = path.strip_suffix(".gz").unwrap_or(path);
-    let middle = name.strip_suffix(".mokuro")?;
-    let cut = middle.rfind('.')?;
-    if cut == 0 {
+    let (stem, layer, _) = bunko_core::sidecar_names::split_layer(path)?;
+    if !layer.bytes().any(|b| b.is_ascii_lowercase()) {
         return None;
     }
-    let layer = &middle[cut + 1..];
-    let ok = (1..=32).contains(&layer.len())
-        && layer
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-        && layer.bytes().any(|b| b.is_ascii_lowercase());
-    if !ok || middle[cut..].contains('/') {
-        return None;
-    }
-    Some(format!("{}.cbz", &middle[..cut]))
+    Some(format!("{stem}.cbz"))
 }
 
 /// The series-identity fold (`_fold_series_title_key` = the reader's
@@ -101,6 +94,11 @@ pub fn fold_series_title_key(title: &str) -> String {
     }
     out.to_lowercase()
 }
+
+/// [`Database::volume_uploads_by`]: matched as auth matches account names (NOCASE),
+/// which `idx_volume_uploads_uploader_nocase` serves.
+const VOLUME_UPLOADS_BY_SQL: &str = "SELECT volume_key FROM volume_uploads \
+     WHERE uploader_username = ? COLLATE NOCASE ORDER BY volume_key";
 
 impl Database {
     /// Record an upload/edit of a library file. An archive creates ownership (keeping the
@@ -223,6 +221,18 @@ impl Database {
         Ok(owned.into_iter().collect())
     }
 
+    /// The archives (`volume_key`s) `username` uploaded, by code point, its name matched
+    /// as auth matches account names (ASCII case-insensitive). `/login/api/me`'s
+    /// `curated.volumes`.
+    pub fn volume_uploads_by(&self, username: &str) -> Result<Vec<String>> {
+        self.read(|conn| {
+            Ok(conn
+                .prepare_cached(VOLUME_UPLOADS_BY_SQL)?
+                .query_map([username], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?)
+        })
+    }
+
     /// Delete the ownership row of the volume this path belongs to.
     pub fn forget_volume_upload(&self, library_relative_path: &str) -> Result<()> {
         let Some(key) = normalize_volume_key(library_relative_path) else {
@@ -300,6 +310,26 @@ mod tests {
     use super::*;
     use crate::testutil::temp_db;
 
+    /// `/me` asks for an uploader's archives on every call: by index (the NOCASE one),
+    /// not by a scan of every volume's row.
+    #[test]
+    fn an_accounts_uploads_are_found_by_index() {
+        let (_dir, db) = temp_db();
+        let plan: Vec<String> = db
+            .read(|conn| {
+                Ok(conn
+                    .prepare(&format!("EXPLAIN QUERY PLAN {VOLUME_UPLOADS_BY_SQL}"))?
+                    .query_map(["alice"], |r| r.get::<_, String>(3))?
+                    .collect::<rusqlite::Result<_>>()?)
+            })
+            .unwrap();
+        assert!(
+            plan.iter()
+                .any(|p| p.starts_with("SEARCH volume_uploads USING INDEX")),
+            "{plan:?}"
+        );
+    }
+
     #[test]
     fn volume_keys() {
         assert_eq!(
@@ -354,6 +384,16 @@ mod tests {
         assert_eq!(layer_sidecar_volume_path("S/Vol 1.Hayai.mokuro"), None);
         assert_eq!(layer_sidecar_volume_path(".x.mokuro"), None);
         assert_eq!(layer_sidecar_volume_path("a.b/c.mokuro"), None);
+        // Rule v1's suffixes match in any ASCII case; the id stays exact.
+        assert_eq!(
+            layer_sidecar_volume_path("S/Vol 1.gcv.MOKURO").as_deref(),
+            Some("S/Vol 1.cbz")
+        );
+        assert_eq!(
+            layer_sidecar_volume_path("S/Vol 1.gcv.Mokuro.GZ").as_deref(),
+            Some("S/Vol 1.cbz")
+        );
+        assert_eq!(layer_sidecar_volume_path("S/Vol 1.2024.mokuro"), None);
     }
 
     #[test]
@@ -478,5 +518,22 @@ mod tests {
         db.rename_volume_upload("nope.cbz", "x.cbz").unwrap();
         db.forget_volume_upload("Dr Stone/Vol 1.mokuro").unwrap();
         assert_eq!(db.get_volume_owner("Dr Stone/Vol 1.cbz").unwrap(), None);
+    }
+
+    /// An account's recorded uploads, by code point: its name matched as auth matches
+    /// it (ASCII case-insensitive), sidecar stamps never adding a row.
+    #[test]
+    fn the_volumes_an_account_uploaded() {
+        let (_dir, db) = temp_db();
+        db.record_volume_upload("S/V2.cbz", "alice").unwrap();
+        db.record_volume_upload("S/V1.cbz", "Alice").unwrap();
+        db.record_volume_upload("S/V3.cbz", "bob").unwrap();
+        db.record_volume_upload("S/V3.mokuro", "alice").unwrap();
+        db.record_volume_upload("S/V4.mokuro", "alice").unwrap();
+        assert_eq!(
+            db.volume_uploads_by("ALICE").unwrap(),
+            ["S/V1.cbz", "S/V2.cbz"]
+        );
+        assert!(db.volume_uploads_by("carol").unwrap().is_empty());
     }
 }

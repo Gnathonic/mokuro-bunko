@@ -30,7 +30,30 @@ fn copy_fixture(name: &str) -> (tempfile::TempDir, PathBuf) {
     (dir, path)
 }
 
+/// The tables and the index 0.8 adds (schema version 7), which no Python build made:
+/// kept out of the rows compared with the Python manifests and checked on their own
+/// ([`series_folder_owner_tables`]).
+fn is_v7_row(row: &Value) -> bool {
+    row[2]
+        .as_str()
+        .is_some_and(|t| t.starts_with("series_folder_"))
+        || row[1].as_str() == Some("idx_volume_uploads_uploader_nocase")
+}
+
+/// [`all_schema_rows`] without the version 7 tables: what Python 0.5.3 compares.
 fn schema_rows(path: &Path) -> Value {
+    let rows = all_schema_rows(path);
+    Value::Array(
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .filter(|r| !is_v7_row(r))
+            .cloned()
+            .collect(),
+    )
+}
+
+fn all_schema_rows(path: &Path) -> Value {
     let conn = rusqlite::Connection::open(path).unwrap();
     let mut stmt = conn
         .prepare("SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY rowid")
@@ -113,8 +136,72 @@ fn a_fresh_rust_schema_is_byte_identical_to_python() {
     assert_eq!(schema_rows(&path), m["fresh_schema"]);
 }
 
+fn version_of(path: &Path) -> i64 {
+    rusqlite::Connection::open(path)
+        .unwrap()
+        .query_row("SELECT version FROM schema_version", [], |r| r.get(0))
+        .unwrap()
+}
+
+/// Version 7 (0.8) adds the series folder owners and the NOCASE uploader index, after
+/// everything 0.5.3 has. A new database is adopted at once (it tracks no volume); a
+/// Python one that tracks volumes waits for the server's adoption, and opening it again
+/// changes nothing.
+#[test]
+fn series_folder_owner_tables() {
+    let names = |path: &Path| -> Vec<String> {
+        all_schema_rows(path)
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|r| is_v7_row(r))
+            .map(|r| r[1].as_str().unwrap().to_string())
+            .collect()
+    };
+    let want = [
+        "series_folder_owners",
+        "sqlite_autoindex_series_folder_owners_1",
+        "series_folder_adoption",
+        "idx_volume_uploads_uploader_nocase",
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let fresh = dir.path().join("mokuro.db");
+    let db = open(&fresh);
+    assert!(!db.series_folder_adoption_pending().unwrap());
+    drop(db);
+    assert_eq!(version_of(&fresh), 7);
+    let rows = all_schema_rows(&fresh);
+    let last: Vec<&str> = rows.as_array().unwrap()[rows.as_array().unwrap().len() - want.len()..]
+        .iter()
+        .map(|r| r[1].as_str().unwrap())
+        .collect();
+    assert_eq!(last, want, "after 0.5.3's tables");
+    assert_eq!(names(&fresh), want);
+
+    for tag in ["py052", "py053"] {
+        let (_dir, path) = copy_fixture(&format!("{tag}.db"));
+        let db = open(&path);
+        assert!(db.series_folder_adoption_pending().unwrap(), "{tag}");
+        drop(db);
+        assert_eq!(version_of(&path), 7, "{tag}");
+        let before = all_schema_rows(&path);
+        let db = open(&path);
+        assert!(db.series_folder_adoption_pending().unwrap(), "{tag} again");
+        drop(db);
+        assert_eq!(all_schema_rows(&path), before, "{tag}: idempotent");
+    }
+    // A newer build's marker is left alone.
+    let (_dir, path) = copy_fixture("py053.db");
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute("UPDATE schema_version SET version = 8", [])
+        .unwrap();
+    drop(open(&path));
+    assert_eq!(version_of(&path), 8);
+}
+
 /// A 0.5.3 database opens unchanged; a 0.5.2 one gains exactly what 0.5.3 gives it
-/// (`catalog_folders`, nothing else: its `catalog_series` is left as it was).
+/// (`catalog_folders`).
 #[test]
 fn a_python_database_opens_as_python_053_opens_it() {
     for (tag, want) in [
@@ -125,28 +212,11 @@ fn a_python_database_opens_as_python_053_opens_it() {
         ),
     ] {
         let (_dir, path) = copy_fixture(&format!("{tag}.db"));
-        let before = schema_rows(&path);
         drop(open(&path));
         assert_eq!(schema_rows(&path), want, "{tag}");
-        assert_legacy_table_untouched(&before, &schema_rows(&path), tag);
-        let version: i64 = rusqlite::Connection::open(&path)
-            .unwrap()
-            .query_row("SELECT version FROM schema_version", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(version, 6);
+        // 0.5.3 marks it 6; 0.8's owner tables make it 7 (series_folder_owner_tables).
+        assert_eq!(version_of(&path), 7);
     }
-}
-
-/// The 0.5.2 `catalog_series` DDL, where a file has one, is byte-identical after an open.
-fn assert_legacy_table_untouched(before: &Value, after: &Value, tag: &str) {
-    let legacy = |rows: &Value| {
-        rows.as_array()
-            .unwrap()
-            .iter()
-            .find(|r| r[1] == "catalog_series")
-            .cloned()
-    };
-    assert_eq!(legacy(before), legacy(after), "{tag}: catalog_series DDL");
 }
 
 fn users_and_passwords(tag: &str) {
@@ -427,42 +497,17 @@ fn series_tables_read_back_and_rewrite_byte_identically(tag: &str) {
     }
 
     // The catalog: 0.5.3 reads `catalog_folders` only. A 0.5.2 file's rows are in
-    // `catalog_series`, which is left exactly as it was (the first pass rebuilds the folder
-    // rows; the listing falls back to the scanning index until then).
-    let (catalog, legacy) = if tag == "py052" {
-        let rows = |v: &Value| -> Value {
-            Value::Array(
-                v.as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|r| {
-                        json!([
-                            r["series_key"],
-                            r["folder_name"],
-                            r["volume_count"],
-                            r["total_pages"]
-                        ])
-                    })
-                    .collect(),
-            )
-        };
-        (
-            manifest("upgrade053.json")["py052"]["catalog"].clone(),
-            rows(&m["catalog_series"]),
-        )
+    // `catalog_series`, which is ignored (the first pass rebuilds the folder rows; the
+    // listing falls back to the scanning index until then).
+    let catalog = if tag == "py052" {
+        manifest("upgrade053.json")["py052"]["catalog"].clone()
     } else {
-        (
-            m["catalog_series"].clone(),
-            m["legacy_catalog_series"].clone(),
-        )
+        m["catalog_series"].clone()
     };
     assert_eq!(
         serde_json::to_value(db.list_catalog_series().unwrap()).unwrap(),
         catalog
     );
-    let legacy_sql = "SELECT series_key, folder_name, volume_count, total_pages \
-                      FROM catalog_series ORDER BY series_key";
-    assert_eq!(query(&conn, legacy_sql), legacy);
     let community = db.list_community_details().unwrap();
     assert_eq!(
         serde_json::to_value(&community).unwrap(),
@@ -499,7 +544,9 @@ fn a_legacy_database_is_migrated_as_python_053_migrates_it() {
     let conn = rusqlite::Connection::open(&path).unwrap();
     let q = |sql: &str| query(&conn, sql);
     let c = &m["contents"];
-    assert_eq!(q("SELECT version FROM schema_version"), c["schema_version"]);
+    // Python 0.5.3 marks it 6 (`c["schema_version"]`); 0.8 marks it 7.
+    assert_eq!(c["schema_version"], json!([[6]]));
+    assert_eq!(q("SELECT version FROM schema_version"), json!([[7]]));
     assert_eq!(
         q("SELECT id, username, role, status, notes FROM users ORDER BY id"),
         c["users"]
@@ -507,11 +554,6 @@ fn a_legacy_database_is_migrated_as_python_053_migrates_it() {
     assert_eq!(
         q("SELECT code, role, invited_by, expires_at FROM invites ORDER BY id"),
         c["invites"]
-    );
-    // 0.5.2 gave the legacy table its damage columns; 0.5.3 leaves it as it was.
-    assert_eq!(
-        q("SELECT series_key, folder_name, volume_count FROM catalog_series ORDER BY series_key"),
-        c["catalog_series"]
     );
     assert_eq!(
         q("SELECT series_key, folder_name, volume_count FROM catalog_folders ORDER BY folder_name"),
@@ -598,13 +640,4 @@ fn a_case_merged_library_reads_back_as_python_053_left_it() {
         .map(|r| (r.folder_name, r.volume_count))
         .collect();
     assert_eq!(kingdom, [("Kingdom".to_string(), 13)]);
-    // 0.5.2's table still holds what 0.5.2 last wrote, for a rollback.
-    let conn = rusqlite::Connection::open(&path).unwrap();
-    assert_eq!(
-        query(
-            &conn,
-            "SELECT series_key, folder_name, volume_count, total_pages FROM catalog_series"
-        ),
-        m["legacy_catalog_series"]
-    );
 }

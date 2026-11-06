@@ -109,6 +109,27 @@ impl Database {
         })
     }
 
+    /// One archive moved (a case merge, spec §5.9): its id follows it (a row already
+    /// at the new key is replaced). The per-volume form of
+    /// [`Database::rename_volume_uuids_under_prefix`].
+    pub fn rename_volume_uuid(&self, old_relative: &str, new_relative: &str) -> Result<usize> {
+        let (Some(old), Some(new)) = (
+            normalize_volume_key(old_relative),
+            normalize_volume_key(new_relative),
+        ) else {
+            return Ok(0);
+        };
+        if old == new {
+            return Ok(0);
+        }
+        self.write(|conn| {
+            Ok(conn.execute(
+                "UPDATE OR REPLACE volume_identities SET volume_key = ? WHERE volume_key = ?",
+                params![new, old],
+            )?)
+        })
+    }
+
     /// A folder moved: what its archives were known by follows.
     pub fn rename_volume_uuids_under_prefix(
         &self,
@@ -211,5 +232,31 @@ mod tests {
         db.forget_volume_uuid("T/V2.webp").unwrap();
         assert_eq!(db.remembered_volume_uuid("T/V2.cbz").unwrap(), None);
         assert_eq!(db.forget_volume_uuids_under_prefix("/T/").unwrap(), 1);
+    }
+
+    #[test]
+    fn one_volume_renames() {
+        let (_dir, db) = temp_db();
+        db.remember_volume_uuid("kingdom/V1.cbz", "u1").unwrap();
+        db.remember_volume_uuid("kingdom/V2.cbz", "u2").unwrap();
+        assert_eq!(
+            db.rename_volume_uuid("kingdom/V1.mokuro", "Kingdom/V1.cbz")
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            db.remembered_volume_uuid("Kingdom/V1.cbz")
+                .unwrap()
+                .as_deref(),
+            Some("u1")
+        );
+        assert_eq!(db.remembered_volume_uuid("kingdom/V1.cbz").unwrap(), None);
+        assert_eq!(
+            db.remembered_volume_uuid("kingdom/V2.cbz")
+                .unwrap()
+                .as_deref(),
+            Some("u2")
+        );
+        assert_eq!(db.rename_volume_uuid("x.txt", "y.cbz").unwrap(), 0);
     }
 }

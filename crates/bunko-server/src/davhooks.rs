@@ -2,7 +2,7 @@
 //! OCR provenance, volume identities) plus fan-out of library events to the modules that
 //! care (OCR queue, metadata/index runtime).
 
-use bunko_dav::{AuditEvent, DavHooks, PutFollowUp};
+use bunko_dav::{AuditEvent, DavHooks, HookGuard, PutFollowUp};
 use bunko_db::{AuditDetails, Database, NewAuditEvent};
 use parking_lot::RwLock;
 use std::path::{Path, PathBuf};
@@ -11,14 +11,18 @@ use tracing::warn;
 
 pub struct ServerDavHooks {
     db: Arc<Database>,
+    /// The library root (the store's mount on a cloud library): series folder owners
+    /// look at the folders listed there.
+    library: PathBuf,
     /// Non-DB listeners (OCR control, library runtime), added as modules start.
     listeners: RwLock<Vec<Arc<dyn DavHooks>>>,
 }
 
 impl ServerDavHooks {
-    pub fn new(db: Arc<Database>) -> Self {
+    pub fn new(db: Arc<Database>, library: PathBuf) -> Self {
         Self {
             db,
+            library,
             listeners: RwLock::new(Vec::new()),
         }
     }
@@ -64,6 +68,10 @@ impl DavHooks for ServerDavHooks {
             .target_path(&e.target_path);
         ev.details = details;
         Self::log("audit", self.db.log_audit_event(&ev));
+    }
+
+    fn ocr_sidecar_staged(&self, dest: &Path, staged: &Path) {
+        crate::ocr::provenance::reattach_on_put(dest, staged);
     }
 
     fn record_volume_upload(&self, rel: &str, actor: &str, _existed_before: bool) {
@@ -123,6 +131,15 @@ impl DavHooks for ServerDavHooks {
             self.db.rename_volume_uuids_under_prefix(old, new),
         );
     }
+    fn series_folder_created(&self, rel: &str, actor: &str) {
+        crate::library::owners::folder_created(&self.db, &self.library, rel, actor);
+    }
+    fn series_folder_removed(&self, rel: &str) {
+        crate::library::owners::folder_removed(&self.db, &self.library, rel);
+    }
+    fn series_folder_moved(&self, old: &str, new: &str) {
+        crate::library::owners::folder_moved(&self.db, &self.library, old, new);
+    }
 
     fn primary_sidecar_leaving(&self, rel: &str, sidecar: &Path) {
         // 0.5.2 `_remember_primary_uuid`: a re-uploaded volume keeps its id (and reading
@@ -141,6 +158,17 @@ impl DavHooks for ServerDavHooks {
     }
     fn archive_arrived(&self, cbz: &Path) {
         self.each(|l| l.archive_arrived(cbz));
+    }
+    fn archive_moving(&self, from: &Path, to: &Path) -> HookGuard {
+        self.listeners
+            .read()
+            .iter()
+            .fold(HookGuard::default(), |held, l| {
+                held.and(l.archive_moving(from, to))
+            })
+    }
+    fn archive_moved(&self, from: &Path, to: &Path) {
+        self.each(|l| l.archive_moved(from, to));
     }
     fn put_follow_up(&self, cbz: &Path, series: &str, volume: &str) -> Option<PutFollowUp> {
         self.listeners

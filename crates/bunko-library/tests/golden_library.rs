@@ -3,6 +3,9 @@
 //! compiled file must come out byte-identical; the database rows, the library
 //! index, the manifests and the archive page lists must match too.
 
+// Fixtures are set up and checked with std::fs on purpose.
+#![allow(clippy::disallowed_methods)]
+
 mod common;
 
 use std::collections::BTreeMap;
@@ -73,22 +76,86 @@ fn compiled_files(root: &Path) -> BTreeMap<String, String> {
     out
 }
 
-fn expected_files(step: &JsonValue) -> BTreeMap<String, String> {
+/// Where 0.8 departs from 0.5.3 on purpose: `(what Python wrote, what Bunko writes)`.
+///
+/// Sidecar names rule v1 tolerates a leading UTF-8 BOM, as Mokuro Reader does; Python's
+/// `json.loads` refused the fixture's BOM sidecar, so 0.5.3 compiled that volume as
+/// having no OCR. It now counts its page and characters, and its hash covers the stored
+/// bytes, BOM included.
+const DEPARTURES: &[(&str, &str)] = &[
+    (
+        r#"{"volume_uuid":"bfbc350b-3bda-4469-8466-c162fb97","volume_title":"進撃の巨人 01","page_count":3,"matched_page_count":3,"character_count":0,"mokuro_version":"","archive_size":466,"mokuro_size":305,"mokuro_modified":1700042000}"#,
+        r#"{"volume_uuid":"bom","volume_title":"進撃の巨人 01","page_count":1,"matched_page_count":1,"character_count":3,"mokuro_version":"0.2.2","archive_size":466,"mokuro_size":305,"mokuro_modified":1700042000,"mokuro_sha256":"9c1ce67ea22fc5a54dd5e1ab687bc121f837bc41bc8d910fe018b9827ec17d47"}"#,
+    ),
+    (
+        r#"{"volume_uuid": "bfbc350b-3bda-4469-8466-c162fb97", "volume_title": "進撃の巨人 01", "page_count": 3, "matched_page_count": 3, "character_count": 0, "mokuro_version": "", "spine_width": null, "archive_size": 466, "mokuro_size": 305, "mokuro_modified": 1700042000, "mokuro_sha256": null}"#,
+        r#"{"volume_uuid": "bom", "volume_title": "進撃の巨人 01", "page_count": 1, "matched_page_count": 1, "character_count": 3, "mokuro_version": "0.2.2", "spine_width": null, "archive_size": 466, "mokuro_size": 305, "mokuro_modified": 1700042000, "mokuro_sha256": "9c1ce67ea22fc5a54dd5e1ab687bc121f837bc41bc8d910fe018b9827ec17d47"}"#,
+    ),
+];
+
+/// [`DEPARTURES`] in a table dump: the cached entry, the BOM volume's page and
+/// character counts in its folder's totals (8 pages → 6, 3 more characters) and the
+/// identity its sidecar now gives it.
+fn departed_table(table: &str, rows: Vec<Vec<(String, String)>>) -> Vec<Vec<(String, String)>> {
+    let str_cell = |v: &str| ("str".to_owned(), v.to_owned());
+    let mut rows: Vec<Vec<(String, String)>> = rows
+        .into_iter()
+        .map(|row| {
+            let mut row: Vec<(String, String)> =
+                row.into_iter().map(|(k, v)| (k, departed(&v))).collect();
+            if table == "catalog_folders" && row[1].1 == "進撃の巨人" {
+                assert_eq!(
+                    (row[5].1.as_str(), row[6].1.as_str()),
+                    ("8", "1234567890123")
+                );
+                row[5].1 = "6".into();
+                row[6].1 = "1234567890126".into();
+            }
+            row
+        })
+        .collect();
+    if table == "volume_identities" {
+        rows.push(vec![
+            str_cell("進撃の巨人/進撃の巨人 01.cbz"),
+            str_cell("bom"),
+        ]);
+        rows.sort();
+    }
+    rows
+}
+
+fn departed(text: &str) -> String {
+    DEPARTURES
+        .iter()
+        .fold(text.to_owned(), |text, (python, bunko)| {
+            text.replace(python, bunko)
+        })
+}
+
+/// The compiled files Python wrote at `step`.
+fn python_files(step: &JsonValue) -> BTreeMap<String, String> {
     obj(obj(step).get("files").unwrap())
         .iter()
         .map(|(k, v)| (k.to_owned(), v.as_str().unwrap().to_owned()))
         .collect()
 }
 
-fn assert_files(root: &Path, step: &JsonValue, label: &str) {
+/// What Bunko compiles at `step` from scratch: Python's files with [`DEPARTURES`].
+fn expected_files(step: &JsonValue) -> BTreeMap<String, String> {
+    python_files(step)
+        .into_iter()
+        .map(|(k, v)| (k, departed(&v)))
+        .collect()
+}
+
+fn assert_files(root: &Path, expected: &BTreeMap<String, String>, label: &str) {
     let actual = compiled_files(root);
-    let expected = expected_files(step);
     assert_eq!(
         actual.keys().collect::<Vec<_>>(),
         expected.keys().collect::<Vec<_>>(),
         "{label}: compiled file set"
     );
-    for (path, text) in &expected {
+    for (path, text) in expected {
         assert_eq!(
             &actual[path], text,
             "{label}: {path} differs from Python 0.5.3"
@@ -140,7 +207,7 @@ fn full_passes_and_puts_are_byte_identical_to_python() {
             .unwrap()
             .as_f64()
     );
-    assert_files(&root, &steps[0], "initial full pass");
+    assert_files(&root, &expected_files(&steps[0]), "initial full pass");
 
     let mut previous = expected_files(&steps[0]);
     for step in &steps[1..steps.len() - 1] {
@@ -160,7 +227,7 @@ fn full_passes_and_puts_are_byte_identical_to_python() {
             matches!(step_obj.get("accepted"), Some(JsonValue::Bool(true))),
             "{label}: accepted"
         );
-        assert_files(&root, step, label);
+        assert_files(&root, &expected_files(step), label);
         // A file whose bytes did not change must not be rewritten (clients key on size/mtime).
         let current = expected_files(step);
         let after = mtimes(&root);
@@ -188,12 +255,12 @@ fn full_passes_and_puts_are_byte_identical_to_python() {
         changed as f64,
         obj(last).get("changed").unwrap().as_num().unwrap().as_f64()
     );
-    assert_files(&root, last, "final full pass");
+    assert_files(&root, &expected_files(last), "final full pass");
 
     for (table, key, columns) in TABLES {
         assert_eq!(
             dump_table(&store, table, key, columns),
-            expected_table(&db, table),
+            departed_table(table, expected_table(&db, table)),
             "table {table}"
         );
     }
@@ -255,13 +322,18 @@ fn a_warm_python_cache_is_read_back_without_recompiling() {
     }
     let service = service(&root, Arc::clone(&store));
     service.recompile_all().unwrap();
-    // Only the legacy row was written back (hash filled); everything else hit.
-    assert_eq!(store.cache_writes.load(Ordering::SeqCst), 1);
-    assert_files(&root, steps.last().unwrap(), "warm full pass");
+    // Written back: the legacy row (hash filled) and the BOM volume, which Python cached
+    // as having no OCR (recompiled once, [`DEPARTURES`]); everything else hit.
+    assert_eq!(store.cache_writes.load(Ordering::SeqCst), 2);
+    assert_files(
+        &root,
+        &expected_files(steps.last().unwrap()),
+        "warm full pass",
+    );
     for (table, key, columns) in TABLES {
         assert_eq!(
             dump_table(&store, table, key, columns),
-            expected_table(&db, table),
+            departed_table(table, expected_table(&db, table)),
             "table {table}"
         );
     }
@@ -375,7 +447,7 @@ fn manifests_match_python() {
     let (_temp, root) = fixture_library();
     // The compiled files Python had written, with the mtime it pinned them to.
     let steps = load_json("expected/steps.json");
-    for (rel, text) in expected_files(steps.as_array().unwrap().last().unwrap()) {
+    for (rel, text) in python_files(steps.as_array().unwrap().last().unwrap()) {
         let path = root.join(&rel);
         std::fs::write(&path, text).unwrap();
         let file = std::fs::File::options().write(true).open(&path).unwrap();
@@ -517,7 +589,7 @@ fn directory_volumes_list_pages_like_python() {
 fn damage_is_read_back_from_the_compiled_series_file() {
     let (_temp, root) = fixture_library();
     let steps = load_json("expected/steps.json");
-    for (rel, text) in expected_files(steps.as_array().unwrap().last().unwrap()) {
+    for (rel, text) in python_files(steps.as_array().unwrap().last().unwrap()) {
         std::fs::write(root.join(rel), text).unwrap();
     }
     let damage = bunko_library::manifest::damage_by_volume_title(&root.join("Dr Stone"));

@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use base64::Engine;
+use bunko_store::{Durability, Mode, Origin, WriteIntent, afs, fs};
 use parking_lot::Mutex;
 use rand::RngCore;
 use sha2::Digest;
@@ -133,19 +134,43 @@ pub struct Rejection {
     pub reason: &'static str,
     pub detail: String,
     pub retry: bool,
+    /// `Retry-After` seconds (a 503 from the library storage).
+    pub retry_after: Option<u64>,
 }
 
 impl Rejection {
-    fn new(status: u16, reason: &'static str, detail: impl Into<String>, retry: bool) -> Self {
+    pub(crate) fn new(
+        status: u16,
+        reason: &'static str,
+        detail: impl Into<String>,
+        retry: bool,
+    ) -> Self {
         Self {
             status,
             reason,
             detail: detail.into(),
             retry,
+            retry_after: None,
         }
     }
 
+    /// An I/O error while staging or publishing. A library store's own errors keep
+    /// their class (spec §3.5): not now (an outage, the lease, a sign-in, a quota) is
+    /// 503 with `Retry-After`, a precondition 412, a full store 507, a refused name
+    /// 400; anything else is the server's own failure (500).
     pub fn from_io(e: &io::Error, doing: &str) -> Self {
+        // An OS error (a local disk) carries no payload; a full cloud account comes
+        // from the library store with its provider's error inside.
+        let cloud_full = e.get_ref().is_some()
+            && bunko_store::classify(e) == bunko_store::ErrorClass::StorageFull;
+        if cloud_full {
+            return Rejection::new(
+                507,
+                "disk-full",
+                "The library storage is full; the upload was not stored.",
+                false,
+            );
+        }
         if is_disk_full(e) {
             return Rejection::new(
                 507,
@@ -154,12 +179,43 @@ impl Rejection {
                 false,
             );
         }
-        Rejection::new(
-            500,
-            "server-error",
-            format!("The server failed {doing}: {}.", strerror(e)),
-            true,
-        )
+        // An OS error (a local library, the staging disk) carries no payload and stays
+        // the server's own failure, as it always was; a library store's errors do.
+        if e.get_ref().is_none() {
+            return Rejection::new(
+                500,
+                "server-error",
+                format!("The server failed {doing}: {}.", strerror(e)),
+                true,
+            );
+        }
+        if bunko_store::classify(e) == bunko_store::ErrorClass::AlreadyExists {
+            // A create-only publish (If-None-Match: *) found the name taken.
+            return Rejection::new(
+                412,
+                "server-error",
+                "The upload was not stored: the file was created meanwhile.",
+                false,
+            );
+        }
+        let d = crate::response::DavError::from_io(e);
+        match d.status.as_u16() {
+            503 | 412 | 400 => Rejection {
+                retry_after: d.retry_after,
+                ..Rejection::new(
+                    d.status.as_u16(),
+                    "server-error",
+                    format!("The upload was not stored: {}.", d.context),
+                    d.status.as_u16() == 503,
+                )
+            },
+            _ => Rejection::new(
+                500,
+                "server-error",
+                format!("The server failed {doing}: {}.", strerror(e)),
+                true,
+            ),
+        }
     }
 }
 
@@ -191,6 +247,12 @@ pub struct Stored {
     pub unchanged: bool,
 }
 
+/// What [`Staging::before_publish`] runs on the staged file.
+pub type BeforePublish = Box<dyn FnOnce(&Path) + Send>;
+
+/// What [`Staging::recheck_before_publish`] asks: may the write still land? Blocking.
+pub type Recheck = Box<dyn FnOnce() -> Result<(), crate::Refusal> + Send>;
+
 /// One body being staged at `<dest dir>/.<name>.upload-<random>.tmp`. Dropping it before
 /// [`Staging::commit`] discards the staged bytes (an aborted or rejected upload never
 /// touches the destination).
@@ -204,12 +266,17 @@ pub struct Staging {
     written: u64,
     finished: bool,
     keep_identical: bool,
+    mode: Mode,
+    /// Run on the staged file once it is checked, before anything else looks at it.
+    before_publish: Option<BeforePublish>,
+    /// Asked once the body is checked, right before it is compared and published.
+    recheck: Option<Recheck>,
 }
 
 impl Drop for Staging {
     fn drop(&mut self) {
         if !self.finished {
-            let _ = std::fs::remove_file(&self.temp);
+            let _ = fs::remove_file(&self.temp);
         }
     }
 }
@@ -220,6 +287,26 @@ impl Staging {
         expected_size: Option<u64>,
         expected_digest: Option<(DigestAlgo, Vec<u8>)>,
     ) -> Result<Staging, Rejection> {
+        Self::create_in(dest, expected_size, expected_digest, true).await
+    }
+
+    /// [`Self::create`] into a folder that must exist already: a library folder deleted
+    /// since the request was checked is a 409, never made again (unowned, behind the
+    /// back of the series owner rules).
+    pub async fn create_in_existing(
+        dest: &Path,
+        expected_size: Option<u64>,
+        expected_digest: Option<(DigestAlgo, Vec<u8>)>,
+    ) -> Result<Staging, Rejection> {
+        Self::create_in(dest, expected_size, expected_digest, false).await
+    }
+
+    async fn create_in(
+        dest: &Path,
+        expected_size: Option<u64>,
+        expected_digest: Option<(DigestAlgo, Vec<u8>)>,
+        create_parent: bool,
+    ) -> Result<Staging, Rejection> {
         let dir = dest.parent().ok_or_else(|| {
             Rejection::new(
                 500,
@@ -228,9 +315,13 @@ impl Staging {
                 true,
             )
         })?;
-        tokio::fs::create_dir_all(dir)
-            .await
-            .map_err(|e| Rejection::from_io(&e, "writing the upload"))?;
+        if create_parent {
+            afs::create_dir_all(dir)
+                .await
+                .map_err(|e| Rejection::from_io(&e, "writing the upload"))?;
+        } else if !afs::metadata(dir).await.is_ok_and(|m| m.is_dir()) {
+            return Err(folder_gone());
+        }
         let name = paths::file_name(dest);
         for _ in 0..16 {
             let mut raw = [0u8; 6];
@@ -239,7 +330,7 @@ impl Staging {
             let temp = dir.join(format!(".{name}.upload-{suffix}.tmp"));
             // Mode 0o666 & ~umask, the mode the published file must end with (0.5.2 staged
             // at 0600 and chmod'ed after the rename).
-            match tokio::fs::OpenOptions::new()
+            match afs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .open(&temp)
@@ -256,9 +347,15 @@ impl Staging {
                         written: 0,
                         finished: false,
                         keep_identical: false,
+                        mode: Mode::Replace { base: None },
+                        before_publish: None,
+                        recheck: None,
                     });
                 }
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(e) if !create_parent && e.kind() == io::ErrorKind::NotFound => {
+                    return Err(folder_gone());
+                }
                 Err(e) => return Err(Rejection::from_io(&e, "writing the upload")),
             }
         }
@@ -274,6 +371,23 @@ impl Staging {
     /// (a re-sent, unchanged file keeps its mtime and its history).
     pub fn keep_if_identical(&mut self) {
         self.keep_identical = true;
+    }
+
+    /// At commit, once the body is checked: `f` may rewrite the staged file before it is
+    /// compared ([`Self::keep_if_identical`]) and published.
+    pub fn before_publish(&mut self, f: BeforePublish) {
+        self.before_publish = Some(f);
+    }
+
+    /// At commit, once the body is checked and before it is compared or published: `f`
+    /// may refuse the write after all (a 403 with the refusal's detail).
+    pub fn recheck_before_publish(&mut self, f: Recheck) {
+        self.recheck = Some(f);
+    }
+
+    /// The publish's precondition (default: replace whatever is there).
+    pub fn set_mode(&mut self, mode: Mode) {
+        self.mode = mode;
     }
 
     pub fn written(&self) -> u64 {
@@ -299,9 +413,13 @@ impl Staging {
         Ok(())
     }
 
-    /// Flush, fsync and check the staged bytes, then rename them over the destination.
-    /// `damage` remembers archive damage per destination (`.cbz` only).
-    pub async fn commit(mut self, damage: &DamageMemory) -> Result<Stored, Rejection> {
+    /// Flush, fsync and check the staged bytes, then publish them over the destination
+    /// for `user`. `damage` remembers archive damage per destination (`.cbz` only).
+    pub async fn commit(
+        mut self,
+        damage: &DamageMemory,
+        user: Option<&str>,
+    ) -> Result<Stored, Rejection> {
         if let Some(mut file) = self.file.take() {
             file.flush()
                 .await
@@ -318,7 +436,7 @@ impl Staging {
                 return Err(Rejection::from_io(&e, "saving the upload"));
             }
         }
-        let size = tokio::fs::metadata(&self.temp)
+        let size = afs::metadata(&self.temp)
             .await
             .map_err(|e| Rejection::from_io(&e, "checking the upload"))?
             .len();
@@ -364,6 +482,37 @@ impl Staging {
                 })?;
             judge_archive(result, size, digest_verified, &self.dest, damage)?;
         }
+        if let Some(f) = self.before_publish.take() {
+            let temp = self.temp.clone();
+            let _ = tokio::task::spawn_blocking(move || f(&temp)).await;
+        }
+        if let Some(recheck) = self.recheck.take() {
+            let answer = tokio::task::spawn_blocking(move || bunko_store::interactive(recheck))
+                .await
+                .map_err(|_| {
+                    Rejection::new(
+                        500,
+                        "server-error",
+                        "The server failed checking the upload: recheck panicked.",
+                        true,
+                    )
+                })?;
+            if let Err(refusal) = answer {
+                if let Some(secs) = refusal.retry_after {
+                    return Err(Rejection {
+                        retry_after: Some(secs),
+                        ..Rejection::new(503, "server-error", refusal.message, true)
+                    });
+                }
+                let (_, reason, detail, _) = failure_for_status(403);
+                return Err(Rejection::new(
+                    403,
+                    reason,
+                    refusal.detail.map_or(detail, str::to_string),
+                    false,
+                ));
+            }
+        }
         if self.keep_identical {
             let (temp, dest) = (self.temp.clone(), self.dest.clone());
             let same = tokio::task::spawn_blocking(move || same_bytes(&temp, &dest))
@@ -379,8 +528,17 @@ impl Staging {
                 });
             }
         }
-        tokio::fs::rename(&self.temp, &self.dest)
+        let (temp, dest) = (self.temp.clone(), self.dest.clone());
+        let intent = WriteIntent::new(
+            self.mode.clone(),
+            Origin::Dav {
+                user: user.map(str::to_owned),
+            },
+            Durability::Sync,
+        );
+        tokio::task::spawn_blocking(move || fs::publish(&temp, &dest, &intent))
             .await
+            .unwrap_or_else(|e| Err(io::Error::other(e)))
             .map_err(|e| Rejection::from_io(&e, "moving the upload into place"))?;
         self.finished = true;
         damage.forget(&self.dest.to_string_lossy());
@@ -393,9 +551,19 @@ impl Staging {
     }
 }
 
+/// A library upload whose folder went while it was checked.
+fn folder_gone() -> Rejection {
+    Rejection::new(
+        409,
+        "server-error",
+        "The folder of this upload is gone; create it again first.",
+        false,
+    )
+}
+
 /// Do two files hold the same bytes? (Any read error: no.) Blocking.
 fn same_bytes(a: &Path, b: &Path) -> bool {
-    let (Ok(fa), Ok(fb)) = (std::fs::File::open(a), std::fs::File::open(b)) else {
+    let (Ok(fa), Ok(fb)) = (fs::File::open(a), fs::File::open(b)) else {
         return false;
     };
     match (fa.metadata(), fb.metadata()) {
@@ -521,7 +689,7 @@ pub fn verify_staged(path: &Path) -> Verified {
 
 fn verify_with_allowance(path: &Path, allowance: fn(u64) -> u64) -> Verified {
     let mut result = Verified::default();
-    let Ok(mut file) = std::fs::File::open(path) else {
+    let Ok(mut file) = fs::File::open(path) else {
         result.structural = Some("OSError: cannot open the staged upload".to_string());
         return result;
     };
@@ -626,7 +794,7 @@ fn verify_with_allowance(path: &Path, allowance: fn(u64) -> u64) -> Verified {
     result
 }
 
-fn read_up_to(file: &mut std::fs::File, buf: &mut [u8]) -> usize {
+fn read_up_to(file: &mut fs::File, buf: &mut [u8]) -> usize {
     let mut n = 0;
     while n < buf.len() {
         match file.read(&mut buf[n..]) {
@@ -822,8 +990,86 @@ pub fn failure_for_status(code: u16) -> (u16, &'static str, String, bool) {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // fixtures are written with std::fs
 mod tests {
     use super::*;
+
+    /// A library upload never makes its folder again (C9): a folder that went while the
+    /// request was checked is a 409; the caller's own trees are made as before.
+    #[tokio::test]
+    async fn a_library_upload_needs_its_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("gone/V.cbz");
+        let refused = Staging::create_in_existing(&dest, None, None)
+            .await
+            .err()
+            .unwrap();
+        assert_eq!((refused.status, refused.reason), (409, "server-error"));
+        assert!(!dir.path().join("gone").exists());
+        let staged = Staging::create(&dest, None, None).await.unwrap();
+        assert!(dir.path().join("gone").is_dir());
+        drop(staged);
+        assert!(Staging::create_in_existing(&dest, None, None).await.is_ok());
+    }
+
+    /// A library store's errors keep their class in the PUT verdict (spec §3.5): not now
+    /// is 503 with the store's Retry-After (the lease's settle wait included), a
+    /// precondition 412, a taken name 412; only the server's own failures are 500.
+    #[test]
+    fn store_errors_keep_their_class_in_the_verdict() {
+        use std::time::Duration;
+        let r = Rejection::from_io(
+            &bunko_store::unavailable_for(
+                "storage-lease-claiming: this Bunko is still claiming the library (about 9 min left)",
+                Duration::from_secs(530),
+            ),
+            "moving the upload into place",
+        );
+        assert_eq!((r.status, r.retry, r.retry_after), (503, true, Some(530)));
+        assert!(
+            r.detail
+                .contains("still claiming the library (about 9 min left)"),
+            "{}",
+            r.detail
+        );
+        let r = Rejection::from_io(
+            &bunko_store::unavailable("storage-lease: another Bunko manages this library"),
+            "x",
+        );
+        assert_eq!((r.status, r.retry), (503, true));
+        assert!(r.retry_after.is_some());
+        assert!(
+            r.detail.contains("another Bunko manages this library"),
+            "{}",
+            r.detail
+        );
+        let r = Rejection::from_io(
+            &bunko_store::unavailable_for("throttled", Duration::from_secs(7)),
+            "x",
+        );
+        assert_eq!((r.status, r.retry_after), (503, Some(7)));
+        let r = Rejection::from_io(&bunko_store::conflict("the base changed"), "x");
+        assert_eq!((r.status, r.retry), (412, false));
+        let r = Rejection::from_io(
+            &io::Error::new(io::ErrorKind::AlreadyExists, "S/v.cbz: exists"),
+            "x",
+        );
+        assert_eq!(r.status, 412);
+        let r = Rejection::from_io(&io::Error::from(io::ErrorKind::StorageFull), "x");
+        assert_eq!((r.status, r.reason), (507, "disk-full"));
+        let r = Rejection::from_io(&io::Error::other("boom"), "saving the upload");
+        assert_eq!((r.status, r.retry, r.retry_after), (500, true, None));
+        assert_eq!(r.detail, "The server failed saving the upload: boom.");
+        // OS errors (a local library) are the server's own, whatever their kind.
+        for errno in [
+            107, /* ENOTCONN */
+            17,  /* EEXIST */
+            13,  /* EACCES */
+        ] {
+            let r = Rejection::from_io(&io::Error::from_raw_os_error(errno), "x");
+            assert_eq!((r.status, r.reason), (500, "server-error"), "errno {errno}");
+        }
+    }
 
     /// A deflated one-member zip of `real` zero bytes whose headers declare `declared`.
     fn understated_zip(real: usize, declared: u32) -> Vec<u8> {

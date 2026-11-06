@@ -2,17 +2,18 @@
 //! layers `<stem>.<layer>.mokuro[.gz]`, covers and markers
 //! (`ocr/generations.py` helpers and `metadata/compiler.py::_load_sidecar`).
 
-use std::collections::HashSet;
-use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
+use bunko_core::sidecar_names;
+use bunko_store::fs;
 use sha2::{Digest, Sha256};
 
 use crate::pyjson::{self, JsonObject, JsonValue};
 
-/// Archive extensions a volume can have (`VOLUME_ARCHIVE_EXTENSIONS`).
-pub const VOLUME_ARCHIVE_EXTENSIONS: &[&str] = &[".cbz", ".cbr", ".zip", ".rar"];
+/// Archive extensions a volume can have (`VOLUME_ARCHIVE_EXTENSIONS`). Only `.cbz`
+/// anchors sidecars (rule v1, [`sidecar_names`]).
+pub const VOLUME_ARCHIVE_EXTENSIONS: &[&str] = &sidecar_names::ARCHIVE_EXTENSIONS;
 
 /// Suffixes of the files that belong to a volume besides layers.
 pub const VOLUME_SIDE_SUFFIXES: &[&str] = &[".mokuro", ".mokuro.gz", ".webp", ".nocover"];
@@ -62,6 +63,11 @@ pub fn nocover_marker_path(cbz_path: &Path) -> PathBuf {
 /// `split_layer_sidecar`: `("Vol 1", "hayai-nova")` for
 /// `Vol 1.hayai-nova.mokuro[.gz]`; `None` for the primary, non-sidecars and
 /// postfixes that are not reader layer ids. Splits on the LAST dot.
+///
+/// The 0.5.2 listing-free split, suffixes exact as Python had them (the golden
+/// vectors pin it); the catalog index's layer lists and the manifest still pair
+/// through it. Anything that decides what a listed file IS goes through
+/// [`sidecar_names::classify`].
 pub fn split_layer_sidecar(file_name: &str) -> Option<(&str, &str)> {
     let name = file_name.strip_suffix(".gz").unwrap_or(file_name);
     let middle = name.strip_suffix(".mokuro")?;
@@ -76,41 +82,32 @@ pub fn split_layer_sidecar(file_name: &str) -> Option<(&str, &str)> {
     Some((&middle[..cut], layer))
 }
 
-/// `layer_id_of_sidecar`: the layer id of `<stem>.<id>.mokuro[.gz]`, unless
-/// `<stem>.<id>` is itself another volume here (decimal volume numbers:
-/// `Volume 01.5.mokuro` is volume 1.5's primary when `Volume 01.5.cbz` exists).
-pub fn layer_id_of_sidecar<'a>(
-    file_name: &'a str,
-    stem: &str,
-    other_volumes: &HashSet<String>,
-) -> Option<&'a str> {
-    let (owner, layer) = split_layer_sidecar(file_name)?;
-    if owner != stem || other_volumes.contains(&format!("{stem}.{layer}")) {
-        return None;
-    }
-    Some(layer)
+/// The names of the FILES in `directory` (`None` when it cannot be listed), sorted:
+/// what a [`sidecar_names::Folder`] is built from. A folder is never an archive nor a
+/// sidecar (rule 2), whatever it is named.
+pub fn list_names(directory: &Path) -> Option<Vec<String>> {
+    let mut names: Vec<String> = fs::read_dir(directory)
+        .ok()?
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                return None;
+            }
+            entry.file_name().into_string().ok()
+        })
+        .collect();
+    names.sort();
+    Some(names)
 }
 
-/// `volume_stems`: stems of the volume archives among these names.
-pub fn volume_stems<'a>(file_names: impl IntoIterator<Item = &'a str>) -> HashSet<String> {
-    let mut stems = HashSet::new();
-    for name in file_names {
-        let lower = crate::pyunicode::lower(name);
-        for ext in VOLUME_ARCHIVE_EXTENSIONS {
-            if lower.ends_with(ext) {
-                // `name[: -len(ext)]`: by character count, as Python slices.
-                let keep = name.chars().count() - ext.len();
-                stems.insert(name.chars().take(keep).collect());
-                break;
-            }
-        }
-    }
-    stems
+/// The names in the archive's directory.
+fn listing(cbz_path: &Path) -> Option<Vec<String>> {
+    list_names(cbz_path.parent().unwrap_or_else(|| Path::new("")))
 }
 
 /// `sidecar_siblings(cbz_path)`: every file that goes when the archive goes —
 /// primary, gzip primary, cover, no-cover marker (whether or not they exist),
-/// then every layer sidecar of this stem found in the directory (sorted).
+/// then the rest of [`sidecar_names::sweep_set`] (other spellings, layers; sorted).
 pub fn sidecar_siblings(cbz_path: &Path) -> Vec<PathBuf> {
     let Some(name) = cbz_path.file_name().and_then(|n| n.to_str()) else {
         return Vec::new();
@@ -121,29 +118,66 @@ pub fn sidecar_siblings(cbz_path: &Path) -> Vec<PathBuf> {
         .iter()
         .map(|suffix| directory.join(format!("{stem}{suffix}")))
         .collect();
-    let Ok(listing) = fs::read_dir(directory) else {
+    let Some(names) = listing(cbz_path) else {
         return siblings;
     };
-    let mut names: Vec<String> = listing
-        .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
-        .collect();
-    names.sort();
-    let mut others = volume_stems(names.iter().map(String::as_str));
-    others.remove(stem);
-    for entry_name in &names {
-        if layer_id_of_sidecar(entry_name, stem, &others).is_some() {
-            siblings.push(directory.join(entry_name));
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    for entry_name in sidecar_names::sweep_set(name, &names) {
+        let path = directory.join(entry_name);
+        if !siblings.contains(&path) {
+            siblings.push(path);
         }
     }
     siblings
 }
 
-/// `_sidecar_for`: `<stem>.mokuro` if it is a file, else `<stem>.mokuro.gz`.
+/// `_sidecar_for`: `<stem>.mokuro` if it is a file, else `<stem>.mokuro.gz`; else
+/// (rule v1) the primary in another spelling the listing has
+/// ([`sidecar_names::primary_of`]: `V.MOKURO`, `v.mokuro` on a case-sensitive disk).
 pub fn primary_sidecar(cbz_path: &Path) -> Option<PathBuf> {
-    [".mokuro", ".mokuro.gz"]
+    exact_sidecar(cbz_path, ".mokuro").or_else(|| {
+        let names = listing(cbz_path)?;
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        listed_file(cbz_path, |name| {
+            sidecar_names::Folder::new(&names).primary_of(name)
+        })
+    })
+}
+
+/// [`primary_sidecar`] with the archive's folder already listed: a pass over a whole
+/// series lists it once, not once a volume without an exact-case primary.
+pub fn primary_sidecar_in(cbz_path: &Path, folder: &sidecar_names::Folder) -> Option<PathBuf> {
+    exact_sidecar(cbz_path, ".mokuro")
+        .or_else(|| listed_file(cbz_path, |name| folder.primary_of(name)))
+}
+
+/// The archive's layer `id`: `<stem>.<id>.mokuro[.gz]` as named, else (rule v1) in
+/// another spelling of the stem the folder has ([`sidecar_names::Folder::layer_of`]).
+pub fn layer_sidecar_in(
+    cbz_path: &Path,
+    id: &str,
+    folder: &sidecar_names::Folder,
+) -> Option<PathBuf> {
+    exact_sidecar(cbz_path, &format!(".{id}.mokuro"))
+        .or_else(|| listed_file(cbz_path, |name| folder.layer_of(name, id)))
+}
+
+/// `<stem><suffix>` if it is a file, else `<stem><suffix>.gz`.
+fn exact_sidecar(cbz_path: &Path, suffix: &str) -> Option<PathBuf> {
+    [suffix.to_owned(), format!("{suffix}.gz")]
         .iter()
         .map(|suffix| with_suffix(cbz_path, suffix))
-        .find(|candidate| fs::metadata(candidate).is_ok_and(|meta| meta.is_file()))
+        .find(|candidate| is_file(candidate))
+}
+
+/// The listed name `find` gives for the archive's name, when it is a file.
+fn listed_file<'a>(cbz_path: &Path, find: impl FnOnce(&str) -> Option<&'a str>) -> Option<PathBuf> {
+    let found = cbz_path.with_file_name(find(cbz_path.file_name()?.to_str()?)?);
+    is_file(&found).then_some(found)
+}
+
+fn is_file(path: &Path) -> bool {
+    fs::metadata(path).is_ok_and(|meta| meta.is_file())
 }
 
 /// A sidecar read the way `_load_sidecar` reads it.
@@ -306,13 +340,33 @@ pub fn load_sidecar(path: &Path) -> LoadedSidecar {
     let Ok(text) = std::str::from_utf8(&raw) else {
         return unreadable;
     };
-    match pyjson::parse(text) {
+    // The hash covers the stored bytes, BOM included: what the reader hashes.
+    match pyjson::parse(pyjson::strip_bom(text)) {
         Ok(JsonValue::Object(object)) => LoadedSidecar {
             data: Some(object),
             sha256: Some(hex::encode(Sha256::digest(&raw))),
         },
         _ => unreadable,
     }
+}
+
+/// The sidecar's JSON starts with a UTF-8 BOM (after gunzip). Reads only the head: a
+/// compile asks it of cache rows that recorded the sidecar as unreadable.
+pub fn starts_with_bom(path: &Path) -> bool {
+    let Ok(file) = fs::File::open(path) else {
+        return false;
+    };
+    let gz = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|name| crate::pyunicode::lower(name).ends_with(".gz"));
+    let mut head = [0u8; 3];
+    let read = if gz {
+        flate2::read::GzDecoder::new(file).read_exact(&mut head)
+    } else {
+        file.take(3).read_exact(&mut head)
+    };
+    read.is_ok() && head == *b"\xef\xbb\xbf"
 }
 
 /// `mokuro_sha256` of a sidecar if it parses as a JSON object.
@@ -337,15 +391,6 @@ mod tests {
         assert_eq!(split_layer_sidecar("Vol 1.mokuro"), None);
         assert_eq!(split_layer_sidecar("Vol 1.Bad.mokuro"), None);
         assert_eq!(split_layer_sidecar(".x.mokuro"), None);
-        let others: HashSet<String> = ["Volume 01.5".to_owned()].into();
-        assert_eq!(
-            layer_id_of_sidecar("Volume 01.5.mokuro", "Volume 01", &others),
-            None
-        );
-        assert_eq!(
-            layer_id_of_sidecar("Volume 01.5.mokuro", "Volume 01", &HashSet::new()),
-            Some("5")
-        );
     }
 
     #[test]
@@ -353,10 +398,148 @@ mod tests {
         assert_eq!(py_stem("Vol 1.5.cbz"), "Vol 1.5");
         assert_eq!(py_stem(".cbz"), ".cbz");
         assert_eq!(py_stem("a."), "a.");
+    }
+
+    fn touch(dir: &Path, names: &[&str]) {
+        for name in names {
+            fs::write(dir.join(name), b"{}").unwrap();
+        }
+    }
+
+    fn sibling_names(cbz: &Path) -> Vec<String> {
+        sidecar_siblings(cbz)
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// Rule v1 on a case-sensitive directory: the primary is found in any spelling,
+    /// the exact one first.
+    #[test]
+    fn primary_in_any_case() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        touch(d, &["V.cbz", "V.MOKURO"]);
+        assert_eq!(primary_sidecar(&d.join("V.cbz")), Some(d.join("V.MOKURO")));
+        touch(d, &["V.mokuro.gz"]);
         assert_eq!(
-            volume_stems(["A.CBZ", "b.rar", "c.txt"]),
-            ["A".to_owned(), "b".to_owned()].into()
+            primary_sidecar(&d.join("V.cbz")),
+            Some(d.join("V.mokuro.gz"))
         );
+        touch(d, &["V.mokuro"]);
+        assert_eq!(primary_sidecar(&d.join("V.cbz")), Some(d.join("V.mokuro")));
+        touch(d, &["W.cbz", "w.cbz", "w.mokuro"]);
+        assert_eq!(primary_sidecar(&d.join("W.cbz")), None);
+        assert_eq!(primary_sidecar(&d.join("w.cbz")), Some(d.join("w.mokuro")));
+    }
+
+    #[test]
+    fn a_bom_is_seen_through_gzip() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        fs::write(d.join("a.mokuro"), "\u{feff}{}").unwrap();
+        fs::write(d.join("b.mokuro"), "{}").unwrap();
+        fs::write(d.join("c.mokuro"), "").unwrap();
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gz.write_all("\u{feff}{}".as_bytes()).unwrap();
+        fs::write(d.join("d.mokuro.gz"), gz.finish().unwrap()).unwrap();
+        assert!(starts_with_bom(&d.join("a.mokuro")));
+        assert!(!starts_with_bom(&d.join("b.mokuro")));
+        assert!(!starts_with_bom(&d.join("c.mokuro")));
+        assert!(!starts_with_bom(&d.join("missing.mokuro")));
+        assert!(starts_with_bom(&d.join("d.mokuro.gz")));
+    }
+
+    /// A listed folder answers like a fresh listing, and a layer is found in any
+    /// spelling of its stem (its id exact).
+    #[test]
+    fn lookups_in_a_listed_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        touch(
+            d,
+            &["V.cbz", "v.MOKURO", "v.gcv.mokuro.gz", "W.cbz", "W.mokuro"],
+        );
+        // A folder named like an archive is none (rule 2).
+        fs::create_dir(d.join("v.cbz")).unwrap();
+        let names = list_names(d).unwrap();
+        assert!(!names.iter().any(|n| n == "v.cbz"));
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let folder = sidecar_names::Folder::new(&names);
+        assert_eq!(
+            primary_sidecar_in(&d.join("V.cbz"), &folder),
+            Some(d.join("v.MOKURO"))
+        );
+        assert_eq!(
+            primary_sidecar_in(&d.join("W.cbz"), &folder),
+            Some(d.join("W.mokuro"))
+        );
+        assert_eq!(primary_sidecar_in(&d.join("X.cbz"), &folder), None);
+        assert_eq!(
+            layer_sidecar_in(&d.join("V.cbz"), "gcv", &folder),
+            Some(d.join("v.gcv.mokuro.gz"))
+        );
+        assert_eq!(layer_sidecar_in(&d.join("V.cbz"), "GCV", &folder), None);
+        assert_eq!(layer_sidecar_in(&d.join("W.cbz"), "gcv", &folder), None);
+    }
+
+    #[test]
+    fn siblings_follow_rule_v1() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        touch(
+            d,
+            &[
+                "Vol 1.cbz",
+                "Vol 1.5.zip",
+                "Vol 1.5.mokuro",
+                "Vol 1.2024.mokuro",
+                "vol 1.gcv.MOKURO",
+                "Vol 1.Upper.mokuro",
+            ],
+        );
+        let got = sibling_names(&d.join("Vol 1.cbz"));
+        assert_eq!(
+            got,
+            [
+                "Vol 1.mokuro",
+                "Vol 1.mokuro.gz",
+                "Vol 1.webp",
+                "Vol 1.nocover",
+                "Vol 1.2024.mokuro",
+                "vol 1.gcv.MOKURO",
+            ]
+        );
+        // Rule v1 reads `Vol 1.5.mokuro` as layer `5` here (a .zip defines no stem),
+        // but a sweep never takes a file whose base is any archive's stem.
+        let stems = bunko_core::sidecar_names::volume_stems(["Vol 1.cbz", "Vol 1.5.zip"]);
+        assert!(matches!(
+            bunko_core::sidecar_names::classify("Vol 1.5.mokuro", &stems),
+            bunko_core::sidecar_names::SidecarClass::Layer { id: "5", .. }
+        ));
+    }
+
+    /// Rule v1: a leading BOM is tolerated on read and the hash still covers the
+    /// stored bytes, BOM included (what the reader hashes).
+    #[test]
+    fn a_bom_sidecar_loads_and_hashes_its_raw_bytes() {
+        use flate2::{Compression, write::GzEncoder};
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let raw = "\u{feff}{\"pages\": []}".as_bytes();
+        let plain = dir.path().join("V.mokuro");
+        fs::write(&plain, raw).unwrap();
+        let mut enc = GzEncoder::new(Vec::new(), Compression::fast());
+        enc.write_all(raw).unwrap();
+        let gz = dir.path().join("W.mokuro.gz");
+        fs::write(&gz, enc.finish().unwrap()).unwrap();
+        let want = hex::encode(Sha256::digest(raw));
+        for path in [&plain, &gz] {
+            let loaded = load_sidecar(path);
+            assert!(loaded.data.is_some(), "{}", path.display());
+            assert_eq!(loaded.sha256.as_deref(), Some(want.as_str()));
+        }
     }
 
     #[test]

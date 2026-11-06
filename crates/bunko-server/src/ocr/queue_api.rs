@@ -320,7 +320,7 @@ pub async fn build(ocr: &OcrControl, level: &str, admin: bool) -> Option<(String
         return Some(hit);
     }
     let lvl = level.to_string();
-    let (version, payload) = ocr
+    let (version, mut payload) = ocr
         .ask(move |s| {
             let raw = s.raw_status();
             let version = s.page_version();
@@ -328,6 +328,11 @@ pub async fn build(ocr: &OcrControl, level: &str, admin: bool) -> Option<(String
             (version, shaped)
         })
         .await?;
+    if admin && let Some(variant) = installing_variant(ocr) {
+        // This server's own machine reports what runs now (CPU) until the pack is in.
+        payload["backend"] = json!(variant_backend(&variant));
+        payload["backend_installing"] = json!(true);
+    }
     let text = crate::ocr::pyjson::dumps(&payload, crate::ocr::pyjson::SORTED_DEFAULT);
     let digest = hex::encode(sha2::Sha256::digest(text.as_bytes()));
     let etag = format!(
@@ -346,4 +351,23 @@ pub async fn build(ocr: &OcrControl, level: &str, admin: bool) -> Option<(String
         },
     );
     Some((etag, body))
+}
+
+/// The pack variant this server's background install is fetching now (`rocm7.1`).
+fn installing_variant(ocr: &OcrControl) -> Option<String> {
+    ocr.installer()?
+        .view()
+        .filter(|v| v.running())
+        .and_then(|v| v.variant)
+}
+
+/// The backend a pack variant runs on: `rocm7.1` -> `rocm`, `cu130` -> `cuda`.
+fn variant_backend(variant: &str) -> &str {
+    if variant.starts_with("rocm") {
+        "rocm"
+    } else if variant.starts_with("cu") {
+        "cuda"
+    } else {
+        variant
+    }
 }

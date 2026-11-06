@@ -1,6 +1,6 @@
 // Catalog JavaScript
 
-const API_BASE = '/catalog/api';
+const API_BASE = 'catalog/api';
 
 // State
 let series = [];
@@ -325,7 +325,7 @@ async function updateNav() {
 
 async function logout() {
     await window.mokuroAuth.signOut();
-    window.location.href = '/';
+    window.location.href = './';
 }
 
 // Load root catalog
@@ -440,7 +440,9 @@ function showRoot(fromPopState) {
     filterSeries(rootSearchQuery.toLowerCase().trim());
     window.scrollTo(0, rootScrollY);
     if (!fromPopState) {
-        history.pushState(null, '', '/catalog');
+        // The page's own path, never another depth: the relative <base> must keep
+        // naming the mount root.
+        history.pushState(null, '', window.location.pathname + window.location.search);
     }
 }
 
@@ -470,7 +472,7 @@ async function openSeries(seriesName, fromPopState) {
         renderVolumes();
 
         if (!fromPopState) {
-            history.pushState({ series: seriesName }, '', '/catalog#' + encodeURIComponent(seriesName));
+            history.pushState({ series: seriesName }, '', window.location.pathname + window.location.search + '#' + encodeURIComponent(seriesName));
         }
     } catch (err) {
         grid.innerHTML = '<div class="loading">Error: ' + escapeHtml(err.message) + '</div>';
@@ -528,18 +530,27 @@ function renderRoot() {
 
 // Open a volume in mokuro-reader
 function openVolume(seriesName, volumeName, coverPath) {
-    const cbzPath = '/mokuro-reader/' + encodeURIComponent(seriesName) + '/' + encodeURIComponent(volumeName) + '.cbz';
-    const cbzUrl = new URL(cbzPath, window.location.origin).toString();
+    // Absolute URLs under the mount root (a sub-path mount included), so a reader
+    // without manifest support for some paths and one with it both fetch the
+    // right files.
+    const root = new URL('.', document.baseURI);
+    const enc = (p) => p.split('/').map(encodeURIComponent).join('/');
+    const cbzUrl = new URL(
+        'mokuro-reader/' + encodeURIComponent(seriesName) + '/' + encodeURIComponent(volumeName) + '.cbz',
+        root,
+    ).toString();
     // The volume's manifest names every file the reader should fetch (OCR,
     // layers, cover, series.json); a reader that doesn't know it keeps using cbz.
     const manifestUrl = new URL(
         API_BASE + '/manifest?series=' + encodeURIComponent(seriesName) + '&volume=' + encodeURIComponent(volumeName),
-        window.location.origin,
+        root,
     ).toString();
     const params = new URLSearchParams({ cbz: cbzUrl, manifest: manifestUrl });
     if (coverPath) {
-        // Optional hint; reader now assumes sidecars by default from cbz stem.
-        params.set('cover', coverPath);
+        // `<folder>/<Vol>.webp` is library-relative: absolute here, since the reader
+        // fetches it as given. The manifest still names the cover for readers
+        // that read it.
+        params.set('cover', new URL('mokuro-reader/' + enc(coverPath), root).toString());
     }
     const url = readerUrl + '/#/upload?' + params.toString();
     window.open(url, '_blank');

@@ -16,9 +16,9 @@ use http_body_util::{BodyExt, Limited};
 use crate::conditional::{self, IfHeader};
 use crate::hooks::AuditEvent;
 use crate::propfind::resource_key;
-use crate::resource::Resource;
+use crate::resource::{FileKind, Resource};
 use crate::response::{self, DavError, DavResult, Resp};
-use crate::{DavContext, Inner, paths};
+use crate::{Caller, DavContext, Inner, paths};
 
 /// Request bodies DAV parses as XML are read whole up to this size.
 pub(crate) const XML_BODY_LIMIT: usize = 1024 * 1024;
@@ -37,6 +37,11 @@ pub(crate) struct Req {
 impl Req {
     pub fn username(&self) -> Option<&str> {
         self.ctx.username.as_deref()
+    }
+
+    /// Who per-user paths resolve for.
+    pub fn caller(&self) -> Option<Caller<'_>> {
+        self.ctx.caller()
     }
 
     pub fn header(&self, name: &str) -> Option<&str> {
@@ -98,14 +103,56 @@ pub(crate) async fn dispatch(inner: Arc<Inner>, req: Request<Body>, ctx: DavCont
             return resp;
         }
     };
-    result.unwrap_or_else(DavError::into_response)
+    match result {
+        Ok(resp) => {
+            if resp.status().is_server_error() {
+                log_server_error(&r, resp.status().as_u16(), "");
+            }
+            resp
+        }
+        Err(e) => {
+            if e.status.is_server_error() {
+                log_server_error(&r, e.status.as_u16(), &e.context);
+            }
+            e.into_response()
+        }
+    }
+}
+
+/// A 5xx answer is the server's (or the library storage's) failure, so it is logged:
+/// the method, the path and the cause (store and provider errors carry no
+/// credentials; the request's own headers are never logged). A 503 is a wait the
+/// client is told to sit out (WARN); anything else is a fault (ERROR).
+pub(crate) fn log_server_error(req: &Req, status: u16, cause: &str) {
+    let user = req.username().unwrap_or("-");
+    let cause = if cause.is_empty() {
+        "(no detail)"
+    } else {
+        cause
+    };
+    if status == 503 {
+        tracing::warn!(
+            "[WEBDAV] {} {} answered {status} (user {user}): {cause}",
+            req.method,
+            req.path
+        );
+    } else {
+        tracing::error!(
+            "[WEBDAV] {} {} failed with {status} (user {user}): {cause}",
+            req.method,
+            req.path
+        );
+    }
 }
 
 /// Run filesystem work off the async workers.
+/// WebDAV work on the blocking pool. It answers a client, so a remote store treats it
+/// as interactive: a provider pause fails fast with a retry-after error (503) instead
+/// of holding the request (spec §3.1).
 pub(crate) async fn blocking<T: Send + 'static>(
     f: impl FnOnce() -> T + Send + 'static,
 ) -> DavResult<T> {
-    tokio::task::spawn_blocking(f)
+    tokio::task::spawn_blocking(move || bunko_store::interactive(f))
         .await
         .map_err(|_| DavError::new(crate::SERVER_ERROR, "internal error"))
 }
@@ -125,15 +172,45 @@ pub(crate) async fn read_body(body: Body, limit: usize) -> DavResult<Bytes> {
     }
 }
 
+/// Resolve `path` for the requesting account. Blocking work, off the async workers.
 pub(crate) async fn lookup(
     inner: &Arc<Inner>,
     path: &str,
-    username: Option<&str>,
+    req: &Req,
 ) -> DavResult<Option<Resource>> {
     let inner = inner.clone();
     let path = path.to_string();
-    let user = username.map(str::to_string);
-    blocking(move || inner.roots.lookup(&path, user.as_deref())).await
+    let ctx = req.ctx.clone();
+    blocking(move || inner.roots.lookup(&path, ctx.caller())).await
+}
+
+/// A write auth admitted only as the caller's own correction
+/// ([`DavContext::personal_only`]) must find one where it writes: refused (409) when
+/// the path now resolves to anything else.
+pub(crate) fn personal_grant_holds(req: &Req, kind: Option<FileKind>) -> DavResult<()> {
+    if req.ctx.personal_only && kind != Some(FileKind::Personal) {
+        return Err(DavError::new(
+            StatusCode::CONFLICT,
+            "The folder changed while this request was checked; try again.",
+        ));
+    }
+    Ok(())
+}
+
+/// A write auth admitted by a series owner rule ([`DavContext::ownership_recheck`]) is
+/// decided again where it lands: refused (403, the fresh refusal) when it no longer
+/// would be, or 503 with `Retry-After` when that cannot be decided now. Blocking.
+pub(crate) fn ownership_holds(req: &Req) -> DavResult<()> {
+    match &req.ctx.ownership_recheck {
+        Some(recheck) => recheck().map_err(|refusal| match refusal.retry_after {
+            Some(secs) => DavError {
+                retry_after: Some(secs),
+                ..DavError::new(StatusCode::SERVICE_UNAVAILABLE, refusal.message)
+            },
+            None => DavError::new(StatusCode::FORBIDDEN, refusal.message),
+        }),
+        None => Ok(()),
+    }
 }
 
 /// HTTP conditionals and the DAV `If:` header against an existing resource (WsgiDAV
@@ -187,12 +264,36 @@ pub(crate) fn file_audit_target(inner: &Inner, vpath: &str, phys: &Path) -> (&'s
         return ("library", format!("/{}/{rel}", paths::READER_ROOT));
     }
     let norm = paths::normalize(vpath);
-    let ty = if paths::is_per_user_name(paths::uri_name(&norm)) {
+    let ty = if is_progress_path(&norm) {
         "progress"
     } else {
         "webdav"
     };
     (ty, norm)
+}
+
+/// The audit target of a personal correction (D27): the account's own file, at the
+/// path it asked for, whether it is an overlay or the cloud-root owner's physical file.
+pub(crate) fn personal_audit_target(vpath: &str) -> (&'static str, String) {
+    ("personal", paths::normalize(vpath))
+}
+
+/// The audit target of a file of `kind`.
+pub(crate) fn audit_target_of(
+    inner: &Inner,
+    kind: Option<FileKind>,
+    vpath: &str,
+    phys: &Path,
+) -> (&'static str, String) {
+    match kind {
+        Some(FileKind::Personal) => personal_audit_target(vpath),
+        _ => file_audit_target(inner, vpath, phys),
+    }
+}
+
+/// A path of the caller's own tree (root files, `history/**`).
+pub(crate) fn is_progress_path(vpath: &str) -> bool {
+    matches!(paths::classify(vpath), paths::Target::Progress(_))
 }
 
 /// The audit target of a folder (0.5.2 `MokuroFolderResource._audit`).
@@ -206,6 +307,7 @@ pub(crate) fn folder_audit_target(
         .filter(|r| !r.is_empty())
     {
         Some(rel) => ("library_folder", format!("/{}/{rel}", paths::READER_ROOT)),
+        None if is_progress_path(vpath) => ("progress", paths::normalize(vpath)),
         None => ("webdav_folder", paths::normalize(vpath)),
     }
 }
@@ -265,7 +367,7 @@ pub(crate) fn primary_leaving(inner: &Inner, req: &Req, phys: &Path) {
     let Some(stem) = crate::sidecars::primary_sidecar_stem(&name) else {
         return;
     };
-    if phys.with_file_name(format!("{stem}.cbz")).is_file() {
+    if bunko_store::fs::is_file(phys.with_file_name(format!("{stem}.cbz"))) {
         req.ctx.hooks.primary_sidecar_leaving(&rel, phys);
     }
 }
@@ -288,21 +390,36 @@ pub(crate) struct Effects {
 
 impl Effects {
     pub fn note_removed(&mut self, inner: &Inner, phys: &Path) {
-        if phys.starts_with(&inner.roots.library) {
+        if inner.roots.library_rel(phys).is_some() {
             self.removed.push(phys.to_path_buf());
         }
     }
 
     pub fn note_arrived(&mut self, inner: &Inner, phys: &Path) {
-        if is_cbz(phys) && phys.starts_with(&inner.roots.library) {
+        if is_cbz(phys) && inner.roots.library_rel(phys).is_some() {
             self.arrived.push(phys.to_path_buf());
         }
     }
 
+    /// A write changed `vpath`. The caller's own tree is in no shared listing and is no
+    /// library change, so a progress or history write evicts nothing (a reader saving
+    /// its goals used to drop the whole-library `Depth: infinity` listing).
     pub fn touch(&mut self, vpath: &str, phys: Option<&Path>) {
+        if is_progress_path(vpath) {
+            return;
+        }
         self.listings.push(paths::normalize(vpath));
         if let Some(p) = phys {
             self.changed.push(p.to_path_buf());
+        }
+    }
+
+    /// A personal correction changed. An overlay is in no shared listing; the cloud-root
+    /// owner's physical file is, hidden, in the owner's part of the cached listings
+    /// (which therefore go). Neither is a library change.
+    pub fn touch_personal(&mut self, inner: &Inner, vpath: &str, phys: &Path) {
+        if inner.roots.library_rel(phys).is_some() {
+            self.listings.push(paths::normalize(vpath));
         }
     }
 
@@ -320,7 +437,7 @@ impl Effects {
         let changed: Vec<PathBuf> = self
             .changed
             .into_iter()
-            .filter(|p| p.starts_with(&inner.roots.library))
+            .filter(|p| inner.roots.library_rel(p).is_some())
             .collect();
         if !changed.is_empty() {
             req.ctx.hooks.library_changed(&changed);

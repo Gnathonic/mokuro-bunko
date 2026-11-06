@@ -1,0 +1,169 @@
+# The reader contract
+
+What Bunko sends Mokuro Reader and what the reader sends Bunko, as golden files (spec
+`docs/design/interop-testing.md` §5). Both sides test against these files, so a change
+to the contract shows up as a fixture diff in the pull request that makes it.
+
+## Layout
+
+- `seed.json`: the users and the library every fixture is made from. The passwords are
+  test values for a throwaway in-process server. `reader` is an uploader (may write
+  progress and add files), `viewer` a processor account (the only signed-in role with
+  neither right), `admin` an admin, `progress` a `registered` account (progress and
+  reading history only; the `history-*` fixtures are its). Volume 01 has OCR, a layer sidecar and a cover;
+  Volume 02 has no OCR; one series and its volume have Japanese names. A series'
+  `owner` is its recorded series folder owner (0.8): `reader` owns "Contract Series",
+  so its writes there are an owner's; the Japanese series has none (shared).
+- `bunko/<name>.json`: what Bunko answers, written by
+  `crates/bunko-server/tests/contract_export.rs` from a seeded full-stack server. The
+  reader's unit tests parse these instead of hand-written JSON.
+- `reader/<name>.json`: the requests the reader sends, written by the reader's
+  `src/lib/interop/reader-requests.test.ts`, each with the response fields and headers
+  its code reads. `crates/bunko-server/tests/contract_replay.rs` sends each one to a
+  seeded server and checks them.
+- `reader/legacy/*.json`: hand-written records for requests older readers sent.
+- `seal/<name>.json`: the content seal on an installed `.mokuro` (`ocr_engine.seal`),
+  written by `crates/bunko-layout/tests/seal_vectors.rs`. See "Seal vectors" below.
+
+- `sidecar-names.json`: sidecar names rule v1, what a `.mokuro` listed beside volume
+  archives is. Written by hand (it is a rule, not a recording); Bunko's
+  `bunko_core::sidecar_names` tests and the reader's `classifyMokuroSidecar` run it.
+  See below.
+
+## Fixture format
+
+```json
+{
+  "request": {"method": "GET", "path": "/login/api/me", "auth": "basic:reader", "headers": {}},
+  "status": 200,
+  "headers": {"content-type": "application/json"},
+  "body": {}
+}
+```
+
+- `auth` is `none`, `basic:<user>`, `bearer:<user>` (a fresh token for that user) or
+  `raw:<header value>`. A request body is `body` (JSON; the string `<password:USER>` is
+  that seed password), `body_text`, or `body_cbz` (`{"pages": n}`, a generated archive).
+- The response body is `body` (JSON), `body_text` (XML or text, `\n` line endings) or
+  absent. Only the headers the reader reads, plus `WWW-Authenticate`, `Retry-After`,
+  `Vary` and the CORS headers, are kept.
+- Files Bunko writes into a library (the cloud queue copy, the lease marker,
+  `series.json`, `catalog.json`) use the same shape with `"request": {"file": "<path>"}`.
+- Reader records carry `expect` instead of a response: `status` (a list), `body_fields`
+  (dot paths that must exist and be non-null, e.g. `permissions.canWriteProgress`),
+  `nullable_fields` (dot paths that must exist, null allowed), `body_values` (`{path:
+  value}`, exact), `headers` (names that must be present, and exposed to the reader's
+  page) and `header_prefixes` (`{name: prefix}`, used by the legacy records). The replay
+  sends each record with the reader's `Origin`, after a preflight when it is not simple. A top-level `after` names the record whose answer's ETag
+  replaces the `"etag"` sentinel in this one's request; the two run on one server. A
+  `Content-Digest` is recorded as `<digest>`, and the replay sends the digest of the
+  body it sends.
+
+## Sentinels
+
+Anything that changes from run to run is replaced by a value of the same JSON type:
+
+| Kind | Sentinel |
+|---|---|
+| ISO-8601 or SQLite time | `"2000-01-01T00:00:00Z"`, in the same format (`.000`, `+00:00`, `2000-01-01 00:00:00`) |
+| HTTP date | `"Sat, 01 Jan 2000 00:00:00 GMT"` |
+| epoch seconds / milliseconds, under `*_at`, `*_modified`, `at_ms` keys | `946684800` / `946684800000` |
+| ETag (header, XML `getetag`, `If-Match`, `If-None-Match`) | `"\"etag\""` (`W/` kept) |
+| `Content-Digest` (reader records) | `"<digest>"` |
+| token | `"<token>"` |
+| random ids (`instance_id`, `boot_id`, `took_over_from`) | `00000000-0000-4000-8000-00000000000N` for a UUID, else `"<id-N>"`, numbered by first appearance |
+| Bunko version (`bunko_version`, `server_version`, and the top-level `version` of a `/login/api/me` body only) / machine name | `"0.0.0"` / `"contract-host"` |
+| a wait counted down (`Retry-After`, `Retry in Ns`) | rounded up to whole minutes |
+| the lease claim's `about N min left` | `about <n> min left` |
+
+`version` is replaced in `/login/api/me` bodies alone: everywhere else (a `.mokuro`, the
+queue file, the marker) it names a file format and is contract. The sentinel is below
+0.8.0, so a reader test that derives its history gate from a recorded identity sees it
+off: such a test sets the gate itself.
+
+Every other id (a `.mokuro`'s uuids, the uuid Bunko derives for a volume without one) is
+contract and stays as written, and objects keep Bunko's key order. Archives and the cover
+are generated byte for byte the same, so sizes and SHA-256 digests stay real.
+The reader's loader maps the sentinel times onto a `now` of its choosing, so freshness
+checks (a lease marker, a queue file) behave as they would on a live server.
+
+## Seal vectors
+
+`ocr_engine.seal` is `"v1:"` + the lowercase hex sha256 of the RFC 8785 (JCS) text of
+`{"ocr_engine": <the block without "seal" and "content_sha256">, "pages": <pages>}`:
+keys sorted by UTF-16 code units, numbers as JavaScript's `String(n)`, strings as
+`JSON.stringify`, no whitespace. So `JSON.stringify` over key-sorted objects matches it.
+No `ocr_engine` object, no `pages` array, or a NaN/Infinity in either: no seal. That
+includes a number past the double range (`1e400`, a 400-digit integer): `JSON.parse`
+reads it as Infinity and `JSON.stringify` would write it as `null`, so a reader checks
+for non-finite numbers after parsing and gives no seal (the `overflow` vector). A
+document is sealed when its block's `seal` matches `^v1:[0-9a-f]{64}$` and equals the
+seal its content gives (a leading UTF-8 BOM is ignored).
+
+Each vector is
+
+```json
+{
+  "description": "what it shows",
+  "document": "<the sidecar's exact text, as a string>",
+  "seal_input": "<the JCS text hashed> | null",
+  "seal": "v1:<64 hex> | null",
+  "is_sealed": true
+}
+```
+
+`document` is a string so Python's float spellings (`1e-05`, `24.0`, `-0.0`), integers
+past 2^53 and the key order reach the other side unchanged. `seal` is what sealing the
+document would set, also when its own seal no longer checks (`edited-line`).
+
+## Accepting a change
+
+```sh
+BUNKO_BLESS=1 cargo test -p bunko-server --test contract_export   # Bunko's answers
+BUNKO_BLESS=1 cargo test -p bunko-layout --test seal_vectors       # the seal vectors
+BUNKO_REPO=<this checkout> READER_BLESS=1 npx vitest run src/lib/interop   # in the reader
+```
+
+Then read the diff: it is the contract change, and the other side's tests show whether
+it breaks them. `READER_BLESS=1` writes only into the checkout `BUNKO_REPO` names.
+
+A change to a request the reader sends lands in two steps: first the re-blessed
+`reader/*.json` records are committed here (where `contract_replay` checks them), then the
+reader change, whose CI reads this repository at `BUNKO_REF` and would otherwise compare
+against the old records. `BUNKO_CONTRACT_DIR=<copy of this folder>` points Bunko's
+contract tests at a scratch copy (to check that a deliberate change fails).
+
+## Sidecar names (`sidecar-names.json`)
+
+Rule v1: the suffixes `.cbz`, `.mokuro` and `.mokuro.gz` match in any ASCII case; only
+`.cbz` archives define volume stems; stems compare folded (NFC, then Unicode lowercase);
+a primary wins over a layer reading of the same name; a layer id matches
+`^[a-z0-9-]{1,32}$` exactly as written, all-digit ids included; when sweeping, an
+exact-case stem wins over a folded one, and a folded-only match is no archive's when two
+archives' stems fold alike; a leading UTF-8 BOM is tolerated on read, never
+written, and hashes cover the raw bytes. New reader ids always contain a letter.
+
+- `rule`: the rule version, `1`.
+- `classify`: `{name, folder, expect, why}`. `folder` is every name listed beside it;
+  `expect` is `{"kind": "primary", "stem", "gz"}`, `{"kind": "layer", "stem", "layer",
+  "gz"}` or `{"kind": "orphan"}`. `stem` is spelled as in `name` (compare it folded if
+  your stems are folded).
+- `layer_class`: `{id, class}`, exact-case: `personal` (`edit`, `edit-<n>`), `curated`
+  (`curated`), `reserved` (no client writes it on Bunko: `curated-<n>`), `other`
+  (everything else).
+- `sweep`: `{archive, folder, expect, why}`: the names that go when `archive` is deleted
+  (sorted; compare as a set). Besides rule v1, a sweep never takes a name whose base is
+  the stem of any archive of `.cbz`, `.cbr`, `.zip` or `.rar`, so it can leave a file
+  `classify` calls a layer.
+
+## Beyond the fixtures: the rig
+
+These files are layer 1: each side checks them alone, in its own unit tests. Layer 2,
+the interop rig (`cargo xtask interop rig`, specs in `interop/e2e/rig/`,
+`docs/design/interop-testing.md` §7.1), runs the real reader against a real server: the
+reader commit `interop/reader.ref` pins (a pushed commit; a local run passes
+`--reader-dir`), built with `--mode interop`. A field rename fails the fixtures first;
+a behaviour the fixtures cannot show (a sync, a merge, a lease) fails a rig spec. Both
+run on every Bunko PR (§9). A Bunko change the pinned reader cannot pass yet lists the
+reader capability it waits for in `interop/pending-reader-caps.txt` until a PR bumps
+`reader.ref`.

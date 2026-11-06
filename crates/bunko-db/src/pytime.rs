@@ -3,7 +3,7 @@
 //! - SQLite `datetime('now')`: `YYYY-MM-DD HH:MM:SS`, UTC — produced in SQL, never here.
 //! - `invites.expires_at`: Python `datetime.now().isoformat()` — LOCAL naive time (process
 //!   TZ), `T` separator, `.ffffff` present unless the microsecond is 0. [`local_now`] and
-//!   [`isoformat`] reproduce it so a Python 0.5.2 rollback reads Rust-written invites.
+//!   [`isoformat`] keep writing it, so new rows compare like the ones 0.5.x left behind.
 //! - `auth_tokens.*`: REAL epoch seconds ([`epoch_now`]).
 //!
 //! [`fromisoformat`] accepts what Python 3.12's `datetime.fromisoformat` accepts for the

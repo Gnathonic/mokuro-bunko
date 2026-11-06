@@ -11,7 +11,9 @@
 # publishing nothing.
 #
 # Needs the repository secret BUNKO_SIGNING_KEY (base64 ed25519 seed of the release
-# key whose public half is compiled into bunko-update).
+# key whose public half is compiled into bunko-update), and the Google client secrets
+# BUNKO_GOOGLE_{RELEASE,BETA}_{DESKTOP,DEVICE}_SECRET the binaries embed (without them
+# a release cannot sign in to Google Drive with its built-in clients).
 name: Release
 
 on:
@@ -93,6 +95,10 @@ jobs:
       ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
       ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
       ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+      BUNKO_GOOGLE_RELEASE_DESKTOP_SECRET: ${{ secrets.BUNKO_GOOGLE_RELEASE_DESKTOP_SECRET }}
+      BUNKO_GOOGLE_RELEASE_DEVICE_SECRET: ${{ secrets.BUNKO_GOOGLE_RELEASE_DEVICE_SECRET }}
+      BUNKO_GOOGLE_BETA_DESKTOP_SECRET: ${{ secrets.BUNKO_GOOGLE_BETA_DESKTOP_SECRET }}
+      BUNKO_GOOGLE_BETA_DEVICE_SECRET: ${{ secrets.BUNKO_GOOGLE_BETA_DEVICE_SECRET }}
 
   release:
     needs: [prepare, build]

@@ -19,6 +19,7 @@
 
 mod account;
 mod home;
+pub mod local;
 mod login;
 mod registration;
 mod setup;
@@ -72,14 +73,17 @@ pub struct AccountsDeps {
     pub machine: Option<Arc<dyn crate::machine::Machine>>,
     /// Started when the setup turns Dynamic DNS on.
     pub dyndns: Option<crate::ops::dyndns::DynDnsService>,
-    /// Restart the server (the setup turned HTTPS on).
+    /// Restart the server (the setup turned HTTPS on, or connected a cloud library).
     pub restart: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Where the library lives: the setup wizard's Connect and Check (0.8 §11).
+    pub storage: Option<Arc<crate::storage::StorageControl>>,
 }
 
 impl AccountsDeps {
     /// Deps with no hooks or optional sources, and a setup flag of their own (the
     /// server passes its [`crate::app::Services::setup`]).
     pub fn new(core: Core, db: Arc<Database>) -> Self {
+        let storage = Some(crate::storage::StorageControl::for_core(&core, None));
         AccountsDeps {
             core,
             db,
@@ -90,6 +94,7 @@ impl AccountsDeps {
             machine: None,
             dyndns: None,
             restart: None,
+            storage,
         }
     }
 }

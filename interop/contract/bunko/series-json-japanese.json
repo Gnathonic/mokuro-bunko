@@ -1,0 +1,27 @@
+{
+  "body": {
+    "version": 2,
+    "series_title": "日本語シリーズ",
+    "external_ids": {},
+    "titles": {},
+    "synonyms": [],
+    "updated_at": "2000-01-01T00:00:00.000Z",
+    "volumes": [
+      {
+        "volume_uuid": "22222222-2222-4222-8222-222222222222",
+        "volume_title": "第1巻",
+        "page_count": 1,
+        "matched_page_count": 1,
+        "character_count": 5,
+        "mokuro_version": "0.2.2",
+        "archive_size": 116,
+        "mokuro_size": 378,
+        "mokuro_modified": 946684800,
+        "mokuro_sha256": "1603fb7c5f7b74b911beea4d1fcda4aad5a6273c65458d0581c2dccd8e17c94b"
+      }
+    ]
+  },
+  "request": {
+    "file": "日本語シリーズ/series.json"
+  }
+}

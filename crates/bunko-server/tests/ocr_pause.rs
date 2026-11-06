@@ -2,6 +2,9 @@
 //! scheduler stops offering it work, drains its sessions, takes released claims back at
 //! once without recording anything, and never blames what ends while it is paused.
 
+// Fixtures are set up and checked with std::fs on purpose.
+#![allow(clippy::disallowed_methods)]
+
 mod ocr_common;
 
 use bunko_proto::{Availability, Event, Op};

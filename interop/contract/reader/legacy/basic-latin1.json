@@ -1,0 +1,18 @@
+{
+  "note": "Readers before UTF-8 Basic (btoa of the Latin-1 bytes of `reader:contract-pässwörd`): Bunko refuses the header and challenges again.",
+  "request": {
+    "auth": "raw:Basic cmVhZGVyOmNvbnRyYWN0LXDkc3N39nJk",
+    "headers": {
+      "depth": "0"
+    },
+    "method": "PROPFIND",
+    "path": "/mokuro-reader/"
+  },
+  "expect": {
+    "status": [401],
+    "headers": ["www-authenticate"],
+    "header_prefixes": {
+      "www-authenticate": "Basic"
+    }
+  }
+}

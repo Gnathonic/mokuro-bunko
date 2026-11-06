@@ -90,6 +90,9 @@ impl Scheduler {
 
     /// `queue_hold()`: why the WHOLE queue is not moving, or None.
     pub fn queue_hold(&self) -> Option<&'static str> {
+        if let Some(reason) = self.storage_hold() {
+            return Some(reason);
+        }
         if self.processing_hold().is_some() {
             return Some("no-processor");
         }
@@ -170,7 +173,7 @@ impl Scheduler {
             if row != Some(primary.name.as_str()) || key.ends_with("@upgrade") {
                 continue;
             }
-            let mtime = std::fs::metadata(library.join(key))
+            let mtime = bunko_store::fs::metadata(library.join(key))
                 .ok()
                 .and_then(|m| m.modified().ok())
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
@@ -535,6 +538,8 @@ impl Scheduler {
             Value::Array(self.connected_machines()),
         );
         raw.insert("speed".into(), Value::Array(self.speed(&plan.running)));
+        raw.insert("orphans_unproven".into(), json!(self.orphans_unproven));
+        raw.insert("walks".into(), json!(self.walks));
         raw
     }
 

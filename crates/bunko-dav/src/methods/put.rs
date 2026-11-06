@@ -13,14 +13,16 @@ use http_body_util::BodyExt;
 const BODY_STALL: std::time::Duration = std::time::Duration::from_secs(120);
 
 use super::{
-    Effects, Req, audit, check_dav_locks, eval_if, file_audit_target, forget_ocr_records, is_cbz,
+    Effects, Req, audit, audit_target_of, check_dav_locks, eval_if, forget_ocr_records, is_cbz,
     lookup, write_lock_conflict,
 };
+use crate::personal::{self, LayerRefusal, MAX_LAYER_BYTES};
 use crate::propfind::resource_key;
-use crate::resource::{Resource, Stat};
+use crate::resource::{FileKind, Resource, Stat};
 use crate::response::{self, DavError, Resp};
 use crate::upload::{self, Rejection, Staging, Stored};
 use crate::{Inner, paths};
+use bunko_core::reader_tree::{self, HistoryShape};
 
 enum PutError {
     /// The writer's own verdict (truncated, corrupted-in-transit, archive-*, disk-full,
@@ -44,18 +46,36 @@ impl From<Rejection> for PutError {
 
 pub(crate) async fn put(inner: &Arc<Inner>, req: &Req, body: Body) -> Resp {
     let verdict = crate::put_gives_verdict(&req.path);
-    let mut resp = match put_inner(inner, req, body).await {
-        Ok(resp) => resp,
-        Err(PutError::Rejected(rej)) if verdict => {
-            failure_response(rej.status, rej.reason, &rej.detail, rej.retry)
+    let result = put_inner(inner, req, body).await;
+    match &result {
+        Err(PutError::Rejected(rej)) if rej.status >= 500 => {
+            super::log_server_error(req, rej.status, &rej.detail)
         }
-        Err(PutError::Rejected(rej)) => response::status_page(
-            StatusCode::from_u16(rej.status).unwrap_or(crate::SERVER_ERROR),
-            &rej.detail,
-        ),
+        Err(PutError::Dav(e)) if e.status.is_server_error() => {
+            super::log_server_error(req, e.status.as_u16(), &e.context)
+        }
+        _ => {}
+    }
+    let mut resp = match result {
+        Ok(resp) => resp,
+        Err(PutError::Rejected(rej)) if verdict => failure_response(&rej),
+        Err(PutError::Rejected(rej)) => {
+            let mut resp = response::status_page(
+                StatusCode::from_u16(rej.status).unwrap_or(crate::SERVER_ERROR),
+                &rej.detail,
+            );
+            set_retry_after(&mut resp, rej.retry_after);
+            resp
+        }
         Err(PutError::Dav(e)) if verdict => {
             let (status, reason, detail, retry) = upload::failure_for_status(e.status.as_u16());
-            failure_response(status, reason, &detail, retry)
+            failure_response(&Rejection {
+                status,
+                reason,
+                detail,
+                retry,
+                retry_after: e.retry_after,
+            })
         }
         Err(PutError::Dav(e)) => e.into_response(),
     };
@@ -65,23 +85,35 @@ pub(crate) async fn put(inner: &Arc<Inner>, req: &Req, body: Body) -> Resp {
     resp
 }
 
-fn failure_response(status: u16, reason: &str, detail: &str, retry: bool) -> Resp {
-    let body = upload::failure_json(reason, detail, retry).into_bytes();
+fn failure_response(rej: &Rejection) -> Resp {
+    let body = upload::failure_json(rej.reason, &rej.detail, rej.retry).into_bytes();
     let len = body.len();
     let mut resp = Response::new(Body::from(body));
-    *resp.status_mut() = StatusCode::from_u16(status).unwrap_or(crate::SERVER_ERROR);
+    *resp.status_mut() = StatusCode::from_u16(rej.status).unwrap_or(crate::SERVER_ERROR);
     resp.headers_mut()
         .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     resp.headers_mut()
         .insert(CONTENT_LENGTH, HeaderValue::from(len));
+    set_retry_after(&mut resp, rej.retry_after);
     resp
+}
+
+fn set_retry_after(resp: &mut Resp, secs: Option<u64>) {
+    if let Some(secs) = secs {
+        resp.headers_mut()
+            .insert(http::header::RETRY_AFTER, HeaderValue::from(secs));
+    }
 }
 
 /// See [`crate::put_refusal_verdict`].
 pub(crate) fn refusal_verdict(path: &str, mut resp: Resp) -> Resp {
     let cbz = path.to_lowercase().ends_with(".cbz");
     if crate::put_gives_verdict(path) && !resp.status().is_success() {
-        let (status, reason, detail, retry) = upload::failure_for_status(resp.status().as_u16());
+        let (status, reason, mut detail, retry) =
+            upload::failure_for_status(resp.status().as_u16());
+        if let (403, Some(why)) = (status, resp.extensions().get::<crate::RefusalDetail>()) {
+            detail = why.0.to_string();
+        }
         let body = upload::failure_json(reason, &detail, retry).into_bytes();
         let len = body.len();
         let mut headers = std::mem::take(resp.headers_mut());
@@ -121,29 +153,73 @@ async fn put_inner(inner: &Arc<Inner>, req: &Req, body: Body) -> Result<Resp, Pu
         )
         .into());
     }
+    // In the caller's history only `history/<device>/<file>` takes a file.
+    let history = match paths::classify(&req.path) {
+        paths::Target::Progress(rel) => reader_tree::history_shape_of_rel(&rel),
+        _ => None,
+    };
+    if history.is_some_and(|shape| shape != HistoryShape::File) {
+        return Err(Rejection::new(403, "forbidden", "Not a reading-history path.", false).into());
+    }
+    // A correction or curated layer (D27) must name a listed volume and be a plain
+    // `.mokuro` with an edit's body, checked before anything is staged.
+    let layer_rule = match paths::classify(&req.path) {
+        paths::Target::Library(rel) => {
+            let inner2 = inner.clone();
+            super::blocking(move || inner2.roots.layer_put_rule(&rel)).await?
+        }
+        _ => None,
+    };
+    let checked_layer = match layer_rule {
+        None => false,
+        Some(Ok(())) => true,
+        Some(Err(LayerRefusal::Gzip)) => {
+            return Err(Rejection::new(
+                403,
+                "forbidden",
+                "Corrections are saved as plain .mokuro files.",
+                false,
+            )
+            .into());
+        }
+        Some(Err(LayerRefusal::NoVolume)) => {
+            return Err(Rejection::new(
+                409,
+                "no-volume",
+                "No volume for these corrections: a .cbz of that name must be beside them, \
+                 and the name must end in .mokuro.",
+                false,
+            )
+            .into());
+        }
+    };
+    if checked_layer && expected_size(req).is_some_and(|n| n > MAX_LAYER_BYTES) {
+        return Err(layer_too_large().into());
+    }
     let user = req.username();
-    let res = lookup(inner, &req.path, user).await?;
+    let res = lookup(inner, &req.path, req).await?;
     if res.as_ref().is_some_and(Resource::is_collection) {
         return Err(
             DavError::new(StatusCode::METHOD_NOT_ALLOWED, "Cannot PUT to a collection").into(),
         );
     }
     let parent = match paths::uri_parent(&req.path) {
-        Some(p) => lookup(inner, &p, user).await?,
+        Some(p) => lookup(inner, &p, req).await?,
         None => None,
     };
     let Some(parent) = parent.filter(Resource::is_collection) else {
         return Err(DavError::new(StatusCode::CONFLICT, "PUT parent must be a collection").into());
     };
 
-    let dest = match &res {
+    let (dest, kind) = match &res {
         Some(existing) => {
             eval_if(inner, req, existing)?;
             check_dav_locks(inner, req, &resource_key(existing, user), false)?;
-            existing
+            let phys = existing
                 .phys()
                 .map(Path::to_path_buf)
-                .ok_or_else(|| DavError::status(StatusCode::METHOD_NOT_ALLOWED))?
+                .ok_or_else(|| DavError::status(StatusCode::METHOD_NOT_ALLOWED))?;
+            (phys, existing.kind())
         }
         None => {
             // RFC 9110: If-Match fails when there is no current representation.
@@ -157,12 +233,11 @@ async fn put_inner(inner: &Arc<Inner>, req: &Req, body: Body) -> Result<Resp, Pu
             check_dav_locks(inner, req, &resource_key(&parent, user), false)?;
             let name = paths::uri_name(&req.path).to_string();
             let inner2 = inner.clone();
-            let (parent2, user2) = (parent.clone(), user.map(str::to_string));
-            let (phys, kind) = super::blocking(move || {
-                inner2.roots.member_path(&parent2, &name, user2.as_deref())
-            })
-            .await?
-            .ok_or_else(|| DavError::new(StatusCode::FORBIDDEN, "Forbidden"))?;
+            let (parent2, ctx2) = (parent.clone(), req.ctx.clone());
+            let (phys, kind) =
+                super::blocking(move || inner2.roots.member_path(&parent2, &name, ctx2.caller()))
+                    .await?
+                    .ok_or_else(|| DavError::new(StatusCode::FORBIDDEN, "Forbidden"))?;
             // A lock-null resource (LOCK before the first PUT) is locked by its own URL.
             let pseudo = Resource::File {
                 path: paths::normalize(&req.path),
@@ -177,28 +252,85 @@ async fn put_inner(inner: &Arc<Inner>, req: &Req, body: Body) -> Result<Resp, Pu
                 kind,
             };
             check_dav_locks(inner, req, &resource_key(&pseudo, user), false)?;
-            phys
+            (phys, Some(kind))
         }
     };
+    super::personal_grant_holds(req, kind)?;
+    let personal = kind == Some(FileKind::Personal);
 
     let Some(_guard) = inner.write_locks.try_lock(&dest) else {
         return Err(write_lock_conflict(
             req,
-            file_audit_target(inner, &req.path, &dest),
+            audit_target_of(inner, kind, &req.path, &dest),
             "write",
             None,
         )
         .into());
     };
-    let existed_before = tokio::fs::metadata(&dest).await.is_ok();
+    // One history writer per account from the measure to the publish, so the room
+    // left is never handed to two files at once.
+    let history_base = history
+        .and_then(|_| req.ctx.caller())
+        .and_then(|caller| inner.roots.user_base(caller));
+    let _history_writer = match history_base {
+        Some(base) => Some(inner.history_writers.lock(base).await),
+        None => None,
+    };
+    let before = bunko_store::afs::metadata(&dest).await.ok();
+    let existed_before = before.is_some();
     let expected = expected_size(req);
+    // A history file's cap, and the room the account's history tree has left for it.
+    let caps = match history {
+        Some(_) => {
+            let replaced = before.as_ref().map_or(0, |m| m.len());
+            Some(history_caps(inner, req, expected, replaced).await?)
+        }
+        None => None,
+    };
+    // A library store that cannot take a write now (a cloud library without its
+    // lease, §9.2) says so before the client sends the body.
+    let dest2 = dest.clone();
+    super::blocking(move || bunko_store::fs::writable(&dest2))
+        .await?
+        .map_err(|e| Rejection::from_io(&e, "accepting the upload"))?;
     let digest = upload::parse_content_digest(req.header("content-digest"));
-    let mut staging = Staging::create(&dest, expected, digest).await?;
+    let mut staging = if kind == Some(FileKind::Library) {
+        Staging::create_in_existing(&dest, expected, digest).await?
+    } else {
+        Staging::create(&dest, expected, digest).await?
+    };
+    // Admitted by a series owner rule: asked again under this path's write lock, once
+    // the body is in, so an archive that landed meanwhile and governs it refuses it.
+    if let Some(recheck) = req.ctx.ownership_recheck.clone() {
+        staging.recheck_before_publish(Box::new(move || recheck()));
+    }
+    // The client's precondition travels with the publish (spec §10 PUT): a remote
+    // store checks it against the provider's version, so a change made in the cloud
+    // since the client's If-Match (or a file created since its If-None-Match: *) is a
+    // 412, not a lost update. A local store's rename ignores it.
+    if req.header("if-none-match").is_some_and(|v| v.trim() == "*") {
+        staging.set_mode(bunko_store::Mode::CreateNew);
+    } else if req.headers.contains_key("if-match") {
+        staging.set_mode(bunko_store::Mode::Replace {
+            base: before.as_ref().and_then(|m| m.version().cloned()),
+        });
+    }
+    // A history file or a correction is the account's own bytes, never a library OCR
+    // file to re-seal.
+    if history.is_none() && !personal && paths::file_name(&dest).to_lowercase().ends_with(".mokuro")
+    {
+        let (hooks, dest) = (req.ctx.hooks.clone(), dest.clone());
+        staging.before_publish(Box::new(move |staged| {
+            hooks.ocr_sidecar_staged(&dest, staged)
+        }));
+    }
     if existed_before && is_ocr_sidecar(&dest) {
         // A client re-sending an OCR file unchanged (a backup, a re-upload) edits nothing:
         // the file, its provenance and its history stay as they were.
         staging.keep_if_identical();
     }
+    // A layer is small and checked whole before it is published.
+    let mut layer_body: Option<Vec<u8>> = checked_layer.then(Vec::new);
     let mut body = body;
     loop {
         // A client that stops sending for two minutes is gone: drop the upload rather
@@ -212,6 +344,15 @@ async fn put_inner(inner: &Arc<Inner>, req: &Req, body: Body) -> Result<Resp, Pu
             Some(Ok(frame)) => {
                 if let Ok(data) = frame.into_data() {
                     staging.write(&data).await?;
+                    if let Some(caps) = &caps {
+                        caps.check(staging.written())?;
+                    }
+                    if let Some(buf) = layer_body.as_mut() {
+                        if staging.written() > MAX_LAYER_BYTES {
+                            return Err(layer_too_large().into());
+                        }
+                        buf.extend_from_slice(&data);
+                    }
                 }
             }
             Some(Err(_)) => {
@@ -226,22 +367,36 @@ async fn put_inner(inner: &Arc<Inner>, req: &Req, body: Body) -> Result<Resp, Pu
                     reason: "truncated",
                     detail,
                     retry: true,
+                    retry_after: None,
                 }
                 .into());
             }
         }
     }
-    let stored: Stored = staging.commit(&inner.damage).await?;
+    if let Some(buf) = layer_body {
+        let ok = super::blocking(move || personal::is_layer_body(&buf)).await?;
+        if !ok {
+            return Err(Rejection::new(
+                422,
+                "not-a-layer",
+                "A correction layer is a JSON object with a \"pages\" array and no \"ocr_engine\".",
+                false,
+            )
+            .into());
+        }
+    }
+    let stored: Stored = staging.commit(&inner.damage, req.username()).await?;
 
     // Committed: the rest reports it and never fails the request.
     let (inner2, req2, dest2) = (inner.clone(), req.clone(), dest.clone());
     let unchanged = stored.unchanged;
-    let follow_up =
-        super::blocking(move || after_commit(&inner2, &req2, &dest2, existed_before, unchanged))
-            .await
-            .unwrap_or(None);
+    let follow_up = super::blocking(move || {
+        after_commit(&inner2, &req2, &dest2, kind, existed_before, unchanged)
+    })
+    .await
+    .unwrap_or(None);
 
-    let etag = tokio::fs::metadata(&dest)
+    let etag = bunko_store::afs::metadata(&dest)
         .await
         .map(|m| Stat::from_meta(&m).file_etag())
         .ok();
@@ -271,6 +426,77 @@ async fn put_inner(inner: &Arc<Inner>, req: &Req, body: Body) -> Result<Resp, Pu
     Ok(resp)
 }
 
+fn layer_too_large() -> Rejection {
+    Rejection::new(
+        413,
+        "too-large",
+        format!("A correction layer is limited to {MAX_LAYER_BYTES} bytes."),
+        false,
+    )
+}
+
+/// The limits a reading-history PUT is held to: the file cap, and the room left in the
+/// account's tree (its total minus the file being replaced).
+struct HistoryCaps {
+    max_file: u64,
+    room: u64,
+    max_total: u64,
+}
+
+impl HistoryCaps {
+    fn check(&self, size: u64) -> Result<(), Rejection> {
+        if size > self.max_file {
+            return Err(Rejection::new(
+                413,
+                "too-large",
+                format!(
+                    "A reading-history file is limited to {} bytes.",
+                    self.max_file
+                ),
+                false,
+            ));
+        }
+        if size > self.room {
+            return Err(Rejection::new(
+                507,
+                "quota-exceeded",
+                format!(
+                    "This account's reading history is limited to {} bytes.",
+                    self.max_total
+                ),
+                false,
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Measure the caller's history tree and refuse a declared size over a limit before
+/// any of the body is read.
+async fn history_caps(
+    inner: &Arc<Inner>,
+    req: &Req,
+    expected: Option<u64>,
+    replaced: u64,
+) -> Result<HistoryCaps, PutError> {
+    let limits = inner.roots.history;
+    let (inner2, ctx) = (inner.clone(), req.ctx.clone());
+    let stored = super::blocking(move || {
+        ctx.caller()
+            .map_or(0, |caller| inner2.roots.history_bytes(caller))
+    })
+    .await?;
+    let caps = HistoryCaps {
+        max_file: limits.max_file_bytes,
+        room: limits
+            .max_total_bytes
+            .saturating_sub(stored.saturating_sub(replaced)),
+        max_total: limits.max_total_bytes,
+    };
+    caps.check(expected.unwrap_or(0))?;
+    Ok(caps)
+}
+
 /// A `.mokuro` / `.mokuro.gz` OCR file.
 fn is_ocr_sidecar(path: &Path) -> bool {
     let name = paths::file_name(path).to_lowercase();
@@ -282,21 +508,36 @@ fn after_commit(
     inner: &Inner,
     req: &Req,
     dest: &Path,
+    kind: Option<FileKind>,
     existed_before: bool,
     unchanged: bool,
 ) -> Option<crate::PutFollowUp> {
-    let rel = inner.roots.library_rel(dest);
+    let target = audit_target_of(inner, kind, &req.path, dest);
     if unchanged {
         // Nothing on disk changed: only the request is on record (as an `edit` the
         // generation upgrade does not count as one, `generation-upgrade.md` §3).
         audit(
             req,
             "edit",
-            file_audit_target(inner, &req.path, dest),
+            target,
             Some(serde_json::json!({ "existed_before": true, "unchanged": true })),
         );
         return None;
     }
+    if kind == Some(FileKind::Personal) {
+        // The account's own file: no upload record, no OCR row, no library change.
+        audit(
+            req,
+            if existed_before { "edit" } else { "upload" },
+            target,
+            Some(serde_json::json!({ "existed_before": existed_before })),
+        );
+        let mut effects = Effects::default();
+        effects.touch_personal(inner, &req.path, dest);
+        effects.fire(inner, req);
+        return None;
+    }
+    let rel = inner.roots.library_rel(dest);
     if let (Some(rel), Some(actor)) = (rel.as_deref(), req.username()) {
         req.ctx
             .hooks
@@ -306,7 +547,7 @@ fn after_commit(
     audit(
         req,
         if existed_before { "edit" } else { "upload" },
-        file_audit_target(inner, &req.path, dest),
+        target,
         Some(serde_json::json!({ "existed_before": existed_before })),
     );
     let mut effects = Effects::default();

@@ -105,15 +105,22 @@ optional generation upgrade (below).
 
 With `ocr.upgrade.enabled`, the scheduler compares each volume's primary
 sidecar's **recipe** (engine, effective detector, and the patch budget for
-engines that use one) with the primary row's; model revisions are not
-compared, so older weights count as current. When they differ and the
-sidecar's family is in `ocr.upgrade.replace`, the volume is either swapped
-directly (another layer already holds the target recipe made from the
-current archive) or gets an upgrade job queued behind every ordinary job. A
-volume with missing pages, or whose sidecar a person edited, is skipped. The
-swap runs under the per-path write lock shared with WebDAV: the new bytes
-replace the bare file atomically, so there is never a moment without a
-primary, and no copy of the old file is kept. The old file's `ocr_sidecars`
+engines that use one) with the primary row's; model weights are not
+compared, so older weights count as current. The sidecar is outdated when the
+recipes differ and its family is in `ocr.upgrade.replace`, or when it is the
+primary's own recipe at a lower `ocr_engine.revision` than the engine's
+(absent = 1), listed or not. An outdated volume is either swapped directly
+(another layer holds the target recipe made from the current archive, and
+its seal proves Bunko wrote it) or gets an upgrade job queued behind every
+ordinary job. A volume with missing pages is skipped. A change nobody marked
+is not a reason to skip: the bare file is model output, replaced even if a
+person changed it. A file a reader marked EDITED (an `edited` block) is never
+replaced nor swapped in; when its recipe is outdated, the new OCR is written
+beside it as `<Volume>.<primary generation>.mokuro`, sealed. The swap runs
+under the per-path write lock shared with WebDAV: the new bytes replace the
+bare file atomically, so there is never a moment without a primary, and no
+copy of the old file is kept (on a cloud library the old file goes to the
+provider's trash, or its version history). The old file's `ocr_sidecars`
 row is dropped, the new file gets its own, and an `ocr_sidecar_upgraded`
 audit event is written; `volume_uuid` is preserved. Layers 0.7.0-beta.3 kept
 of replaced files (stamped `ocr_engine.upgraded_from_primary`) are removed at

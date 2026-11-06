@@ -50,6 +50,165 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/app/api/jobs/{id}/events", get(job_events))
         .route("/app/api/jobs/{id}/cancel", post(job_cancel))
         .route("/app/api/handoff", post(handoff))
+        .route("/app/api/library/storage", get(library_storage))
+        .route(
+            "/app/api/library/connect",
+            get(library_connect_status).post(library_connect),
+        )
+        .route(
+            "/app/api/library/connect/cancel",
+            post(library_connect_cancel),
+        )
+        .route(
+            "/app/api/library/connect/account",
+            post(library_connect_account),
+        )
+        .route(
+            "/app/api/library/connect/paste",
+            post(library_connect_paste),
+        )
+        .route(
+            "/app/api/library/connect/create",
+            post(library_connect_create),
+        )
+        .route("/app/api/library/disconnect", post(library_disconnect))
+}
+
+// ---- the library's storage (`library connect` / `disconnect`, 0.8 §7) ----------------
+//
+// The running server's Connect and Disconnect, for `mokuro-bunko library connect` and
+// `library disconnect` (they ask here when a server runs on this storage, through
+// `docker exec` too). The control token guards them like every other route; the
+// answers carry the sign-in's code and state, never a secret.
+
+// A refusal is the handler's whole answer.
+#[allow(clippy::result_large_err)]
+fn storage_of(state: &AppState) -> Result<Arc<bunko_server::storage::StorageControl>, Response> {
+    state.storage.clone().ok_or_else(|| {
+        fail(
+            StatusCode::NOT_FOUND,
+            "no library server runs on this control port",
+        )
+    })
+}
+
+async fn library_storage(State(state): S) -> Response {
+    let s = match storage_of(&state) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    match blocking(move || s.status_json()).await {
+        Some(v) => ok(v),
+        None => fail(StatusCode::INTERNAL_SERVER_ERROR, "status failed"),
+    }
+}
+
+/// `POST /app/api/library/connect` (a `ConnectRequest`): the flow the body names (the
+/// CLI decides: browser, code or pasted address); the server restarts onto the
+/// library once connected.
+async fn library_connect(State(state): S, Json(body): Json<Value>) -> Response {
+    let s = match storage_of(&state) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    let req: bunko_server::storage::connect::ConnectRequest = match serde_json::from_value(body) {
+        Ok(r) => r,
+        Err(e) => return bad(format!("invalid connect request: {e}")),
+    };
+    tracing::info!(
+        "[STORAGE] library connect {} (local control API)",
+        req.provider
+    );
+    // This listener is loopback only: the terminal shares the machine with the
+    // server's loopback redirect, and opens the browser itself.
+    let origin = bunko_server::storage::connect::RequestOrigin::cli();
+    match s.connect(req, origin, true) {
+        Ok(st) => ok(st.as_json()),
+        Err(e) => bad(e),
+    }
+}
+
+async fn library_connect_status(State(state): S) -> Response {
+    match storage_of(&state) {
+        Ok(s) => ok(s.connector().status().as_json()),
+        Err(r) => r,
+    }
+}
+
+async fn library_connect_cancel(State(state): S) -> Response {
+    match storage_of(&state) {
+        Ok(s) => {
+            s.connector().cancel();
+            ok(s.connector().status().as_json())
+        }
+        Err(r) => r,
+    }
+}
+
+/// `POST /app/api/library/connect/paste` `{url}`: the address the browser ended on
+/// (`library connect` asks for it on the terminal). Never logged.
+async fn library_connect_paste(State(state): S, Json(body): Json<Value>) -> Response {
+    let s = match storage_of(&state) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    let Some(url) = body["url"].as_str() else {
+        return bad("url (the address the browser ended on) is required");
+    };
+    match s.connector().paste(url.to_string()).await {
+        Ok(st) => ok(st.as_json()),
+        Err(e) => bad(e),
+    }
+}
+
+async fn library_connect_account(State(state): S, Json(body): Json<Value>) -> Response {
+    let s = match storage_of(&state) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    let yes = body["use_this_account"].as_bool().unwrap_or(false);
+    match s.decide_account(yes, true).await {
+        Ok(st) => ok(st.as_json()),
+        Err(e) => bad(e),
+    }
+}
+
+/// `POST /app/api/library/connect/create`: "Create it?" after the Check.
+async fn library_connect_create(State(state): S) -> Response {
+    let s = match storage_of(&state) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    match s.connector().create_folder().await {
+        Ok(check) => ok(json!({"check": check})),
+        Err(e) => bad(e),
+    }
+}
+
+/// `POST /app/api/library/disconnect` `{mode, wait_s?, folder?}`: 409 with `owed` when
+/// results are still owed.
+async fn library_disconnect(State(state): S, Json(body): Json<Value>) -> Response {
+    use bunko_server::storage::disconnect::{DisconnectError, DisconnectMode};
+    let s = match storage_of(&state) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    let mode = match DisconnectMode::from_json(&body) {
+        Ok(m) => m,
+        Err(e) => return bad(e),
+    };
+    let s2 = s.clone();
+    match blocking(move || s2.disconnect(&mode)).await {
+        Some(Ok(report)) => {
+            let restarting = s.restart_soon();
+            ok(json!({"report": report, "restarting": restarting}))
+        }
+        Some(Err(e @ DisconnectError::Owed(_))) => {
+            (StatusCode::CONFLICT, Json(e.as_json())).into_response()
+        }
+        Some(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, Json(e.as_json())).into_response(),
+        None => fail(StatusCode::INTERNAL_SERVER_ERROR, "disconnect failed"),
+    }
 }
 
 fn fail(status: StatusCode, msg: impl std::fmt::Display) -> Response {
@@ -296,11 +455,21 @@ async fn ocr_request(State(state): S, Json(b): Json<OcrRequestBody>) -> Response
 /// tray running on a desktop, the tray is started (it starts the role). None: no tray
 /// (the lite build, or headless): the caller starts the role itself.
 async fn hand_to_tray(state: &AppState, role: Role) -> Option<String> {
-    let exe = state.exe.clone();
-    let cfg = service_config(state, role);
     let log = paths::server_storage(&state.config_path)
         .join("logs")
         .join("tray-start-console.log");
+    hand_to_tray_at(state.exe.clone(), role, service_config(state, role), log).await
+}
+
+/// Add `role` (run with its config `cfg`) to the tray's managed list and make sure a
+/// tray runs it: a note on what happened, or None when no tray will (headless, lite
+/// build, no tray.json). `log`: where a tray started here writes its console.
+pub(crate) async fn hand_to_tray_at(
+    exe: PathBuf,
+    role: Role,
+    cfg: PathBuf,
+    log: PathBuf,
+) -> Option<String> {
     blocking(move || -> Option<String> {
         let cmd = tray::tray_command(&exe)?;
         let path = tray::config_path(&exe);
@@ -609,82 +778,99 @@ async fn processor_config_set(State(state): S, Json(form): Json<ProcessorForm>) 
 async fn processor_start(State(state): S) -> Response {
     #[cfg(feature = "ocr")]
     {
-        let cfg = state.processor_config.clone();
-        let loaded = match bunko_processor::load_processor_config(&cfg) {
-            Ok(c) => c,
-            Err(e) => return bad(format!("{}: {e}", cfg.display())),
-        };
-        let storage = loaded.processor.storage.clone();
-        let before = bunko_processor::status::read_status(&storage)
-            .get("updated_at")
-            .and_then(Value::as_f64)
-            .unwrap_or(0.0);
-        let log = spawn::stdout_log(&storage, "processor-console.log");
-        // A running tray takes it over (tray.json); it starts it within seconds.
-        let tray = hand_to_tray(&state, Role::Processor).await;
-        if let Some(note) = &tray {
-            let end = tokio::time::Instant::now() + Duration::from_secs(25);
-            while tokio::time::Instant::now() < end {
-                if let Some(f) = bunko_control::read_control_file(&storage)
-                    && spawn::pid_alive(f.pid)
-                {
-                    let status = bunko_processor::status::read_status(&storage);
-                    return ok(json!({"pid": f.pid, "by_tray": true, "note": note,
-                        "state": status.get("state").and_then(Value::as_str).unwrap_or("starting"),
-                        "status": status, "running": true, "log": log, "output": ""}));
-                }
-                tokio::time::sleep(Duration::from_millis(500)).await;
-            }
+        let log = paths::server_storage(&state.config_path)
+            .join("logs")
+            .join("tray-start-console.log");
+        match start_processor(&state.exe, &state.processor_config, Some(log)).await {
+            Ok(v) => ok(v),
+            Err(e) => bad(e),
         }
-        let args = vec![
-            "processor".to_string(),
-            "serve".to_string(),
-            "--config".to_string(),
-            cfg.display().to_string(),
-        ];
-        let envs: &[(&str, &str)] = if tray.is_some() {
-            &[(bunko_control::MANAGED_ENV, "1")]
-        } else {
-            &[]
-        };
-        let pid = match spawn::spawn_detached_env(&state.exe, &args, &log, envs) {
-            Ok(p) => p,
-            Err(e) => return bad(format!("could not start the processor: {e}")),
-        };
-        let end = tokio::time::Instant::now() + Duration::from_secs(60);
-        let mut status = serde_json::Map::new();
-        while tokio::time::Instant::now() < end {
-            status = bunko_processor::status::read_status(&storage);
-            let fresh = status
-                .get("updated_at")
-                .and_then(Value::as_f64)
-                .is_some_and(|t| t > before);
-            if fresh && status.get("state").and_then(Value::as_str) != Some("stopped") {
-                break;
-            }
-            if !spawn::pid_alive(pid) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
-        let state_s = status
-            .get("state")
-            .and_then(Value::as_str)
-            .unwrap_or("starting")
-            .to_string();
-        let output = if state_s == "connected" {
-            String::new()
-        } else {
-            spawn::tail_file(&log, 30).unwrap_or_default()
-        };
-        ok(json!({"pid": pid, "state": state_s, "status": status,
-                  "running": spawn::pid_alive(pid), "log": log, "output": output}))
     }
     #[cfg(not(feature = "ocr"))]
     {
         let _ = state;
         lite()
     }
+}
+
+/// Start `processor serve --config <cfg>`: handed to the tray when `tray_log` is set
+/// and a tray takes it (`tray_log`: where a tray started here logs), else detached in
+/// the background. Waits for its first status; `Err` when it cannot start at all.
+#[cfg(feature = "ocr")]
+pub(crate) async fn start_processor(
+    exe: &Path,
+    cfg: &Path,
+    tray_log: Option<PathBuf>,
+) -> Result<Value, String> {
+    let cfg = cfg.to_path_buf();
+    let loaded = bunko_processor::load_processor_config(&cfg)
+        .map_err(|e| format!("{}: {e}", cfg.display()))?;
+    let storage = loaded.processor.storage.clone();
+    let before = bunko_processor::status::read_status(&storage)
+        .get("updated_at")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    let log = spawn::stdout_log(&storage, "processor-console.log");
+    // A running tray takes it over (tray.json); it starts it within seconds.
+    let tray = match tray_log {
+        Some(tl) => hand_to_tray_at(exe.to_path_buf(), Role::Processor, cfg.clone(), tl).await,
+        None => None,
+    };
+    if let Some(note) = &tray {
+        let end = tokio::time::Instant::now() + Duration::from_secs(25);
+        while tokio::time::Instant::now() < end {
+            if let Some(f) = bunko_control::read_control_file(&storage)
+                && spawn::pid_alive(f.pid)
+            {
+                let status = bunko_processor::status::read_status(&storage);
+                return Ok(json!({"pid": f.pid, "by_tray": true, "note": note,
+                    "state": status.get("state").and_then(Value::as_str).unwrap_or("starting"),
+                    "status": status, "running": true, "log": log, "output": ""}));
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+    let args = vec![
+        "processor".to_string(),
+        "serve".to_string(),
+        "--config".to_string(),
+        cfg.display().to_string(),
+    ];
+    let envs: &[(&str, &str)] = if tray.is_some() {
+        &[(bunko_control::MANAGED_ENV, "1")]
+    } else {
+        &[]
+    };
+    let pid = spawn::spawn_detached_env(exe, &args, &log, envs)
+        .map_err(|e| format!("could not start the processor: {e}"))?;
+    let end = tokio::time::Instant::now() + Duration::from_secs(60);
+    let mut status = serde_json::Map::new();
+    while tokio::time::Instant::now() < end {
+        status = bunko_processor::status::read_status(&storage);
+        let fresh = status
+            .get("updated_at")
+            .and_then(Value::as_f64)
+            .is_some_and(|t| t > before);
+        if fresh && status.get("state").and_then(Value::as_str) != Some("stopped") {
+            break;
+        }
+        if !spawn::pid_alive(pid) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let state_s = status
+        .get("state")
+        .and_then(Value::as_str)
+        .unwrap_or("starting")
+        .to_string();
+    let output = if state_s == "connected" {
+        String::new()
+    } else {
+        spawn::tail_file(&log, 30).unwrap_or_default()
+    };
+    Ok(json!({"pid": pid, "state": state_s, "status": status,
+              "running": spawn::pid_alive(pid), "log": log, "output": output}))
 }
 
 async fn processor_status(State(state): S) -> Response {

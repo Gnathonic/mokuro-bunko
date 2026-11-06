@@ -159,6 +159,8 @@ pub fn cpu_label(cpu: &str, cores: Option<u32>) -> String {
 /// `_physical_cores()`: distinct (physical id, core id) pairs of `/proc/cpuinfo`, else
 /// the logical count — cores, not threads, what a pool width competes for.
 pub fn physical_cores() -> Option<u32> {
+    // unmounted: procfs, not the library.
+    #[allow(clippy::disallowed_methods)]
     let text = std::fs::read_to_string("/proc/cpuinfo").unwrap_or_default();
     let mut pairs = std::collections::BTreeSet::new();
     let mut physical: Option<String> = None;
@@ -184,7 +186,7 @@ pub fn physical_cores() -> Option<u32> {
 fn has_archive(library: &Path) -> bool {
     let mut stack = vec![library.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(&dir) else {
+        let Ok(rd) = bunko_store::fs::read_dir(&dir) else {
             continue;
         };
         for entry in rd.flatten() {
@@ -250,6 +252,8 @@ pub fn build_sample(library: &Path, out: &Path, wanted: i64) -> Result<(i64, i64
     let ordered = if plain.is_empty() { newer } else { plain };
     let wanted = wanted.clamp(MIN_SAMPLE_PAGES, MAX_SAMPLE_PAGES);
     let per_archive = 4.max(((wanted as f64) / (ordered.len() as f64)).ceil() as i64);
+    // unmounted: the benchmark sample lives in the `.processing` spool.
+    #[allow(clippy::disallowed_methods)]
     let file =
         std::fs::File::create(out).map_err(|e| format!("could not write the sample: {e}"))?;
     let mut zip = zip::ZipWriter::new(std::io::BufWriter::new(file));
@@ -557,10 +561,16 @@ impl Scheduler {
             .map(|(k, v)| (k.clone(), json!(v)))
             .collect();
         if machine == LOCAL {
-            if !self.settings.local_processing || !self.machines.contains_key(LOCAL) {
+            if !self.settings.local_processing {
                 return Err(bench_error(
                     400,
                     "this server runs no OCR of its own (ocr.local_processing is off); choose a connected processor to benchmark on",
+                ));
+            }
+            if !self.machines.contains_key(LOCAL) {
+                return Err(bench_error(
+                    409,
+                    "this server's OCR has not started yet; benchmark once it is running",
                 ));
             }
             let refused = self
@@ -901,6 +911,8 @@ impl Scheduler {
         let library = self.library();
         let out = self.sample_path(&run.bid);
         let (bid, pages, machine) = (run.bid.clone(), run.pages, machine.to_string());
+        // unmounted: the benchmark sample lives in the `.processing` spool.
+        #[allow(clippy::disallowed_methods)]
         self.run_background(Box::new(move || {
             if let Some(dir) = out.parent() {
                 let _ = std::fs::create_dir_all(dir);
@@ -932,6 +944,8 @@ impl Scheduler {
             .is_some_and(|r| r.bid == bid && r.building);
         if !is_head {
             // Cancelled (or the machine left) while it was being packed.
+            // unmounted: the benchmark sample lives in the `.processing` spool.
+            #[allow(clippy::disallowed_methods)]
             let _ = std::fs::remove_file(self.sample_path(bid));
             return;
         }
@@ -1019,6 +1033,8 @@ impl Scheduler {
             self.bench.order.remove(i);
         }
         if !run.building {
+            // unmounted: the benchmark sample lives in the `.processing` spool.
+            #[allow(clippy::disallowed_methods)]
             let _ = std::fs::remove_file(self.sample_path(&run.bid));
         }
         let finished_at = self.now_iso();
@@ -1458,6 +1474,8 @@ impl Scheduler {
         self.bench.order.retain(|(_, m)| m != machine);
         let finished_at = self.now_iso();
         for mut run in line {
+            // unmounted: the benchmark sample lives in the `.processing` spool.
+            #[allow(clippy::disallowed_methods)]
             let _ = std::fs::remove_file(self.sample_path(&run.bid));
             run.data.insert("state".into(), json!("failed"));
             run.data.insert("finished_at".into(), json!(finished_at));
@@ -1711,6 +1729,7 @@ mod tests {
     }
 
     /// A stored `.cbz` of `pages` members `NNN.<suffix>`.
+    #[allow(clippy::disallowed_methods)] // fixtures are written with std::fs
     fn cbz_of(path: &Path, pages: usize, suffix: &str) {
         use std::io::Write;
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -1725,6 +1744,7 @@ mod tests {
         z.finish().unwrap();
     }
 
+    #[allow(clippy::disallowed_methods)] // the sample is read back with std::fs
     fn sample_suffixes(sample: &Path) -> Vec<String> {
         let mut zip = zip::ZipArchive::new(std::fs::File::open(sample).unwrap()).unwrap();
         let mut out: Vec<String> = (0..zip.len())

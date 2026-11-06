@@ -1,11 +1,62 @@
 //! MOVE/COPY (incl. the fixed destructive quirks 14.1–14.3), LOCK/UNLOCK and PROPPATCH.
 
+// Fixtures are set up and checked with std::fs on purpose.
+#![allow(clippy::disallowed_methods)]
+
 mod common;
 
 use common::*;
 
 fn dest(path: &str) -> String {
     format!("http://localhost:8080{path}")
+}
+
+/// An archive's MOVE tells the hooks before the rename (`archive_moving`) and keeps the
+/// guard they gave until `archive_moved` ran; a rename that fails drops it without the
+/// hook. Another file's MOVE tells nothing of the kind.
+#[tokio::test]
+async fn an_archive_move_is_announced_before_the_rename_and_over_after_its_hook() {
+    let env = Env::new();
+    for name in ["a.cbz", "b.cbz", "a.mokuro"] {
+        std::fs::write(env.lib(name), b"x").unwrap();
+    }
+    let mv = |from: &'static str, to: &'static str| {
+        let env = &env;
+        async move {
+            let d = dest(&format!("/mokuro-reader/{to}"));
+            env.req(
+                Some("admin"),
+                "MOVE",
+                &format!("/mokuro-reader/{from}"),
+                &[("destination", &d)],
+                b"",
+            )
+            .await
+            .code()
+        }
+    };
+    assert_eq!(mv("a.cbz", "c.cbz").await, 204);
+    assert_eq!(
+        env.hooks.moves(),
+        [
+            "moving a.cbz c.cbz",
+            "moved a.cbz c.cbz",
+            "over a.cbz c.cbz"
+        ]
+    );
+    env.hooks.moves.lock().clear();
+    assert_eq!(mv("a.mokuro", "c.mokuro").await, 204);
+    assert!(env.hooks.moves().is_empty(), "{:?}", env.hooks.moves());
+
+    env.hooks
+        .fail_moves
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_ne!(mv("b.cbz", "d.cbz").await, 204);
+    assert_eq!(
+        env.hooks.moves(),
+        ["moving b.cbz d.cbz", "over b.cbz d.cbz"]
+    );
+    assert!(!env.lib("d.cbz").exists());
 }
 
 #[tokio::test]

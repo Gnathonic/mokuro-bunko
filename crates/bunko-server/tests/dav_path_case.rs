@@ -7,6 +7,9 @@
 //! (an upload spelled in another case), and the catalog then showed only the stray folder's
 //! one volume.
 
+// Fixtures are set up and checked with std::fs on purpose.
+#![allow(clippy::disallowed_methods)]
+
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 

@@ -781,12 +781,24 @@ longer set it), else the loader scans `<storage>/backends/` (bunko-engines
 then a processor's fallback directories, then `<exe dir>/backends` (packs shipped next
 to the executable: a `BAKE_PACK=1` image).
 
-**A pack is locked to its release.** `bunko_version` (written by `xtask torch-pack` from
-the workspace version) must equal the loading binary's version: the loader refuses any
-other release's pack (`the backend pack is from mokuro-bunko A, this is B: each release
-runs only its own pack; run 'mokuro-bunko install-ocr'`) before it checks the ABI, and
-`install-ocr` installs only the pack listed in its own release's `release.json` (an
-installed pack of another release does not count as installed). A pack without
+**A build opens the packs of the releases that build the same pack.** `bunko_version`
+(written by `xtask torch-pack` and `xtask vulkan-pack` from the workspace version) must lie
+between `bunko_torch::abi::OLDEST_PACK_RELEASE` and the loading binary's version: the
+loader refuses an older pack, or one newer than itself (`the backend pack is from
+mokuro-bunko A, this is B, which opens the packs of O to B; run 'mokuro-bunko
+install-ocr'`), before it checks the ABI. `install-ocr` downloads the pack listed in its
+own release's `release.json`, and counts an installed pack of any release it opens as
+installed, so an update between such releases downloads nothing. A pack is compiled from
+bunko-torch, bunko-vlm, bunko-vulkan and bunko-ncnn, with what `torch_specs.rs`,
+`torch_pack.rs` and `vulkan_pack.rs` pin (libtorch, wheels, ncnn, the layout). bunko-ocr
+is no part of a pack's cdylib (its code, page decoding included, runs in the host); it
+counts as a pack input for its model manifests: `torch_models.json`, which `xtask
+torch-pack` reads, and `vulkan_models.json`, which bunko-vulkan's tests check. 0.7.4 to
+0.8.0 build the same packs (the packs of 0.7.1 to 0.7.3 lack 0.7.4's fix for a libtorch
+recognizer's leaked weights, so 0.8 refuses them). When a change to those is one an older
+pack lacks, `OLDEST_PACK_RELEASE` moves to the release being made. bunko-torch's test
+`pack_inputs` fingerprints those files and fails on any change until it is decided
+either way (move the floor, or record the new fingerprint). A pack without
 `bunko_version` (built outside a release) is a development pack and any build opens it.
 `doctor`, `/control/status` (`backend.pack`) and the tray name the pack as
 `<variant> for <release> (<dir name>)`. The `release.json` entry also carries the pack's
@@ -874,7 +886,7 @@ with a `processor.yaml` and no library configuration.
 `--if-needed` (what `serve` and `processor serve` run in the background, §2): nothing when
 `MOKURO_OCR_AUTO_INSTALL=false`, when local OCR is off (`ocr.backend: skip`,
 `ocr.local_processing: false`), when no enabled generation needs the pack (ppocr-manga
-alone) or when a pack of this release that serves the chosen
+alone) or when a pack this release opens (below) that serves the chosen
 variant is installed (for `cpu`, an installed GPU pack counts: it runs on the CPU too, so
 a container started once without its GPU downloads nothing); otherwise the full install
 above, after which the packs it replaces in the install directory (another variant,

@@ -16,8 +16,10 @@
 //! computer answers a page asking for it; `POST /setup/code` checks it (constant time;
 //! [`ATTEMPTS_PER_IP`] tries per client address, one more every [`REFILL`]; after
 //! [`ROTATE_AFTER`] wrong codes from everyone within a minute the code is replaced and
-//! the new one logged, so nobody can lock the owner out) and answers a random setup-session cookie ([`SESSION_COOKIE`], `Path=/setup`,
-//! `HttpOnly; SameSite=Strict`, one hour), which the unchanged wizard page and its
+//! the new one logged, so nobody can lock the owner out) and answers a random
+//! setup-session cookie ([`SESSION_COOKIE`]; no `Path`, as the browser's default,
+//! `<mount>/setup`, also holds under a sub-path mount; `HttpOnly; SameSite=Strict`,
+//! one hour), which the unchanged wizard page and its
 //! `/setup/api/*` calls carry. A script may send the code as `X-Setup-Code` instead
 //! (same limits). The code and every session die as soon as an admin exists (the wizard,
 //! `admin add-user`). The code is never written to a response.
@@ -27,7 +29,6 @@ use super::util::{
     Client, JsonBody, blocking, db_failed, json_error, json_response, read_body,
     serve_page_json_errors,
 };
-use crate::http::client_ip::is_loopback;
 use axum::Router;
 use axum::body::Body;
 use axum::extract::{Path, State};
@@ -45,6 +46,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
+
+mod processor;
+mod storage;
 
 /// The header a script may send the setup code in.
 pub const SETUP_CODE_HEADER: &str = "x-setup-code";
@@ -313,6 +317,8 @@ pub fn normalize_code(input: &str) -> String {
 }
 
 /// Delete the 0.7 betas' `<storage>/.setup-token` (it no longer opens anything).
+// unmounted: a file in the storage dir, beside the library.
+#[allow(clippy::disallowed_methods)]
 pub fn remove_legacy_token(layout: &StorageLayout) {
     let path = layout.base.join(LEGACY_TOKEN_FILE);
     match std::fs::remove_file(&path) {
@@ -344,14 +350,7 @@ fn session_cookie(headers: &HeaderMap) -> Option<String> {
         })
 }
 
-/// 0.5.2 `_is_local_request`: loopback peer, and a loopback client address if proxy
-/// headers name a different one. An unknown peer (no `ConnectInfo`) is not local.
-fn is_local(client: &Client) -> bool {
-    if !client.peer_known || !client.peer.is_loopback() {
-        return false;
-    }
-    client.ip == client.peer.to_string() || is_loopback(&client.ip)
-}
+use super::local::is_local;
 
 /// May this request run setup: local, a live setup session, or the code in
 /// `X-Setup-Code` (which counts as an attempt).
@@ -412,6 +411,8 @@ async fn gate(deps: &AccountsDeps, client: &Client, parts: &Parts) -> Option<Res
 
 pub fn routes() -> Router<AccountsDeps> {
     Router::new()
+        .merge(storage::routes())
+        .merge(processor::routes())
         .route("/setup/api/status", get(status))
         .route("/setup/api/options", get(options))
         .route("/setup/api/complete", post(complete))
@@ -455,9 +456,18 @@ async fn options(State(d): State<AccountsDeps>, client: Client, parts: Parts) ->
             .unwrap_or(Value::Null),
         None => Value::Null,
     };
-    let (registration, ssl) = {
+    let (registration, ssl, serve_readers, library) = {
         let c = d.core.config.read();
-        (c.registration.mode.clone(), c.ssl.enabled)
+        (
+            c.registration.mode.clone(),
+            c.ssl.enabled,
+            c.server.serve_readers,
+            json!({
+                "backend": c.storage.library.backend.as_str(),
+                "folder": c.storage.library.folder,
+                "local_folder": c.storage.layout().library(),
+            }),
+        )
     };
     json_response(
         200,
@@ -465,10 +475,17 @@ async fn options(State(d): State<AccountsDeps>, client: Client, parts: Parts) ->
             "ocr": ocr,
             // Certificate files can be named from this machine only.
             "local": is_local(&client),
+            // The server listens on this computer only: with no readers, the admin
+            // password is optional.
+            "local_only": super::local::local_only(&d.core),
             "pinned": {
                 "registration": env_pin("MOKURO_REGISTRATION_MODE").map(|_| registration),
                 "ssl": env_pin("MOKURO_SSL_ENABLED").map(|_| ssl),
+                "serve_readers": env_pin("MOKURO_SERVE_READERS").map(|_| serve_readers),
+                "backend": env_pin("MOKURO_LIBRARY_BACKEND"),
             },
+            // The storage step (0.8): where the library lives now.
+            "library": library,
         }),
     )
 }
@@ -522,8 +539,11 @@ async fn code(State(d): State<AccountsDeps>, client: Client, body: Body) -> Resp
     let to_setup = || {
         let mut r = Response::new(Body::empty());
         *r.status_mut() = StatusCode::SEE_OTHER;
-        r.headers_mut()
-            .insert(header::LOCATION, HeaderValue::from_static("/setup"));
+        // Relative to `/setup/code`: stays under a sub-path mount.
+        let to = crate::http::base_href::relative_to_root("/setup/code", "setup");
+        if let Ok(v) = HeaderValue::from_str(&to) {
+            r.headers_mut().insert(header::LOCATION, v);
+        }
         r
     };
     match needs_setup(&d).await {
@@ -556,7 +576,7 @@ async fn code(State(d): State<AccountsDeps>, client: Client, body: Body) -> Resp
                 ""
             };
             let cookie = format!(
-                "{SESSION_COOKIE}={id}; Path=/setup; Max-Age={}; HttpOnly; SameSite=Strict{secure}",
+                "{SESSION_COOKIE}={id}; Max-Age={}; HttpOnly; SameSite=Strict{secure}",
                 SESSION_TTL.as_secs()
             );
             let mut r = to_setup();
@@ -612,8 +632,8 @@ fn code_page(status: StatusCode, message: Option<String>, has_code: bool) -> Res
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Setup code - Mokuro Bunko</title>
-    <link rel="stylesheet" href="/_static/shared.css">
-    <link rel="stylesheet" href="/setup/setup.css">
+    <link rel="stylesheet" href="_static/shared.css">
+    <link rel="stylesheet" href="setup/setup.css">
 </head>
 <body>
     <div class="setup-container">
@@ -622,7 +642,7 @@ fn code_page(status: StatusCode, message: Option<String>, has_code: bool) -> Res
             <p class="setup-description">To create the admin account from another computer, enter the one-time setup code.
             It is in the server log, printed at startup in a line beginning <code>First run:</code>
             (for Docker: <code>docker logs &lt;container&gt;</code>; on Unraid: the container's log).</p>
-            <form method="post" action="/setup/code" autocomplete="off">
+            <form method="post" action="setup/code" autocomplete="off">
                 <div class="form-group">
                     <label for="setup-code" class="form-label">Setup code</label>
                     <input type="text" id="setup-code" name="code" class="form-input" required autofocus
@@ -710,12 +730,23 @@ async fn complete(
     if let Some(msg) = validate_username(&username) {
         return json_error(400, msg);
     }
-    if let Some(msg) = validate_password(&password) {
+    // A server only this computer reaches, with no readers, may have an admin with no
+    // password: it signs in from this computer only (`super::local`).
+    let readers = plan
+        .readers
+        .map_or_else(|| d.core.config.read().server.serve_readers, |(r, _)| r);
+    let passwordless =
+        password.is_empty() && !readers && is_local(&client) && super::local::local_only(&d.core);
+    if !passwordless && let Some(msg) = validate_password(&password) {
         return json_error(400, msg);
     }
     let db = d.db.clone();
     match blocking(move || {
-        db.create_user(&username, &password, Role::Admin, UserStatus::Active, "")
+        if passwordless {
+            db.create_user_without_password(&username, Role::Admin, UserStatus::Active, "")
+        } else {
+            db.create_user(&username, &password, Role::Admin, UserStatus::Active, "")
+        }
     })
     .await
     {
@@ -728,14 +759,36 @@ async fn complete(
     }
     // The admin exists: the code and the sessions end now.
     d.setup.mark_complete();
+    // Lite build (no OCR here): an account for the first processor to pair with.
+    let mut processor = Value::Null;
+    if plan.processor {
+        let db = d.db.clone();
+        match blocking(move || create_processor_account(&db)).await {
+            Ok(Ok((name, password))) => {
+                info!("setup: created the processor account '{name}' for the first processor");
+                processor = json!({"username": name, "password": password});
+            }
+            Ok(Err(e)) => warn!("setup: could not create a processor account: {e}"),
+            Err(_) => {}
+        }
+    }
     let mode = data
         .get("registration")
         .and_then(|r| r.get("mode"))
         .and_then(Value::as_str);
+    let admin_name = strip(admin.get("username").and_then(Value::as_str).unwrap_or("")).to_string();
     let applied = {
         let mut c = d.core.config.write();
         if let Some(mode) = mode.filter(|m| VALID_MODES.contains(m)) {
             c.registration.mode = mode.to_string();
+        }
+        if let Some((serve, link)) = plan.readers {
+            if env_pin("MOKURO_SERVE_READERS").is_none() {
+                c.server.serve_readers = serve;
+            }
+            if serve && link && c.is_cloud_library() {
+                c.storage.library.progress_user = Some(admin_name.clone());
+            }
         }
         plan.apply(&mut c)
     };
@@ -762,10 +815,19 @@ async fn complete(
             .await
             .unwrap_or(Value::Null);
     }
-    // HTTPS starts with the next start: restart now (after this answer goes out).
-    let restarting = applied.ssl && d.restart.is_some();
+    // HTTPS, and a library connected in the wizard (a cloud store opens at start),
+    // start with the next start: restart now (after this answer goes out).
+    let storage_restart = d.storage.as_ref().is_some_and(|s| s.restart_pending());
+    let restarting = (applied.ssl || storage_restart) && d.restart.is_some();
     if restarting && let Some(restart) = d.restart.clone() {
-        info!("setup: HTTPS turned on; restarting the server");
+        info!(
+            "setup: {}; restarting the server",
+            if applied.ssl {
+                "HTTPS turned on"
+            } else {
+                "the library was connected"
+            }
+        );
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(800)).await;
             restart();
@@ -779,7 +841,9 @@ async fn complete(
             "notes": applied.notes,
             "ocr": ocr,
             "restarting": restarting,
+            "storage_restart": storage_restart && restarting,
             "https": applied.ssl,
+            "processor": processor,
         }),
     )
 }
@@ -797,6 +861,11 @@ struct SetupPlan {
     /// OCR on this machine, and the backend it prefers (None: leave it).
     ocr: Option<(bool, Option<String>)>,
     access: String,
+    /// "Do readers connect to this Bunko?" and "link my reading progress to the
+    /// cloud" (None: leave both).
+    readers: Option<(bool, bool)>,
+    /// Lite build: make an account for the first processor ("Connect a processor").
+    processor: bool,
 }
 
 /// What [`SetupPlan::apply`] changed.
@@ -891,7 +960,10 @@ impl SetupPlan {
             "files" => {
                 let (cert, key) = (text(ssl, "cert_file"), text(ssl, "key_file"));
                 for (label, p) in [("certificate", &cert), ("private key", &key)] {
-                    if p.is_empty() || !std::path::Path::new(p).is_file() {
+                    // unmounted: TLS certificate and key files (config).
+                    #[allow(clippy::disallowed_methods)]
+                    let present = !p.is_empty() && std::path::Path::new(p).is_file();
+                    if !present {
                         return Err(format!(
                             "HTTPS: the {label} file {p} does not exist on the server"
                         ));
@@ -926,6 +998,26 @@ impl SetupPlan {
             };
             plan.ocr = Some((on, backend));
         }
+        match data.get("library") {
+            None | Some(Value::Null) => {}
+            Some(Value::Object(l)) => {
+                let serve = match l.get("serve_readers") {
+                    Some(Value::Bool(b)) => *b,
+                    _ => return Err("library.serve_readers: true or false".into()),
+                };
+                let link = l
+                    .get("link_progress")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                plan.readers = Some((serve, link));
+            }
+            Some(_) => return Err("library: an object".into()),
+        }
+        plan.processor = data
+            .get("processor")
+            .and_then(|p| p.get("create"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         Ok(plan)
     }
 
@@ -970,9 +1062,60 @@ impl SetupPlan {
     }
 }
 
+/// A processor account for the lite build's "Connect a processor" step: `processor`
+/// (or `processor-2`, ...) with a random password, shown once in the wizard.
+fn create_processor_account(db: &Database) -> Result<(String, String), DbError> {
+    use base64::Engine as _;
+    use rand::RngCore as _;
+    let mut bytes = [0u8; 18];
+    rand::rng().fill_bytes(&mut bytes);
+    let password = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+    // Usernames are unique ignoring ASCII case (`insert_user`), so a `Processor` account
+    // takes `processor` too: compare folded.
+    let taken: std::collections::HashSet<String> = db
+        .list_users(None)?
+        .into_iter()
+        .map(|u| u.username.to_ascii_lowercase())
+        .collect();
+    let name = std::iter::once("processor".to_string())
+        .chain((2..100).map(|n| format!("processor-{n}")))
+        .find(|n| !taken.contains(n))
+        .unwrap_or_else(|| "processor-x".into());
+    db.create_user(&name, &password, Role::Processor, UserStatus::Active, "")?;
+    Ok((name, password))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A name is taken whatever its case (usernames are unique ignoring ASCII case), so
+    /// a `Processor` account moves the picker on to `processor-2` instead of failing.
+    #[test]
+    fn the_processor_name_picker_skips_a_case_variant() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(dir.path().join("bunko.db")).unwrap();
+        db.create_user(
+            "Processor",
+            "a-long-password-1",
+            Role::Registered,
+            UserStatus::Active,
+            "",
+        )
+        .unwrap();
+        let (name, _) = create_processor_account(&db).unwrap();
+        assert_eq!(name, "processor-2");
+        db.create_user(
+            "PROCESSOR-3",
+            "a-long-password-1",
+            Role::Registered,
+            UserStatus::Active,
+            "",
+        )
+        .unwrap();
+        let (name, _) = create_processor_account(&db).unwrap();
+        assert_eq!(name, "processor-4");
+    }
 
     #[test]
     fn cookie_parsing() {

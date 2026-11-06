@@ -20,6 +20,7 @@ mod locks;
 mod methods;
 mod path_case;
 mod paths;
+mod personal;
 mod propfind;
 mod resource;
 mod response;
@@ -33,14 +34,17 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Body;
+use bunko_core::reader_tree;
 use bunko_core::{Role, StorageLayout};
 use http::{HeaderMap, Request, Response, StatusCode};
 
+pub use bunko_core::reader_tree::Caller;
 pub use cache::{CacheConfig, PropfindCache};
-pub use hooks::{AuditEvent, DavHooks, NoHooks, PutFollowUp};
+pub use hooks::{AuditEvent, DavHooks, HookGuard, NoHooks, PutFollowUp};
 pub use path_case::{LibraryPathCanonicalizer, PathCase, fold_name, is_case_sensitive};
+pub use personal::{EDITS_DIR, MAX_LAYER_BYTES, PersonalOverlays};
 pub use upload::{DamageMemory, DigestAlgo, parse_content_digest};
-pub use write_locks::{PathWriteLocks, WriteLockGuard};
+pub use write_locks::{AccountWriteGuard, AccountWriteLocks, PathWriteLocks, WriteLockGuard};
 
 use crate::locks::LockManager;
 use crate::propfind::DeadProps;
@@ -50,7 +54,48 @@ use crate::resource::Roots;
 #[derive(Debug, Clone, Default)]
 pub struct DavConfig {
     pub propfind_cache: CacheConfig,
+    pub history: HistoryLimits,
 }
+
+/// Size limits of an account's reading-history tree (`/mokuro-reader/history`).
+#[derive(Debug, Clone, Copy)]
+pub struct HistoryLimits {
+    /// One file (413 beyond).
+    pub max_file_bytes: u64,
+    /// The account's whole tree (507 beyond).
+    pub max_total_bytes: u64,
+}
+
+impl Default for HistoryLimits {
+    fn default() -> Self {
+        Self {
+            max_file_bytes: reader_tree::HISTORY_MAX_FILE_BYTES,
+            max_total_bytes: reader_tree::HISTORY_MAX_TOTAL_BYTES,
+        }
+    }
+}
+
+/// A refusal of a write, from the server's auth layer: a 403 with `message` as its text
+/// body, and `detail` (when set) as the `detail` of a PUT's verdict.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refusal {
+    pub message: String,
+    pub detail: Option<&'static str>,
+    /// Set when the decision could not be made now (series folder adoption pending, an
+    /// owner lookup failed): a 503 with this `Retry-After` instead, so a client retries
+    /// rather than taking it as a final refusal of the file.
+    pub retry_after: Option<u64>,
+}
+
+/// [`DavContext::ownership_recheck`]: the auth decision made again. Blocking (it lists
+/// a folder and reads the database).
+pub type OwnershipRecheck = Arc<dyn Fn() -> Result<(), Refusal> + Send + Sync>;
+
+/// A response extension the server's auth layer puts on a refusal it answered itself:
+/// the `detail` its PUT verdict carries ([`put_refusal_verdict`]) in place of the
+/// generic one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RefusalDetail(pub &'static str);
 
 /// Who is asking, as the server's auth layer decided (spec §2.3).
 #[derive(Clone)]
@@ -59,6 +104,19 @@ pub struct DavContext {
     /// `users/<username>/`.
     pub username: Option<String>,
     pub role: Role,
+    /// The account owns a cloud library's root: its per-user files are the root's own
+    /// (spec 0.8 §10). Never true for anonymous.
+    pub owns_cloud_root: bool,
+    /// Auth admitted this write only as the caller's own correction layer (D27), from a
+    /// folder listing of its own: the path must still resolve to one when it is
+    /// written, else the write is refused. An archive of the layer's dotted name that
+    /// lands in between makes the path that archive's shared primary.
+    pub personal_only: bool,
+    /// Auth admitted this write by a series owner rule (0.8), decided from a folder
+    /// listing and the database: asked again just before the write lands (a PUT's
+    /// publish, a DELETE's removal), so an archive that arrived meanwhile and governs
+    /// the path now refuses it.
+    pub ownership_recheck: Option<OwnershipRecheck>,
     /// `MOKURO_NGINX_ACCEL=1`: answer library GET/HEAD with `X-Accel-Redirect` (§8.10).
     pub nginx_accel: bool,
     /// The resolved client IP (logging only).
@@ -71,6 +129,9 @@ impl DavContext {
         Self {
             username: None,
             role: Role::Anonymous,
+            owns_cloud_root: false,
+            personal_only: false,
+            ownership_recheck: None,
             nginx_accel: false,
             client_ip: None,
             hooks,
@@ -81,6 +142,9 @@ impl DavContext {
         Self {
             username: Some(username.into()),
             role,
+            owns_cloud_root: false,
+            personal_only: false,
+            ownership_recheck: None,
             nginx_accel: false,
             client_ip: None,
             hooks,
@@ -90,16 +154,36 @@ impl DavContext {
     pub(crate) fn principal(&self) -> &str {
         self.username.as_deref().unwrap_or("")
     }
+
+    /// Who per-user paths resolve for (`None`: anonymous, who has no per-user tree).
+    pub fn caller(&self) -> Option<Caller<'_>> {
+        self.username.as_deref().map(|username| Caller {
+            username,
+            owns_cloud_root: self.owns_cloud_root,
+        })
+    }
 }
 
 pub(crate) struct Inner {
     pub roots: Roots,
     pub write_locks: PathWriteLocks,
+    pub history_writers: AccountWriteLocks,
     pub locks: LockManager,
     pub dead: DeadProps,
     pub damage: DamageMemory,
     pub cache: Arc<PropfindCache>,
     pub path_case: PathCase,
+}
+
+impl Inner {
+    /// Every account's correction overlays (they follow their volume).
+    pub(crate) fn overlays(&self) -> PersonalOverlays {
+        PersonalOverlays::new(
+            self.roots.library.clone(),
+            self.roots.users.clone(),
+            self.write_locks.clone(),
+        )
+    }
 }
 
 /// The WebDAV handler. Cheap to clone; build one per server.
@@ -121,8 +205,9 @@ impl Dav {
     pub fn new(layout: &StorageLayout, config: DavConfig) -> Result<Dav, DavInitError> {
         layout.ensure_directories()?;
         let roots = Roots {
-            library: std::fs::canonicalize(layout.library())?,
-            users: std::fs::canonicalize(layout.users())?,
+            library: bunko_store::fs::canonicalize(layout.library())?,
+            users: bunko_store::fs::canonicalize(layout.users())?,
+            history: config.history,
         };
         let cache = PropfindCache::new(config.propfind_cache, roots.clone());
         let path_case = PathCase::new(LibraryPathCanonicalizer::new(roots.library.clone(), None));
@@ -130,6 +215,7 @@ impl Dav {
             inner: Arc::new(Inner {
                 roots,
                 write_locks: PathWriteLocks::new(),
+                history_writers: AccountWriteLocks::default(),
                 locks: LockManager::new(),
                 dead: DeadProps::default(),
                 damage: DamageMemory::default(),
@@ -150,19 +236,31 @@ impl Dav {
         &self.inner.cache
     }
 
+    /// Every account's correction overlays, for the hooks of changes made outside DAV
+    /// (a rename, merge or delete in the cloud folder): they follow their volume.
+    pub fn overlays(&self) -> PersonalOverlays {
+        self.inner.overlays()
+    }
+
     /// The per-path write-lock registry shared with non-DAV writers (the metadata compiler
     /// takes it around `series.json`/`catalog.json` writes, spec §8.7).
     pub fn write_locks(&self) -> &PathWriteLocks {
         &self.inner.write_locks
     }
 
-    /// The physical file a virtual path names for `username` (existing or not), or
+    /// The physical file a virtual path names for `caller` (existing or not), or
     /// `None` for virtual/unmapped paths and traversal. For the auth layer's "does this PUT
     /// replace an existing file" check (spec §4.4). Blocking (resolves symlinks).
-    pub fn physical_path(&self, virtual_path: &str, username: Option<&str>) -> Option<PathBuf> {
+    pub fn physical_path(&self, virtual_path: &str, caller: Option<Caller<'_>>) -> Option<PathBuf> {
         match paths::classify(virtual_path) {
-            paths::Target::Progress(name) => self.inner.roots.user_file(username?, name),
-            paths::Target::Library(rel) => paths::resolve_under(&self.inner.roots.library, &rel),
+            paths::Target::Progress(rel) => self.inner.roots.user_path(caller?, &rel),
+            paths::Target::Library(rel) => {
+                let roots = &self.inner.roots;
+                match roots.personal(&rel) {
+                    Some(file) => roots.personal_path(&file.rel, caller?),
+                    None => roots.library_member(&roots.library, &rel),
+                }
+            }
             _ => None,
         }
     }
@@ -230,7 +328,8 @@ pub fn put_gives_verdict(path: &str) -> bool {
 /// a body limit, ...) into the JSON verdict a reader expects (spec §9; in 0.5.2 the upload
 /// middleware wrapped the auth layer). Other headers (`WWW-Authenticate`) are kept. A
 /// response for a path without a verdict, or a success, is returned unchanged; a `.cbz`
-/// PUT always gets `X-Mokuro-Put: verified`.
+/// PUT always gets `X-Mokuro-Put: verified`. A 403 carrying a [`RefusalDetail`] says
+/// why in its verdict's `detail`.
 pub fn put_refusal_verdict(path: &str, resp: Response<Body>) -> Response<Body> {
     methods::put::refusal_verdict(path, resp)
 }
@@ -243,7 +342,7 @@ pub enum LibraryChange {
     Library,
     /// Inside the series folder of this name.
     Series(String),
-    /// Under `thumbnails/`.
+    /// Under `thumbnails/`, or the cloud-root owner's per-user tree.
     Ignore,
 }
 
@@ -255,6 +354,13 @@ pub fn classify_change(library_root: &Path, path: &Path) -> LibraryChange {
         .components()
         .map(|c| c.as_os_str().to_string_lossy().into_owned())
         .collect();
+    // The cloud-root owner's per-user tree (0.8) is never a series or a library change.
+    if parts
+        .first()
+        .is_some_and(|n| reader_tree::is_per_user_root_name(n))
+    {
+        return LibraryChange::Ignore;
+    }
     if parts.len() < 2 {
         return LibraryChange::Library;
     }
@@ -309,6 +415,18 @@ mod tests {
         assert_eq!(
             classify_change(root, Path::new("/elsewhere/S/v.cbz")),
             LibraryChange::Library
+        );
+        assert_eq!(
+            classify_change(root, Path::new("/lib/history/dev/x.events")),
+            LibraryChange::Ignore
+        );
+        assert_eq!(
+            classify_change(root, Path::new("/lib/history")),
+            LibraryChange::Ignore
+        );
+        assert_eq!(
+            classify_change(root, Path::new("/lib/History/v.cbz")),
+            LibraryChange::Series("History".into())
         );
         assert!(is_relevant_change(Path::new("/lib/S/v.mokuro.gz"), false));
         assert!(is_relevant_change(Path::new("/lib/S/v.webp"), false));
