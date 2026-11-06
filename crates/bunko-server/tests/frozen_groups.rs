@@ -515,6 +515,30 @@ async fn background_passes(env: &Env) {
     assert_eq!(sweep.adopted, 0, "{sweep:?}");
     // The compile (series files, the catalog, retiring stale ones).
     env.services.library.recompile_all_now().await;
+    // Startup adoption of series folder owners: a series whose folder is a member of a
+    // group (`Kingdom/`, bob's; `kingdom/`, alice's) gets none, as a mixed one gets
+    // none. `Free/` and `T/` (bob's only, no member folders) get theirs; `S/` is mixed.
+    let db = &env.services.db;
+    db.with_writer_connection(|c| c.execute("DELETE FROM series_folder_adoption", []))
+        .unwrap();
+    assert_eq!(
+        bunko_server::library::adopt_series_folder_owners(db, &library),
+        Some(bunko_server::library::FolderAdoption {
+            owned: 2,
+            unowned: 2
+        })
+    );
+    for folder in ["Kingdom", "kingdom", "S"] {
+        assert_eq!(db.series_folder_owner(folder).unwrap(), None, "{folder}");
+    }
+    for folder in ["Free", "T"] {
+        assert_eq!(
+            db.series_folder_owner(folder).unwrap().as_deref(),
+            Some("bob"),
+            "{folder}"
+        );
+        assert!(db.forget_series_folder_owner(folder).unwrap());
+    }
 }
 
 /// The freeze's own refusal ([`bunko_core::fold_groups::Frozen::describe`]): any other

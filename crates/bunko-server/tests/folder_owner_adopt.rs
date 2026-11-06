@@ -243,3 +243,35 @@ async fn adoption_that_cannot_be_done_now_is_tried_again() {
     );
     stop.cancel();
 }
+
+/// A series split across spellings of one folder name (`Kingdom/` alice's, `kingdom/`
+/// bob's; `Straße/` alice's, `STRASSE/` bob's, whose series keys differ but which every
+/// host joins) is a frozen case-variant group where a disk can hold both: adoption
+/// gives it no owner, as it gives a mixed series none. Where the disk keeps one
+/// spelling, both uploads land in the one folder, which is mixed: the same outcome on
+/// every host.
+#[test]
+fn a_series_split_across_spellings_of_its_folder_gets_no_owner() {
+    let lib = Lib::new();
+    let mut second = Vec::new();
+    for (one, other) in [("Kingdom", "kingdom"), ("Stra\u{df}e", "STRASSE")] {
+        lib.upload(&format!("{one}/a.cbz"), "alice");
+        std::fs::create_dir_all(lib.root.join(other)).unwrap();
+        second.push(names_in(&lib.root).contains(&other.to_string()));
+        lib.upload(&format!("{other}/b.cbz"), "bob");
+    }
+    lib.upload("Solo/a.cbz", "alice");
+    let adopted = lib.adopt().unwrap();
+    assert_eq!(adopted.owned, 1, "{second:?}");
+    for folder in ["Kingdom", "kingdom", "Stra\u{df}e", "STRASSE"] {
+        assert_eq!(lib.owner(folder), None, "{folder} ({second:?})");
+    }
+    assert_eq!(lib.owner("Solo").as_deref(), Some("alice"));
+}
+
+fn names_in(dir: &Path) -> Vec<String> {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect()
+}
