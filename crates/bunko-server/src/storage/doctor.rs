@@ -192,10 +192,13 @@ pub fn reserved_series_rows(library: &Path, cloud_folder: Option<&str>) -> Vec<R
 }
 
 /// Names a local library holds in two or more spellings (only a case-sensitive disk can:
-/// made outside Bunko, or by a release before 0.5.3), one Warn row per set. Bunko reaches
-/// one spelling of a name, the byte-smallest; the others are hidden from DAV and the
-/// catalog and never written, moved or deleted, so their volumes are out of reach until
-/// they are merged by hand. Also the hidden names a case-only rename leaves behind when
+/// made outside Bunko, or by a release before 0.5.3), one Warn row per set (a
+/// case-variant group, [`bunko_core::fold_groups`]). Bunko reaches one spelling of a
+/// name, the byte-smallest; the others are hidden from DAV and the catalog. The whole
+/// group is frozen until it is merged by hand: the members, the winner included, the
+/// files rule v1 gives their archives (named in the row) and everything inside a member
+/// folder are never written, moved, deleted or re-keyed, by a client (409) or by Bunko
+/// (no OCR, cover, sweep or adoption). Also the hidden names a case-only rename leaves behind when
 /// it is interrupted between its two steps (`.bunko-case-<token>-<name>`), with the
 /// rename that finishes it. Walks folders only (no file is read). A remote store merges
 /// its own case variants (spec §5.9): not for it.
@@ -266,52 +269,57 @@ pub fn case_variant_rows(library: &Path) -> Vec<Row> {
                     && !(rel.is_empty() && bunko_core::reader_tree::is_per_user_root_name(n))
             })
             .collect();
-        let losers =
-            bunko_library::fsutil::case_losers(&dir, reachable.iter().map(|(n, _)| n.as_str()));
-        if !losers.is_empty() {
-            let mut groups: std::collections::BTreeMap<String, Vec<&(String, bool)>> =
-                std::collections::BTreeMap::new();
-            for entry in &reachable {
-                groups
-                    .entry(bunko_core::sidecar_names::fold(&entry.0))
-                    .or_default()
-                    .push(entry);
-            }
-            for group in groups.values().filter(|g| g.len() > 1) {
-                let Some(winner) = group.iter().find(|(n, _)| !losers.contains(n)) else {
-                    continue;
-                };
-                let shown = |(n, is_dir): &(String, bool)| {
-                    if *is_dir {
-                        let volumes = bunko_library::compiler::archive_names(&dir.join(n)).len();
-                        format!(
-                            "{}/ ({volumes} volume{})",
-                            child(n),
-                            if volumes == 1 { "" } else { "s" }
-                        )
-                    } else {
-                        child(n)
-                    }
-                };
-                let hidden: Vec<String> = group
-                    .iter()
-                    .filter(|(n, _)| losers.contains(n))
-                    .map(|e| shown(e))
-                    .collect();
-                out.push(row(
-                    Verdict::Warn,
-                    "Case variants",
+        let groups = bunko_library::fsutil::fold_groups(
+            &dir,
+            reachable.iter().map(|(n, is_dir)| (n.as_str(), *is_dir)),
+        );
+        let losers = groups.hidden();
+        for group in groups.groups() {
+            let shown = |n: &str| {
+                let is_dir = listed.iter().any(|(m, d)| m == n && *d);
+                if is_dir {
+                    let volumes = bunko_library::compiler::archive_names(&dir.join(n)).len();
                     format!(
-                        "{} is used; hidden until merged: {}",
-                        shown(winner),
-                        hidden.join(", ")
-                    ),
-                    Some(format!(
-                        "Stop Bunko, move each hidden spelling's volumes (an archive with its sidecars) into {}, then rename their database rows (MIGRATING-0.7.md, \"Case variants\").",
-                        dir.join(&winner.0).display()
-                    )),
-                ));
-            }
+                        "{}/ ({volumes} volume{})",
+                        child(n),
+                        if volumes == 1 { "" } else { "s" }
+                    )
+                } else {
+                    child(n)
+                }
+            };
+            let hidden: Vec<String> = group
+                .members
+                .iter()
+                .filter(|n| **n != group.winner)
+                .map(|n| shown(n))
+                .collect();
+            let files = if group.files.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " (with {})",
+                    group
+                        .files
+                        .iter()
+                        .map(|n| child(n))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            };
+            out.push(row(
+                Verdict::Warn,
+                "Case variants",
+                format!(
+                    "{} is used; hidden until merged: {}. Frozen until then{files}: no upload, rename, delete, OCR or cover touches any of them",
+                    shown(&group.winner),
+                    hidden.join(", ")
+                ),
+                Some(format!(
+                    "Stop Bunko, move each hidden spelling's volumes (an archive with its sidecars, cover and layers) into {} (or rename them apart), then rename their database rows and corrections (MIGRATING-0.7.md, \"Library paths are case-insensitive\").",
+                    dir.join(&group.winner).display()
+                )),
+            ));
         }
         for (name, is_dir) in reachable {
             if *is_dir && !losers.contains(name) {

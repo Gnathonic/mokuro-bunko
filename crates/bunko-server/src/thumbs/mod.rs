@@ -22,6 +22,11 @@
 //!   again with `bunko-layout`'s Python-compatible parser (`NaN`/`Infinity`), and a
 //!   lone-surrogate escape (which Python accepts) never gets a file deleted.
 //!
+//! Neither pass enters a frozen case-variant group (`bunko_core::fold_groups`: its
+//! members, the files rule v1 gives their archives, member folders) nor a series
+//! spelled like a reader's per-user name; a cover or marker is written under the
+//! WebDAV write lock of its name.
+//!
 //! **A cloud library** (0.8 §8, D13, D14): covers are made as archives arrive (the
 //! store's change events, plus one walk of its index at start and after a `Rescan`),
 //! never by a periodic walk; there is no corrupt-sidecar sweep (report-only on
@@ -85,9 +90,27 @@ type Busy<'a> = &'a dyn Fn(&Path) -> bool;
 /// DELETE hooks, so a move lands either before the cover is published (no cover) or
 /// after it is recorded (the hook takes it along).
 #[derive(Default)]
-pub struct MadeCovers(Mutex<HashMap<PathBuf, (u64, Instant)>>);
+pub struct MadeCovers(
+    Mutex<HashMap<PathBuf, (u64, Instant)>>,
+    /// The WebDAV write locks (the folded per-name lock a PUT and the OCR install
+    /// take), once the server has set them ([`Thumbnails::set_locks`]).
+    std::sync::OnceLock<crate::ocr::types::PathLocks>,
+);
+
+/// A write lock on a cover or marker name could not be had: a WebDAV write holds it.
+struct NameHeld;
 
 impl MadeCovers {
+    /// The WebDAV write lock on `path` (folded: every spelling of the name), so a cover
+    /// or marker is never written while a client writes that name in any spelling.
+    /// `Ok(None)` when no locks were set (a test, a tool).
+    fn write_lock(&self, path: &Path) -> Result<Option<Box<dyn Send>>, NameHeld> {
+        match self.1.get() {
+            None => Ok(None),
+            Some(locks) => locks.try_lock(path).map(Some).ok_or(NameHeld),
+        }
+    }
+
     /// The record of `cover` is kept under its folder as the disk names it, plus its
     /// name. The cover worker finds archives under the library root as configured; a
     /// WebDAV MOVE or DELETE names them under the root bunko-dav canonicalized. The two
@@ -572,11 +595,20 @@ fn ensure_cover(
                 Some(set) => set
                     .insert(cbz)
                     .map_err(|e| format!("could not record the missing cover: {e}"))?,
-                // Never a marker another archive's listed `.nocover` would be.
+                // Never a marker another archive's listed `.nocover` would be, nor one
+                // in a frozen case-variant group; written under the WebDAV write lock
+                // of its name, the name looked up again under it.
                 None => {
                     if let Some(marker) = bunko_library::sidecar::sibling(cbz, ".nocover") {
-                        fs::File::create(marker)
-                            .map_err(|e| format!("could not write the .nocover marker: {e}"))?;
+                        let Ok(_guard) = made.write_lock(&marker) else {
+                            return Ok(false);
+                        };
+                        if bunko_library::sidecar::sibling(cbz, ".nocover").as_ref()
+                            == Some(&marker)
+                        {
+                            fs::File::create(marker)
+                                .map_err(|e| format!("could not write the .nocover marker: {e}"))?;
+                        }
                     }
                 }
             }
@@ -601,6 +633,7 @@ fn ensure_cover(
         }
         None => {
             if let Some(marker) = bunko_library::sidecar::sibling(cbz, ".nocover")
+                && let Ok(_guard) = made.write_lock(&marker)
                 && fs::exists(&marker)
                 && let Err(e) = fs::remove_file(&marker)
             {
@@ -637,6 +670,7 @@ fn publish_cover_with(
     made: &MadeCovers,
     before_record: &dyn Fn(&Path),
 ) -> Result<bool, String> {
+    let covers = made;
     let mut made = made.0.lock();
     if !fs::exists(cbz) || busy(cbz) {
         return Ok(false);
@@ -648,6 +682,17 @@ fn publish_cover_with(
     let Some(out) = bunko_library::sidecar::sibling(cbz, ".webp") else {
         return Ok(false);
     };
+    // The WebDAV write lock of the cover's name, every spelling, as the OCR install
+    // takes it for a sidecar: a client's PUT of the cover in another spelling cannot
+    // interleave (it would be a second spelling on a case-sensitive disk, or written
+    // over on an insensitive one). Held, the next scan tries again. Under it the name
+    // is looked up again: one listed since is the cover's name.
+    let Ok(_guard) = covers.write_lock(&out) else {
+        return Ok(false);
+    };
+    if bunko_library::sidecar::sibling(cbz, ".webp").as_ref() != Some(&out) {
+        return Ok(false);
+    }
     // A cover written for this archive (a client's, landed meanwhile) stays. A stale
     // one is replaced; on a cloud library only while it is still the version judged
     // stale, so a client's cover landing meanwhile wins there too.
@@ -692,31 +737,24 @@ fn publish_cover_with(
     Ok(true)
 }
 
-/// Every file below `dir`, folders and archives another listed spelling shadows left
-/// out (no cover is made for, or beside, what no request reaches).
-fn walk(dir: &Path, keep: &mut dyn FnMut(&Path)) {
-    let Ok(entries) = fs::read_dir(dir) else {
+/// Every file below `dir`, leaving out what a case-variant group freezes (its members,
+/// the winner included, the files rule v1 gives their archives, everything inside a
+/// member folder: [`bunko_core::fold_groups`]) and, at the library root (`top`), the
+/// per-user names (a cloud progress user's `history/`, a series spelled like one). No
+/// cover is made, no marker written and no sidecar deleted there.
+fn walk(dir: &Path, top: bool, keep: &mut dyn FnMut(&Path)) {
+    let Some((entries, groups)) = bunko_library::fsutil::listed_groups(dir, top) else {
         return;
     };
-    let entries: Vec<_> = entries.flatten().collect();
-    let names: Vec<String> = entries
-        .iter()
-        .filter_map(|e| e.file_name().to_str().map(str::to_string))
-        .collect();
-    let losers = bunko_library::fsutil::case_losers(dir, names.iter().map(String::as_str));
-    for entry in entries {
-        if entry
-            .file_name()
-            .to_str()
-            .is_some_and(|n| losers.contains(n))
-        {
+    for (name, is_dir) in entries {
+        if groups.is_frozen(&name) {
             continue;
         }
-        let path = entry.path();
-        match entry.file_type() {
-            Ok(t) if t.is_dir() => walk(&path, keep),
-            Ok(t) if t.is_file() || t.is_symlink() => keep(&path),
-            _ => {}
+        let path = dir.join(&name);
+        if is_dir {
+            walk(&path, false, keep);
+        } else {
+            keep(&path);
         }
     }
 }
@@ -732,7 +770,7 @@ pub fn thumbnail_candidates(library: &Path) -> Vec<PathBuf> {
 pub fn thumbnail_candidates_with(dir: &Path, nocover: Option<&NoCoverSet>) -> Vec<PathBuf> {
     let library = nocover.map_or(dir, |n| n.library.as_path());
     let mut out = Vec::new();
-    walk(dir, &mut |p| {
+    walk(dir, dir == library, &mut |p| {
         if is_cbz(p)
             && !crate::ocr::types::is_per_user_path(library, p)
             && needs_thumbnail_with(p, nocover)
@@ -852,6 +890,12 @@ impl bunko_dav::DavHooks for Thumbnails {
 }
 
 impl Thumbnails {
+    /// The WebDAV write locks, taken for every cover and `.nocover` marker written (as
+    /// the OCR install takes them for a sidecar). Set once, by the server.
+    pub fn set_locks(&self, locks: crate::ocr::types::PathLocks) {
+        let _ = self.made.1.set(locks);
+    }
+
     /// Forget the `.nocover` record of `cbz` on a cloud library (a case merge trashed
     /// or moved the archive); nothing on a local one, where the marker is a file.
     pub fn forget_nocover(&self, cbz: &Path) {
@@ -1029,6 +1073,11 @@ impl Thumbnails {
                     } else {
                         let mut out = BTreeSet::new();
                         for p in work.paths.iter().chain(&cleared) {
+                            // Nothing in a frozen case-variant group, in any folder on
+                            // the way (the walk below leaves out the rest).
+                            if bunko_library::fsutil::frozen_path(&lib, p).is_some() {
+                                continue;
+                            }
                             if fs::is_dir(p) {
                                 out.extend(thumbnail_candidates_with(p, Some(&n)));
                             } else if needs_thumbnail_with(p, Some(&n)) {
@@ -1156,7 +1205,7 @@ fn check_sidecar_capped(path: &Path, cap: u64) -> SidecarCheck {
 /// ([`bunko_library::sidecar::sibling`]).
 pub fn clear_jxl_nocovers(library: &Path) -> usize {
     let mut marked = Vec::new();
-    walk(library, &mut |p| {
+    walk(library, true, &mut |p| {
         if is_cbz(p)
             && let Some(marker) = bunko_library::sidecar::sibling(p, ".nocover")
             && fs::is_file(&marker)
@@ -1194,7 +1243,7 @@ fn holds_jxl(cbz: &Path) -> bool {
 /// `_remove_corrupt_sidecars`: delete every invalid library sidecar; returns how many.
 pub fn remove_corrupt_sidecars(library: &Path, db: Option<&Database>) -> usize {
     let mut found = Vec::new();
-    walk(library, &mut |p| {
+    walk(library, true, &mut |p| {
         let name = p.to_string_lossy();
         if name.ends_with(".mokuro") || name.ends_with(".mokuro.gz") {
             found.push(p.to_path_buf());
@@ -1322,6 +1371,40 @@ mod tests {
             std::fs::read(cover_path(&vol)).unwrap(),
             b"a client's cover"
         );
+    }
+
+    /// The cover and the `.nocover` marker are written under the WebDAV write lock of
+    /// their name (folded: every spelling), as the OCR install writes a sidecar: while a
+    /// client's write of `v.WEBP` (or `V.NOCOVER`) holds it, nothing is written, and the
+    /// next scan makes it.
+    #[test]
+    fn covers_and_markers_take_the_webdav_write_lock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lib = tmp.path().join("library");
+        let series = lib.join("Series");
+        std::fs::create_dir_all(&series).unwrap();
+        let vol = series.join("V.cbz");
+        cbz(&vol, &[("p.png", &png(500, 700))]);
+        let bad = series.join("W.cbz");
+        cbz(&bad, &[("notes.txt", b"x")]);
+        let locks = bunko_dav::PathWriteLocks::new();
+        let thumbs = Thumbnails::default();
+        thumbs.set_locks(Arc::new(crate::ocr::types::DavLocks(locks.clone())));
+        let stop = CancellationToken::new();
+        {
+            let _cover = locks.try_lock(&series.join("v.WEBP")).unwrap();
+            let _marker = locks.try_lock(&series.join("w.NOCOVER")).unwrap();
+            assert_eq!(thumbs.scan_once(&lib, &stop), 0);
+            let mut names: Vec<String> = std::fs::read_dir(&series)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().into_string().unwrap())
+                .collect();
+            names.sort();
+            assert_eq!(names, ["V.cbz", "W.cbz"]);
+        }
+        assert_eq!(thumbs.scan_once(&lib, &stop), 1);
+        assert!(series.join("V.webp").is_file());
+        assert!(series.join("W.nocover").is_file());
     }
 
     /// `.nocover` describes the archive it was written for: a good archive uploaded

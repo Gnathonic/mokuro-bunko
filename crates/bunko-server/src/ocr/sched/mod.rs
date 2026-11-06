@@ -334,6 +334,9 @@ pub struct Scheduler {
     pub orphan_sweeping: bool,
     /// Numbered `_n` sidecars the last sweep left: not provably Bunko's.
     pub orphans_unproven: u64,
+    /// Numbered `_n` sidecars the last sweep left because their name is listed in
+    /// another spelling, or a case-variant group freezes them.
+    pub orphans_left: u64,
     /// Those, with the stat they were judged at: not read again while unchanged.
     pub orphans_seen: Arc<crate::ocr::orphans::Unproven>,
     pub last_walk_at: Option<f64>,
@@ -429,6 +432,7 @@ impl Scheduler {
             direct_running: false,
             orphan_sweeping: false,
             orphans_unproven: 0,
+            orphans_left: 0,
             orphans_seen: Arc::default(),
             last_walk_at: None,
             walks: 0,
@@ -833,6 +837,13 @@ impl Scheduler {
             ));
         }
         self.orphans_unproven = report.unproven;
+        if report.left > 0 && report.left != self.orphans_left {
+            self.log(format!(
+                "Left {} numbered OCR file(s) (<volume>_<n>.mokuro) in place: their name is listed in another spelling, or a case-variant group holds them (run doctor)",
+                report.left
+            ));
+        }
+        self.orphans_left = report.left;
         self.bump();
     }
 

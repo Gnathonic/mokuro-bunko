@@ -707,6 +707,42 @@ mod tests {
         );
     }
 
+    /// A folder holding two spellings of a volume, moved whole (in the cloud, where the
+    /// hooks follow it volume by volume): each spelling's upload record follows its own
+    /// volume. The other spelling's row is no stale row of the first, though its old
+    /// path leads nowhere once the folder moved.
+    #[test]
+    fn a_moved_case_variant_group_keeps_both_upload_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = StorageLayout::new(dir.path());
+        let library = layout.library();
+        bunko_store::fs::create_dir_all(library.join("G")).unwrap();
+        bunko_store::fs::write(library.join("G/V.cbz"), b"bob's").unwrap();
+        if bunko_store::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(library.join("G/v.cbz"))
+            .is_err()
+        {
+            return; // one spelling per name on this disk: no group can exist
+        }
+        let db = Arc::new(Database::open(dir.path().join("mokuro.db")).unwrap());
+        db.record_volume_upload("F/V.cbz", "bob").unwrap();
+        db.record_volume_upload("F/v.cbz", "alice").unwrap();
+        use bunko_dav::DavHooks;
+        let hooks = crate::davhooks::ServerDavHooks::new(db.clone(), library.clone());
+        hooks.rename_volume_upload("F/V.cbz", "G/V.cbz");
+        hooks.rename_volume_upload("F/v.cbz", "G/v.cbz");
+        assert_eq!(
+            db.get_volume_owner_exact("G/V.cbz").unwrap().as_deref(),
+            Some("bob")
+        );
+        assert_eq!(
+            db.get_volume_owner_exact("G/v.cbz").unwrap().as_deref(),
+            Some("alice")
+        );
+    }
+
     /// An overwrite of a respelled volume keeps its first uploader: the record takes the
     /// row the fallback matched over instead of starting a second one.
     #[test]

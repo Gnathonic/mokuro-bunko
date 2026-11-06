@@ -111,10 +111,15 @@ impl DavHooks for ServerDavHooks {
     }
     fn rename_volume_upload(&self, old: &str, new: &str) {
         let walk = ListedWalk::new(&self.library);
+        // A volume that lands in a case-variant group (a folder moved whole in the
+        // cloud with two spellings of a volume in it) takes its own row only: a row of
+        // another spelling is that member's, whose own move follows (the group is
+        // frozen: no row of it is re-keyed or dropped for another).
+        let frozen = bunko_library::fsutil::frozen(&self.library, new).is_some();
         Self::log(
             "rename_volume_upload",
             self.db
-                .rename_volume_upload_where(old, new, |k| walk.leads_nowhere(k)),
+                .rename_volume_upload_where(old, new, |k| !frozen && walk.leads_nowhere(k)),
         );
     }
     fn forget_volume_uploads_under_prefix(&self, p: &str) {

@@ -67,8 +67,9 @@ pub enum Outcome {
     Superseded(String),
 }
 
-/// Why a result was discarded for a volume another spelling of itself shadows.
-pub const SHADOWED: &str = "another spelling of the volume shadows it; the result was discarded";
+/// Why a result was discarded for a volume where nothing may be written: a frozen
+/// case-variant group, or a name another volume owns.
+pub const SHADOWED: &str = "the volume is in a case-variant group (frozen until it is merged by hand) or its name is another volume's; the result was discarded";
 
 /// Why a result was discarded for a file already at its destination.
 pub const SUPERSEDED: &str = "a sidecar was already at the destination; the result was discarded";
@@ -402,7 +403,11 @@ fn install(req: &CollectRequest) -> Outcome {
     if let Err(e) = bunko_layout::seal::seal_sidecar_file(&req.result) {
         return Outcome::Failed(format!("the {} sidecar could not be sealed: {e}", row.name));
     }
-    // 5. Into place, under the DAV write lock.
+    // 5. Into place, under the DAV write lock. Never into a frozen case-variant group,
+    // in any folder on the way (the volume's own folder is the listing's below).
+    if bunko_library::fsutil::frozen_path(&req.library, &cbz).is_some() {
+        return Outcome::Superseded(SHADOWED.into());
+    }
     let mut mode = None;
     let destination = if req.job.upgrade {
         match super::upgrade::swap_in_generated(req, &cbz) {

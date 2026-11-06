@@ -178,6 +178,11 @@ pub fn compute(
     facts: &dyn LibraryFacts,
     upgrade: Option<&dyn UpgradeProbe>,
 ) -> Option<OwedVolume> {
+    // One archive (an arrival): nothing is owed in a frozen case-variant group, in any
+    // folder on the way (the walk leaves those out as it lists).
+    if bunko_library::fsutil::frozen_path(library, cbz).is_some() {
+        return None;
+    }
     compute_in(library, cbz, rows, facts, upgrade, None)
 }
 
@@ -275,46 +280,27 @@ fn compute_in(
 }
 
 /// Every `library/**/*.cbz` (any case), sorted. The per-user names at the root (a cloud
-/// progress user's `history/`, any spelling) are not walked, nor is a folder or archive
-/// another listed spelling shadows.
+/// progress user's `history/`, a series spelled like one) are not walked, nor is
+/// anything a case-variant group freezes ([`bunko_core::fold_groups`]): the members of
+/// a group, the winner included, the files rule v1 gives their archives, and everything
+/// inside a member folder. Volumes there are owed nothing until the group is merged.
 pub fn list_archives(library: &Path) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![library.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let Ok(rd) = fs::read_dir(&dir) else {
+        let top = dir.as_path() == library;
+        let Some((entries, groups)) = bunko_library::fsutil::listed_groups(&dir, top) else {
             continue;
         };
-        let top = dir.as_path() == library;
-        let entries: Vec<_> = rd.flatten().collect();
-        // A folder or archive another listed spelling shadows is never reached: no
-        // OCR is owed for it, and none is written beside the one that shadows it.
-        let names: Vec<String> = entries
-            .iter()
-            .filter_map(|e| e.file_name().to_str().map(str::to_string))
-            .collect();
-        let losers = bunko_library::fsutil::case_losers(&dir, names.iter().map(String::as_str));
-        for entry in entries {
+        for (name, is_dir) in entries {
             // Nor is the temporary name an interrupted case-only rename left (doctor's).
-            if entry.file_name().to_str().is_some_and(|n| {
-                losers.contains(n) || n.starts_with(bunko_store::fs::CASE_RENAME_PREFIX)
-            }) {
+            if groups.is_frozen(&name) || name.starts_with(bunko_store::fs::CASE_RENAME_PREFIX) {
                 continue;
             }
-            if top
-                && entry
-                    .file_name()
-                    .to_str()
-                    .is_some_and(bunko_core::reader_tree::is_per_user_root_name)
-            {
-                continue;
-            }
-            let Ok(ft) = entry.file_type() else { continue };
-            let path = entry.path();
-            if ft.is_dir() {
+            let path = dir.join(&name);
+            if is_dir {
                 stack.push(path);
-            } else if (ft.is_file() || ft.is_symlink())
-                && bunko_library::sidecar::is_cbz_name(&entry.file_name().to_string_lossy())
-            {
+            } else if bunko_library::sidecar::is_cbz_name(&name) {
                 out.push(path);
             }
         }
@@ -405,6 +391,10 @@ pub fn still_owed_with(
 ) -> bool {
     let cbz = library.join(rel);
     if !fs::is_file(&cbz) {
+        return false;
+    }
+    // Nothing is owed in a frozen case-variant group, in any folder on the way.
+    if bunko_library::fsutil::frozen(library, rel).is_some() {
         return false;
     }
     // Held while a case merge is open on the volume's folder (spec §5.9).

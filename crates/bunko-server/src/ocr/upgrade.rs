@@ -528,8 +528,11 @@ impl Upgrade {
             .edited_main_layer()
             .ok_or_else(|| Outcome::Failed("no primary generation".into()))?;
         let rel = rel_of(&self.library, cbz).unwrap_or_default();
+        if bunko_library::fsutil::frozen_path(&self.library, cbz).is_some() {
+            return Err(Outcome::Superseded(super::collect::SHADOWED.into()));
+        }
         let bare = bunko_library::sidecar::sibling(cbz, ".mokuro")
-            .ok_or_else(|| Outcome::Failed("the volume is shadowed by another spelling".into()))?;
+            .ok_or_else(|| Outcome::Superseded(super::collect::SHADOWED.into()))?;
         let (plain, gz) = super::owed::listed_sidecar_paths(cbz, &layer_row.sidecar_suffix())
             .ok_or_else(|| Outcome::Superseded(super::collect::SHADOWED.into()))?;
         let locked =
@@ -1018,8 +1021,13 @@ impl Upgrade {
     }
 
     fn swap_install(&self, cbz: &Path, install: Install<'_>) -> Result<PathBuf, String> {
-        let bare = bunko_library::sidecar::sibling(cbz, ".mokuro")
-            .ok_or_else(|| "the volume is shadowed by another spelling".to_string())?;
+        if let Some(frozen) = bunko_library::fsutil::frozen_path(&self.library, cbz) {
+            return Err(frozen.describe());
+        }
+        let bare = bunko_library::sidecar::sibling(cbz, ".mokuro").ok_or_else(|| {
+            "the volume is in a case-variant group, or its OCR's name is another volume's"
+                .to_string()
+        })?;
         let Some(_guard) = self.locks.try_lock(&bare) else {
             return Err(format!("{} is locked by a WebDAV write", bare.display()));
         };
@@ -1292,27 +1300,60 @@ impl Upgrade {
         }
         let mut removed = 0;
         let mut touched: HashSet<PathBuf> = HashSet::new();
+        // The audit's spellings are resolved through the folder listings, never opened
+        // as written (a host that folds names would open another spelling, even a
+        // hidden one): each must lead to the entry a request reaches, both in one
+        // folder, and nothing there a case-variant group freezes.
+        let walk = bunko_library::fsutil::ListedWalk::new(&self.library);
+        let listed = |rel: &str| match walk.walk(rel) {
+            Ok(bunko_library::fsutil::ListedPath::Reaches(listed)) => Some(listed),
+            _ => None,
+        };
         for (bare_rel, kept_rel) in seen {
+            let (Some(bare_rel), Some(kept_rel)) = (listed(&bare_rel), listed(&kept_rel)) else {
+                continue;
+            };
             let bare = self.library.join(&bare_rel);
             let layer = self.library.join(&kept_rel);
+            if bare.parent() != layer.parent()
+                || bunko_library::fsutil::frozen(&self.library, &bare_rel).is_some()
+                || bunko_library::fsutil::frozen(&self.library, &kept_rel).is_some()
+            {
+                continue;
+            }
             if fs::is_file(&layer)
                 && self.bare_upgraded(&bare)
                 && self.drop_kept_layer(&bare, &layer)
             {
                 removed += 1;
-                touched.insert(bare.with_extension("cbz"));
+                if let Some(cbz) = archive_of_primary(&bare) {
+                    touched.insert(cbz);
+                }
             }
         }
         for cbz in touched {
-            if fs::is_file(&cbz) {
-                self.facts.sidecar_installed(&cbz);
-            }
+            self.facts.sidecar_installed(&cbz);
             if let Some(rel) = rel_of(&self.library, &cbz) {
                 self.census.lock().remove(&rel);
             }
         }
         removed
     }
+}
+
+/// The listed archive whose primary sidecar (rule v1, over the folder listing) is
+/// `primary`: `V.CBZ` for `v.mokuro`. Never a constructed archive name opened on the
+/// host.
+fn archive_of_primary(primary: &Path) -> Option<PathBuf> {
+    let dir = primary.parent()?;
+    let name = primary.file_name()?.to_str()?;
+    let listed = bunko_library::sidecar::list_names(dir)?;
+    let names: Vec<&str> = listed.iter().map(String::as_str).collect();
+    let folder = sidecar_names::Folder::new(&names);
+    names
+        .iter()
+        .find(|n| sidecar_names::cbz_stem(n).is_some() && folder.primary_of(n) == Some(name))
+        .map(|n| dir.join(n))
 }
 
 impl UpgradeProbe for Upgrade {
