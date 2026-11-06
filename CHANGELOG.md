@@ -498,7 +498,22 @@
   name, or removed when the new name has a cover already; a deleted archive takes
   it too. Covers a reader uploaded stay where they are. This works on Windows too, and
   wherever the storage folder is reached through a link (macOS temporary folders
-  among them).
+  among them). While the rename is under way Bunko no longer makes a cover for the
+  new name, as it often did on Windows: in a cloud library the moved cover was then
+  deleted and the same picture uploaded again as a new file. When the new name already
+  has a cover Bunko made (the move replaced a volume it had covered, or a rename seen
+  in the cloud reached Bunko after it covered the new name), the moved cover takes its
+  place, even while that cover is still on its way to the cloud, and a replaced
+  volume's cover no longer stays beside the volume moved over it.
+- **Deleting or renaming a cloud file while Bunko uploads it waits for the upload.**
+  A DELETE of a file Bunko was uploading at that moment (a cover, an OCR result)
+  answered at once, and the file came back when the upload finished; a rename was
+  applied too late for the upload, and the file landed under its old name. Both now
+  wait for that upload, as a move or delete already waits for other uploads (up to 30
+  seconds, then "try again shortly"), and then delete or move what it left. A write
+  that has not left yet is cancelled at once, as before, and so now is one waiting to
+  try again after its check of the cloud failed (it had sent nothing; it used to land
+  after the delete).
 - **A volume renamed while Bunko makes its cover leaves no stray cover behind.** A
   cover made from an archive that a reader moved away meanwhile (a volume rename, then
   its series') was still written under the old name, beside nothing, and the old

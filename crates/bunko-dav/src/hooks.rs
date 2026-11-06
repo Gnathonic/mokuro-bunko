@@ -6,12 +6,32 @@
 //! `Database` calls they replace (spec §8.6) so the mapping stays one-to-one.
 //!
 //! **Timing:** every hook runs after the filesystem change it reports has happened
-//! (0.5.2 ran the DB calls in the same order, inside the request). Hooks are called from a
-//! blocking thread (`spawn_blocking`), so synchronous SQLite work is fine; they must not
-//! panic, and they cannot fail the request: a database error after the file is in place is
-//! the server's to log (spec 14.14: never answer 500 after commit).
+//! (0.5.2 ran the DB calls in the same order, inside the request), except the few named
+//! as running before it. Hooks are called from a blocking thread (`spawn_blocking`), so
+//! synchronous SQLite work is fine; they must not panic, and they cannot fail the
+//! request: a database error after the file is in place is the server's to log (spec
+//! 14.14: never answer 500 after commit).
 
 use std::path::{Path, PathBuf};
+
+/// What a hook told of a write about to happen keeps until that write is over: the
+/// request drops it once the write is done and its hooks ran, or as soon as the write
+/// failed, so nothing it holds outlives the request.
+#[derive(Default)]
+pub struct HookGuard(Vec<Box<dyn Send>>);
+
+impl HookGuard {
+    /// A guard that keeps `held` until the write is over.
+    pub fn new(held: impl Send + 'static) -> HookGuard {
+        HookGuard(vec![Box::new(held)])
+    }
+
+    /// Both guards, kept together.
+    pub fn and(mut self, other: HookGuard) -> HookGuard {
+        self.0.extend(other.0);
+        self
+    }
+}
 
 /// One audit row (0.5.2 `Database.log_audit_event`).
 #[derive(Debug, Clone, PartialEq)]
@@ -87,6 +107,15 @@ pub trait DavHooks: Send + Sync + 'static {
     fn archives_removed(&self, _paths: &[PathBuf]) {}
     /// A library `.cbz` is now in place (PUT, or MOVE/COPY into place): queue its OCR.
     fn archive_arrived(&self, _cbz: &Path) {}
+    /// A file MOVE is about to rename the library `.cbz` `from` to the library `.cbz`
+    /// `to`. Called BEFORE the rename, under both paths' write locks, with `to`'s folder
+    /// in place. The guard it returns is dropped right after `archive_moved` ran, or as
+    /// soon as the rename failed (no `archive_moved` then): the archive is under `to`
+    /// for a moment before `archive_moved` runs, and a store's change event may already
+    /// have announced it there.
+    fn archive_moving(&self, _from: &Path, _to: &Path) -> HookGuard {
+        HookGuard::default()
+    }
     /// A file MOVE renamed the library `.cbz` `from` to the library `.cbz` `to` (its
     /// sidecars stay where they are). Called right after the rename, under both paths'
     /// write locks, before `archives_removed`.

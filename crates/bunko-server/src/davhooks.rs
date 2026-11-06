@@ -2,7 +2,7 @@
 //! OCR provenance, volume identities) plus fan-out of library events to the modules that
 //! care (OCR queue, metadata/index runtime).
 
-use bunko_dav::{AuditEvent, DavHooks, PutFollowUp};
+use bunko_dav::{AuditEvent, DavHooks, HookGuard, PutFollowUp};
 use bunko_db::{AuditDetails, Database, NewAuditEvent};
 use bunko_library::fsutil::ListedWalk;
 use parking_lot::RwLock;
@@ -181,6 +181,14 @@ impl DavHooks for ServerDavHooks {
     }
     fn archive_arrived(&self, cbz: &Path) {
         self.each(|l| l.archive_arrived(cbz));
+    }
+    fn archive_moving(&self, from: &Path, to: &Path) -> HookGuard {
+        self.listeners
+            .read()
+            .iter()
+            .fold(HookGuard::default(), |held, l| {
+                held.and(l.archive_moving(from, to))
+            })
     }
     fn archive_moved(&self, from: &Path, to: &Path) {
         self.each(|l| l.archive_moved(from, to));
