@@ -457,9 +457,21 @@ async fn frozen_refusal(inner: &Arc<Inner>, r: &Req) -> Option<Resp> {
         return None;
     }
     let library = inner.roots.library.clone();
+    let roots = inner.roots.clone();
     let refusal = blocking(move || -> Option<String> {
         for rel in targets {
-            let rel = rel.trim_matches('/').to_string();
+            // As spelled (`.` segments stay in their folder, `..` is held), and where
+            // the handler will write: the physical path the request resolves to
+            // (symlinks followed, `\` a separator on Windows), library-relative.
+            if let Some(frozen) = crate::path_case::frozen(&library, &rel) {
+                return Some(frozen.describe());
+            }
+            let Some(rel) = roots
+                .library_member(&library, &rel)
+                .and_then(|phys| roots.library_rel(&phys))
+            else {
+                continue;
+            };
             if let Some(frozen) = crate::path_case::frozen(&library, &rel) {
                 return Some(frozen.describe());
             }

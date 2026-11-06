@@ -62,6 +62,12 @@ pub struct FoldGroups {
     by_fold: HashMap<String, usize>,
     /// The listed name of every fold that is no group (one entry).
     single: HashMap<String, String>,
+    /// The listed file names (what rule v1 reads), sorted.
+    files: Vec<String>,
+    /// Every listed name the freeze holds or hides (members, group files, hidden
+    /// files) -> index into `groups`: an archive whose arrival would take one of them
+    /// as its own file (rule 4) is frozen too.
+    held: HashMap<String, usize>,
     /// Stems of the archives a group freezes, by rule v1's stem fold and by the
     /// filename fold, -> index into `groups`.
     stem_folds: HashMap<String, usize>,
@@ -109,11 +115,13 @@ impl FoldGroups {
         if out.groups.is_empty() {
             return out;
         }
-        let files: Vec<&str> = entries
+        let mut files: Vec<&str> = entries
             .iter()
             .filter(|(_, dir)| !dir)
             .map(|(n, _)| *n)
             .collect();
+        files.sort_unstable();
+        out.files = files.iter().map(|n| n.to_string()).collect();
         out.cbz_stem_folds = sidecar_names::volume_stems(files.iter().copied());
         let folder = Folder::new(&files);
         // Hidden: every member but the winner, and the files rule v1 gives a hidden
@@ -178,6 +186,18 @@ impl FoldGroups {
             files.sort();
             group.files = files;
         }
+        for (index, group) in out.groups.iter().enumerate() {
+            for name in group.members.iter().chain(group.files.iter()) {
+                out.held.entry(name.clone()).or_insert(index);
+            }
+        }
+        let hidden_files: Vec<(String, usize)> = out
+            .hidden
+            .iter()
+            .filter(|n| !out.held.contains_key(*n))
+            .filter_map(|n| out.frozen_file(n).map(|g| (n.clone(), g)))
+            .collect();
+        out.held.extend(hidden_files);
         out
     }
 
@@ -212,8 +232,28 @@ impl FoldGroups {
             .by_fold
             .get(&fold_name(name))
             .copied()
-            .or_else(|| self.frozen_file(name))?;
+            .or_else(|| self.frozen_file(name))
+            .or_else(|| self.taking_archive(name))?;
         self.groups.get(index)
+    }
+
+    /// The group an archive `name` that is not listed yet would take a file from: once
+    /// written, rule v1 (rule 4: an exact stem is the archive's own primary) would give
+    /// it a member, a file the freeze holds or a hidden file (`V.edit.cbz` takes
+    /// `V.edit.mokuro`, a frozen `V.cbz`'s correction, as its primary; `v.hayai.cbz`
+    /// takes the hidden `v.cbz`'s `v.hayai.mokuro`). Writing it would move that file out
+    /// of the group, and deleting it then would delete the file.
+    fn taking_archive(&self, name: &str) -> Option<usize> {
+        sidecar_names::cbz_stem(name)?;
+        if self.files.iter().any(|f| f == name) {
+            return None;
+        }
+        let mut listing: Vec<&str> = self.files.iter().map(String::as_str).collect();
+        listing.push(name);
+        Folder::new(&listing)
+            .volume_files(name)
+            .into_iter()
+            .find_map(|(file, _)| self.held.get(file).copied())
     }
 
     /// [`Self::freezing`] is some.
@@ -272,6 +312,9 @@ pub enum Frozen {
     /// The first segment is a reader's per-user name in some spelling (`History/`,
     /// `Goals.json`): never a library entry, never touched as one.
     Reserved { name: String },
+    /// A `..` segment: the walk cannot tell where it leads, so it is held (fail closed;
+    /// the request edge refuses such paths before they get here).
+    Unresolved { rel: String },
 }
 
 impl Frozen {
@@ -296,12 +339,17 @@ impl Frozen {
                 "{name:?} at the library root is spelled like a reader's own file or folder \
                  and is no library entry: rename it (doctor names it)."
             ),
+            Frozen::Unresolved { rel } => {
+                format!("{rel:?} steps out of a folder (`..`): nothing is written there.")
+            }
         }
     }
 }
 
-/// Walk `rel` (library-relative, `/`-separated) from the library root through the
-/// folder listings: the first segment the freeze holds, or `None`. `groups_of(folder)`
+/// Walk `rel` (library-relative, `/`-separated; `\\` too on Windows, as the handlers
+/// split it) from the library root through the folder listings: the first segment the
+/// freeze holds, or `None`. A `.` segment stays in its folder, as every handler resolves
+/// it; a `..` segment is [`Frozen::Unresolved`] (never "not frozen"). `groups_of(folder)`
 /// gives the [`FoldGroups`] of a library folder (`""` for the root, the per-user names
 /// left out of it), `None` when it cannot be listed (nothing below it is listed either:
 /// the walk stops there). `top_reserved`: a per-user name as the first segment is
@@ -312,10 +360,17 @@ pub fn frozen_along(
     mut groups_of: impl FnMut(&str) -> Option<FoldGroups>,
 ) -> Option<Frozen> {
     let mut folder = String::new();
-    for (position, segment) in rel.split('/').filter(|s| !s.is_empty()).enumerate() {
-        if segment == "." || segment == ".." {
-            return None;
-        }
+    #[cfg(windows)]
+    let segments = rel.split(['/', '\\']);
+    #[cfg(not(windows))]
+    let segments = rel.split('/');
+    let segments: Vec<&str> = segments.filter(|s| !s.is_empty() && *s != ".").collect();
+    if segments.contains(&"..") {
+        return Some(Frozen::Unresolved {
+            rel: rel.to_string(),
+        });
+    }
+    for (position, segment) in segments.into_iter().enumerate() {
         if position == 0 && top_reserved && crate::reader_tree::is_per_user_root_name(segment) {
             return Some(Frozen::Reserved {
                 name: segment.to_string(),
@@ -440,6 +495,31 @@ mod tests {
         assert!(g.is_frozen("Vol 1.6.mokuro"), "a layer `6` of Vol 1");
     }
 
+    /// A new archive whose own files (rule 4) would include a member, a file the freeze
+    /// holds or a hidden file is frozen: writing it would take that file from the group.
+    #[test]
+    fn an_archive_that_would_take_a_frozen_file_is_frozen() {
+        let g = FoldGroups::new(
+            files(&[
+                "V.cbz",
+                "v.cbz",
+                "V.edit.mokuro",
+                "v.hayai.mokuro",
+                "W.cbz",
+                "W.x.mokuro",
+            ]),
+            none,
+        );
+        assert!(g.is_hidden("v.hayai.mokuro"));
+        for name in ["V.edit.cbz", "v.hayai.cbz", "V.HAYAI.cbz", "v.edit.CBZ"] {
+            assert!(g.is_frozen(name), "{name}");
+        }
+        // Nothing of the group's would be its own.
+        for name in ["W.x.cbz", "X.cbz", "V.other.cbz"] {
+            assert!(!g.is_frozen(name), "{name}");
+        }
+    }
+
     #[test]
     fn the_wider_fold_freezes_too() {
         let g = FoldGroups::new(files(&["Straße.cbz", "STRASSE.cbz"]), none);
@@ -502,5 +582,17 @@ mod tests {
             })
         );
         assert_eq!(frozen_along("History/x", false, listing), None);
+        // `.` stays in its folder, as every handler resolves it; `..` never passes.
+        assert!(
+            matches!(at("./kingdom/./V.cbz"), Some(Frozen::Group { folder, .. }) if folder.is_empty())
+        );
+        assert!(
+            matches!(at("Other/./S/./a.mokuro"), Some(Frozen::Group { folder, .. }) if folder == "Other/S")
+        );
+        assert!(matches!(
+            at("Other/New/../S/a.cbz"),
+            Some(Frozen::Unresolved { .. })
+        ));
+        assert_eq!(at("Other/./S/./B.cbz"), None);
     }
 }

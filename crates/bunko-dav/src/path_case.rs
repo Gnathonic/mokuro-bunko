@@ -173,11 +173,16 @@ pub(crate) fn spelled_otherwise(parent: &Path, name: &str, top: bool) -> bool {
 /// as the entry a request for it reaches ([`on_disk_name`])? Whether a library path
 /// exists, decided from the listings alone: a host that would open another spelling
 /// (APFS, NTFS, casefold) answers as a case-sensitive one and a remote store do.
-/// `top_reserved`: `base` is the library root. `.`/`..` segments never are.
+/// `top_reserved`: `base` is the library root. A `.` segment stays in its folder; a
+/// `..` segment never is.
 pub(crate) fn reachable_as_spelled(base: &Path, relative: &str, top_reserved: bool) -> bool {
     let mut parent = base.to_path_buf();
-    for (position, segment) in relative.split('/').filter(|s| !s.is_empty()).enumerate() {
-        if segment == "." || segment == ".." {
+    for (position, segment) in relative
+        .split('/')
+        .filter(|s| !s.is_empty() && *s != ".")
+        .enumerate()
+    {
+        if segment == ".." {
             return false;
         }
         if on_disk_name(&parent, segment, top_reserved && position == 0).as_deref() != Some(segment)
@@ -243,8 +248,8 @@ pub(crate) fn frozen_inside(dir: &Path) -> Option<(PathBuf, bunko_core::fold_gro
 /// `relative` (below `base`) with every existing segment in its listed spelling
 /// ([`on_disk_name`]); segments past the first one that names nothing keep the requested
 /// spelling. `top_reserved`: `base` is the library root, where per-user names are never
-/// library entries. `.`/`..` segments are never resolved through (the path is returned
-/// unchanged); empty segments are carried through.
+/// library entries. A `.` segment is carried through (it stays in its folder); a path
+/// with a `..` segment is returned unchanged; empty segments are carried through.
 pub(crate) fn resolve_existing(base: &Path, relative: &str, top_reserved: bool) -> String {
     resolve(base, relative, None, top_reserved)
 }
@@ -278,10 +283,14 @@ pub(crate) fn listed_entry(library: &Path, relative: &str) -> Option<String> {
 
 fn resolve(base: &Path, relative: &str, keep: Option<&str>, top_reserved: bool) -> String {
     let mut parts: Vec<String> = relative.split('/').map(str::to_string).collect();
-    if parts.iter().any(|p| p == "." || p == "..") {
+    if parts.iter().any(|p| p == "..") {
         return relative.to_string();
     }
-    let named: Vec<usize> = (0..parts.len()).filter(|&i| !parts[i].is_empty()).collect();
+    // A `.` segment stays in its folder, as every handler resolves it: carried through
+    // untouched, the segments around it resolved as if it were not there.
+    let named: Vec<usize> = (0..parts.len())
+        .filter(|&i| !parts[i].is_empty() && parts[i] != ".")
+        .collect();
     let keep = keep.map(|k| k.trim_matches('/'));
     let mut parent = base.to_path_buf();
     let mut resolved: Vec<String> = Vec::new();
@@ -334,9 +343,10 @@ impl LibraryPathCanonicalizer {
     ///
     /// `keep_last_if_variant_of` is a MOVE's (already canonical) source: when the last
     /// segment resolves to that very entry, the client is renaming it and the requested
-    /// spelling is kept. Traversal (`.`/`..` segments) is never resolved through: it is
-    /// refused downstream. Empty segments (a trailing or doubled slash) are carried
-    /// through untouched so the request keeps its exact shape.
+    /// spelling is kept. A `.` segment is carried through, the segments around it
+    /// resolved; a path with a `..` segment is returned unchanged (refused downstream).
+    /// Empty segments (a trailing or doubled slash) are carried through untouched so
+    /// the request keeps its exact shape.
     pub fn canonicalize(&self, relative: &str, keep_last_if_variant_of: Option<&str>) -> String {
         resolve(&self.library, relative, keep_last_if_variant_of, true)
     }

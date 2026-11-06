@@ -555,6 +555,16 @@ async fn every_write(env: &Env) -> Vec<String> {
         "Kingdom/a.mokuro",
         "Kingdom/new.cbz",
         "kingdom/new.mokuro",
+        // New archives whose own files (rule 4) would take a frozen one.
+        "S/V.edit.cbz",
+        "S/v.hayai.cbz",
+        // A `.` segment (plain and percent-encoded) stays in its folder.
+        "S/./v.mokuro.gz",
+        "S/./V.webp",
+        "S/./V.mokuro",
+        "./S/V.cbz",
+        "S/%2E/V.mokuro",
+        "S/%2e/v.hayai.cbz",
     ];
     for (i, rel) in files.iter().enumerate() {
         let path = format!("/mokuro-reader/{rel}");
@@ -588,7 +598,7 @@ async fn every_write(env: &Env) -> Vec<String> {
         let ext = rel.rsplit_once('.').map_or("x", |(_, e)| e);
         // A correction moves between correction names only (else 403 before anything
         // else): admin's own correction of `Free/F.cbz` stands in.
-        let correction = rel.contains(".edit");
+        let correction = rel.contains(".edit") && rel.ends_with(".mokuro");
         let source = if correction {
             "/mokuro-reader/Free/F.edit.mokuro"
         } else {
@@ -649,7 +659,15 @@ async fn every_write(env: &Env) -> Vec<String> {
             );
         }
     }
-    for rel in ["Kingdom/", "kingdom/", "S/", "T/"] {
+    for rel in [
+        "Kingdom/",
+        "kingdom/",
+        "S/",
+        "T/",
+        "./S/",
+        "%2E/Kingdom/",
+        "S/./",
+    ] {
         let path = format!("/mokuro-reader/{rel}");
         check(
             format!("DELETE {rel}"),
@@ -658,7 +676,7 @@ async fn every_write(env: &Env) -> Vec<String> {
         for method in ["COPY", "MOVE"] {
             let out = format!(
                 "http://localhost:8080/mokuro-reader/Out-{}-{method}/",
-                rel.trim_end_matches('/')
+                rel.trim_end_matches('/').replace(['/', '%', '.'], "_")
             );
             check(
                 format!("{method} {rel} as source"),

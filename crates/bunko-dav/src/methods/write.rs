@@ -401,6 +401,25 @@ fn frozen_inside() -> DavError {
     )
 }
 
+/// The freeze, checked again under the write lock of a folder MOVE or COPY: neither
+/// `paths` (library paths) is frozen nor holds a case-variant group (one made since
+/// the request was let through).
+fn not_frozen_now(inner: &Inner, paths: &[&Path]) -> DavResult<()> {
+    for path in paths {
+        if let Some(rel) = inner.roots.library_rel(path)
+            && let Some(frozen) = crate::path_case::frozen(&inner.roots.library, &rel)
+        {
+            return Err(DavError::new(StatusCode::CONFLICT, frozen.describe()));
+        }
+        if fs::symlink_metadata(path).is_ok_and(|m| m.is_dir())
+            && crate::path_case::frozen_inside(path).is_some()
+        {
+            return Err(frozen_inside());
+        }
+    }
+    Ok(())
+}
+
 /// 405: a MKCOL of a name that is mapped (in another spelling).
 fn mapped_url() -> DavError {
     DavError::new(
@@ -971,6 +990,7 @@ fn move_folder(
         return Err(write_lock_conflict(req, target, "move", Some(dest_v)));
     };
     dest_spelling_allowed(inner, req, Some(src), dest)?;
+    not_frozen_now(inner, &[src, dest])?;
     let old_prefix = inner.roots.library_rel(src);
     let new_prefix = inner.roots.library_rel(dest);
     let volumes = cbz_under(src);
@@ -1069,6 +1089,7 @@ fn copy_folder(
             Some(guard)
         }
     };
+    not_frozen_now(inner, &[src_phys, dest_phys])?;
     if let Some(existing) = dest
         && infinity
     {

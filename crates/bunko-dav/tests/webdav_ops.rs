@@ -2012,6 +2012,8 @@ async fn cloud_root_owner_uses_the_library_root() {
             b"overwritten",
         )
         .await;
-    assert_eq!(r.code(), 403);
+    // Held before any handler resolves it: a `..` segment is never "not frozen"
+    // (the HTTP edge answers 400 for it first).
+    assert_eq!(r.code(), 409);
     assert_eq!(std::fs::read(env.lib("goals.json")).unwrap(), b"{}");
 }
