@@ -202,25 +202,10 @@ impl AuthBackend for DbAuthBackend {
     }
 
     fn volume_uploader(&self, rel: &str) -> Result<Option<String>, OwnerUnknown> {
-        // The fold fallback finds a volume renamed outside Bunko; a row whose own
-        // spelling is still listed is that other entry's (a shadowed case variant), and
-        // never makes its uploader the owner of this one.
-        let library = self.layout.library();
-        let still_listed = |key: &str| {
-            let (dir, name) = key.rsplit_once('/').unwrap_or(("", key));
-            match bunko_library::fsutil::list_dir(&library.join(dir)) {
-                Ok(entries) => entries.iter().any(|(n, _)| n == name),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-                // Unlistable: the row may well be another entry's; it decides nothing.
-                Err(_) => true,
-            }
-        };
-        self.db
-            .get_volume_owner_where(rel, still_listed)
-            .map_err(|e| {
-                warn!("volume owner lookup failed: {e}");
-                OwnerUnknown
-            })
+        volume_owner(&self.db, &self.layout.library(), rel).map_err(|e| {
+            warn!("volume owner lookup failed: {e}");
+            OwnerUnknown
+        })
     }
 
     fn is_library_folder(&self, virtual_path: &str) -> bool {
@@ -245,6 +230,36 @@ impl AuthBackend for DbAuthBackend {
             }
         }
     }
+}
+
+/// The uploader of the volume `rel` belongs to: the row under its own key, else (the
+/// fold fallback) a row whose spelling leads, through the library's listings, to the very
+/// entry `rel` does ([`ListedWalk::same_entry`]): the volume renamed to another case
+/// outside Bunko. A row whose spelling is a separate listed entry (a case variant a
+/// case-sensitive disk or a remote store holds beside it, shadowed) never makes its
+/// uploader the owner of this one. Decided from listings, never by opening a path by
+/// name, so every host answers alike. Auth and `/login/api/me` both ask this.
+///
+/// [`ListedWalk::same_entry`]: bunko_library::fsutil::ListedWalk::same_entry
+pub(crate) fn volume_owner(
+    db: &Database,
+    library: &std::path::Path,
+    rel: &str,
+) -> bunko_db::Result<Option<String>> {
+    let walk = bunko_library::fsutil::ListedWalk::new(library);
+    volume_owner_in(db, &walk, rel)
+}
+
+/// [`volume_owner`] through a walker the caller keeps (one listing per folder).
+pub(crate) fn volume_owner_in(
+    db: &Database,
+    walk: &bunko_library::fsutil::ListedWalk,
+    rel: &str,
+) -> bunko_db::Result<Option<String>> {
+    let Some(key) = bunko_db::uploads::normalize_volume_key(rel) else {
+        return Ok(None);
+    };
+    db.get_volume_owner_where(&key, |stored| walk.same_entry(stored, &key))
 }
 
 /// See [`AuthBackend::library_listing`]: the files of the library folder that holds
@@ -597,6 +612,112 @@ mod tests {
                 Some((403, None))
             );
         }
+    }
+
+    /// A series folder renamed to another case outside Bunko keeps its uploader's
+    /// volumes hers on every host: the fold fallback follows the listings, never a path
+    /// opened by the row's spelling (which a case-insensitive disk would open and a
+    /// case-sensitive one would not). Leaving and moving the volume take that row along,
+    /// so no later upload of the old spelling inherits her.
+    #[test]
+    fn a_respelled_series_folder_keeps_its_uploader_on_every_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = StorageLayout::new(dir.path());
+        let library = layout.library();
+        bunko_store::fs::create_dir_all(library.join("kingdom")).unwrap();
+        bunko_store::fs::write(library.join("kingdom/V.cbz"), b"alice's").unwrap();
+        bunko_store::fs::write(library.join("kingdom/W.cbz"), b"alice's").unwrap();
+        let db = Arc::new(Database::open(dir.path().join("mokuro.db")).unwrap());
+        db.record_volume_upload("kingdom/V.cbz", "alice").unwrap();
+        db.record_volume_upload("kingdom/W.cbz", "alice").unwrap();
+        bunko_store::fs::rename(library.join("kingdom"), library.join("Kingdom")).unwrap();
+        let backend = DbAuthBackend::new(db.clone(), layout.clone());
+        assert_eq!(
+            backend.volume_uploader("Kingdom/V.cbz"),
+            Ok(Some("alice".into()))
+        );
+        assert_eq!(
+            backend.volume_uploader("Kingdom/V.mokuro"),
+            Ok(Some("alice".into()))
+        );
+        assert_eq!(backend.volume_uploader("Kingdom/X.cbz"), Ok(None));
+
+        // Deleted (a hook after the file is gone): her row goes with it.
+        use bunko_dav::DavHooks;
+        let hooks = crate::davhooks::ServerDavHooks::new(db.clone(), library.clone());
+        bunko_store::fs::remove_file(library.join("Kingdom/V.cbz")).unwrap();
+        hooks.forget_volume_upload("Kingdom/V.cbz");
+        assert_eq!(db.get_volume_owner_exact("kingdom/V.cbz").unwrap(), None);
+        // Moved: the row follows the volume.
+        bunko_store::fs::create_dir_all(library.join("Other")).unwrap();
+        bunko_store::fs::rename(library.join("Kingdom/W.cbz"), library.join("Other/W.cbz"))
+            .unwrap();
+        hooks.rename_volume_upload("Kingdom/W.cbz", "Other/W.cbz");
+        assert_eq!(db.get_volume_owner_exact("kingdom/W.cbz").unwrap(), None);
+        assert_eq!(
+            db.get_volume_owner_exact("Other/W.cbz").unwrap().as_deref(),
+            Some("alice")
+        );
+        // A later upload of the old spelling is bob's own.
+        bunko_store::fs::write(library.join("Kingdom/V.cbz"), b"bob's").unwrap();
+        hooks.record_volume_upload("Kingdom/V.cbz", "bob", false);
+        assert_eq!(
+            backend.volume_uploader("Kingdom/V.cbz"),
+            Ok(Some("bob".into()))
+        );
+    }
+
+    /// An overwrite of a respelled volume keeps its first uploader: the record takes the
+    /// row the fallback matched over instead of starting a second one.
+    #[test]
+    fn recording_a_respelled_volume_keeps_its_first_uploader() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = StorageLayout::new(dir.path());
+        let library = layout.library();
+        bunko_store::fs::create_dir_all(library.join("S")).unwrap();
+        bunko_store::fs::write(library.join("S/v.cbz"), b"alice's").unwrap();
+        let db = Arc::new(Database::open(dir.path().join("mokuro.db")).unwrap());
+        db.record_volume_upload("S/v.cbz", "alice").unwrap();
+        bunko_store::fs::rename(library.join("S/v.cbz"), library.join("S/V.cbz")).unwrap();
+        use bunko_dav::DavHooks;
+        let hooks = crate::davhooks::ServerDavHooks::new(db.clone(), library.clone());
+        hooks.record_volume_upload("S/V.cbz", "admin", true);
+        assert_eq!(
+            db.get_volume_owner_exact("S/V.cbz").unwrap().as_deref(),
+            Some("alice")
+        );
+        assert_eq!(db.get_volume_owner_exact("S/v.cbz").unwrap(), None);
+    }
+
+    /// A shadowed case variant's row (both spellings listed: a case-sensitive disk) is
+    /// never another entry's, and leaving or moving the winner leaves it alone.
+    #[test]
+    fn a_shadowed_variants_row_stays_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = StorageLayout::new(dir.path());
+        let library = layout.library();
+        bunko_store::fs::create_dir_all(library.join("kingdom")).unwrap();
+        bunko_store::fs::write(library.join("kingdom/V.cbz"), b"alice's").unwrap();
+        bunko_store::fs::create_dir_all(library.join("Kingdom")).unwrap();
+        bunko_store::fs::write(library.join("Kingdom/V.cbz"), b"admin's").unwrap();
+        if bunko_store::fs::read_dir(&library).unwrap().count() != 2 {
+            return; // one folder: the host folds names (the respelled case above)
+        }
+        let db = Arc::new(Database::open(dir.path().join("mokuro.db")).unwrap());
+        db.record_volume_upload("kingdom/V.cbz", "alice").unwrap();
+        let backend = DbAuthBackend::new(db.clone(), layout.clone());
+        assert_eq!(backend.volume_uploader("Kingdom/V.cbz"), Ok(None));
+        use bunko_dav::DavHooks;
+        let hooks = crate::davhooks::ServerDavHooks::new(db.clone(), library.clone());
+        bunko_store::fs::remove_file(library.join("Kingdom/V.cbz")).unwrap();
+        hooks.forget_volume_upload("Kingdom/V.cbz");
+        hooks.forget_volume_uploads_under_prefix("Kingdom");
+        assert_eq!(
+            db.get_volume_owner_exact("kingdom/V.cbz")
+                .unwrap()
+                .as_deref(),
+            Some("alice")
+        );
     }
 
     #[test]

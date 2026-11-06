@@ -114,15 +114,61 @@ fn like_escape(text: &str) -> String {
 const VOLUME_UPLOADS_BY_SQL: &str = "SELECT volume_key FROM volume_uploads \
      WHERE uploader_username = ? COLLATE NOCASE ORDER BY volume_key";
 
+/// `(volume_key, uploader)` of every row other than `key` whose key folds like it, by
+/// key. SQLite's LIKE ignores ASCII case only: the prefilter, the filename fold decides.
+fn fold_rows(conn: &rusqlite::Connection, key: &str) -> rusqlite::Result<Vec<(String, String)>> {
+    let want = bunko_core::sidecar_names::fold(key);
+    let rows: Vec<(String, String)> = conn
+        .prepare_cached(
+            "SELECT volume_key, uploader_username FROM volume_uploads \
+             WHERE volume_key LIKE ? ESCAPE '\\' ORDER BY volume_key",
+        )?
+        .query_map([like_escape(key)], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(rows
+        .into_iter()
+        .filter(|(k, _)| k != key && bunko_core::sidecar_names::fold(k) == want)
+        .collect())
+}
+
 impl Database {
     /// Record an upload/edit of a library file. An archive creates ownership (keeping the
     /// first uploader on conflict); a sidecar only stamps an existing row.
     pub fn record_volume_upload(&self, library_relative_path: &str, username: &str) -> Result<()> {
+        self.record_volume_upload_where(library_relative_path, username, |_| false)
+    }
+
+    /// [`Self::record_volume_upload`], where a volume with no row under its own key but
+    /// one under a key that folds like it and for which `same_volume(key)` holds (see
+    /// [`Self::get_volume_owner_where`]: this volume, renamed to another case outside
+    /// Bunko) first takes that row over: its uploader stays the owner, as the fold
+    /// fallback already said.
+    pub fn record_volume_upload_where(
+        &self,
+        library_relative_path: &str,
+        username: &str,
+        same_volume: impl Fn(&str) -> bool,
+    ) -> Result<()> {
         let Some(key) = normalize_volume_key(library_relative_path) else {
             return Ok(());
         };
         let is_archive = strip_suffix_ci(library_relative_path.trim_matches('/'), ".cbz").is_some();
         self.write(|conn| {
+            let own: bool = conn
+                .prepare_cached("SELECT 1 FROM volume_uploads WHERE volume_key = ?")?
+                .query_row([&key], |_| Ok(()))
+                .optional()?
+                .is_some();
+            if !own
+                && let Some((respelled, _)) = fold_rows(conn, &key)?
+                    .into_iter()
+                    .find(|(k, _)| same_volume(k))
+            {
+                conn.execute(
+                    "UPDATE volume_uploads SET volume_key = ? WHERE volume_key = ?",
+                    params![key, respelled],
+                )?;
+            }
             if is_archive {
                 conn.execute(
                     "INSERT INTO volume_uploads (volume_key, uploader_username, last_modified_by, \
@@ -143,19 +189,20 @@ impl Database {
         })
     }
 
-    /// The uploader of the volume a library-relative path belongs to.
+    /// The uploader of the volume a library-relative path belongs to: its own row, else
+    /// (fold fallback) the byte-smallest row whose key folds like it.
     pub fn get_volume_owner(&self, library_relative_path: &str) -> Result<Option<String>> {
-        self.get_volume_owner_where(library_relative_path, |_| false)
+        self.get_volume_owner_where(library_relative_path, |_| true)
     }
 
-    /// [`Self::get_volume_owner`], whose fold fallback passes over every row for which
-    /// `still_listed(key)` holds: a row whose own spelling is still an entry of the
-    /// library belongs to that entry (a case variant a case-sensitive disk or a remote
-    /// store holds beside this one), never to this one.
+    /// [`Self::get_volume_owner`], whose fold fallback takes only a row for which
+    /// `same_volume(key)` holds: the caller's word that the row's spelling leads, through
+    /// the library's listings, to the very entry this path does (the volume renamed to
+    /// another case outside Bunko), never to a case variant listed beside it.
     pub fn get_volume_owner_where(
         &self,
         library_relative_path: &str,
-        still_listed: impl Fn(&str) -> bool,
+        same_volume: impl Fn(&str) -> bool,
     ) -> Result<Option<String>> {
         let Some(key) = normalize_volume_key(library_relative_path) else {
             return Ok(None);
@@ -173,20 +220,11 @@ impl Database {
             // The key is the spelling Bunko wrote. A volume renamed outside Bunko
             // (Finder, Explorer, mv) to another case, or asked for through a sidecar
             // whose suffix is spelled otherwise (`V.mokuro` for `V.CBZ`), is still that
-            // volume: one name is one entry on every host. SQLite's LIKE ignores ASCII
-            // case; the filename fold decides, and the byte-smallest key wins a tie.
-            let pattern = like_escape(&key);
-            let want = bunko_core::sidecar_names::fold(&key);
-            let rows: Vec<(String, String)> = conn
-                .prepare_cached(
-                    "SELECT volume_key, uploader_username FROM volume_uploads \
-                     WHERE volume_key LIKE ? ESCAPE '\\' ORDER BY volume_key",
-                )?
-                .query_map([&pattern], |r| Ok((r.get(0)?, r.get(1)?)))?
-                .collect::<rusqlite::Result<_>>()?;
-            Ok(rows
+            // volume: one name is one entry on every host. The filename fold decides,
+            // and the byte-smallest key wins a tie.
+            Ok(fold_rows(conn, &key)?
                 .into_iter()
-                .find(|(k, _)| bunko_core::sidecar_names::fold(k) == want && !still_listed(k))
+                .find(|(k, _)| same_volume(k))
                 .map(|(_, owner)| owner))
         })
     }
@@ -299,27 +337,73 @@ impl Database {
 
     /// Delete the ownership row of the volume this path belongs to.
     pub fn forget_volume_upload(&self, library_relative_path: &str) -> Result<()> {
+        self.forget_volume_upload_where(library_relative_path, |_| false)
+    }
+
+    /// [`Self::forget_volume_upload`], also deleting each row whose key folds like this
+    /// one and for which `leads_nowhere(key)` holds: the caller's word that the key's
+    /// spelling names nothing listed any more (the row of this volume, renamed to another
+    /// case outside Bunko, that the owner fold fallback matched). A row left behind would
+    /// hand a later upload of that spelling to its old uploader.
+    pub fn forget_volume_upload_where(
+        &self,
+        library_relative_path: &str,
+        leads_nowhere: impl Fn(&str) -> bool,
+    ) -> Result<()> {
         let Some(key) = normalize_volume_key(library_relative_path) else {
             return Ok(());
         };
         self.write(|conn| {
-            conn.execute("DELETE FROM volume_uploads WHERE volume_key = ?", [key])?;
+            conn.execute("DELETE FROM volume_uploads WHERE volume_key = ?", [&key])?;
+            for (stale, _) in fold_rows(conn, &key)? {
+                if leads_nowhere(&stale) {
+                    conn.execute("DELETE FROM volume_uploads WHERE volume_key = ?", [&stale])?;
+                }
+            }
             Ok(())
         })
     }
 
     /// Delete the ownership rows of every volume under a folder (exact prefix); how many.
     pub fn forget_volume_uploads_under_prefix(&self, library_prefix: &str) -> Result<usize> {
+        self.forget_volume_uploads_under_prefix_where(library_prefix, |_| false)
+    }
+
+    /// [`Self::forget_volume_uploads_under_prefix`], also deleting each row under a
+    /// folder whose name folds like the prefix's and for which `leads_nowhere(key)`
+    /// holds (see [`Self::forget_volume_upload_where`]).
+    pub fn forget_volume_uploads_under_prefix_where(
+        &self,
+        library_prefix: &str,
+        leads_nowhere: impl Fn(&str) -> bool,
+    ) -> Result<usize> {
         let prefix = library_prefix.trim_matches('/');
         if prefix.is_empty() {
             return Ok(0);
         }
         let head = format!("{prefix}/");
+        let folded_head = bunko_core::sidecar_names::fold(&head);
         self.write(|conn| {
-            Ok(conn.execute(
+            let mut gone = conn.execute(
                 "DELETE FROM volume_uploads WHERE substr(volume_key, 1, ?) = ?",
                 params![head.chars().count() as i64, head],
-            )?)
+            )?;
+            let candidates: Vec<String> = conn
+                .prepare_cached(
+                    "SELECT volume_key FROM volume_uploads \
+                     WHERE volume_key LIKE ? ESCAPE '\\' ORDER BY volume_key",
+                )?
+                .query_map([format!("{}%", like_escape(&head))], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            for stale in candidates {
+                if bunko_core::sidecar_names::fold(&stale).starts_with(&folded_head)
+                    && leads_nowhere(&stale)
+                {
+                    gone +=
+                        conn.execute("DELETE FROM volume_uploads WHERE volume_key = ?", [&stale])?;
+                }
+            }
+            Ok(gone)
         })
     }
 
@@ -328,6 +412,20 @@ impl Database {
         &self,
         old_library_relative: &str,
         new_library_relative: &str,
+    ) -> Result<()> {
+        self.rename_volume_upload_where(old_library_relative, new_library_relative, |_| false)
+    }
+
+    /// [`Self::rename_volume_upload`], where the old row may also be one whose key folds
+    /// like the old path's and for which `leads_nowhere(key)` holds (see
+    /// [`Self::forget_volume_upload_where`]): the old path's own row when there is one,
+    /// else the byte-smallest such row (the one the owner fold fallback matched). Every
+    /// other such row is deleted.
+    pub fn rename_volume_upload_where(
+        &self,
+        old_library_relative: &str,
+        new_library_relative: &str,
+        leads_nowhere: impl Fn(&str) -> bool,
     ) -> Result<()> {
         let (Some(old_key), Some(new_key)) = (
             normalize_volume_key(old_library_relative),
@@ -339,14 +437,29 @@ impl Database {
             return Ok(());
         }
         self.write(|conn| {
-            let row: Option<(String, String, Option<String>)> = conn
-                .query_row(
+            let stale: Vec<String> = fold_rows(conn, &old_key)?
+                .into_iter()
+                .map(|(k, _)| k)
+                .filter(|k| *k != new_key && leads_nowhere(k))
+                .collect();
+            let row_of = |key: &str| -> rusqlite::Result<Option<(String, String, Option<String>)>> {
+                conn.query_row(
                     "SELECT uploader_username, uploaded_at, last_modified_by FROM volume_uploads \
                      WHERE volume_key = ?",
-                    [&old_key],
+                    [key],
                     |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                 )
-                .optional()?;
+                .optional()
+            };
+            let mut row = row_of(&old_key)?;
+            if row.is_none()
+                && let Some(first) = stale.first()
+            {
+                row = row_of(first)?;
+            }
+            for key in &stale {
+                conn.execute("DELETE FROM volume_uploads WHERE volume_key = ?", [key])?;
+            }
             let Some((uploader, uploaded_at, last_by)) = row else {
                 return Ok(());
             };

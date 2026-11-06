@@ -127,6 +127,118 @@ pub fn listed_name(dir: &Path, name: &str) -> Option<String> {
     pick_winner(dir, &folded, variants)
 }
 
+/// Where a library-relative path leads through the folder listings alone
+/// ([`ListedWalk::walk`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ListedPath {
+    /// Every segment names a listed entry, each through the winner of its spelling group
+    /// (the entry a request reaches): the path in listed spelling.
+    Reaches(String),
+    /// Some segment is spelled exactly like a listed entry another spelling shadows: the
+    /// path is that hidden entry's (or below it), never the winner's.
+    Shadowed,
+    /// Some segment names nothing listed (or a per-user name at the root).
+    Missing,
+}
+
+/// Resolves library-relative paths segment by segment from listings, never by opening a
+/// path by name, so the answer is the same on every host: a case-sensitive disk, a
+/// case-insensitive one and a remote store alike. Each folder is listed once per walker.
+pub struct ListedWalk {
+    root: PathBuf,
+    listings: std::cell::RefCell<std::collections::HashMap<PathBuf, Option<Vec<String>>>>,
+}
+
+impl ListedWalk {
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self {
+            root: root.into(),
+            listings: Default::default(),
+        }
+    }
+
+    /// The UTF-8 names `dir` lists; `None` when it is gone or no folder; `Err` when it
+    /// cannot be read.
+    fn names(&self, dir: &Path) -> io::Result<Option<Vec<String>>> {
+        if let Some(cached) = self.listings.borrow().get(dir) {
+            return Ok(cached.clone());
+        }
+        let names = match list_dir(dir) {
+            Ok(entries) => Some(entries.into_iter().map(|(n, _)| n).collect()),
+            Err(e)
+                if dir != self.root
+                    && matches!(
+                        e.kind(),
+                        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                    ) =>
+            {
+                None
+            }
+            Err(e) => return Err(e),
+        };
+        self.listings
+            .borrow_mut()
+            .insert(dir.to_path_buf(), names.clone());
+        Ok(names)
+    }
+
+    /// Where `rel` leads: each segment takes the winner of the listed names that fold
+    /// like it (PathCase's rule), unless the segment is spelled exactly like a listed
+    /// loser ([`ListedPath::Shadowed`]). `Err` when a folder on the way cannot be read.
+    pub fn walk(&self, rel: &str) -> io::Result<ListedPath> {
+        let mut dir = self.root.clone();
+        let mut resolved: Vec<String> = Vec::new();
+        for (position, segment) in rel.split('/').filter(|s| !s.is_empty()).enumerate() {
+            let top = position == 0;
+            if segment == "." || segment == ".." {
+                return Ok(ListedPath::Missing);
+            }
+            if top && bunko_core::reader_tree::is_per_user_root_name(segment) {
+                return Ok(ListedPath::Missing);
+            }
+            let Some(names) = self.names(&dir)? else {
+                return Ok(ListedPath::Missing);
+            };
+            let folded = bunko_core::sidecar_names::fold(segment);
+            let variants: Vec<String> = names
+                .iter()
+                .filter(|n| !(top && bunko_core::reader_tree::is_per_user_root_name(n)))
+                .filter(|n| *n == segment || bunko_core::sidecar_names::fold(n) == folded)
+                .cloned()
+                .collect();
+            let exact = variants.iter().any(|n| n == segment);
+            let Some(winner) = pick_winner(&dir, &folded, variants) else {
+                return Ok(ListedPath::Missing);
+            };
+            if exact && winner != segment {
+                return Ok(ListedPath::Shadowed);
+            }
+            dir.push(&winner);
+            resolved.push(winner);
+        }
+        Ok(ListedPath::Reaches(resolved.join("/")))
+    }
+
+    /// Does the stored path `stored` (a database key, in the spelling Bunko wrote) name
+    /// the entry `target` reaches, and not a separate one? True when `stored` leads, by
+    /// listings, to the very path `target` does: it is that entry spelled otherwise (a
+    /// respelling outside Bunko), never a case variant listed beside it. Unreadable
+    /// folders decide nothing (false).
+    pub fn same_entry(&self, stored: &str, target: &str) -> bool {
+        match (self.walk(stored), self.walk(target)) {
+            (Ok(ListedPath::Reaches(a)), Ok(ListedPath::Reaches(b))) => a == b,
+            _ => false,
+        }
+    }
+
+    /// Does the stored path `stored` lead to no listed entry at all (neither one a
+    /// request reaches nor a shadowed one): a row left behind? Unreadable folders decide
+    /// nothing (false).
+    pub fn leads_nowhere(&self, stored: &str) -> bool {
+        matches!(self.walk(stored), Ok(ListedPath::Missing))
+    }
+}
+
 /// `dir/name` in the spelling `dir` lists ([`listed_name`]); the requested spelling when
 /// nothing there folds like it. What Bunko reads and writes for a name it builds itself
 /// (`series.json`, `catalog.json`): never a second spelling of an existing entry.

@@ -4,6 +4,7 @@
 
 use bunko_dav::{AuditEvent, DavHooks, PutFollowUp};
 use bunko_db::{AuditDetails, Database, NewAuditEvent};
+use bunko_library::fsutil::ListedWalk;
 use parking_lot::RwLock;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -75,13 +76,21 @@ impl DavHooks for ServerDavHooks {
     }
 
     fn record_volume_upload(&self, rel: &str, actor: &str, _existed_before: bool) {
+        let walk = ListedWalk::new(&self.library);
+        let key = bunko_db::normalize_volume_key(rel).unwrap_or_default();
         Self::log(
             "record_volume_upload",
-            self.db.record_volume_upload(rel, actor),
+            self.db
+                .record_volume_upload_where(rel, actor, |k| walk.same_entry(k, &key)),
         );
     }
     fn forget_volume_upload(&self, rel: &str) {
-        Self::log("forget_volume_upload", self.db.forget_volume_upload(rel));
+        let walk = ListedWalk::new(&self.library);
+        Self::log(
+            "forget_volume_upload",
+            self.db
+                .forget_volume_upload_where(rel, |k| walk.leads_nowhere(k)),
+        );
     }
     fn forget_volume_uuid(&self, rel: &str) {
         Self::log("forget_volume_uuid", self.db.forget_volume_uuid(rel));
@@ -96,15 +105,19 @@ impl DavHooks for ServerDavHooks {
         Self::log("forget_ocr_sidecar", self.db.forget_ocr_sidecar(rel));
     }
     fn rename_volume_upload(&self, old: &str, new: &str) {
+        let walk = ListedWalk::new(&self.library);
         Self::log(
             "rename_volume_upload",
-            self.db.rename_volume_upload(old, new),
+            self.db
+                .rename_volume_upload_where(old, new, |k| walk.leads_nowhere(k)),
         );
     }
     fn forget_volume_uploads_under_prefix(&self, p: &str) {
+        let walk = ListedWalk::new(&self.library);
         Self::log(
             "forget_volume_uploads_under_prefix",
-            self.db.forget_volume_uploads_under_prefix(p),
+            self.db
+                .forget_volume_uploads_under_prefix_where(p, |k| walk.leads_nowhere(k)),
         );
     }
     fn forget_ocr_sidecars_under_prefix(&self, p: &str) {
