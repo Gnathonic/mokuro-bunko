@@ -50,14 +50,66 @@ pub fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     path.with_file_name(format!("{}{suffix}", py_stem(&name)))
 }
 
-/// `<stem>.webp` beside the archive (`OCRProcessor.get_cover_path`).
+/// `<stem>.webp` beside the archive (`OCRProcessor.get_cover_path`), in the spelling
+/// the folder lists ([`sibling`]); the constructed name when there is none to use.
 pub fn cover_path(cbz_path: &Path) -> PathBuf {
-    with_suffix(cbz_path, ".webp")
+    sibling(cbz_path, ".webp").unwrap_or_else(|| with_suffix(cbz_path, ".webp"))
 }
 
-/// `<stem>.nocover` beside the archive: "thumbnailing was tried and failed".
+/// `<stem>.nocover` beside the archive: "thumbnailing was tried and failed" (listed
+/// spelling, as [`cover_path`]).
 pub fn nocover_marker_path(cbz_path: &Path) -> PathBuf {
-    with_suffix(cbz_path, ".nocover")
+    sibling(cbz_path, ".nocover").unwrap_or_else(|| with_suffix(cbz_path, ".nocover"))
+}
+
+/// The file `<stem><suffix>` of the archive `cbz_path` as Bunko reads and writes it:
+/// the name the folder lists in any spelling (`V.WEBP`, `v.mokuro`), else the
+/// constructed `<stem><suffix>` (a brand-new name keeps the archive's spelling). Bunko
+/// never creates a second spelling of a name.
+///
+/// `None` when nothing may be read or written for it: the archive is shadowed by
+/// another spelling of itself ([`fsutil::case_losers`], a case-sensitive disk only), or
+/// every listed spelling of the name belongs to another archive (rule v1: an exact
+/// stem is that archive's), so writing it would overwrite that volume's file.
+///
+/// [`fsutil::case_losers`]: crate::fsutil::case_losers
+pub fn sibling(cbz_path: &Path, suffix: &str) -> Option<PathBuf> {
+    let name = cbz_path.file_name()?.to_str()?;
+    let directory = cbz_path.parent().unwrap_or_else(|| Path::new(""));
+    let stem = py_stem(name);
+    let wanted = format!("{stem}{suffix}");
+    let Some(names) = list_names(directory) else {
+        return Some(directory.join(wanted));
+    };
+    let losers = crate::fsutil::case_losers(directory, names.iter().map(String::as_str));
+    if losers.contains(name) {
+        return None;
+    }
+    if names.contains(&wanted) {
+        return Some(directory.join(wanted));
+    }
+    let fold = sidecar_names::fold(&wanted);
+    let candidates: Vec<&String> = names
+        .iter()
+        .filter(|n| sidecar_names::fold(n) == fold)
+        .collect();
+    if candidates.is_empty() {
+        return Some(directory.join(wanted));
+    }
+    // Another archive whose stem is spelled exactly like a candidate's owns it.
+    let other_stems: Vec<&str> = names
+        .iter()
+        .filter(|n| n.as_str() != name)
+        .filter_map(|n| sidecar_names::cbz_stem(n))
+        .collect();
+    candidates
+        .into_iter()
+        .filter(|c| {
+            let cut = c.len().saturating_sub(suffix.len());
+            !c.is_char_boundary(cut) || !other_stems.contains(&&c[..cut])
+        })
+        .min()
+        .map(|c| directory.join(c))
 }
 
 /// `split_layer_sidecar`: `("Vol 1", "hayai-nova")` for
@@ -428,6 +480,19 @@ mod tests {
             primary_sidecar(&d.join("W.cbz")),
             Some(d.join("w.mokuro.gz"))
         );
+    }
+
+    /// A sibling is found in the spelling the folder lists, and a new one takes the
+    /// archive's: no second spelling is ever made.
+    #[test]
+    fn siblings_resolve_to_the_listed_spelling() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        touch(d, &["V.cbz", "V.WEBP", "W.cbz"]);
+        assert_eq!(sibling(&d.join("V.cbz"), ".webp"), Some(d.join("V.WEBP")));
+        assert_eq!(cover_path(&d.join("V.cbz")), d.join("V.WEBP"));
+        assert_eq!(sibling(&d.join("W.cbz"), ".webp"), Some(d.join("W.webp")));
+        assert_eq!(nocover_marker_path(&d.join("V.cbz")), d.join("V.nocover"));
     }
 
     #[test]

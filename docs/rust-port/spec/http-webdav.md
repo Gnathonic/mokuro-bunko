@@ -368,7 +368,10 @@ Predicates (`auth.py:114-165`), all on the path with `"/" + path.strip("/")` nor
 * **0.8 (Rust, `bunko_core::reader_tree`):** the per-user names are `volume-data.json`,
   `profiles.json`, `goals.json`, `positions.json` and the `history` tree (`history`,
   `history/<device>`, `history/<device>/<file>`, each segment `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`),
-  still exact and case-sensitive (`History/` is a library series). `is_progress_path` covers all of
+  matched in any case (0.8: `History/` and `Goals.json` ARE the caller's `history/` and `goals.json`;
+  PathCase rewrites the first segment to the canonical spelling before auth, and the physical path
+  is built from the canonical name; a library folder spelled like one is hidden and named by
+  doctor). `is_progress_path` covers all of
   them: PUT, MKCOL and DELETE there need `WRITE_PROGRESS` (so `registered` keeps its own history);
   MOVE, COPY, LOCK, UNLOCK and PROPPATCH on or into `history` are refused (403, 401 anonymous).
 * `is_inbox_path`, `is_admin_path` (`startswith("/_admin")`), `is_processor_path`
@@ -540,7 +543,9 @@ In order:
 uploader); owner = `get_volume_owner(rel)` where the key is `rel` with the extension swapped to `.cbz`
 (`.cbz`, `.mokuro`, `.mokuro.gz`, `.webp`, `.nocover` all map to the archive; other files -> `None`);
 if none, an OCR layer file `<stem>.<layer>.mokuro[.gz]` (layer matches `^(?=[a-z0-9-]*[a-z])[a-z0-9-]{1,32}$`)
-borrows the owner of `<stem>.cbz`; allowed iff `owner == username`. Byte-exact (no case/NFC folding).
+borrows the owner of `<stem>.cbz`; allowed iff `owner == username`. 0.8: the key is the canonical
+spelling Bunko wrote; a lookup that misses falls back to the filename fold (NFC + lowercase) among
+the rows that match it ignoring ASCII case, so a volume respelled outside Bunko keeps its uploader.
 Consequently an uploader can delete **files** they uploaded (and their sidecars/layers) but never a folder.
 
 ### 4.7 `gate_read(environ, start_response, path)` (`auth.py:441-468`)
@@ -1002,7 +1007,9 @@ Bunko-specific handlers (authoritative semantics):
 
 * **File MOVE** (`handle_move`): destination resolved with `PathMapper.virtual_to_physical`; source and destination
   must be the same class (`library`->`library` or `progress`->`progress`, else `handle_move` returns False: QUIRK
-  14.1). Locks `[src, dst]` (sorted by casefolded resolved path; `423` + audit on conflict). Steps:
+  14.1). Locks `[src, dst]` (sorted by casefolded resolved path; `423` + audit on conflict). 0.8: a MOVE that
+  only changes the case of its source while the destination still exists as another entry (a second spelling,
+  which only a case-sensitive disk holds) answers `409 Conflict` before anything is deleted. Steps:
   `_remember_primary_uuid`; `mkdir -p dst.parent`; `os.replace(src, dst)` (atomic; overwrites); `archives_removed += [src]`
   if `.cbz`; `archive_written = dst` if `.cbz` in library; DB `rename_volume_upload(old, new)` (ownership follows
   the file; upsert); `_forget_ocr_records(old)` (archive => all sidecar rows of the old volume) and
@@ -1138,7 +1145,8 @@ exists (never in the PROPFIND cache's synthetic requests).
 
 Process-local registry `_PATH_WRITE_LOCKS` of held paths, **non-blocking**:
 
-* key = tuple of **casefolded** parts of `path.resolve()`.
+* key = tuple of **casefolded** parts of `path.resolve()` (Rust 0.8: the filename fold, NFC then lowercase, per
+  part, so a decomposed spelling conflicts with the composed one).
 * `acquire(path)`: fails (False) if ANY held key conflicts, i.e. is equal to, an **ancestor** of, or a **descendant** of
   the candidate; else records and returns True. (A folder move blocks writes inside it and vice versa; `Series/Vol.CBZ`
   conflicts with `series/vol.cbz`.) `blocking=True` raises `ValueError`.
@@ -1540,7 +1548,7 @@ Numbered for cross-reference. **[VERIFIED]** = reproduced against the real app/W
 | 14.12 | `201`/`MKCOL` responses carry an HTML body; `204` has none. | any small body is fine. |
 | 14.13 | `library/thumbnails/` is created at startup and listed in PROPFIND of `/mokuro-reader/`; in-flight staging files (`.<n>.upload-*.tmp`) and dotfiles are listed. | Q3. |
 | 14.14 | One audit row per successful PUT incl. each progress save; a DB error after the rename makes the PUT `500` although the file was stored. | decide in DB spec; at least do not 500 after commit. |
-| 14.15 | Per-user names are matched case-sensitively; `Volume-Data.json` is a shared library file. | replicate. |
+| 14.15 | Per-user names are matched case-sensitively; `Volume-Data.json` is a shared library file. | **changed in 0.8** (deliberate): per-user names match in any case, so `Volume-Data.json` is the caller's `volume-data.json`. The library is case-insensitive and case-preserving on every host. |
 | 14.16 | `AuthMiddleware` error bodies have no `Content-Length` (cheroot frames them); 429 has no `Retry-After`. | add `Content-Length`; `Retry-After` optional. |
 | 14.17 | Two independent auth limiters (WebDAV vs login/queue pages); limiter map grows per distinct key; failures from non-existent users count the same as existing ones. | Q7. |
 | 14.18 | No SIGTERM handler. | **FIX** (1.2). |

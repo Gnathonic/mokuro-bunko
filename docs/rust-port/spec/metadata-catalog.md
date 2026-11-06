@@ -24,6 +24,7 @@ Byte-compat target: the Mokuro Reader client parsers (`series-file.ts`, `catalog
 
 ### Identity folds
 - `normalize_series_key(t)` = `re.sub(r"\s+"," ", t.strip()).lower()` (`reader_compat.py:118-147`).
+- File names (0.8): `has_mokuro`, `has_mokuro_gz`, the cover and `series.json` are found by rule v1 over the folder listing in any case (`V.MOKURO`, `V.WEBP`, `Series.json`), never by exact constructed names, and Bunko writes to the spelling already listed. A folder or archive shadowed by another spelling of itself (a case-sensitive disk only) is no series and no volume. This is the filename fold (NFC + lowercase), not the series-identity fold below.
 - `normalize_volume_title_key(t)` = `normalize_series_key(NFC(t))` (`:150-157`). This is the key used for `series_facts.series_key`, `catalog_series.series_key`, `series_entry_cache.series_key`, and all folder resolution in the service.
 - Known divergences from JS `trim/\s/toLowerCase` documented at `:122-146` (U+FEFF; U+001C-1F,U+0085; Python vs Node lowercase tables differ on 55 codepoints). Rust must pick Unicode-whitespace and lowercase rules explicitly; Python `str.strip()`/`\s` (Unicode `str.isspace` semantics) is the compat target for the server's own keys, JS is the target for placeholder uuids (Q2).
 - `catalog.json` dedup/sort uses `normalize_series_key` WITHOUT NFC (`schema.py:221-237, 312-315`) while the DB key uses the NFC variant. Preserve both as-is.

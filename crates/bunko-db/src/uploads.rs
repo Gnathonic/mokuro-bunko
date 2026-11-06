@@ -1,7 +1,8 @@
 //! Volume ownership (`volume_uploads`) and the series ownership derived from it (spec §9).
 //!
-//! Reproduced: volume keys are the library-relative `.cbz` path, case-preserving and
-//! byte-exact; only an ARCHIVE upload creates ownership (a sidecar only stamps
+//! Reproduced: volume keys are the library-relative `.cbz` path, case-preserving, in
+//! the spelling Bunko wrote (a lookup that misses falls back to the filename fold, so a
+//! volume respelled outside Bunko keeps its uploader); only an ARCHIVE upload creates ownership (a sidecar only stamps
 //! `last_modified_*` of an existing row); the original uploader survives re-uploads and
 //! renames; OCR layer files (`<stem>.<layer>.mokuro[.gz]`) belong to `<stem>.cbz`; series
 //! ownership compares folder names by the reader's fold (NFC, trim, collapse whitespace,
@@ -95,6 +96,19 @@ pub fn fold_series_title_key(title: &str) -> String {
     out.to_lowercase()
 }
 
+/// `text` as a LIKE pattern that matches itself only (up to ASCII case): `%`, `_` and
+/// the escape character `\` escaped.
+fn like_escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if matches!(c, '%' | '_' | '\\') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// [`Database::volume_uploads_by`]: matched as auth matches account names (NOCASE),
 /// which `idx_volume_uploads_uploader_nocase` serves.
 const VOLUME_UPLOADS_BY_SQL: &str = "SELECT volume_key FROM volume_uploads \
@@ -131,6 +145,43 @@ impl Database {
 
     /// The uploader of the volume a library-relative path belongs to.
     pub fn get_volume_owner(&self, library_relative_path: &str) -> Result<Option<String>> {
+        let Some(key) = normalize_volume_key(library_relative_path) else {
+            return Ok(None);
+        };
+        self.read(|conn| {
+            let exact: Option<String> = conn
+                .prepare_cached(
+                    "SELECT uploader_username FROM volume_uploads WHERE volume_key = ?",
+                )?
+                .query_row([&key], |r| r.get(0))
+                .optional()?;
+            if exact.is_some() {
+                return Ok(exact);
+            }
+            // The key is the spelling Bunko wrote. A volume renamed outside Bunko
+            // (Finder, Explorer, mv) to another case, or asked for through a sidecar
+            // whose suffix is spelled otherwise (`V.mokuro` for `V.CBZ`), is still that
+            // volume: one name is one entry on every host. SQLite's LIKE ignores ASCII
+            // case; the filename fold decides, and the byte-smallest key wins a tie.
+            let pattern = like_escape(&key);
+            let want = bunko_core::sidecar_names::fold(&key);
+            let rows: Vec<(String, String)> = conn
+                .prepare_cached(
+                    "SELECT volume_key, uploader_username FROM volume_uploads \
+                     WHERE volume_key LIKE ? ESCAPE '\\' ORDER BY volume_key",
+                )?
+                .query_map([&pattern], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok(rows
+                .into_iter()
+                .find(|(k, _)| bunko_core::sidecar_names::fold(k) == want)
+                .map(|(_, owner)| owner))
+        })
+    }
+
+    /// [`Self::get_volume_owner`] without its fold fallback: the row stored under
+    /// exactly the key this path belongs to.
+    pub fn get_volume_owner_exact(&self, library_relative_path: &str) -> Result<Option<String>> {
         let Some(key) = normalize_volume_key(library_relative_path) else {
             return Ok(None);
         };
@@ -201,7 +252,8 @@ impl Database {
     /// at least one).
     pub fn can_user_edit_series(&self, username: &str, series_title: &str) -> Result<bool> {
         let owners = self.series_owners(series_title)?;
-        Ok(owners.len() == 1 && owners.contains(username))
+        // Account names compare as auth compares them: ASCII case ignored.
+        Ok(owners.len() == 1 && owners.iter().any(|o| o.eq_ignore_ascii_case(username)))
     }
 
     /// Every raw folder spelling of the series `username` may edit, sorted by code point
@@ -459,6 +511,38 @@ mod tests {
         assert_eq!(last_by, "bob");
     }
 
+    /// A volume respelled outside Bunko (another case, a sidecar's suffix spelled
+    /// otherwise) keeps its uploader: an exact miss falls back to the filename fold.
+    #[test]
+    fn ownership_in_any_spelling() {
+        let (_dir, db) = temp_db();
+        db.record_volume_upload("Kingdom/Vol 1.CBZ", "alice")
+            .unwrap();
+        db.record_volume_upload("K_ng%/V.cbz", "bob").unwrap();
+        for spelling in [
+            "kingdom/vol 1.cbz",
+            "KINGDOM/Vol 1.mokuro",
+            "Kingdom/Vol 1.cbz",
+        ] {
+            assert_eq!(
+                db.get_volume_owner(spelling).unwrap().as_deref(),
+                Some("alice"),
+                "{spelling}"
+            );
+        }
+        assert!(
+            db.can_user_delete_library_path("alice", "/mokuro-reader/kingdom/VOL 1.webp")
+                .unwrap()
+        );
+        // LIKE wildcards in a key match themselves only.
+        assert_eq!(db.get_volume_owner("Kxngz/V.cbz").unwrap(), None);
+        assert_eq!(
+            db.get_volume_owner("k_NG%/v.cbz").unwrap().as_deref(),
+            Some("bob")
+        );
+        assert!(db.can_user_edit_series("ALICE", "Kingdom").unwrap());
+    }
+
     #[test]
     fn series_ownership() {
         let (_dir, db) = temp_db();
@@ -508,7 +592,7 @@ mod tests {
         assert_eq!(db.forget_volume_uploads_under_prefix("/").unwrap(), 0);
         db.rename_volume_upload("Dr Stone/V1.cbz", "Dr Stone/Vol 1.cbz")
             .unwrap();
-        assert_eq!(db.get_volume_owner("Dr Stone/V1.cbz").unwrap(), None);
+        assert_eq!(db.get_volume_owner_exact("Dr Stone/V1.cbz").unwrap(), None);
         assert_eq!(
             db.get_volume_owner("Dr Stone/Vol 1.cbz")
                 .unwrap()

@@ -3,6 +3,20 @@
 ## [Unreleased]
 
 ### Breaking
+- **Library names are case-insensitive and case-preserving on every host, with no
+  probing.** Linux (case-sensitive or casefold), macOS, Windows, SMB mounts and every
+  cloud store behave the same: a name that differs only in case from an existing
+  entry addresses that entry. Where a case-sensitive disk already holds two spellings
+  of one name (made outside Bunko or before 0.5.3), every request, the exact spelling
+  of the other included, reaches one of them, the byte-smallest; the others are hidden
+  from WebDAV, the catalog, OCR and covers until they are merged by hand, and nothing
+  is written to, moved out of or deleted from them. `doctor` and the startup log name
+  each set.
+- **The reader's per-user names are reserved in any spelling.** `History/`,
+  `Goals.json`, `Volume-Data.json` and the like are the caller's own `history/`,
+  `goals.json` and `volume-data.json`, never library paths. A series folder spelled
+  like one is hidden until it is renamed (`doctor` names it), and so is one named
+  `Thumbnails/`.
 - **Series have owners, and an uploader controls only what is its own.** The account
   that creates a series folder owns it. An `uploader` account can no longer add files
   or folders to a series another account owns; it adds new volumes to a series nobody
@@ -321,6 +335,20 @@
   taken in.
 
 ### Fixed
+- **A case-only rename takes effect on Linux casefold disks** (and between hard links),
+  where `rename(2)` between two names of one file does nothing: renaming `kingdom/` to
+  `Kingdom/` over WebDAV used to leave the folder as it was while the database and the
+  corrections followed the new spelling.
+- **A case-fixing MOVE onto a name another entry already holds in another spelling is
+  refused (409)** instead of deleting that entry first under `Overwrite: T`.
+- **Bunko never writes a second spelling of a name.** Covers, `.nocover` markers, the
+  OCR upgrade and per-account corrections use the spelling the folder already lists
+  (`V.WEBP`, `V.MOKURO`); reading-history device folders are reached in any case; the
+  catalog's volume manifest and the admin OCR actions take a series or volume in any
+  case; an uploader keeps control of a volume renamed to another case outside Bunko.
+- **Deleting an account no longer deletes another account's folder** whose name differs
+  only in case (possible in databases from before such names were refused), on disks
+  that ignore case.
 - **A new account cannot take an existing name in other letter case.** `ALICE` could
   register beside `alice`; on a Windows or macOS disk, which ignore case, both then
   read and wrote one `users/alice/` folder (progress, reading history, corrections),

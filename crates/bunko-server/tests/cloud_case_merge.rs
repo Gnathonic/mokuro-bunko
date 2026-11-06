@@ -205,7 +205,11 @@ async fn a_case_merge_carries_the_db_rows_per_volume_and_holds_the_queue() {
         db.get_volume_owner("Kingdom/Vol 2.cbz").unwrap().as_deref(),
         Some("alice")
     );
-    assert_eq!(db.get_volume_owner("kingdom/Vol 2.cbz").unwrap(), None);
+    // The row itself moved (a lookup by the old spelling folds to the new one).
+    assert_eq!(
+        db.get_volume_owner_exact("kingdom/Vol 2.cbz").unwrap(),
+        None
+    );
     let row = db.get_ocr_sidecar("Kingdom/Vol 2.mokuro").unwrap().unwrap();
     assert_eq!(row.volume_key, "Kingdom/Vol 2.cbz");
     assert!(

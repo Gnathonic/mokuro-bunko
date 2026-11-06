@@ -8,7 +8,8 @@
 //! newest write wins, then the copy in the canonical parent, then the smallest pid —
 //! the copy a duplicate merge keeps; the rest are role 2 and reported as `dup-file`); a
 //! folder beats a file of the same name (`file-vs-dir`). Case variants are distinct
-//! entries. Every root candidate named exactly like the root is a member of the root
+//! entries that PathCase never addresses (every spelling resolves to the oldest, the
+//! one the case merge keeps). Every root candidate named exactly like the root is a member of the root
 //! entry, in the canonical order the backend found them (the first is the winner and
 //! the write root); one found inside the tree is an ordinary folder and a
 //! `nested-root` conflict.

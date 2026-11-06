@@ -577,9 +577,31 @@ async fn manifest(State(deps): State<LibraryDeps>, req: Request) -> Response {
 
 fn build_manifest(deps: &LibraryDeps, series: &str, volume: &str, headers: &HeaderMap) -> Response {
     let library = deps.runtime.library_path();
+    // The names as the library lists them, whatever case the request spells them in
+    // (the DAV paths are canonicalized the same way at the edge).
+    let canonical = (!series.contains(['/', '\\']) && !volume.contains(['/', '\\'])).then(|| {
+        bunko_dav::LibraryPathCanonicalizer::new(library)
+            .canonicalize(&format!("{series}/{volume}.cbz"), None)
+    });
+    let (series, volume, archive_file) = match canonical.as_deref().and_then(|c| c.split_once('/'))
+    {
+        Some((s, v)) => (
+            s.to_string(),
+            bunko_core::sidecar_names::cbz_stem(v)
+                .unwrap_or(volume)
+                .to_string(),
+            v.to_string(),
+        ),
+        None => (
+            series.to_string(),
+            volume.to_string(),
+            format!("{volume}.cbz"),
+        ),
+    };
+    let (series, volume) = (series.as_str(), volume.as_str());
     let base = resolve(library).unwrap_or_else(|| library.to_path_buf());
     let resolved = resolve(&library.join(series)).and_then(|dir| {
-        let archive = resolve(&dir.join(format!("{volume}.cbz")))?;
+        let archive = resolve(&dir.join(&archive_file))?;
         Some((dir, archive))
     });
     let Some((series_dir, archive)) = resolved else {

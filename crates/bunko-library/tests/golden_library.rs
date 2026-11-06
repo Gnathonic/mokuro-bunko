@@ -462,6 +462,18 @@ fn manifests_match_python() {
     for (key, manifest) in obj(&expected).iter() {
         let (series, volume) = key.rsplit_once('/').unwrap();
         let actual = build_volume_manifest(&root.join(series), series, volume, &order);
+        // 0.8 (deliberate): an archive spelled `.CBZ` is the volume's, where Python
+        // looked for `<volume>.cbz` exactly and found nothing.
+        if matches!(manifest, JsonValue::Null)
+            && std::fs::read_dir(root.join(series))
+                .unwrap()
+                .flatten()
+                .any(|e| e.file_name().to_string_lossy() == format!("{volume}.CBZ"))
+        {
+            assert!(actual.is_some(), "manifest of {key}");
+            checked += 1;
+            continue;
+        }
         let actual = actual.map_or(JsonValue::Null, JsonValue::Object);
         assert_eq!(canonical(&actual), canonical(manifest), "manifest of {key}");
         checked += 1;

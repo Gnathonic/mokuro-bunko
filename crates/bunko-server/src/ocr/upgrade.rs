@@ -517,7 +517,8 @@ impl Upgrade {
             .edited_main_layer()
             .ok_or_else(|| Outcome::Failed("no primary generation".into()))?;
         let rel = rel_of(&self.library, cbz).unwrap_or_default();
-        let bare = cbz.with_extension("mokuro");
+        let bare = bunko_library::sidecar::sibling(cbz, ".mokuro")
+            .ok_or_else(|| Outcome::Failed("the volume is shadowed by another spelling".into()))?;
         let (plain, gz) = super::owed::sidecar_paths(cbz, &layer_row.sidecar_suffix());
         let locked =
             |p: &Path| Outcome::Busy(format!("{} is locked by a WebDAV write", p.display()));
@@ -686,7 +687,11 @@ impl Upgrade {
 
     /// The census verdict for one volume (cached by the bare file's stat).
     pub fn judge(&self, cbz: &Path, rel: &str) -> (String, Verdict) {
-        let bare = cbz.with_extension("mokuro");
+        // The bare file in the spelling the folder lists (`V.MOKURO`); nothing for a
+        // volume shadowed by another spelling of itself.
+        let Some(bare) = bunko_library::sidecar::sibling(cbz, ".mokuro") else {
+            return (UNKNOWN.into(), Verdict::Current);
+        };
         let Some(meta) = fs::metadata(&bare).ok().filter(|m| m.is_file()) else {
             return (UNKNOWN.into(), Verdict::Current);
         };
@@ -1001,7 +1006,8 @@ impl Upgrade {
     }
 
     fn swap_install(&self, cbz: &Path, install: Install<'_>) -> Result<PathBuf, String> {
-        let bare = cbz.with_extension("mokuro");
+        let bare = bunko_library::sidecar::sibling(cbz, ".mokuro")
+            .ok_or_else(|| "the volume is shadowed by another spelling".to_string())?;
         let Some(_guard) = self.locks.try_lock(&bare) else {
             return Err(format!("{} is locked by a WebDAV write", bare.display()));
         };
@@ -1197,7 +1203,9 @@ impl Upgrade {
     /// kept, once its bare file is the upgraded output. Only layer names such an upgrade
     /// gave (`mokuro`, `mokuro-old`, `-prev…`) are read; the stamp decides.
     fn sweep_kept(&self, cbz: &Path) -> usize {
-        let bare = cbz.with_extension("mokuro");
+        let Some(bare) = bunko_library::sidecar::sibling(cbz, ".mokuro") else {
+            return 0;
+        };
         let named: Vec<PathBuf> = self
             .layer_candidates(cbz)
             .into_iter()

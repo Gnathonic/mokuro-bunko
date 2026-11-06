@@ -223,26 +223,36 @@ with a system unit is updated by re-running `install.sh`; a binary under
 `/usr/bin`, Homebrew or `/nix/store` by its package manager. Docker installs are
 told which image to pull.
 
-### Library paths are case-insensitive (as since 0.5.3)
+### Library paths are case-insensitive (as since 0.5.3), on every host
 
 As on Windows, `kingdom/` and `Kingdom/` are one folder: a request in any case
 reaches the spelling already on disk, an upload spelled in another case lands in the
-existing folder, and a folder or file can be renamed to fix its case. Coming straight
-from 0.5.2 on a case-sensitive host (Linux, Docker), check the library for folders
-and files whose names differ only in case: `ls library | sort -f | uniq -Di` lists
-such series folders; run it in each series folder too (`Vol 1.cbz` / `vol 1.cbz`).
-It folds ASCII letters only; the server also folds other letters' case and Unicode
-normalization. Both spellings stay
-listed in the catalog, but a request in a third spelling reaches only one of them,
-and the library cannot be copied to Windows or macOS as it is. Merge them while the
-server is stopped: move each volume with all its files (`<stem>.cbz`, its
-`.mokuro[.gz]` and layer files `<stem>.<layer>.mokuro[.gz]`, `<stem>.webp`, any
-`<stem>.nocover`) into one folder; the next metadata pass picks it up. Upload
-ownership and OCR records are keyed by exact path, so a merged volume needs its
-`volume_uploads`, `ocr_sidecars` and `volume_identities` rows renamed too. Its
-uploader cannot fix that by uploading it again if they have only the Uploader role
-(the upload over the merged file is refused) unless an admin, editor or inviter
-deletes the merged copy first.
+existing folder, and a folder or file can be renamed to fix its case (0.8 also on a
+Linux casefold disk). 0.8 behaves the same on every host and probes none.
+
+Coming straight from 0.5.2 on a case-sensitive host (Linux, Docker), the library may
+hold folders or files whose names differ only in case. Run `mokuro-bunko doctor` (or
+read the server's startup log): its "Case variants" rows name each set. Only one
+spelling is listed and reachable, the byte-smallest (`Kingdom/` before `kingdom/`),
+in DAV, the catalog, OCR and covers; the others are hidden until merged, and nothing
+is ever written to, moved out of or deleted from them. Merge them while the server is
+stopped: move each volume with all its files (`<stem>.cbz`, its `.mokuro[.gz]` and
+layer files `<stem>.<layer>.mokuro[.gz]`, `<stem>.webp`, any `<stem>.nocover`) into
+the reachable folder; the next metadata pass picks it up. Upload ownership and OCR
+records are keyed by path, so a merged volume needs its `volume_uploads`,
+`ocr_sidecars` and `volume_identities` rows renamed too (an ownership lookup that
+misses falls back to another spelling of the same name, but the OCR and identity rows
+do not). Its uploader cannot fix that by uploading it again if they have only the
+Uploader role (the upload over the merged file is refused) unless an admin, editor or
+inviter deletes the merged copy first. Doctor also names any hidden
+`.bunko-case-<token>-<name>` entry a case-only rename left when it was interrupted,
+with the rename that finishes it.
+
+Series folders spelled like a reader's per-user name (`history`, `History`,
+`goals.json`, `Goals.json`, `volume-data.json`, ...) are hidden in 0.8: those names
+are each account's own files in every spelling. Doctor names them; rename them (for
+example to `History (series)`). The legacy `thumbnails/` folder is recognised in any
+case, so a series named `Thumbnails/` must be renamed too.
 
 ### First-run setup from another computer
 

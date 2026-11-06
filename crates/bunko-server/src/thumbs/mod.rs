@@ -161,14 +161,16 @@ fn is_cbz(p: &Path) -> bool {
         .is_some_and(|e| e.to_string_lossy().eq_ignore_ascii_case("cbz"))
 }
 
-/// `<stem>.webp`.
+/// `<stem>.webp`, in the spelling the folder lists (`V.WEBP`): Bunko never writes a
+/// second spelling of a name ([`bunko_library::sidecar::sibling`]).
 pub fn cover_path(cbz: &Path) -> PathBuf {
-    cbz.with_extension("webp")
+    bunko_library::sidecar::sibling(cbz, ".webp").unwrap_or_else(|| cbz.with_extension("webp"))
 }
 
-/// `<stem>.nocover`: a cover was looked for and there is none.
+/// `<stem>.nocover`: a cover was looked for and there is none (listed spelling).
 pub fn nocover_path(cbz: &Path) -> PathBuf {
-    cbz.with_extension("nocover")
+    bunko_library::sidecar::sibling(cbz, ".nocover")
+        .unwrap_or_else(|| cbz.with_extension("nocover"))
 }
 
 /// `needs_thumbnail`.
@@ -180,6 +182,9 @@ pub fn needs_thumbnail(cbz: &Path) -> bool {
 pub fn needs_thumbnail_with(cbz: &Path, nocover: Option<&NoCoverSet>) -> bool {
     fs::is_file(cbz)
         && is_cbz(cbz)
+        // Shadowed by another spelling of itself, or its cover's name is another
+        // volume's: nothing is written for it.
+        && bunko_library::sidecar::sibling(cbz, ".webp").is_some()
         && !written_for(&cover_path(cbz), cbz)
         && !written_for(&nocover_path(cbz), cbz)
         && nocover.is_none_or(|n| !n.contains(cbz))
@@ -506,7 +511,9 @@ fn publish_cover_with(
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let out = cover_path(cbz);
+    let Some(out) = bunko_library::sidecar::sibling(cbz, ".webp") else {
+        return Ok(false);
+    };
     // A cover written for this archive (a client's, landed meanwhile) stays. A stale
     // one is replaced; on a cloud library only while it is still the version judged
     // stale, so a client's cover landing meanwhile wins there too.

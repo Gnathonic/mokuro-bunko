@@ -192,7 +192,7 @@ pub fn volume_uuid_for(
     if !row.primary {
         for suffix in [".mokuro", ".mokuro.gz"] {
             if let Some(found) =
-                sidecar_volume_uuid(&bunko_library::sidecar::with_suffix(cbz, suffix))
+                bunko_library::sidecar::sibling(cbz, suffix).and_then(|p| sidecar_volume_uuid(&p))
             {
                 return found;
             }

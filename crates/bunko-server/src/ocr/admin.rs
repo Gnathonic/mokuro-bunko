@@ -678,7 +678,10 @@ impl OcrAdmin for OcrControl {
         {
             return Some(Err(OcrError::new(400, "not a volume of the library")));
         }
-        let cbz = self.core().layout.library().join(&rel);
+        // In the library's spelling, whatever case the request has (as DAV paths).
+        let library = self.core().layout.library();
+        let rel = bunko_dav::LibraryPathCanonicalizer::new(&library).canonicalize(&rel, None);
+        let cbz = library.join(&rel);
         if !bunko_store::fs::is_file(&cbz) {
             return Some(Err(OcrError::new(404, "no such volume")));
         }
