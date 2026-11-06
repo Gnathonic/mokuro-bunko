@@ -46,7 +46,7 @@ impl<'a> OrphanStems<'a> {
                 .iter()
                 .find_map(|ext| sidecar_names::strip_suffix_ci(name, ext))
             {
-                stems.archives.insert(sidecar_names::fold(stem));
+                stems.archives.insert(sidecar_names::stem_fold(stem));
             }
         }
         stems
@@ -66,7 +66,7 @@ fn orphan_of<'n>(name: &'n str, stems: &OrphanStems<'_>) -> Option<(String, &'n 
     let (base, n) = numbered.rsplit_once('_')?;
     // `unique_path` counted from 1, never with a leading zero.
     let counted = n.bytes().all(|b| b.is_ascii_digit()) && !n.is_empty() && !n.starts_with('0');
-    if base.is_empty() || !counted || stems.archives.contains(&sidecar_names::fold(numbered)) {
+    if base.is_empty() || !counted || stems.archives.contains(&sidecar_names::stem_fold(numbered)) {
         return None;
     }
     let canonical = format!("{base}{}", &name[numbered.len()..]);

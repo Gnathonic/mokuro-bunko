@@ -96,34 +96,23 @@ pub fn fold_series_title_key(title: &str) -> String {
     out.to_lowercase()
 }
 
-/// `text` as a LIKE pattern that matches itself only (up to ASCII case): `%`, `_` and
-/// the escape character `\` escaped.
-fn like_escape(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for c in text.chars() {
-        if matches!(c, '%' | '_' | '\\') {
-            out.push('\\');
-        }
-        out.push(c);
-    }
-    out
-}
-
 /// [`Database::volume_uploads_by`]: matched as auth matches account names (NOCASE),
 /// which `idx_volume_uploads_uploader_nocase` serves.
 const VOLUME_UPLOADS_BY_SQL: &str = "SELECT volume_key FROM volume_uploads \
      WHERE uploader_username = ? COLLATE NOCASE ORDER BY volume_key";
 
-/// `(volume_key, uploader)` of every row other than `key` whose key folds like it, by
-/// key. SQLite's LIKE ignores ASCII case only: the prefilter, the filename fold decides.
+/// `(volume_key, uploader)` of every row other than `key` whose key folds like it
+/// ([`bunko_core::sidecar_names::fold`], the one filename fold), by key. Every row is
+/// read: no SQL comparison folds as the filename fold does (`Ära/` and `ära/`,
+/// `Straße/` and `STRASSE/` are one name), and the table holds one row per uploaded
+/// volume.
 fn fold_rows(conn: &rusqlite::Connection, key: &str) -> rusqlite::Result<Vec<(String, String)>> {
     let want = bunko_core::sidecar_names::fold(key);
     let rows: Vec<(String, String)> = conn
         .prepare_cached(
-            "SELECT volume_key, uploader_username FROM volume_uploads \
-             WHERE volume_key LIKE ? ESCAPE '\\' ORDER BY volume_key",
+            "SELECT volume_key, uploader_username FROM volume_uploads ORDER BY volume_key",
         )?
-        .query_map([like_escape(key)], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?;
     Ok(rows
         .into_iter()
@@ -389,11 +378,8 @@ impl Database {
                 params![head.chars().count() as i64, head],
             )?;
             let candidates: Vec<String> = conn
-                .prepare_cached(
-                    "SELECT volume_key FROM volume_uploads \
-                     WHERE volume_key LIKE ? ESCAPE '\\' ORDER BY volume_key",
-                )?
-                .query_map([format!("{}%", like_escape(&head))], |r| r.get(0))?
+                .prepare_cached("SELECT volume_key FROM volume_uploads ORDER BY volume_key")?
+                .query_map([], |r| r.get(0))?
                 .collect::<rusqlite::Result<_>>()?;
             for stale in candidates {
                 if bunko_core::sidecar_names::fold(&stale).starts_with(&folded_head)
@@ -666,6 +652,43 @@ mod tests {
             Some("bob")
         );
         assert!(db.can_user_edit_series("ALICE", "Kingdom").unwrap());
+    }
+
+    /// The fold fallback folds as the filename fold does, beyond ASCII: a volume or
+    /// series respelled in a non-ASCII letter (`Ära/` to `ära/`) or by full case folding
+    /// (`Straße/` to `STRASSE/`) keeps its uploader, and its row is forgotten and
+    /// renamed with it.
+    #[test]
+    fn ownership_in_any_spelling_beyond_ascii() {
+        let (_dir, db) = temp_db();
+        db.record_volume_upload("\u{c4}ra/V.cbz", "alice").unwrap();
+        db.record_volume_upload("Stra\u{df}e/V.cbz", "bob").unwrap();
+        assert_eq!(
+            db.get_volume_owner("\u{e4}ra/v.cbz").unwrap().as_deref(),
+            Some("alice")
+        );
+        assert_eq!(
+            db.get_volume_owner("STRASSE/V.cbz").unwrap().as_deref(),
+            Some("bob")
+        );
+        db.rename_volume_upload_where("\u{e4}ra/V.cbz", "\u{e4}ra/W.cbz", |_| true)
+            .unwrap();
+        assert_eq!(
+            db.get_volume_owner_exact("\u{e4}ra/W.cbz")
+                .unwrap()
+                .as_deref(),
+            Some("alice")
+        );
+        db.forget_volume_upload_where("STRASSE/V.cbz", |_| true)
+            .unwrap();
+        assert_eq!(db.get_volume_owner("Stra\u{df}e/V.cbz").unwrap(), None);
+        db.record_volume_upload("Stra\u{df}e/X.cbz", "bob").unwrap();
+        assert_eq!(
+            db.forget_volume_uploads_under_prefix_where("strasse", |_| true)
+                .unwrap(),
+            1
+        );
+        assert_eq!(db.get_volume_owner("Stra\u{df}e/X.cbz").unwrap(), None);
     }
 
     #[test]

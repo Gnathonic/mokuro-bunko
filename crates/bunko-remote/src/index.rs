@@ -43,6 +43,10 @@ const DIR_BUMP_NS: i64 = 1_000;
 /// known write (the copy a duplicate merge keeps), roots in canonical order. An index
 /// from an older rule is recomputed at open.
 const WINNER_RULE: &str = "2";
+/// The filename fold the stored `entry.fold` column holds (meta `fold_rule`). 2: full
+/// Unicode case folding ([`bunko_core::names::fold_name`]). An index from an older rule
+/// is refolded at open.
+const FOLD_RULE: &str = "2";
 /// Subtrees larger than this are not walked for [`Index::subtree_loss`].
 const LOSS_CAP: i64 = 20_000;
 
@@ -344,6 +348,29 @@ impl Index {
             .and_then(|v| v.parse().ok())
         {
             idx.granularity_ns.set(g);
+        }
+        if idx.meta_get("fold_rule").as_deref() != Some(FOLD_RULE) {
+            idx.savepoint(|c| {
+                let rows: Vec<(i64, String, String)> = c
+                    .prepare("SELECT eid, name, fold FROM entry WHERE parent_eid IS NOT NULL")?
+                    .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                    .collect::<rusqlite::Result<_>>()?;
+                for (eid, name, stored) in rows {
+                    let now = fold(&name);
+                    if now != stored {
+                        c.execute(
+                            "UPDATE entry SET fold = ?1 WHERE eid = ?2",
+                            params![now, eid],
+                        )?;
+                    }
+                }
+                c.execute(
+                    "INSERT INTO meta(k, v) VALUES('fold_rule', ?1) \
+                     ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+                    [FOLD_RULE],
+                )?;
+                Ok(())
+            })?;
         }
         if idx.meta_get("winner_rule").as_deref() != Some(WINNER_RULE) {
             // The index is disposable: re-derive every shared entry under the rules

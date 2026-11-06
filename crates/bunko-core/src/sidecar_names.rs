@@ -3,7 +3,7 @@
 //!
 //! 1. The suffixes `.cbz`, `.mokuro` and `.mokuro.gz` match in any ASCII case.
 //! 2. Only `.cbz` archives define volume stems.
-//! 3. Stems are compared folded: NFC, then Unicode lowercase ([`fold`]).
+//! 3. Stems are compared folded: NFC, then Unicode lowercase ([`stem_fold`]).
 //! 4. A primary sidecar wins over a layer reading of the same name
 //!    (`Vol 1.5.mokuro` is volume 1.5's when `Vol 1.5.cbz` is listed).
 //! 5. A layer id is matched exactly as written against `^[a-z0-9-]{1,32}$`
@@ -29,9 +29,15 @@ use crate::generations::is_layer_id;
 /// where a volume is all that is asked (the storage Check, failure records).
 pub const ARCHIVE_EXTENSIONS: [&str; 4] = [".cbz", ".cbr", ".zip", ".rar"];
 
-/// The spelling-insensitive form two stems collide under: NFC, then a full Unicode
-/// lowercase.
-pub fn fold(name: &str) -> String {
+/// The one filename fold: which names are one entry ([`crate::names::fold_name`]).
+/// Every comparison of names as paths (PathCase, the case variants, the owner records,
+/// the write locks, a cloud index) folds with it.
+pub use crate::names::fold_name as fold;
+
+/// Rule v1's stem fold (rule 3), the contract with mokuro-reader: NFC, then a full
+/// Unicode lowercase. Only which archive a sidecar belongs to is decided with it; which
+/// names are one entry is [`fold`]'s.
+pub fn stem_fold(name: &str) -> String {
     name.nfc().collect::<String>().to_lowercase()
 }
 
@@ -65,6 +71,43 @@ pub fn case_losers<'a>(
         );
     }
     out
+}
+
+/// The names of a folder listing no request reaches, `entries` being every listed
+/// `(name, is_dir)`: the [`case_losers`], and every file rule v1 gives to a shadowed
+/// `.cbz` archive ([`Folder::volume_files`] over the whole listing: the sidecars, cover,
+/// no-cover marker and layers named by its exact stem). A hidden archive's own files
+/// stay its own: never shown, read, written, moved or deleted through the archive that
+/// shadows it, until the case variants are merged by hand.
+pub fn hidden_names<'a>(
+    entries: impl IntoIterator<Item = (&'a str, bool)>,
+    preferred: impl Fn(&str) -> Option<String>,
+) -> HashSet<String> {
+    let entries: Vec<(&str, bool)> = entries.into_iter().collect();
+    let mut hidden = case_losers(entries.iter().map(|(n, _)| *n), preferred);
+    let shadowed_archives: Vec<&str> = entries
+        .iter()
+        .filter(|(n, dir)| !dir && hidden.contains(*n) && cbz_stem(n).is_some())
+        .map(|(n, _)| *n)
+        .collect();
+    if shadowed_archives.is_empty() {
+        return hidden;
+    }
+    let files: Vec<&str> = entries
+        .iter()
+        .filter(|(_, dir)| !dir)
+        .map(|(n, _)| *n)
+        .collect();
+    let folder = Folder::new(&files);
+    for archive in shadowed_archives {
+        hidden.extend(
+            folder
+                .volume_files(archive)
+                .into_iter()
+                .map(|(n, _)| n.to_string()),
+        );
+    }
+    hidden
 }
 
 /// `name` minus `suffix`, the suffix matched in any ASCII case.
@@ -113,7 +156,11 @@ pub enum SidecarClass<'a> {
 
 /// The folded stems of the `.cbz` archives among `names` (rule 2).
 pub fn volume_stems<'a>(names: impl IntoIterator<Item = &'a str>) -> HashSet<String> {
-    names.into_iter().filter_map(cbz_stem).map(fold).collect()
+    names
+        .into_iter()
+        .filter_map(cbz_stem)
+        .map(stem_fold)
+        .collect()
 }
 
 /// Rule v1 for one name, given the folder's [`volume_stems`].
@@ -121,11 +168,11 @@ pub fn classify<'a>(name: &'a str, folded_cbz_stems: &HashSet<String>) -> Sideca
     let Some((base, gz)) = split_mokuro(name) else {
         return SidecarClass::Orphan;
     };
-    if folded_cbz_stems.contains(&fold(base)) {
+    if folded_cbz_stems.contains(&stem_fold(base)) {
         return SidecarClass::Primary { stem: base, gz };
     }
     match split_layer(name) {
-        Some((stem, id, gz)) if folded_cbz_stems.contains(&fold(stem)) => {
+        Some((stem, id, gz)) if folded_cbz_stems.contains(&stem_fold(stem)) => {
             SidecarClass::Layer { stem, id, gz }
         }
         _ => SidecarClass::Orphan,
@@ -223,9 +270,9 @@ impl<'a> Folder<'a> {
             {
                 archive_stems.push(stem);
             } else if let Some((base, _)) = split_mokuro(name) {
-                sidecar_folds.insert(fold(base));
+                sidecar_folds.insert(stem_fold(base));
                 if let Some((stem, _, _)) = split_layer(name) {
-                    sidecar_folds.insert(fold(stem));
+                    sidecar_folds.insert(stem_fold(stem));
                 }
             }
         }
@@ -242,7 +289,7 @@ impl<'a> Folder<'a> {
             let exact: HashSet<&str> = self.archive_stems.iter().copied().collect();
             let mut folded: HashMap<String, usize> = HashMap::new();
             for stem in &exact {
-                *folded.entry(fold(stem)).or_default() += 1;
+                *folded.entry(stem_fold(stem)).or_default() += 1;
             }
             (exact, folded)
         })
@@ -264,10 +311,10 @@ impl<'a> Folder<'a> {
             return Vec::new();
         };
         let (exact, folded) = self.stems();
-        let anchor_fold = fold(anchor);
+        let anchor_fold = stem_fold(anchor);
         let alone = folded.get(&anchor_fold).is_none_or(|&n| n <= 1);
         let owns = |stem: &str| {
-            stem == anchor || (alone && !exact.contains(stem) && fold(stem) == anchor_fold)
+            stem == anchor || (alone && !exact.contains(stem) && stem_fold(stem) == anchor_fold)
         };
         let mut out = Vec::new();
         for &name in &self.names {
@@ -283,7 +330,7 @@ impl<'a> Folder<'a> {
             if owns(base) {
                 out.push((name, file));
             } else if matches!(file, VolumeFile::Primary { .. })
-                && !folded.contains_key(&fold(base))
+                && !folded.contains_key(&stem_fold(base))
                 && let Some((stem, id, gz)) = split_layer(name)
                 && owns(stem)
             {
@@ -296,7 +343,7 @@ impl<'a> Folder<'a> {
     /// No `.mokuro` here can be `cbz_name`'s, in any spelling: checked without walking
     /// the listing.
     fn no_sidecars_for(&self, cbz_name: &str) -> bool {
-        cbz_stem(cbz_name).is_none_or(|anchor| !self.sidecar_folds.contains(&fold(anchor)))
+        cbz_stem(cbz_name).is_none_or(|anchor| !self.sidecar_folds.contains(&stem_fold(anchor)))
     }
 
     /// The primary sidecar of `cbz_name`: an exact stem before a folded one,
@@ -362,7 +409,7 @@ pub fn primary_of<'a>(cbz_name: &str, names: &[&'a str]) -> Option<&'a str> {
 /// Kelvin sign, NFC `K`) still turn `V.edit.mokuro` and `V.kanji.mokuro` into their
 /// primaries.
 fn is_nested_id(id: &str) -> bool {
-    let id = fold(id);
+    let id = stem_fold(id);
     is_layer_id(&id) && id.bytes().any(|b| b.is_ascii_lowercase())
 }
 
@@ -410,11 +457,11 @@ pub fn governing_archives<'a>(name: &str, names: &[&'a str]) -> Vec<&'a str> {
         return Vec::new();
     }
     let listed = |stem: &str| -> Vec<(&'a str, &'a str)> {
-        let want = fold(stem);
+        let want = stem_fold(stem);
         archives
             .iter()
             .copied()
-            .filter(|(s, _)| fold(s) == want)
+            .filter(|(s, _)| stem_fold(s) == want)
             .collect()
     };
     let mut candidates: Vec<&str> = Vec::new();
@@ -457,7 +504,7 @@ pub fn governing_archives<'a>(name: &str, names: &[&'a str]) -> Vec<&'a str> {
 /// reserved class: the archive whose primary would be `s`'s layer `<id>`.
 fn hidden_layer_of(stem: &str) -> Option<&str> {
     let (s, id) = stem.rsplit_once('.')?;
-    let id = fold(id);
+    let id = stem_fold(id);
     (!s.is_empty() && is_layer_id(&id) && layer_class(&id) != LayerClass::Other).then_some(s)
 }
 
@@ -470,11 +517,44 @@ fn hidden_layer_of(stem: &str) -> Option<&str> {
 pub fn hides_reserved_layer(name: &str, names: &[&str]) -> bool {
     cbz_stem(name)
         .and_then(hidden_layer_of)
-        .is_some_and(|s| volume_stems(names.iter().copied()).contains(&fold(s)))
+        .is_some_and(|s| volume_stems(names.iter().copied()).contains(&stem_fold(s)))
 }
 
 #[cfg(test)]
 mod tests {
+    /// Hidden: every spelling of a name but the winner, and the files rule v1 gives to a
+    /// shadowed archive (named by its exact stem), never the winner's own or a folder.
+    #[test]
+    fn a_shadowed_archives_own_files_are_hidden_too() {
+        let none = |_: &str| None;
+        let entries = [
+            ("V.cbz", false),
+            ("v.cbz", false),
+            ("v.mokuro", false),
+            ("v.webp", false),
+            ("v.edit.mokuro", false),
+            ("V.mokuro", false),
+            ("W.cbz", false),
+            ("w.webp", false),
+            ("v.nocover", true),
+        ];
+        let mut hidden: Vec<String> = hidden_names(entries, none).into_iter().collect();
+        hidden.sort();
+        assert_eq!(hidden, ["v.cbz", "v.edit.mokuro", "v.mokuro", "v.webp"]);
+        // Names one by the full case folding only (`STRASSE`, `Straße`): rule v1 tells
+        // their stems apart, so the hidden archive's sidecars are its folded ones.
+        let entries = [
+            ("STRASSE.cbz", false),
+            ("Stra\u{df}e.cbz", false),
+            ("strasse.mokuro", false),
+            ("stra\u{df}e.mokuro", false),
+        ];
+        let mut hidden: Vec<String> = hidden_names(entries, none).into_iter().collect();
+        hidden.sort();
+        assert_eq!(hidden, ["Stra\u{df}e.cbz", "stra\u{df}e.mokuro"]);
+        assert!(hidden_names([("a.cbz", false), ("a.mokuro", false)], none).is_empty());
+    }
+
     #[test]
     fn case_losers_leave_one_spelling_per_fold() {
         let none = |_: &str| None;

@@ -50,13 +50,15 @@ pub enum PerUser<'a> {
     InDir { dir: &'static str, rest: &'a str },
 }
 
-/// The canonical per-user root name `name` spells in any ASCII case (every reserved
-/// name is ASCII, so this is the filename fold for them).
+/// The canonical per-user root name `name` spells in any case: the names that fold
+/// alike ([`crate::names::fold_name`], `hiſtory` included). Every reserved name is
+/// lowercase ASCII, its own fold.
 fn root_name(name: &str) -> Option<&'static str> {
+    let folded = crate::names::fold_name(name);
     PER_USER_FILES
         .iter()
         .chain(PER_USER_DIRS.iter())
-        .find(|n| n.eq_ignore_ascii_case(name))
+        .find(|n| **n == folded)
         .copied()
 }
 
@@ -69,15 +71,11 @@ pub fn per_user(rel: &str) -> Option<PerUser<'_>> {
         Some((first, rest)) => (first, Some(rest)),
         None => (rel, None),
     };
-    if let Some(name) = PER_USER_FILES
-        .iter()
-        .find(|n| n.eq_ignore_ascii_case(first))
-    {
+    let root = root_name(first)?;
+    if let Some(name) = PER_USER_FILES.iter().find(|n| **n == root) {
         return rest.is_none().then_some(PerUser::File(name));
     }
-    let dir = PER_USER_DIRS
-        .iter()
-        .find(|n| n.eq_ignore_ascii_case(first))?;
+    let dir = PER_USER_DIRS.iter().find(|n| **n == root)?;
     let rest = rest.unwrap_or("").trim_start_matches('/');
     Some(if rest.is_empty() {
         PerUser::Dir(dir)
@@ -262,6 +260,18 @@ mod tests {
         assert!(folds_to_per_user_root_name("History"));
         assert!(folds_to_per_user_root_name("GOALS.JSON"));
         assert!(!folds_to_per_user_root_name("histories"));
+    }
+
+    #[test]
+    fn a_per_user_name_in_any_spelling_any_host_joins() {
+        assert!(is_per_user_root_name("hi\u{17f}tory"));
+        assert!(is_per_user_root_name("H\u{131}STORY"));
+        assert!(is_per_user_root_name("GOALS.JSON"));
+        assert!(!is_per_user_root_name("histories"));
+        assert_eq!(
+            canonical_per_user_rel("Hi\u{17f}tory/d/x").as_deref(),
+            Some("history/d/x")
+        );
     }
 
     #[test]

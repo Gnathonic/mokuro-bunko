@@ -972,3 +972,52 @@ async fn fake_feed_drives_the_index_on_every_profile() {
         "the older folder wins"
     );
 }
+
+/// Case variants are found by the one filename fold, full Unicode case folding
+/// included (`Straße` and `STRASSE` are one name, as on Linux casefold), and an index
+/// written under the older fold (lowercase) is refolded when it is opened.
+#[test]
+fn variants_fold_fully_and_an_older_index_is_refolded() {
+    let d = tempfile::tempdir().unwrap();
+    let path = d.path().join("index.sqlite");
+    {
+        let idx = Index::open(&path).unwrap();
+        idx.set_roots(&[dir("root-1", "top", "mokuro-reader", 10)])
+            .unwrap();
+        let f = Fx {
+            _dir: tempfile::tempdir().unwrap(),
+            idx,
+        };
+        f.up(&dir("a", "root-1", "Stra\u{df}e", 100));
+        f.up(&dir("b", "root-1", "STRASSE", 200));
+        let v: Vec<String> = f
+            .idx
+            .variants(ROOT_EID, &fold("strasse"))
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert_eq!(v, ["Stra\u{df}e", "STRASSE"]);
+    }
+    // As an index from before the full fold left it.
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute(
+        "UPDATE entry SET fold = lower(name) WHERE parent_eid IS NOT NULL",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE entry SET fold = 'stra\u{df}e' WHERE name = 'Stra\u{df}e'",
+        [],
+    )
+    .unwrap();
+    conn.execute("DELETE FROM meta WHERE k = 'fold_rule'", [])
+        .unwrap();
+    drop(conn);
+    let idx = Index::open(&path).unwrap();
+    let v: Vec<String> = idx
+        .variants(ROOT_EID, &fold("STRASSE"))
+        .into_iter()
+        .map(|e| e.name)
+        .collect();
+    assert_eq!(v, ["Stra\u{df}e", "STRASSE"]);
+}
