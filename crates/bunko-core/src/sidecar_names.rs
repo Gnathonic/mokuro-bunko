@@ -35,6 +35,38 @@ pub fn fold(name: &str) -> String {
     name.nfc().collect::<String>().to_lowercase()
 }
 
+/// The names among `names` that another listed name shadows: in each group of two or
+/// more names that [`fold`] alike, every name but the winner. The winner is
+/// `preferred(fold)` when that name is listed (a remote store's case winner, the
+/// spelling its case merge keeps), else the byte-smallest. This is the rule PathCase
+/// resolves every request spelling by, so a shadowed name is one no request reaches:
+/// listings, the catalog and the library walks leave it out.
+pub fn case_losers<'a>(
+    names: impl IntoIterator<Item = &'a str>,
+    preferred: impl Fn(&str) -> Option<String>,
+) -> HashSet<String> {
+    let mut groups: HashMap<String, Vec<&str>> = HashMap::new();
+    for name in names {
+        groups.entry(fold(name)).or_default().push(name);
+    }
+    let mut out = HashSet::new();
+    for (folded, group) in groups {
+        if group.len() < 2 {
+            continue;
+        }
+        let winner = preferred(&folded)
+            .filter(|w| group.contains(&w.as_str()))
+            .or_else(|| group.iter().min().map(|n| n.to_string()));
+        out.extend(
+            group
+                .into_iter()
+                .filter(|n| Some(*n) != winner.as_deref())
+                .map(str::to_string),
+        );
+    }
+    out
+}
+
 /// `name` minus `suffix`, the suffix matched in any ASCII case.
 pub fn strip_suffix_ci<'a>(name: &'a str, suffix: &str) -> Option<&'a str> {
     let cut = name.len().checked_sub(suffix.len())?;
@@ -443,6 +475,37 @@ pub fn hides_reserved_layer(name: &str, names: &[&str]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn case_losers_leave_one_spelling_per_fold() {
+        let none = |_: &str| None;
+        let names = [
+            "Kingdom",
+            "kingdom",
+            "KINGDOM",
+            "Other",
+            "Pok\u{e9}mon",
+            "POKE\u{301}MON",
+        ];
+        let losers = case_losers(names, none);
+        let mut got: Vec<&str> = losers.iter().map(String::as_str).collect();
+        got.sort();
+        // The byte-smallest wins: `KINGDOM` and `POKÉMON` (decomposed) sort first.
+        assert_eq!(got, ["Kingdom", "Pok\u{e9}mon", "kingdom"]);
+        assert!(case_losers(["a", "b"], none).is_empty());
+        // A preferred winner counts only when it is listed.
+        let oldest = |f: &str| (f == "kingdom").then(|| "kingdom".to_string());
+        let mut got: Vec<String> = case_losers(["Kingdom", "kingdom"], oldest)
+            .into_iter()
+            .collect();
+        got.sort();
+        assert_eq!(got, ["Kingdom"]);
+        let gone = |_: &str| Some("KINGDOM".to_string());
+        let got: Vec<String> = case_losers(["Kingdom", "kingdom"], gone)
+            .into_iter()
+            .collect();
+        assert_eq!(got, ["kingdom"]);
+    }
+
     use super::*;
     use serde_json::Value;
 

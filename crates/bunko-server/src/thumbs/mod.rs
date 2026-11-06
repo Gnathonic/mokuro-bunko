@@ -551,11 +551,26 @@ fn publish_cover_with(
     Ok(true)
 }
 
+/// Every file below `dir`, folders and archives another listed spelling shadows left
+/// out (no cover is made for, or beside, what no request reaches).
 fn walk(dir: &Path, keep: &mut dyn FnMut(&Path)) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
-    for entry in entries.flatten() {
+    let entries: Vec<_> = entries.flatten().collect();
+    let names: Vec<String> = entries
+        .iter()
+        .filter_map(|e| e.file_name().to_str().map(str::to_string))
+        .collect();
+    let losers = bunko_library::fsutil::case_losers(dir, names.iter().map(String::as_str));
+    for entry in entries {
+        if entry
+            .file_name()
+            .to_str()
+            .is_some_and(|n| losers.contains(n))
+        {
+            continue;
+        }
         let path = entry.path();
         match entry.file_type() {
             Ok(t) if t.is_dir() => walk(&path, keep),

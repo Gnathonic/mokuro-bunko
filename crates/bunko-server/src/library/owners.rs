@@ -68,6 +68,9 @@ fn series_folders(library: &Path) -> std::io::Result<Vec<String>> {
             out.push(name);
         }
     }
+    // A folder another listed spelling shadows is no series anyone reaches.
+    let losers = bunko_library::fsutil::case_losers(library, out.iter().map(String::as_str));
+    out.retain(|n| !losers.contains(n));
     Ok(out)
 }
 

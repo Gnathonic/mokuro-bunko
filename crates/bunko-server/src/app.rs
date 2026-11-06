@@ -238,6 +238,19 @@ impl Services {
                     for r in crate::storage::doctor::reserved_series_rows(&layout.library(), None) {
                         tracing::warn!("[STORAGE] {}. {}", r.detail, r.hint.unwrap_or_default());
                     }
+                    // Names held in two spellings (a case-sensitive disk): one folder walk,
+                    // off the startup path.
+                    let library = layout.library();
+                    std::thread::spawn(move || {
+                        for r in crate::storage::doctor::case_variant_rows(&library) {
+                            tracing::warn!(
+                                "[STORAGE] {}: {}. {}",
+                                r.label,
+                                r.detail,
+                                r.hint.unwrap_or_default()
+                            );
+                        }
+                    });
                     (crate::library::mount_local(&layout.library()), None, layout)
                 }
             };

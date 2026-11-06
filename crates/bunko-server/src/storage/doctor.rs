@@ -1,7 +1,8 @@
 //! `doctor`'s library storage rows (0.8 §7, §11, D25): where the library lives, the
 //! Google pairing (and a pairing change waiting for its Disconnect), whether the spool
-//! can hold what OCR spools at once, how the credentials file is protected, and a
-//! local series named like the reader's reading history (0.8).
+//! can hold what OCR spools at once, how the credentials file is protected, a local
+//! series named like the reader's reading history (0.8), and names a local library
+//! holds in two spellings (case variants, which only a case-sensitive disk can hold).
 //! Offline: no provider is asked.
 
 use std::path::Path;
@@ -63,6 +64,7 @@ pub fn checks(config: &Config) -> Vec<Row> {
             &config.storage.layout().library(),
             None,
         ));
+        out.extend(case_variant_rows(&config.storage.layout().library()));
         out.extend(credentials_row(&config.storage.layout().cloud_dir()));
         return out;
     }
@@ -187,6 +189,126 @@ pub fn reserved_series_rows(library: &Path, cloud_folder: Option<&str>) -> Vec<R
             })
         })
         .collect()
+}
+
+/// Names a local library holds in two or more spellings (only a case-sensitive disk can:
+/// made outside Bunko, or by a release before 0.5.3), one Warn row per set. Bunko reaches
+/// one spelling of a name, the byte-smallest; the others are hidden from DAV and the
+/// catalog and never written, moved or deleted, so their volumes are out of reach until
+/// they are merged by hand. Also the hidden names a case-only rename leaves behind when
+/// it is interrupted between its two steps (`.bunko-case-<token>-<name>`), with the
+/// rename that finishes it. Walks folders only (no file is read). A remote store merges
+/// its own case variants (spec §5.9): not for it.
+pub fn case_variant_rows(library: &Path) -> Vec<Row> {
+    let mut out = Vec::new();
+    let mut todo = vec![String::new()];
+    while let Some(rel) = todo.pop() {
+        let dir = if rel.is_empty() {
+            library.to_path_buf()
+        } else {
+            library.join(&rel)
+        };
+        let Ok(entries) = bunko_store::fs::read_dir(&dir) else {
+            continue;
+        };
+        let mut listed: Vec<(String, bool)> = Vec::new();
+        for entry in entries.flatten() {
+            let Ok(name) = entry.file_name().into_string() else {
+                continue;
+            };
+            // Not followed: a symlinked folder is not walked (a link up the tree loops).
+            let is_dir = entry.file_type().is_ok_and(|t| t.is_dir());
+            listed.push((name, is_dir));
+        }
+        listed.sort();
+        let child = |name: &str| {
+            if rel.is_empty() {
+                name.to_string()
+            } else {
+                format!("{rel}/{name}")
+            }
+        };
+        for (name, _) in &listed {
+            if let Some(rest) = name.strip_prefix(bunko_store::fs::CASE_RENAME_PREFIX) {
+                let to = rest.split_once('-').map_or(rest, |(_, to)| to);
+                out.push(row(
+                    Verdict::Warn,
+                    "Interrupted case rename",
+                    format!(
+                        "{} is hidden: a case-only rename to {to} stopped half-way",
+                        child(name)
+                    ),
+                    Some(format!(
+                        "Stop Bunko and rename {} to {}.",
+                        dir.join(name).display(),
+                        dir.join(to).display()
+                    )),
+                ));
+            }
+        }
+        let reachable: Vec<&(String, bool)> = listed
+            .iter()
+            .filter(|(n, _)| {
+                !n.starts_with('.')
+                    && !(rel.is_empty()
+                        && (bunko_core::reader_tree::is_per_user_root_name(n)
+                            || n.eq_ignore_ascii_case("thumbnails")))
+            })
+            .collect();
+        let losers =
+            bunko_library::fsutil::case_losers(&dir, reachable.iter().map(|(n, _)| n.as_str()));
+        if !losers.is_empty() {
+            let mut groups: std::collections::BTreeMap<String, Vec<&(String, bool)>> =
+                std::collections::BTreeMap::new();
+            for entry in &reachable {
+                groups
+                    .entry(bunko_core::sidecar_names::fold(&entry.0))
+                    .or_default()
+                    .push(entry);
+            }
+            for group in groups.values().filter(|g| g.len() > 1) {
+                let Some(winner) = group.iter().find(|(n, _)| !losers.contains(n)) else {
+                    continue;
+                };
+                let shown = |(n, is_dir): &(String, bool)| {
+                    if *is_dir {
+                        let volumes = bunko_library::compiler::archive_names(&dir.join(n)).len();
+                        format!(
+                            "{}/ ({volumes} volume{})",
+                            child(n),
+                            if volumes == 1 { "" } else { "s" }
+                        )
+                    } else {
+                        child(n)
+                    }
+                };
+                let hidden: Vec<String> = group
+                    .iter()
+                    .filter(|(n, _)| losers.contains(n))
+                    .map(|e| shown(e))
+                    .collect();
+                out.push(row(
+                    Verdict::Warn,
+                    "Case variants",
+                    format!(
+                        "{} is used; hidden until merged: {}",
+                        shown(winner),
+                        hidden.join(", ")
+                    ),
+                    Some(format!(
+                        "Stop Bunko, move each hidden spelling's volumes (an archive with its sidecars) into {}, then rename their database rows (MIGRATING-0.7.md, \"Case variants\").",
+                        dir.join(&winner.0).display()
+                    )),
+                ));
+            }
+        }
+        for (name, is_dir) in reachable {
+            if *is_dir && !losers.contains(name) {
+                todo.push(child(name));
+            }
+        }
+    }
+    out
 }
 
 /// `storage.library.spool_gb` against 2 × lanes × the largest archive (the biggest one
@@ -460,6 +582,55 @@ mod tests {
         );
         assert!(
             rows[0].hint.as_deref().unwrap().contains("rename"),
+            "{rows:?}"
+        );
+    }
+
+    /// Case variants (a case-sensitive disk only) are named with the spelling Bunko
+    /// uses; an interrupted case-only rename is named with the rename that finishes it.
+    /// The fixture writes the winner (byte-smallest) first, so a case-insensitive host
+    /// holds one spelling and passes.
+    #[test]
+    fn case_variants_are_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut c = Config::default();
+        c.storage.base_path = dir.path().to_path_buf();
+        let library = c.storage.layout().library();
+        bunko_store::fs::create_dir_all(library.join("Kingdom")).unwrap();
+        bunko_store::fs::write(library.join("Kingdom/a.cbz"), "x").unwrap();
+        let _ = bunko_store::fs::create_dir(library.join("kingdom"));
+        bunko_store::fs::write(library.join("kingdom/b.cbz"), "x").unwrap();
+        let two = bunko_store::fs::read_dir(&library)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().eq_ignore_ascii_case("kingdom"))
+            .count()
+            == 2;
+        let rows: Vec<Row> = checks(&c)
+            .into_iter()
+            .filter(|r| r.label == "Case variants")
+            .collect();
+        if two {
+            assert_eq!(rows.len(), 1, "{rows:?}");
+            assert_eq!(rows[0].verdict, Verdict::Warn);
+            assert!(
+                rows[0].detail.starts_with("Kingdom/ (1 volume) is used"),
+                "{rows:?}"
+            );
+            assert!(rows[0].detail.contains("kingdom/ (1 volume)"), "{rows:?}");
+        } else {
+            assert!(rows.is_empty(), "{rows:?}");
+        }
+
+        bunko_store::fs::create_dir_all(library.join("S")).unwrap();
+        bunko_store::fs::write(library.join("S/.bunko-case-1a2b-V.cbz"), "x").unwrap();
+        let rows: Vec<Row> = case_variant_rows(&library)
+            .into_iter()
+            .filter(|r| r.label == "Interrupted case rename")
+            .collect();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(
+            rows[0].hint.as_deref().unwrap().contains("V.cbz"),
             "{rows:?}"
         );
     }

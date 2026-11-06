@@ -480,12 +480,13 @@ async fn a_steady_stream_of_changes_still_fires_at_the_cap() {
     panic!("the runner stalled every stream for a debounce (longest quiet, fired by): {stalled:?}");
 }
 
-/// 0.5.3 `test_case_variant_folders_each_keep_their_own_row`: `Kingdom/` and `kingdom/`
-/// fold to one series key but are two folders on a case-sensitive host; neither catalog row
-/// may overwrite the other (a stray one-volume `kingdom/` can hide all the
-/// volumes of `Kingdom/` from the catalog).
+/// `Kingdom/` and `kingdom/` are one series key, and one name: every host lists one
+/// catalog row for them. A case-sensitive disk can hold both folders (made outside
+/// Bunko); the byte-smallest spelling is the one Bunko reaches, and the other is hidden
+/// until it is merged by hand (doctor names it). The fixture writes `Kingdom/` first, so
+/// a case-insensitive host (one folder) gives the same row.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn case_variant_folders_each_keep_their_own_catalog_row() {
+async fn case_variants_list_one_catalog_row() {
     let env = Env::new(|_| {});
     write_cbz(&env.series_dir("Kingdom").join("Volume 01.cbz"), 1);
     write_cbz(&env.series_dir("Kingdom").join("Volume 02.cbz"), 1);
@@ -498,35 +499,23 @@ async fn case_variant_folders_each_keep_their_own_catalog_row() {
             .map(|r| (r.folder_name, r.volume_count, r.series_key))
             .collect()
     };
-    if env.library.join("KINGDOM").exists() {
-        // A case-insensitive host (APFS, NTFS): `kingdom/` IS `Kingdom/`, so the two
-        // folders cannot exist and the third volume landed in the one there is.
-        env.runtime.recompile_all_now().await;
-        assert_eq!(
-            rows(&env),
-            [("Kingdom".to_string(), 3, "kingdom".to_string())]
-        );
-        env.runtime.stop().await;
-        return;
-    }
-    let both = vec![
-        ("Kingdom".to_string(), 2, "kingdom".to_string()),
-        ("kingdom".to_string(), 1, "kingdom".to_string()),
-    ];
+    // The volumes listed in `Kingdom/` itself: 3 where the host merged the two
+    // spellings, 2 where it did not.
+    let listed = std::fs::read_dir(env.library.join("Kingdom"))
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".cbz"))
+        .count() as i64;
+    let one = vec![("Kingdom".to_string(), listed, "kingdom".to_string())];
 
     env.runtime.recompile_all_now().await;
-    assert_eq!(rows(&env), both);
+    assert_eq!(rows(&env), one);
 
     let service = env.runtime.service().clone();
     tokio::task::spawn_blocking(move || service.recompile_series("kingdom").unwrap())
         .await
         .unwrap();
-    assert_eq!(rows(&env), both);
-
-    std::fs::remove_dir_all(env.library.join("kingdom")).unwrap();
-    env.runtime.recompile_all_now().await;
-    let names: Vec<String> = rows(&env).into_iter().map(|r| r.0).collect();
-    assert_eq!(names, ["Kingdom"]);
+    assert_eq!(rows(&env), one);
     env.runtime.stop().await;
 }
 

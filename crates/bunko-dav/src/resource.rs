@@ -729,12 +729,24 @@ impl Roots {
         let Ok(entries) = fs::read_dir(dir) else {
             return Vec::new();
         };
+        let entries: Vec<_> = entries.flatten().collect();
+        // Another spelling of a listed name (only a case-sensitive disk or a remote
+        // store holds one) is shadowed: no request reaches it, so it is not listed.
+        let names: Vec<String> = entries
+            .iter()
+            .filter_map(|e| e.file_name().to_str().map(str::to_string))
+            .collect();
+        let shadowed = crate::path_case::shadowed(dir, names.iter().map(String::as_str));
         let mut out: Vec<Resource> = Vec::new();
-        for entry in entries.flatten() {
+        for entry in entries {
             let name = entry.file_name().to_string_lossy().into_owned();
-            // The per-user names at the library root are never the library's: a stray
-            // copy, or the cloud-root owner's own files, which no one else may see.
+            // The per-user names at the library root (in any spelling) are never the
+            // library's: a stray copy, or the cloud-root owner's own files, which no one
+            // else may see.
             if reader_root && reader_tree::is_per_user_root_name(&name) {
+                continue;
+            }
+            if shadowed.contains(&name) {
                 continue;
             }
             if paths::is_staging_name(&name) {

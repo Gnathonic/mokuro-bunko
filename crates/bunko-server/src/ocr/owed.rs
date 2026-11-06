@@ -176,8 +176,9 @@ fn compute_in(
     })
 }
 
-/// Every `library/**/*.cbz` (a case-sensitive `.cbz` suffix, as 0.5.2's glob), sorted.
-/// The per-user names at the root (a cloud progress user's `history/`) are not walked.
+/// Every `library/**/*.cbz` (any case), sorted. The per-user names at the root (a cloud
+/// progress user's `history/`, any spelling) are not walked, nor is a folder or archive
+/// another listed spelling shadows.
 pub fn list_archives(library: &Path) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![library.to_path_buf()];
@@ -186,7 +187,22 @@ pub fn list_archives(library: &Path) -> Vec<std::path::PathBuf> {
             continue;
         };
         let top = dir.as_path() == library;
-        for entry in rd.flatten() {
+        let entries: Vec<_> = rd.flatten().collect();
+        // A folder or archive another listed spelling shadows is never reached: no
+        // OCR is owed for it, and none is written beside the one that shadows it.
+        let names: Vec<String> = entries
+            .iter()
+            .filter_map(|e| e.file_name().to_str().map(str::to_string))
+            .collect();
+        let losers = bunko_library::fsutil::case_losers(&dir, names.iter().map(String::as_str));
+        for entry in entries {
+            if entry
+                .file_name()
+                .to_str()
+                .is_some_and(|n| losers.contains(n))
+            {
+                continue;
+            }
             if top
                 && entry
                     .file_name()

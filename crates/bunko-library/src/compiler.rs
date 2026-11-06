@@ -45,9 +45,11 @@ fn is_cbz_name(name: &str) -> bool {
 /// `iter_series_folders`: top-level, non-hidden directories (symlinks
 /// followed) directly holding at least one `.cbz` file, sorted by name. A
 /// missing/unreadable library is empty. The per-user `history/` (0.8, a cloud
-/// root's reading history), in any spelling, is never a series, whatever it holds.
+/// root's reading history), in any spelling, is never a series, whatever it holds,
+/// nor is a folder another spelling of a listed folder shadows
+/// ([`fsutil::case_losers`]).
 pub fn iter_series_folders(library_path: &Path) -> Vec<SeriesFolder> {
-    let Ok(mut entries) = fsutil::list_dir(library_path) else {
+    let Ok(mut entries) = fsutil::list_dir_reachable(library_path) else {
         return Vec::new();
     };
     entries.sort_by(|a, b| a.0.cmp(&b.0));
@@ -87,7 +89,7 @@ pub fn orphan_series_files_where(
     library_path: &Path,
     wanted: impl Fn(&str) -> bool,
 ) -> Vec<(String, PathBuf)> {
-    let Ok(mut entries) = fsutil::list_dir(library_path) else {
+    let Ok(mut entries) = fsutil::list_dir_reachable(library_path) else {
         return Vec::new();
     };
     entries.sort_by(|a, b| a.0.cmp(&b.0));
@@ -114,7 +116,7 @@ pub fn orphan_series_files_where(
 
 /// The `.cbz` file names directly in `folder`, sorted.
 pub fn archive_names(folder: &Path) -> Vec<String> {
-    let Ok(entries) = fsutil::list_dir(folder) else {
+    let Ok(entries) = fsutil::list_dir_reachable(folder) else {
         return Vec::new();
     };
     let mut names: Vec<String> = entries
@@ -814,6 +816,23 @@ mod tests {
                 .collect();
             assert!(titles.is_empty(), "{history}: {titles:?}");
         }
+    }
+
+    /// A folder another listed spelling shadows is no series (a case-sensitive disk can
+    /// hold `Kingdom/` and `kingdom/`; the byte-smallest is the one reached). Written
+    /// winner first, so every host lists the one folder.
+    #[test]
+    fn a_shadowed_spelling_is_no_series() {
+        let dir = tempfile::tempdir().unwrap();
+        bunko_store::fs::create_dir(dir.path().join("Kingdom")).unwrap();
+        bunko_store::fs::write(dir.path().join("Kingdom/V1.cbz"), "x").unwrap();
+        let _ = bunko_store::fs::create_dir(dir.path().join("kingdom"));
+        bunko_store::fs::write(dir.path().join("kingdom/V2.cbz"), "x").unwrap();
+        let titles: Vec<String> = iter_series_folders(dir.path())
+            .into_iter()
+            .map(|f| f.title)
+            .collect();
+        assert_eq!(titles, ["Kingdom"]);
     }
 
     /// A series pass lists its folder once and still finds a primary spelled

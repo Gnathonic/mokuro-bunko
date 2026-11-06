@@ -93,6 +93,9 @@ fn scan_dir(
     let Ok(entries) = fsutil::list_dir(dir) else {
         return Vec::new();
     };
+    // Folders and archives another listed spelling shadows are never reached: not
+    // walked, not volumes. Their sidecars stay in the listing rule v1 reads.
+    let losers = fsutil::case_losers(dir, entries.iter().map(|(n, _)| n.as_str()));
     let mut subdirs = Vec::new();
     let mut filenames: HashSet<String> = HashSet::new();
     for (name, path) in entries {
@@ -102,7 +105,7 @@ fn scan_dir(
             filenames.insert(name);
         }
     }
-    subdirs.retain(|(name, _)| !name.starts_with('.'));
+    subdirs.retain(|(name, _)| !name.starts_with('.') && !losers.contains(name));
     subdirs.sort_by(|a, b| a.0.cmp(&b.0));
     if series_name.starts_with('.') {
         return subdirs;
@@ -112,7 +115,7 @@ fn scan_dir(
     sorted_names.sort();
     let volume_names: BTreeSet<String> = sorted_names
         .iter()
-        .filter(|name| crate::pyunicode::lower(name).ends_with(".cbz"))
+        .filter(|name| crate::pyunicode::lower(name).ends_with(".cbz") && !losers.contains(**name))
         .map(|name| name.chars().take(name.chars().count() - 4).collect())
         .collect();
     let mut layers_by_stem: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
@@ -132,7 +135,7 @@ fn scan_dir(
     // Stems with an archive, its extension in any case (`Vol 1.CBZ`), to its name.
     let archive_stems: HashMap<&str, &str> = filenames
         .iter()
-        .filter(|name| crate::sidecar::is_cbz_name(name))
+        .filter(|name| crate::sidecar::is_cbz_name(name) && !losers.contains(*name))
         .map(|name| (&name[..name.len() - 4], name.as_str()))
         .collect();
     let listed: Vec<&str> = sorted_names.iter().map(|name| name.as_str()).collect();

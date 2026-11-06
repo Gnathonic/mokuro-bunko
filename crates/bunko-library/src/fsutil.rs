@@ -73,6 +73,34 @@ pub fn list_dir(dir: &Path) -> io::Result<Vec<(String, PathBuf)>> {
     Ok(out)
 }
 
+/// The names listed in `dir` (among `names`) that another listed spelling shadows: in
+/// each group that folds alike (only a case-sensitive disk or a remote store holds
+/// one), all but the store's case winner, else the byte-smallest
+/// ([`bunko_core::sidecar_names::case_losers`], the rule PathCase resolves requests
+/// by). No request reaches them: the catalog and the library walks leave them out, and
+/// nothing is ever written, moved or deleted for them. Doctor reports them.
+pub fn case_losers<'a>(
+    dir: &Path,
+    names: impl IntoIterator<Item = &'a str>,
+) -> std::collections::HashSet<String> {
+    let store = bunko_store::store_for(dir);
+    bunko_core::sidecar_names::case_losers(names, |fold| store.as_ref()?.case_winner(dir, fold))
+}
+
+/// [`list_dir`] without the [`case_losers`]: the entries a request can reach.
+pub fn list_dir_reachable(dir: &Path) -> io::Result<Vec<(String, PathBuf)>> {
+    let entries = list_dir(dir)?;
+    let losers = case_losers(dir, entries.iter().map(|(n, _)| n.as_str()));
+    Ok(if losers.is_empty() {
+        entries
+    } else {
+        entries
+            .into_iter()
+            .filter(|(n, _)| !losers.contains(n))
+            .collect()
+    })
+}
+
 fn temp_suffix() -> String {
     const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789_";
     let mut hasher = RandomState::new().build_hasher();

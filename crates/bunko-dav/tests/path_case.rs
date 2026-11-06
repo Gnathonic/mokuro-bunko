@@ -568,6 +568,31 @@ async fn a_case_fix_onto_an_existing_other_spelling_is_refused() {
     }
 }
 
+/// A listing shows one spelling of a name: the one every request reaches. Another
+/// spelling (a case-sensitive disk only) is shadowed. Written winner first, so every
+/// host lists the same.
+#[tokio::test]
+async fn a_listing_shows_one_spelling_of_a_name() {
+    let env = Env::new();
+    std::fs::create_dir(env.lib("Kingdom")).unwrap();
+    std::fs::write(env.lib("Kingdom/a.cbz"), b"a").unwrap();
+    let _ = std::fs::create_dir(env.lib("kingdom"));
+    std::fs::write(env.lib("kingdom/b.cbz"), b"b").unwrap();
+    let listing = req(
+        &env,
+        None,
+        "PROPFIND",
+        "/mokuro-reader/",
+        &[("depth", "1")],
+        b"",
+    )
+    .await;
+    assert_eq!(listing.code(), 207);
+    let text = listing.text();
+    assert!(text.contains("/mokuro-reader/Kingdom/"), "{text}");
+    assert!(!text.contains("/mokuro-reader/kingdom/"), "{text}");
+}
+
 // --- The per-user names are reserved in every spelling (0.8) ------------------------
 
 /// Inside the caller's own history tree nothing resolves against the library; an

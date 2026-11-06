@@ -95,12 +95,22 @@ pub(crate) fn pick_winner(parent: &Path, target: &str, variants: Vec<String>) ->
     variants.into_iter().min()
 }
 
+/// The names listed in `parent` that another listed spelling shadows (the rule of
+/// [`on_disk_name`], [`bunko_core::sidecar_names::case_losers`]): no request reaches
+/// them, so no listing shows them.
+pub(crate) fn shadowed<'a>(
+    parent: &Path,
+    names: impl IntoIterator<Item = &'a str>,
+) -> std::collections::HashSet<String> {
+    let store = bunko_store::store_for(parent);
+    bunko_core::sidecar_names::case_losers(names, |fold| store.as_ref()?.case_winner(parent, fold))
+}
+
 /// `relative` (below `base`) with every existing segment in its listed spelling
 /// ([`on_disk_name`]); segments past the first one that names nothing keep the requested
 /// spelling. `top_reserved`: `base` is the library root, where per-user names are never
 /// library entries. `.`/`..` segments are never resolved through (the path is returned
 /// unchanged); empty segments are carried through.
-#[allow(dead_code)] // the overlay and history lookups use it next
 pub(crate) fn resolve_existing(base: &Path, relative: &str, top_reserved: bool) -> String {
     resolve(base, relative, None, top_reserved)
 }
