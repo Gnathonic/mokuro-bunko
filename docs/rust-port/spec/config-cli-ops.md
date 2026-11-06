@@ -109,7 +109,7 @@ Meaning: networks of reverse proxies whose `X-Real-IP`/`X-Forwarded-For` are bel
 |---|---|---|---|---|
 | base_path | path str | platform default (1.1) | `expanduser()` on YAML values (str -> Path) | yes + alias `MOKURO_STORAGE` (no expanduser, 2.3) |
 
-Derived directories (NOT configurable): `library = base/library`, `inbox = base/inbox`, `users = base/users`. `ensure_directories()` (config.py:98-103) creates `library`, `inbox`, `users` (all `parents=True, exist_ok=True`) and `library/thumbnails`.
+Derived directories (NOT configurable): `library = base/library`, `inbox = base/inbox`, `users = base/users`. `ensure_directories()` (config.py:98-103) creates `library`, `inbox`, `users` (all `parents=True, exist_ok=True`) and `library/thumbnails`. Rust 0.8: no `library/thumbnails` (an empty one an earlier start made, listed under exactly that name, is removed); a cloud library gets no `library/` either.
 Other fixed names under `base_path` (grep of src; other specs own contents): `mokuro.db` (SQLite; server.py:194), `logs/server.log`, `logs/ocr/` (logging_setup.py:23-30), `.ocr-failures.json`, `.ocr-progress.json`, `.ocr-heartbeat`, `.ocr-bench.json`, `.ocr-congestion.json`, `.processing/` (OCR staging/samples), `processors/` (per-machine profiles), `bench/` (processor-side), `.tmp`/`.pip-cache` (Unraid entrypoint only). Probe files created+deleted by checks: `.mokuro-doctor-probe`, `.mokuro-write-test`.
 
 ### 3.3 `registration` (RegistrationConfig, config.py:106-135)

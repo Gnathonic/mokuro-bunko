@@ -6,16 +6,34 @@
 - **Library names are case-insensitive and case-preserving on every host, with no
   probing.** Linux (case-sensitive or casefold), macOS, Windows, SMB mounts and every
   cloud store behave the same: a name that differs only in case from an existing
-  entry addresses that entry. Where a case-sensitive disk already holds two spellings
-  of one name (made outside Bunko or before 0.5.3), every request, the exact spelling
-  of the other included, reaches one of them, the byte-smallest; the others are hidden
-  from WebDAV, the catalog, OCR and covers until they are merged by hand, and nothing
-  is written to, moved out of or deleted from them. `doctor` and the startup log name
-  each set.
+  entry addresses that entry, and Bunko never creates a second spelling of it. Which
+  entry a name addresses is decided from folder listings, never by opening the name
+  and seeing what the host answers. Where a case-sensitive disk already holds two spellings of one name
+  (made outside Bunko or before 0.5.3), every request, the exact spelling of the other
+  included, reaches one of them: the byte-smallest locally, the spelling a cloud
+  store's case merge keeps there. The others are hidden from WebDAV, the catalog, OCR
+  and covers until they are merged by hand. Nothing is written to, moved out of or
+  deleted from them, and nothing of theirs is used for the one that hides them: the
+  sidecars, cover and `.nocover` its exact stem names (`v.mokuro`, `v.webp` for a
+  hidden `v.cbz`), its account corrections and its upload record stay its own. A
+  volume whose OCR or cover name is a hidden archive's gets none until the merge. A
+  case-fixing MOVE is refused (409) while its folder lists another spelling of the
+  name besides the source. `doctor` and the startup log name each set.
 - **The reader's per-user names are reserved in any spelling.** `History/`,
   `Goals.json`, `Volume-Data.json` and the like are the caller's own `history/`,
   `goals.json` and `volume-data.json`, never library paths. A series folder spelled
-  like one is hidden until it is renamed (`doctor` names it).
+  like one is hidden until it is renamed (`doctor` names it): WebDAV never shows it,
+  and the catalog neither lists it nor serves its page, covers or manifest (404). In
+  a cloud library the progress user's own entries are the canonical `history/`,
+  `goals.json`, ... in the cloud folder; while that folder holds one only in another
+  spelling (a `History/` from 0.7), that entry is the name, and the progress user's
+  writes to it are refused (409) until it is renamed, never written beside it.
+- **No `thumbnails/` folder in the library.** Every start made an empty
+  `library/thumbnails/` (0.5.2's cover cache; covers have long lived beside their
+  archives). 0.8 makes none and removes an empty one an earlier start left; one that
+  holds anything stays as an ordinary folder. `thumbnails` is no special name any
+  more, in any spelling, on any store: a series `Thumbnails/` is a series like any
+  other, where before a request for it reached Bunko's own folder on a local disk.
 - **Series have owners, and an uploader controls only what is its own.** The account
   that creates a series folder owns it. An `uploader` account can no longer add files
   or folders to a series another account owns; it adds new volumes to a series nobody
@@ -340,14 +358,32 @@
   corrections followed the new spelling.
 - **A case-fixing MOVE onto a name another entry already holds in another spelling is
   refused (409)** instead of deleting that entry first under `Overwrite: T`.
-- **Bunko never writes a second spelling of a name.** Covers, `.nocover` markers, the
-  OCR upgrade and per-account corrections use the spelling the folder already lists
-  (`V.WEBP`, `V.MOKURO`); reading-history device folders are reached in any case; the
-  catalog's volume manifest and the admin OCR actions take a series or volume in any
-  case; an uploader keeps control of a volume renamed to another case outside Bunko.
-  The start-up pass that lets JPEG XL volumes get their cover removes the `.nocover`
+- **Bunko never writes a second spelling of a name.** Covers, `.nocover` markers, OCR
+  results, the OCR upgrade and per-account corrections use the spelling the folder
+  already lists (`V.WEBP`, `V.MOKURO`); reading-history device folders are reached in
+  any case; the catalog's volume manifest and the admin OCR actions take a series or
+  volume in any case, and a series' cover is found in the spelling listed (`v.webp`
+  for `V.cbz`). A WebDAV COPY of a folder onto an existing one pairs their
+  members in any case: an existing member spelled otherwise receives the copy and
+  keeps its spelling. A PUT of a new name that an upload in another spelling took
+  meanwhile is refused (409 `case-variant`; sent again, it reaches that file). The
+  start-up pass that lets JPEG XL volumes get their cover removes the `.nocover`
   marker in the spelling the folder lists, and an OCR failure record stays while its
   volume is listed in any case (`V1.CBZ`), on every host alike.
+- **An uploader keeps control of a volume renamed to another case outside Bunko**
+  (the volume, or its series folder), on every host: the upload record is matched to
+  the volume through the folder listings. A record whose spelling is still listed as
+  an entry of its own (a hidden case variant) never gives control of another volume.
+  Deleting or moving such a volume takes its record along, and overwriting it keeps
+  its first uploader, so a later upload of the old spelling is never credited to the
+  old uploader. `/login/api/me` offers curated publishing for exactly the volumes
+  auth then allows.
+- **A Depth: infinity listing shows an account's corrections under the series
+  folder's listed spelling** after the folder was renamed to another case outside
+  Bunko or in the cloud, as a Depth: 1 listing of that folder does.
+- **The temporary name of an interrupted case-only rename is hidden** (`.bunko-case-*`):
+  no WebDAV listing shows it, so no client deletes it as junk, and the OCR walk does
+  not enter it. `doctor` names it with the rename that finishes it.
 - **Deleting an account no longer deletes another account's folder** whose name differs
   only in case (possible in databases from before such names were refused), on disks
   that ignore case.

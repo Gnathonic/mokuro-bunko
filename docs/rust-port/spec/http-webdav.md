@@ -82,7 +82,10 @@ TLS details:
    `Startup validation failed: <msg>` to stdout, `SystemExit(2)` (`server.py:602-606`). **KEEP**.
    * `config.storage.ensure_directories()`: mkdir -p `library`, `inbox`, `users`, and `library/thumbnails`
      (`config.py:98-103`). `thumbnails/` therefore exists in the library and shows up in PROPFIND of
-     `/mokuro-reader/` (section 8.3) (QUIRK).
+     `/mokuro-reader/` (section 8.3) (QUIRK). **Rust 0.8: no `thumbnails/` is made** (on a case-sensitive
+     disk it was a second spelling of a series `Thumbnails/`, and it made `thumbnails` behave differently
+     on a local and a cloud library); an empty one an earlier start left, listed under exactly that name,
+     is removed at start. `thumbnails` is an ordinary name in any spelling on every store.
    * `_assert_writable_dir` for `base_path`, `library`, `inbox`, `users` (`server.py:50-61`): must exist, be
      a directory, and accept creating+deleting `<dir>/.mokuro-write-test` (content `ok`). Messages:
      `Required directory does not exist (<label>): <path>`, `Required path is not a directory (<label>): <path>`,
@@ -545,10 +548,12 @@ uploader); owner = `get_volume_owner(rel)` where the key is `rel` with the exten
 if none, an OCR layer file `<stem>.<layer>.mokuro[.gz]` (layer matches `^(?=[a-z0-9-]*[a-z])[a-z0-9-]{1,32}$`)
 borrows the owner of `<stem>.cbz`; allowed iff `owner == username`. 0.8: the key is the canonical
 spelling Bunko wrote; a lookup that misses falls back to the filename fold (NFC + lowercase) among
-the rows that match it ignoring ASCII case, so a volume respelled outside Bunko keeps its uploader.
-A row whose own spelling is still listed in its folder is passed over: it belongs to that entry (a
-case variant a case-sensitive disk or a cloud folder holds beside this one), never to the one the
-request reaches.
+the rows that match it ignoring ASCII case, taking a row only when its spelling leads, through the
+folder listings segment by segment, to the very entry the request reaches (`fsutil::ListedWalk`):
+a volume or series folder respelled outside Bunko keeps its uploader on every host. A row that
+spells a listed entry of its own (a case variant a case-sensitive disk or a cloud folder holds
+beside this one, shadowed) belongs to that entry, never to the one the request reaches. A DELETE
+or MOVE takes the matched row along (see db-auth-admin `get_volume_owner`).
 Consequently an uploader can delete **files** they uploaded (and their sidecars/layers) but never a folder.
 
 ### 4.7 `gate_read(environ, start_response, path)` (`auth.py:441-468`)
@@ -714,7 +719,7 @@ Physical layout: `<base>/library/` (shared), `<base>/inbox/` (never exposed), `<
 | `/mokuro-reader` | virtual **merged** collection | none |
 | `/mokuro-reader/volume-data.json`, `.../profiles.json`, `.../goals.json` | file; **only visible to an authenticated user**; maps to that user's own file | `users/<username>/<name>` |
 | 0.8: `/mokuro-reader/positions.json`, `/mokuro-reader/history/**` | the same per-user rule: `positions.json` a file, `history` and `history/<device>` collections the reader creates (MKCOL 201; 405 when it exists; 409 without its parent), `history/<device>/<file>` files (PUT ≤ 16 MiB, 413; ≤ 256 MiB an account, 507). Depth 1 on `/mokuro-reader` lists `history/` to its owner only; Depth infinity on `/` and `/mokuro-reader` adds the caller's own tree and nobody else's | `users/<username>/…`; for a cloud library's `progress_user`, the cloud root itself (0.8 design §10) |
-| 0.8: `/mokuro-reader/<folder>/<Vol>.edit[-<n>].mokuro` (D27: the id exactly as written, and no listed `.cbz`'s own primary, sidecar names rule v1) | a **personal correction**: each signed-in caller's own file at the same path, anonymous none (404). Listed (Depth 1 and infinity) only to its owner and only beside its `.cbz`. PUT: the `.cbz` must be listed (409 `no-volume`), plain lowercase `.mokuro` (`.gz` 403, other spellings 409), body a JSON object with a `pages` array and no `ocr_engine` (422 `not-a-layer`), ≤ 32 MiB (413); `curated` takes the same checks. MOVE/COPY only to another correction name (403 otherwise), with no archive check. No upload record, no OCR row, no provenance rewrite; audited as `personal`. Every account's overlays follow their volume (`PersonalOverlays`): an archive MOVE renames them to the new stem, a folder MOVE carries them, and so do the same changes made in a cloud folder and a case merge (a trashed byte-identical loser's go to the kept spelling); a duplicate-folder merge keeps the path, so they stay valid. One already at the destination is kept and the moving one takes the next free `edit-<n>`. A deleted archive or folder takes them along (rule 6 decides which stem is the archive's); a self-delete removes `users/<u>/` with them, an admin soft delete keeps them | `users/<username>/edits/<rel>`; for a cloud library's `progress_user`, the physical `library/<rel>` (hidden from everyone else) |
+| 0.8: `/mokuro-reader/<folder>/<Vol>.edit[-<n>].mokuro` (D27: the id exactly as written, and no listed `.cbz`'s own primary, sidecar names rule v1) | a **personal correction**: each signed-in caller's own file at the same path, anonymous none (404). Listed (Depth 1 and infinity) only to its owner and only beside its `.cbz`. PUT: the `.cbz` must be listed (409 `no-volume`), plain lowercase `.mokuro` (`.gz` 403, other spellings 409), body a JSON object with a `pages` array and no `ocr_engine` (422 `not-a-layer`), ≤ 32 MiB (413); `curated` takes the same checks. MOVE/COPY only to another correction name (403 otherwise), with no archive check. No upload record, no OCR row, no provenance rewrite; audited as `personal`. Every account's overlays follow their volume (`PersonalOverlays`): an archive MOVE renames them to the new stem, a folder MOVE carries them, and so do the same changes made in a cloud folder and a case merge (a trashed byte-identical loser's go to the kept spelling); a duplicate-folder merge keeps the path, so they stay valid. One already at the destination is kept and the moving one takes the next free `edit-<n>`. A deleted archive or folder takes them along (rule 6 decides which stem is the archive's); an overlay folder is matched to the library folder in any case, except one spelled like a library folder of its own (a shadowed case variant on a case-sensitive disk): that stays that folder's, untouched by anything done to the one that shadows it; a `Depth: infinity` listing shows each overlay under the library folder's listed spelling, as `Depth: 1` does; a self-delete removes `users/<u>/` with them, an admin soft delete keeps them | `users/<username>/edits/<rel>`; for a cloud library's `progress_user`, the physical `library/<rel>` (hidden from everyone else) |
 | `/mokuro-reader/<anything else>` | shared library file/collection | `library/<rel>` via `safe_resolve_under` |
 | `/inbox`, `/inbox/*` | **nothing**: `get_resource_inst` returns `None` => GET/PROPFIND/DELETE 404 (PathMapper maps it but the provider never serves it) | |
 | every other path | `None` => 404 | |
@@ -755,7 +760,9 @@ auth gate (4.3 step 5/6, 4.4 steps 2-3).
 * physical folder -> `os.scandir` order (unsorted, filesystem order). Nothing is filtered: hidden files,
   `thumbnails/`, `.nocover`, `.mokuro-write-test` and in-flight upload staging files
   (`.<name>.upload-*.tmp`, section 8.9) are all listed. (Rust: sorting is fine; hiding staging files
-  would be an improvement, Q3.)
+  would be an improvement, Q3.) **Rust 0.8:** in-flight staging files and the temporary
+  `.bunko-case-*` name of an interrupted case-only rename are never listed (nor copied, nor entered by
+  the OCR walk; doctor names the latter); a shadowed case variant is never listed.
 * `OSError` while listing -> empty list.
 Child kind comes from the DirEntry (`is_dir(follow_symlinks=True)`), with `stat` pre-populated
 (`follow_symlinks=True`). Listing therefore does **not** apply `safe_resolve_under`: a symlink pointing
@@ -895,7 +902,11 @@ Order of checks and effects:
    * physical folder parent: `safe_resolve_under(folder, name)`, `None` -> `403`. (No directories are created.)
    Existing file: DAV-lock check on it.
 5. `begin_write` (below): path write-lock; on conflict `423 Locked` ("Resource is locked by another write
-   operation") + audit `lock_conflict` (`operation: "write"`).
+   operation") + audit `lock_conflict` (`operation: "write"`). **0.8:** the lock is keyed by the folded path,
+   and a new library file is resolved again under it: when the folder now lists another spelling of the name
+   (an upload in that spelling took it after PathCase resolved this request), the PUT answers `409`, reason
+   `case-variant`, retry true, nothing staged; sent again, it reaches that file and is judged as a write to it.
+   Bunko never creates a second spelling.
 6. Body streamed (8192-byte reads) into the writer; `close()` runs the finalize/verify/commit sequence (8.9). Any
    exception: `end_write(with_errors=True)` aborts the writer (temp file discarded, path lock released) and the
    request fails with the exception's status (non-DAV exceptions -> `500`; `DAVError` keeps its code, e.g. `422`,
@@ -1011,8 +1022,10 @@ Bunko-specific handlers (authoritative semantics):
 * **File MOVE** (`handle_move`): destination resolved with `PathMapper.virtual_to_physical`; source and destination
   must be the same class (`library`->`library` or `progress`->`progress`, else `handle_move` returns False: QUIRK
   14.1). Locks `[src, dst]` (sorted by casefolded resolved path; `423` + audit on conflict). 0.8: a MOVE that
-  only changes the case of its source while the destination still exists as another entry (a second spelling,
-  which only a case-sensitive disk holds) answers `409 Conflict` before anything is deleted. Steps:
+  only changes the case of its source answers `409 Conflict` before anything is deleted while the destination
+  still exists as another entry, or (checked under the locks, from the listing) while the source's folder lists
+  any other spelling of the name besides the source (a shadowed variant, which only a case-sensitive disk or a
+  cloud folder holds): the name would pass to that entry. Steps:
   `_remember_primary_uuid`; `mkdir -p dst.parent`; `os.replace(src, dst)` (atomic; overwrites); `archives_removed += [src]`
   if `.cbz`; `archive_written = dst` if `.cbz` in library; DB `rename_volume_upload(old, new)` (ownership follows
   the file; upsert); `_forget_ocr_records(old)` (archive => all sidecar rows of the old volume) and
@@ -1044,7 +1057,11 @@ Bunko-specific handlers (authoritative semantics):
   audit `move`. Pinned by `test_move_series_folder_as_admin_preserves_sidecars_and_owner`.
 * **Folder COPY** (generic): `Depth: infinity` copies the tree pre-order (folders `mkdir -p`, files as File COPY);
   when the destination exists and is a collection too, destination members absent from the source are deleted first
-  (RFC 9.8.4 no-merge); `Depth: 0` creates only the destination folder. Folder `copy_move_single` creates the
+  (RFC 9.8.4 no-merge); `Depth: 0` creates only the destination folder. **0.8:** members pair by name in any
+  case, as on a case-insensitive disk, on every host: a destination member is absent only when no source member
+  folds like it, a source member is copied onto the destination member spelled in any case (which keeps its
+  spelling), and the delete hooks get the paths really listed. Shadowed members (either side) are never
+  copied or deleted. Folder `copy_move_single` creates the
   destination directory only if it is a library path (`dest_type == "library"`).
 * The auth gate only requires `MODIFY_DELETE` (or progress write for per-user *source*) and checks the
   Destination only for compiled metadata paths (4.3 step 6).
@@ -1272,7 +1289,7 @@ Tests: `tests/unit/test_nginx_accel.py`, `tests/integration/test_webdav_ops.py::
 
 | Path | When | Notes |
 |---|---|---|
-| `<base>/library/`, `inbox/`, `users/`, `library/thumbnails/` | startup (`ensure_directories`, also by `PathMapper.ensure_directories` and `create_app`) | mkdir -p; default permissions per umask |
+| `<base>/library/`, `inbox/`, `users/`, `library/thumbnails/` | startup (`ensure_directories`, also by `PathMapper.ensure_directories` and `create_app`) | mkdir -p; default permissions per umask. Rust 0.8: no `library/thumbnails/` (an empty one is removed) |
 | `<dir>/.mokuro-write-test` | startup validation, in `base`, `library`, `inbox`, `users` | write `ok` then unlink |
 | `<base>/mokuro.db` | `create_app` | SQLite (DB spec) |
 | `<base>/logs/<server log>` (+ rotated copies) | `run_server` | 2 MiB x 5 |
@@ -1482,6 +1499,8 @@ Tests: `tests/unit/test_queue_file.py`.
 * No debounce of its own (debouncing is the PROPFIND cache's timer and the metadata service's scheduler).
 * `classify_change(library_root, path)` (`:43-65`): path not under the root -> `("library", None)`; fewer than 2 relative parts
   (a top-level entry or the root) -> `("library", None)`; first part `thumbnails` -> `("ignore", None)`; else `("series", <first part>)`.
+  Rust 0.8: no `thumbnails` case (it is a series name like any); a first part spelled like a per-user name,
+  in any case, -> ignore.
   Pinned by `tests/unit/test_fs_watcher.py`.
 
 ### 12.2 Invalidation graph
@@ -1549,7 +1568,7 @@ Numbered for cross-reference. **[VERIFIED]** = reproduced against the real app/W
 | 14.10 | `OPTIONS` of any not-yet-existing path under an existing collection (incl. `/inbox`) is `200 Allow: OPTIONS, PUT, MKCOL`. `OPTIONS` on `/inbox/x`: `404`. Collections advertise no `PUT`/`MKCOL`. | replicate; 0.8 lists `PUT`/`MKCOL` on collections the account may write (§8.3.1, X9): Mokuro Reader reads `Allow`. |
 | 14.11 | 405 answers (`POST`, unknown methods) carry no `Allow`. | add `Allow` (harmless). |
 | 14.12 | `201`/`MKCOL` responses carry an HTML body; `204` has none. | any small body is fine. |
-| 14.13 | `library/thumbnails/` is created at startup and listed in PROPFIND of `/mokuro-reader/`; in-flight staging files (`.<n>.upload-*.tmp`) and dotfiles are listed. | Q3. |
+| 14.13 | `library/thumbnails/` is created at startup and listed in PROPFIND of `/mokuro-reader/`; in-flight staging files (`.<n>.upload-*.tmp`) and dotfiles are listed. | **changed in 0.8**: no `thumbnails/` is created (an empty one from an earlier start is removed; `thumbnails` is an ordinary name in any spelling, local and cloud alike); staging files and `.bunko-case-*` leftovers are hidden; other dotfiles are listed (Q3). |
 | 14.14 | One audit row per successful PUT incl. each progress save; a DB error after the rename makes the PUT `500` although the file was stored. | decide in DB spec; at least do not 500 after commit. |
 | 14.15 | Per-user names are matched case-sensitively; `Volume-Data.json` is a shared library file. | **changed in 0.8** (deliberate): per-user names match in any case, so `Volume-Data.json` is the caller's `volume-data.json`. The library is case-insensitive and case-preserving on every host. |
 | 14.16 | `AuthMiddleware` error bodies have no `Content-Length` (cheroot frames them); 429 has no `Retry-After`. | add `Content-Length`; `Retry-After` optional. |
