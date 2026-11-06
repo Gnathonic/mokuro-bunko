@@ -23,12 +23,15 @@ export function davPath(...segments) {
     return `/mokuro-reader/${segments.map(encodeURIComponent).join('/')}`;
 }
 
+/** How many lease-fence 503s `request` waits out before it hands one back. */
+const FENCE_WAITS = 2;
+
 export function bunko(rig) {
     const base = rig.bunkoUrl;
     if (!base) throw new Error('this suite runs no Bunko server');
     const admin = rig.account('admin');
 
-    async function request(method, path, { auth, body, headers = {} } = {}) {
+    function send(method, path, { auth, body, headers = {} }) {
         const h = { ...headers };
         if (auth) h.authorization = auth;
         let payload = body;
@@ -37,6 +40,22 @@ export function bunko(rig) {
             payload = JSON.stringify(body);
         }
         return fetch(`${base}${path}`, { method, headers: h, body: payload });
+    }
+
+    /**
+     * One request, as a client sends it. Bunko's lease fence answers a write 503 with a
+     * short Retry-After while it claims the library or confirms its claim (outbox.rs):
+     * waited out as the reader does (`fetchWithRetryAfter`), at most twice, a
+     * Retry-After of 30 s at most. Any other answer, and a third 503, come back as is.
+     */
+    async function request(method, path, options = {}) {
+        for (let waits = 0; ; waits++) {
+            const r = await send(method, path, options);
+            const after = Number(r.headers.get('retry-after'));
+            if (r.status !== 503 || waits >= FENCE_WAITS || !(after > 0 && after <= 30)) return r;
+            await r.arrayBuffer();
+            await new Promise((resolve) => setTimeout(resolve, after * 1000));
+        }
     }
 
     return {
