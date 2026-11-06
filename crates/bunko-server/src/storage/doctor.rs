@@ -205,7 +205,9 @@ pub fn reserved_series_rows(library: &Path, cloud_folder: Option<&str>) -> Vec<R
 /// listed volume's files that sidecar names rule v1 does not give it (`STRASSE.mokuro`
 /// beside `Straße.cbz`, `V.EDIT.mokuro` beside `V.cbz`: Bunko writes nothing for the
 /// volume in its place) or that only the fold gives a volume file suffix
-/// ([`bunko_core::sidecar_names::fold_disputed`]). Walks folders only (no file is
+/// ([`bunko_core::sidecar_names::fold_disputed`]), and one the fold makes one name with
+/// a personal or curated layer name while it is no such layer (`X.ed\u{200B}it.mokuro`,
+/// its volume listed or not: [`bunko_core::sidecar_names::shadows_reserved_layer`]). Walks folders only (no file is
 /// read). A remote store merges its own case variants (spec §5.9): not for it.
 pub fn case_variant_rows(library: &Path) -> Vec<Row> {
     let mut out = Vec::new();
@@ -339,10 +341,21 @@ pub fn case_variant_rows(library: &Path) -> Vec<Row> {
                 continue;
             }
             let disputed = bunko_core::sidecar_names::fold_disputed(name, &files);
+            let path = dir.join(name);
             if disputed.is_empty() {
+                if bunko_core::sidecar_names::shadows_reserved_layer(name, &files).is_some() {
+                    out.push(row(
+                        Verdict::Warn,
+                        "Ambiguous name",
+                        format!(
+                            "{} is one name on every host (Bunko joins names as case-insensitive filesystems do) with an account's correction or the curated layer of a volume of that stem, but no such layer by the sidecar naming rule Mokuro Reader shares: requests for those layers never reach it, and Bunko writes no such name",
+                            child(name)
+                        ),
+                        Some(format!("Delete {} or rename it apart.", path.display())),
+                    ));
+                }
                 continue;
             }
-            let path = dir.join(name);
             out.push(if disputed == [name.to_string()] {
                 row(
                     Verdict::Warn,
@@ -721,6 +734,7 @@ mod tests {
             "Stra\u{df}e.cbz",
             "STRASSE.mokuro",
             "W.mo\u{212A}uro",
+            "X.ed\u{200B}it.mokuro",
             "Notes.txt",
         ] {
             bunko_store::fs::write(library.join("S").join(name), "x").unwrap();
@@ -731,7 +745,14 @@ mod tests {
             .collect();
         rows.sort_by(|a, b| a.detail.cmp(&b.detail));
         let details: Vec<&str> = rows.iter().map(|r| r.detail.as_str()).collect();
-        assert_eq!(rows.len(), 3, "{details:?}");
+        assert_eq!(rows.len(), 4, "{details:?}");
+        // One name with an account's correction of a volume `X`, listed or not.
+        assert!(
+            details
+                .iter()
+                .any(|d| d.starts_with("S/X.ed\u{200B}it.mokuro is one name on every host")),
+            "{details:?}"
+        );
         assert!(
             details
                 .iter()

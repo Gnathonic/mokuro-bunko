@@ -640,6 +640,52 @@ pub fn fold_disputed(name: &str, names: &[&str]) -> Vec<String> {
     out
 }
 
+/// The reserved layer class (personal `edit`/`edit-<n>`, `curated`, `curated-<n>`) the
+/// name `name` itself carries, exactly as written (rule 5), in a folder whose listed
+/// FILES are `names`; `None` for any other name: an `Other` layer, no layer at all, or
+/// a listed archive's own primary (rule 4: `V.edit.mokuro` beside `V.edit.cbz`).
+pub fn reserved_layer_of(name: &str, names: &[&str]) -> Option<LayerClass> {
+    let (_, id, _) = split_layer(name)?;
+    let class = layer_class(id);
+    if class == LayerClass::Other {
+        return None;
+    }
+    match classify(name, &volume_stems(names.iter().copied())) {
+        SidecarClass::Primary { .. } => None,
+        _ => Some(class),
+    }
+}
+
+/// The reserved layer class (personal, curated, `curated-<n>`) the filename fold
+/// ([`fold`]) gives `name` while `name` itself is not that layer ([`reserved_layer_of`]),
+/// in a folder whose listed FILES are `names`; `None` otherwise. `V.ed\u{200B}it.mokuro`,
+/// `V.ed\u{131}t.mokuro`, `V.EDIT.mokuro`, `V.Curated.mokuro` are one name with
+/// `V.edit.mokuro` or `V.curated.mokuro` on every host, though rule v1 (ids exact) reads
+/// no such layer in them, for every stem, an archive of it listed or not. Such a file
+/// can only ever shadow those layers: a request for an account's own correction, or for
+/// the shared curated layer, would reach it. Bunko creates no such name (a WebDAV write
+/// of one answers 409), and a request for the layer itself is never sent to one
+/// (`bunko_dav::PathCase`). A listed archive's own primary (`V.EDIT.mokuro` beside
+/// `V.EDIT.cbz`) is that volume's file, never such a name.
+pub fn shadows_reserved_layer(name: &str, names: &[&str]) -> Option<LayerClass> {
+    let target = fold(name);
+    let (_, id, _) = split_layer(&target)?;
+    let class = layer_class(id);
+    if class == LayerClass::Other {
+        return None;
+    }
+    if split_layer(name).is_some_and(|(_, id, _)| layer_class(id) == class) {
+        return None;
+    }
+    if matches!(
+        classify(name, &volume_stems(names.iter().copied())),
+        SidecarClass::Primary { .. }
+    ) {
+        return None;
+    }
+    Some(class)
+}
+
 #[cfg(test)]
 mod tests {
     /// Hidden: every spelling of a name but the winner, and the files rule v1 gives to a
@@ -1141,6 +1187,57 @@ mod tests {
             )
             .is_empty()
         );
+    }
+
+    /// A name the filename fold makes one with a personal or curated layer name, of any
+    /// stem, while rule v1 reads no such layer in it, shadows that layer; the layer
+    /// names themselves, other ids and a listed archive's own primary do not.
+    #[test]
+    fn names_the_fold_joins_with_a_reserved_layer_shadow_it() {
+        let personal = Some(LayerClass::Personal);
+        let curated = Some(LayerClass::Curated);
+        let reserved = Some(LayerClass::Reserved);
+        for (name, class) in [
+            ("X.ed\u{200B}it.mokuro", personal),
+            ("X.ed\u{131}t.mokuro", personal),
+            ("X.edit\u{200B}.mokuro", personal),
+            ("X.e\u{34F}dit.mokuro", personal),
+            ("X.EDIT.mokuro", personal),
+            ("X.Edit.mokuro.gz", personal),
+            ("X.edit-\u{200B}2.mokuro", personal),
+            ("X.cura\u{200B}ted.mokuro", curated),
+            ("X.Curated.mokuro", curated),
+            ("X.CURATED-2.mokuro", reserved),
+        ] {
+            assert_eq!(shadows_reserved_layer(name, &[]), class, "{name:?}");
+            assert_eq!(shadows_reserved_layer(name, &["X.cbz"]), class, "{name:?}");
+        }
+        for name in [
+            "X.edit.mokuro",
+            "X.edit-2.mokuro",
+            "X.curated.mokuro",
+            "X.curated-3.mokuro",
+            "STRASSE.edit.mokuro",
+            "X.Fast.mokuro",
+            "X.gcv.mokuro",
+            "X.tr-en.mokuro",
+            "X.ORIGINAL.mokuro",
+            "X.mokuro",
+            "X.edit.cbz",
+            "Notes.txt",
+        ] {
+            assert_eq!(shadows_reserved_layer(name, &["X.cbz"]), None, "{name:?}");
+        }
+        // A dotted volume's own primary.
+        assert_eq!(
+            shadows_reserved_layer("V.EDIT.mokuro", &["V.EDIT.cbz"]),
+            None
+        );
+        assert_eq!(reserved_layer_of("V.edit.mokuro", &["V.edit.cbz"]), None);
+        assert_eq!(reserved_layer_of("V.edit.mokuro", &["V.cbz"]), personal);
+        assert_eq!(reserved_layer_of("V.curated.mokuro", &[]), curated);
+        assert_eq!(reserved_layer_of("V.ed\u{200B}it.mokuro", &["V.cbz"]), None);
+        assert_eq!(reserved_layer_of("V.gcv.mokuro", &["V.cbz"]), None);
     }
 
     #[test]

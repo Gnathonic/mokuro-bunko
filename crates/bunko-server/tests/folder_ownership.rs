@@ -823,13 +823,16 @@ async fn a_stray_made_first_never_keeps_a_volume_out() {
         ("\u{131}.nocover", "i.cbz"),
     ];
     for (stray, _) in strays {
-        let r = env
-            .put(
-                "bob",
-                &format!("/mokuro-reader/Shared/{stray}"),
-                body.clone(),
-            )
-            .await;
+        let path = format!("/mokuro-reader/Shared/{stray}");
+        // A name the fold joins with an account's correction is made by nobody, its
+        // volume listed or not: this one is made by hand (or by 0.7).
+        if stray == "V.EDIT.mokuro" {
+            let r = env.put("bob", &path, body.clone()).await;
+            assert_eq!(r.status, 409, "bob {stray:?}: {}", r.text());
+            std::fs::write(env.lib(&format!("Shared/{stray}")), &body).unwrap();
+            continue;
+        }
+        let r = env.put("bob", &path, body.clone()).await;
         assert_eq!(r.status, 201, "bob {stray:?}: {}", r.text());
     }
     for (stray, archive) in strays {
@@ -847,7 +850,8 @@ async fn a_stray_made_first_never_keeps_a_volume_out() {
         let r = env.put("editor", &path, cbz(1)).await;
         assert_eq!(r.status, 204, "editor {archive:?}: {}", r.text());
     }
-    // An editor's MOVE into the folder, beside a stray made first.
+    // An editor's MOVE into the folder, beside a stray made first (by hand: nobody
+    // makes a name the fold joins with the curated layer).
     let r = env
         .put(
             "bob",
@@ -855,7 +859,8 @@ async fn a_stray_made_first_never_keeps_a_volume_out() {
             body.clone(),
         )
         .await;
-    assert_eq!(r.status, 201, "{}", r.text());
+    assert_eq!(r.status, 409, "{}", r.text());
+    std::fs::write(env.lib("Shared/Z.Curated.mokuro"), &body).unwrap();
     let r = env
         .put("editor", "/mokuro-reader/Other/Z.cbz", cbz(1))
         .await;
@@ -1040,5 +1045,189 @@ async fn control_files_are_recognised_in_every_spelling_the_fold_joins() {
         assert_eq!(doc["version"], 1, "{name:?}");
         assert!(doc.get("fake").is_none(), "GET {name:?}: {doc}");
         assert!(doc.get("volumes").is_some(), "GET {name:?}: {doc}");
+    }
+}
+
+/// The repair doctor and MIGRATING-0.7 name for a stray (a file the filename fold ties
+/// to a volume's files without rule v1 doing so): rename it to the volume's exact
+/// spelling. A MOVE whose destination folds like its own source respells that entry
+/// and is judged as the source renamed: onto a name rule v1 gives the volume, it is
+/// done (a case-only or fold-only rename, on every host); onto another stray spelling,
+/// it is refused as a PUT of that name is. Only an account that may MOVE (an editor)
+/// makes it; the freeze still runs first.
+#[tokio::test]
+async fn a_stray_renamed_to_its_volumes_spelling_becomes_its_file() {
+    let env = Env::new();
+    std::fs::create_dir_all(env.lib("S")).unwrap();
+    for archive in ["Stra\u{df}e.cbz", "Vol1.cbz", "V.cbz"] {
+        let r = env
+            .put("alice", &format!("/mokuro-reader/S/{archive}"), cbz(1))
+            .await;
+        assert_eq!(r.status, 201, "{archive}: {}", r.text());
+    }
+    let repairs = [
+        ("STRASSE.mokuro", "strasse.mokuro", "Stra\u{df}e.mokuro"),
+        ("Vol\u{200B}1.webp", "VOL\u{200B}1.webp", "Vol1.webp"),
+        ("V.Fast.mokuro", "V.FAST.mokuro", "V.fast.mokuro"),
+    ];
+    for (stray, _, _) in repairs {
+        std::fs::write(env.lib(&format!("S/{stray}")), br#"{"pages":[]}"#).unwrap();
+    }
+    for (stray, other, fixed) in repairs {
+        let from = format!("/mokuro-reader/S/{stray}");
+        // Respelled as another stray: still a name written for nobody.
+        let r = env
+            .mv("editor", &from, &format!("/mokuro-reader/S/{other}"))
+            .await;
+        assert_eq!(r.status, 409, "MOVE {stray:?} to {other:?}: {}", r.text());
+        // An uploader moves nothing.
+        let r = env
+            .mv("alice", &from, &format!("/mokuro-reader/S/{fixed}"))
+            .await;
+        assert_eq!(r.status, 403, "alice MOVE {stray:?}: {}", r.text());
+        let r = env
+            .mv("editor", &from, &format!("/mokuro-reader/S/{fixed}"))
+            .await;
+        assert!(
+            matches!(r.status, 201 | 204),
+            "MOVE {stray:?} to {fixed:?}: {} {}",
+            r.status,
+            r.text()
+        );
+        let listed = names(&env.lib("S"));
+        assert!(listed.contains(&fixed.to_string()), "{fixed:?}: {listed:?}");
+        assert!(
+            !listed.contains(&stray.to_string()),
+            "{stray:?}: {listed:?}"
+        );
+        assert!(
+            !listed.iter().any(|n| n.starts_with(".bunko-case-")),
+            "{listed:?}"
+        );
+    }
+    // Now the volume's own files: their controller writes them.
+    let r = env
+        .put(
+            "alice",
+            "/mokuro-reader/S/Stra\u{df}e.mokuro",
+            br#"{"pages":[1]}"#.to_vec(),
+        )
+        .await;
+    assert_eq!(r.status, 204, "{}", r.text());
+}
+
+/// Names the filename fold makes one with a personal correction or the curated layer
+/// while rule v1 reads no such layer in them.
+const LAYER_STRAYS: [&str; 9] = [
+    "X.ed\u{200B}it.mokuro",
+    "X.ed\u{131}t.mokuro",
+    "X.edit\u{200B}.mokuro",
+    "X.e\u{34F}dit.mokuro",
+    "X.EDIT.mokuro",
+    "X.Edit-2.mokuro",
+    "X.cura\u{200B}ted.mokuro",
+    "X.Curated.mokuro",
+    "X.CURATED-2.mokuro",
+];
+
+/// A name the filename fold makes one with a personal correction or the curated layer
+/// (`X.ed\u{200B}it.mokuro`, `X.ed\u{131}t.mokuro`, `X.EDIT.mokuro`,
+/// `X.cura\u{200B}ted.mokuro`) while rule v1 reads no such layer in it is created by
+/// nobody, its volume listed or not: it could only ever stand in for those layers.
+#[tokio::test]
+async fn a_name_the_fold_joins_with_a_reserved_layer_is_made_by_nobody() {
+    let env = Env::new();
+    let body = br#"{"pages":[]}"#.to_vec();
+    let strays = LAYER_STRAYS;
+    std::fs::create_dir_all(env.lib("U")).unwrap();
+    std::fs::create_dir_all(env.lib("W")).unwrap();
+    let r = env.put("alice", "/mokuro-reader/W/X.cbz", cbz(1)).await;
+    assert_eq!(r.status, 201, "{}", r.text());
+    for stray in strays {
+        // Before its volume exists (nothing governs it), and beside it.
+        for (folder, users) in [
+            ("U", &["bob", "editor"][..]),
+            ("W", &["alice", "editor"][..]),
+        ] {
+            let path = format!("/mokuro-reader/{folder}/{stray}");
+            for user in users {
+                let r = env.put(user, &path, body.clone()).await;
+                assert_eq!(r.status, 409, "{user} PUT {path:?}: {}", r.text());
+                assert_eq!(r.json()["reason"], "ambiguous-name", "{user} {path:?}");
+            }
+            let r = env.mkcol("editor", &path).await;
+            assert_eq!(r.status, 409, "MKCOL {path:?}: {}", r.text());
+        }
+    }
+    assert!(names(&env.lib("U")).is_empty());
+    assert_eq!(names(&env.lib("W")), ["X.cbz"]);
+}
+
+/// A name the fold joins with a personal correction or the curated layer, already
+/// there (made by hand, or before this release, before its volume), never captures
+/// them once the volume arrives: a request for `X.edit.mokuro` stays each account's
+/// own correction (the stray's bytes are no reader's), and the curated layer is refused
+/// naming the stray, never written over it.
+#[tokio::test]
+async fn a_name_the_fold_joins_with_a_reserved_layer_never_stands_in_for_it() {
+    let env = Env::new();
+    let body = br#"{"pages":[]}"#.to_vec();
+    let strays = LAYER_STRAYS;
+    // Strays already there, one folder each: the volume arrives after them.
+    for (i, stray) in strays.iter().enumerate() {
+        let folder = format!("F{i}");
+        std::fs::create_dir_all(env.lib(&folder)).unwrap();
+        std::fs::write(env.lib(&format!("{folder}/{stray}")), b"{\"bob\":1}").unwrap();
+        let r = env
+            .put("alice", &format!("/mokuro-reader/{folder}/X.cbz"), cbz(1))
+            .await;
+        assert_eq!(r.status, 201, "{stray:?}: {}", r.text());
+        let edit = format!("/mokuro-reader/{folder}/X.edit.mokuro");
+        let curated = format!("/mokuro-reader/{folder}/X.curated.mokuro");
+        for path in [&edit, &curated] {
+            let r = env.send("reader", "GET", path, &[], Vec::new()).await;
+            assert_eq!(r.status, 404, "GET {path:?} beside {stray:?}: {}", r.text());
+        }
+        // Each account's own correction, beside any stray.
+        for user in ["reader", "bob"] {
+            let mine = format!(r#"{{"pages":[],"by":"{user}"}}"#).into_bytes();
+            let r = env.put(user, &edit, mine.clone()).await;
+            assert_eq!(
+                r.status,
+                201,
+                "{user} PUT {edit:?} beside {stray:?}: {}",
+                r.text()
+            );
+            let r = env.send(user, "GET", &edit, &[], Vec::new()).await;
+            assert_eq!(r.status, 200, "{user} GET {edit:?}: {}", r.text());
+            assert_eq!(r.body, mine, "{user} GET {edit:?} beside {stray:?}");
+        }
+        // The shared layer is never written over a stray that is one name with it.
+        let r = env.put("alice", &curated, body.clone()).await;
+        let joined =
+            bunko_core::names::fold_name(stray) == bunko_core::names::fold_name("X.curated.mokuro");
+        if joined {
+            assert_eq!(
+                r.status,
+                409,
+                "PUT {curated:?} beside {stray:?}: {}",
+                r.text()
+            );
+            assert_eq!(r.json()["reason"], "ambiguous-name", "{stray:?}");
+        } else {
+            assert_eq!(
+                r.status,
+                201,
+                "PUT {curated:?} beside {stray:?}: {}",
+                r.text()
+            );
+        }
+        let listed = names(&env.lib(&folder));
+        assert!(listed.contains(&stray.to_string()), "{listed:?}");
+        assert_eq!(
+            std::fs::read(env.lib(&format!("{folder}/{stray}"))).unwrap(),
+            b"{\"bob\":1}",
+            "{stray:?} untouched"
+        );
     }
 }

@@ -86,7 +86,8 @@
   names. The series owner may add, replace and delete any file in the series, whoever
   added its volume, and may delete the series folder, but for a case-variant group
   frozen there (409 for everyone) and the accounts' own corrections
-  (`<Volume>.edit.mokuro`), which stay each account's own everywhere. No uploader adds an archive named like a volume's correction or curated
+  (`<Volume>.edit.mokuro`), which stay each account's own: a request for one is never
+  sent to a file that is only one name with it by the wider fold. No uploader adds an archive named like a volume's correction or curated
   layer (`V.edit.cbz`, `V.curated.cbz` beside `V.cbz`), that volume's own uploader
   included. Editors and admins are not limited. This closes a way for an uploader to
   take over another account's volume with an archive named after it (`V.curated.cbz`
@@ -110,12 +111,33 @@
   answers 409 (`ambiguous-name` in a PUT's verdict) for every account; so does a name
   only the fold gives a `.cbz`, `.mokuro`, `.mokuro.gz`, `.webp` or `.nocover` ending
   (`V.mo` + a Kelvin sign + `uro`). Reads, DELETE and a MOVE away still work on one
-  already there. An archive is never refused for such a name already listed beside it
+  already there, and so does the repair: a MOVE that only respells it as the name the
+  volume's file has (`STRASSE.mokuro` to `Straße.mokuro`, `Vol1.webp` with a zero width
+  space to `Vol1.webp`, `V.Fast.mokuro` to `V.fast.mokuro`), by an account that may
+  MOVE, on every host (a case-variant group still freezes it). An archive is never
+  refused for such a name already listed beside it
   (made before the volume, by hand, or by 0.7): a new or replaced `Straße.cbz` beside a
   `STRASSE.mokuro`, or `V.cbz` beside a `V.EDIT.mokuro`, is written as before. The
   stray then counts as that volume's for who may write or delete it (an account that
   does not control the volume, its maker included, no longer may), Bunko writes no file for the volume in
-  its place, and `doctor` names it with the volume ("Ambiguous name").
+  its place, and on a local library `doctor` names it with the volume ("Ambiguous name").
+- **No name the filename fold makes one with a correction or the curated layer is
+  written, its volume listed or not.** `V.ed` + a zero width space + `it.mokuro`,
+  `V.edıt.mokuro` (a dotless i), `V.EDIT.mokuro`, `V.Edit-2.mokuro`, `V.Curated.mokuro`
+  are one name with `V.edit.mokuro` or `V.curated.mokuro` on every host, but sidecar
+  names rule v1 (layer ids exact) reads no such layer in them: such a file could only
+  ever stand in for an account's own correction or the shared layer. A PUT, MKCOL,
+  PROPPATCH or LOCK of one, or a COPY or MOVE onto one, answers 409 (`ambiguous-name`)
+  for every account, before the volume exists too (where before it was written, and
+  then, once the volume came, every account's request for its own `V.edit.mokuro` read
+  and wrote that file: readers got its maker's bytes and their saves were refused). A
+  dotted volume's own primary (`V.EDIT.mokuro` beside `V.EDIT.cbz`) is not such a name.
+  One already there (by hand, or from an earlier release) never stands in for the
+  layer: a request for `V.edit.mokuro` is each account's own correction, a request for
+  `V.curated.mokuro` never reads it, and a curated publish beside it answers 409 naming
+  it; on a local library `doctor` names it ("Ambiguous name"). The other ids reserved
+  for OCR generations (`original`, `gcv`, `updated-ocr`, `tr-*`) are ordinary layer
+  files to WebDAV, as before.
 - **The OCR queue file and the cloud lease marker are recognised in every spelling the
   filename fold joins.** A write of `/mokuro-reader/.MOKURO-QUEUE.JSON`,
   `.mokuro-queue.jſon` or one with a zero width space in it answers 405 for every

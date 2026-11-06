@@ -14,7 +14,11 @@
 //! `kingdom/Vol 13.cbz` lands in (or reads) `Kingdom/`, and every layer below -- the auth
 //! gate's ownership checks, the series.json PUT, the DAV handler, the database rows keyed
 //! by library path -- sees one spelling for one file. A segment that names nothing keeps
-//! the client's spelling: that is the case-preserving half.
+//! the client's spelling: that is the case-preserving half. Except for a personal or
+//! curated layer name (`V.edit.mokuro`, `V.curated.mokuro`): it never takes the spelling
+//! of a listed entry that is one name with it but no such layer (`V.ed\u{200B}it.mokuro`,
+//! `V.EDIT.mokuro`), so auth and DAV classify the layer the request names, an account's
+//! own correction staying its own.
 //!
 //! A folder that already holds two or more spellings of one name (only a case-sensitive
 //! disk or a remote store can) is addressed through ONE of them, whatever the request
@@ -281,6 +285,26 @@ pub(crate) fn listed_entry(library: &Path, relative: &str) -> Option<String> {
     Some(out.join("/"))
 }
 
+/// Is `requested` a personal or curated layer name (`V.edit.mokuro`, `V.curated.mokuro`,
+/// exact as rule v1 reads ids: [`sidecar_names::reserved_layer_of`]) that the listed
+/// entry `listed` of `parent`, one name with it by the fold, is not
+/// (`V.ed\u{200B}it.mokuro`, `V.EDIT.mokuro`, made by hand or before 0.8)? Then a
+/// request for the layer keeps its own spelling: it is an account's own correction or
+/// the shared layer, never that entry (whose bytes another account wrote). From the
+/// listing.
+///
+/// [`sidecar_names::reserved_layer_of`]: bunko_core::sidecar_names::reserved_layer_of
+fn layer_spelled_otherwise(parent: &Path, requested: &str, listed: &str) -> bool {
+    use bunko_core::sidecar_names::{LayerClass, layer_class, reserved_layer_of, split_layer};
+    if !split_layer(requested).is_some_and(|(_, id, _)| layer_class(id) != LayerClass::Other) {
+        return false;
+    }
+    let files = crate::personal::names_in(parent);
+    let refs: Vec<&str> = files.iter().map(String::as_str).collect();
+    let class = reserved_layer_of(requested, &refs);
+    class.is_some() && reserved_layer_of(listed, &refs) != class
+}
+
 fn resolve(base: &Path, relative: &str, keep: Option<&str>, top_reserved: bool) -> String {
     let mut parts: Vec<String> = relative.split('/').map(str::to_string).collect();
     if parts.iter().any(|p| p == "..") {
@@ -300,6 +324,9 @@ fn resolve(base: &Path, relative: &str, keep: Option<&str>, top_reserved: bool) 
             break;
         };
         let is_last = position + 1 == named.len();
+        if is_last && on_disk != part && layer_spelled_otherwise(&parent, &part, &on_disk) {
+            break;
+        }
         if is_last
             && on_disk != part
             && keep.is_some_and(|k| {

@@ -190,6 +190,27 @@ fn a_case_only_rename_takes_effect() {
     );
 }
 
+/// A rename between two names only the wider filename fold joins (`STRASSE` and
+/// `Stra\u{df}e`, a default-ignorable code point dropped, a dotless `\u{131}`) takes
+/// effect too, whether the host makes them one file (casefold) or two: the listing holds
+/// exactly the new name afterwards.
+#[test]
+fn a_fold_only_rename_takes_effect() {
+    let d = tmp();
+    for (from, to) in [
+        ("STRASSE.mokuro", "Stra\u{df}e.mokuro"),
+        ("Vol\u{200B}1.webp", "Vol1.webp"),
+        ("\u{131}.nocover", "i.nocover"),
+        ("V.Fast.mokuro", "V.fast.mokuro"),
+    ] {
+        std::fs::write(d.path().join(from), from.as_bytes()).unwrap();
+        fs::rename(d.path().join(from), d.path().join(to)).unwrap();
+        assert_eq!(names(d.path()), [to], "{from:?} to {to:?}");
+        assert_eq!(std::fs::read(d.path().join(to)).unwrap(), from.as_bytes());
+        std::fs::remove_file(d.path().join(to)).unwrap();
+    }
+}
+
 /// The same through a mounted [`LocalStore`] and through the tokio shim.
 #[cfg(feature = "tokio")]
 #[tokio::test]

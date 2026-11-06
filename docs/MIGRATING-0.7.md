@@ -298,8 +298,20 @@ listed beside it: a new or replaced `Straße.cbz` beside a `STRASSE.mokuro` (mad
 hand, before 0.8, or before the volume existed) is written as in 0.7. For who may
 write or delete such a file it counts as the volume's: an uploader needs control of
 that volume, as for its own files. One already there stays readable and deletable,
-and doctor names it ("Ambiguous name") with its volume. Rename such a file to the
-volume's exact stem and a lowercase id to have it count.
+and on a local library doctor names it ("Ambiguous name") with its volume. Rename such
+a file to the volume's exact stem and a lowercase id to have it count: a WebDAV MOVE
+that only respells it so (`S/STRASSE.mokuro` to `S/Straße.mokuro`) is done, by an
+admin or editor, on every host.
+
+A file the wider fold makes one name with an account's correction or the curated layer
+of any volume (`V.EDIT.mokuro`, `V.Curated.mokuro`, `V.edit.mokuro` with a zero width
+space or a dotless `ı` in the id), while rule v1 reads no such layer in it, is no
+longer written either, its volume listed or not (409 `ambiguous-name`). One made by
+hand or by an earlier release is never what a request for `V.edit.mokuro` or
+`V.curated.mokuro` reaches: corrections stay each account's own, and a curated publish
+beside it answers 409 naming it. On a local library doctor names it; delete it (or
+rename it apart). A dotted volume's own primary (`V.EDIT.mokuro` beside `V.EDIT.cbz`) is
+not such a file.
 
 Series folders spelled like a reader's per-user name (`history`, `History`,
 `goals.json`, `Goals.json`, `volume-data.json`, ...) are hidden in 0.8, from WebDAV

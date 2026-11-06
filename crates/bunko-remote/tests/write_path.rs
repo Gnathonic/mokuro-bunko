@@ -745,6 +745,21 @@ fn rename_moves_by_id_including_case_only_renames() {
         );
         assert!(!fs::exists(t.abs("S/a.mokuro")) && !fs::exists(t.abs("S/b.mokuro")));
         assert_eq!(fs::read(t.abs("S/B.mokuro")).unwrap(), b"a");
+        // Between names only the wider filename fold joins, the same: one entry moved.
+        fs::rename(t.abs("S/B.mokuro"), t.abs("S/STRASSE.mokuro")).unwrap();
+        fs::rename(t.abs("S/STRASSE.mokuro"), t.abs("S/Stra\u{df}e.mokuro")).unwrap();
+        fs::rename(
+            t.abs("S/Stra\u{df}e.mokuro"),
+            t.abs("S/Stra\u{df}e\u{200B}.mokuro"),
+        )
+        .unwrap();
+        fs::rename(t.abs("S/Stra\u{df}e\u{200B}.mokuro"), t.abs("S/B.mokuro")).unwrap();
+        assert_eq!(t.fake.calls(FakeOp::Upload), 0);
+        assert_eq!(
+            t.fake.node_at(&format!("{FOLDER}/S/B.mokuro")).unwrap().pid,
+            pid
+        );
+        assert_eq!(fs::read(t.abs("S/B.mokuro")).unwrap(), b"a");
         // A folder moves with its contents.
         fs::rename(t.abs("S"), t.abs("U/S2")).unwrap();
         assert_eq!(fs::read(t.abs("U/S2/v.cbz")).unwrap(), b"zip");
