@@ -50,17 +50,81 @@ pub fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     path.with_file_name(format!("{}{suffix}", py_stem(&name)))
 }
 
-/// `<stem>.webp` beside the archive (`OCRProcessor.get_cover_path`), in the spelling
-/// the folder lists ([`listed_sibling`]); the constructed name when there is none to
-/// use. For reads: a writer asks [`sibling`].
-pub fn cover_path(cbz_path: &Path) -> PathBuf {
-    listed_sibling(cbz_path, ".webp").unwrap_or_else(|| with_suffix(cbz_path, ".webp"))
+/// `<stem>.webp` beside the archive (`OCRProcessor.get_cover_path`) as the folder
+/// lists it ([`listed_file_in`]), `None` when it lists none: a cover's size and time are
+/// read only from a listed name, never from a constructed one a host might open in
+/// another spelling. For reads: a writer asks [`sibling`].
+pub fn cover_path(cbz_path: &Path) -> Option<PathBuf> {
+    listed_own_file(cbz_path, ".webp")
 }
 
-/// `<stem>.nocover` beside the archive: "thumbnailing was tried and failed" (listed
-/// spelling, as [`cover_path`]).
-pub fn nocover_marker_path(cbz_path: &Path) -> PathBuf {
-    listed_sibling(cbz_path, ".nocover").unwrap_or_else(|| with_suffix(cbz_path, ".nocover"))
+/// `<stem>.nocover` beside the archive, "thumbnailing was tried and failed", as the
+/// folder lists it (`None` when it lists none), as [`cover_path`].
+pub fn nocover_marker_path(cbz_path: &Path) -> Option<PathBuf> {
+    listed_own_file(cbz_path, ".nocover")
+}
+
+/// [`listed_file_in`] over a fresh listing of the archive's folder.
+fn listed_own_file(cbz_path: &Path, suffix: &str) -> Option<PathBuf> {
+    let directory = cbz_path.parent().unwrap_or_else(|| Path::new(""));
+    listed_file_in(cbz_path, suffix, &Listed::of(directory)?)
+}
+
+/// The archive's `<stem><suffix>` when `listed` lists it ([`listed_sibling_in`]: in
+/// any spelling, rule v1 giving it to this archive), `None` otherwise: whether such a
+/// file exists, decided from the listing alone.
+pub fn listed_file_in(cbz_path: &Path, suffix: &str, listed: &Listed) -> Option<PathBuf> {
+    listed_sibling_in(cbz_path, suffix, listed).filter(|p| {
+        p.file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| listed.files.iter().any(|f| f == n))
+    })
+}
+
+/// One listing of a folder: the names of its files, sorted (what rule v1 and a
+/// [`sidecar_names::Folder`] read: a folder is never an archive nor a sidecar, rule 2),
+/// and the names of its folders (a folder spelled like a sidecar or a cover still takes
+/// that name: nothing is written beside it in another spelling).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Listed {
+    pub files: Vec<String>,
+    pub dirs: Vec<String>,
+}
+
+impl Listed {
+    /// `directory`'s UTF-8 entries (`None` when it cannot be listed).
+    pub fn of(directory: &Path) -> Option<Listed> {
+        let mut out = Listed::default();
+        for entry in fs::read_dir(directory).ok()?.flatten() {
+            let Ok(name) = entry.file_name().into_string() else {
+                continue;
+            };
+            if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                out.dirs.push(name);
+            } else {
+                out.files.push(name);
+            }
+        }
+        out.files.sort();
+        out.dirs.sort();
+        Some(out)
+    }
+
+    /// Files only (a caller that listed them; no folder known).
+    pub fn files(files: Vec<String>) -> Listed {
+        Listed {
+            files,
+            dirs: Vec::new(),
+        }
+    }
+
+    /// Every entry as `(name, is_dir)`.
+    pub fn entries(&self) -> impl Iterator<Item = (&str, bool)> {
+        self.files
+            .iter()
+            .map(|n| (n.as_str(), false))
+            .chain(self.dirs.iter().map(|n| (n.as_str(), true)))
+    }
 }
 
 /// The file `<stem><suffix>` of the archive `cbz_path` as Bunko reads and writes it:
@@ -71,57 +135,60 @@ pub fn nocover_marker_path(cbz_path: &Path) -> PathBuf {
 /// `None` when nothing may be written for it: the folder's case-variant groups freeze
 /// the archive or the name ([`bunko_core::fold_groups`]: the archive is a member of a
 /// group, its own files hold one, or the name is a file rule v1 gives a frozen
-/// archive), or every listed spelling of the name belongs to another archive (rule v1:
-/// an exact stem is that archive's, a shadowed archive's included), so writing it would
-/// overwrite that volume's file. Such a volume is owed nothing until the case variants
-/// are merged by hand (doctor reports them). The freeze of a folder above this one is
-/// the walk's ([`crate::fsutil::frozen`]).
+/// archive), a folder there takes the name in some spelling, or every listed spelling
+/// of the name belongs to another archive (rule v1: an exact stem is that archive's, a
+/// shadowed archive's included), so writing it would overwrite that volume's file.
+/// Such a volume is owed nothing until the case variants are merged by hand (doctor
+/// reports them). The freeze of a folder above this one is the walk's
+/// ([`crate::fsutil::frozen`]).
 pub fn sibling(cbz_path: &Path, suffix: &str) -> Option<PathBuf> {
     let directory = cbz_path.parent().unwrap_or_else(|| Path::new(""));
-    match list_names(directory) {
-        Some(names) => sibling_in(cbz_path, suffix, &names),
+    match Listed::of(directory) {
+        Some(listed) => sibling_in(cbz_path, suffix, &listed),
         None => Some(with_suffix(cbz_path, suffix)),
     }
 }
 
 /// [`sibling`] for reads: the file the folder lists for the archive (a frozen one's
 /// included, the reachable winner being served as ever), `None` when the archive is
-/// shadowed or the name is another archive's.
+/// shadowed or the name is another archive's or a folder's.
 pub fn listed_sibling(cbz_path: &Path, suffix: &str) -> Option<PathBuf> {
     let directory = cbz_path.parent().unwrap_or_else(|| Path::new(""));
-    match list_names(directory) {
-        Some(names) => listed_sibling_in(cbz_path, suffix, &names),
+    match Listed::of(directory) {
+        Some(listed) => listed_sibling_in(cbz_path, suffix, &listed),
         None => Some(with_suffix(cbz_path, suffix)),
     }
 }
 
-/// [`sibling`] over `names`, the archive folder's file names (listed once by a caller
-/// that resolves several): `None` where the freeze holds the archive or the name, else
+/// [`sibling`] over `listed`, the archive folder's listing (taken once by a caller that
+/// resolves several): `None` where the freeze holds the archive or the name, else
 /// [`listed_sibling_in`].
-pub fn sibling_in(cbz_path: &Path, suffix: &str, names: &[String]) -> Option<PathBuf> {
+pub fn sibling_in(cbz_path: &Path, suffix: &str, listed: &Listed) -> Option<PathBuf> {
     let name = cbz_path.file_name()?.to_str()?;
     let directory = cbz_path.parent().unwrap_or_else(|| Path::new(""));
-    let groups = crate::fsutil::fold_groups(directory, names.iter().map(|n| (n.as_str(), false)));
+    let groups = crate::fsutil::fold_groups(directory, listed.entries());
     let wanted = format!("{}{suffix}", py_stem(name));
     if groups.is_frozen(name) || groups.is_frozen(&wanted) {
         return None;
     }
-    listed_sibling_in(cbz_path, suffix, names)
+    listed_sibling_in(cbz_path, suffix, listed)
 }
 
-/// [`listed_sibling`] over `names`.
+/// [`listed_sibling`] over `listed`.
 ///
 /// The listed names that are `<stem><suffix>` by the filename fold
 /// ([`sidecar_names::fold`]) are that one name: a new file there would be a second
-/// spelling of it. Only those rule v1 gives to this archive ([`Folder::volume_files`]
-/// over the whole listing, shadowed archives included) are its own; of several, the one
-/// a request reaches (the store's case winner, else the byte-smallest). When every
-/// listed spelling is another archive's, or no archive's by rule v1 (`V.FAST.mokuro`,
-/// whose layer id rule v1 matches exactly; `STRASSE.mokuro` beside `Straße.cbz`, whose
-/// stems rule v1 tells apart), nothing may be written for it: `None`.
+/// spelling of it. A folder among them takes the name: `None`. Of the files, only those
+/// rule v1 gives to this archive ([`Folder::volume_files`] over the whole listing,
+/// shadowed archives included) are its own; of several, the one a request reaches (the
+/// store's case winner, else the byte-smallest). When every listed spelling is another
+/// archive's, or no archive's by rule v1 (`V.FAST.mokuro`, whose layer id rule v1
+/// matches exactly; `STRASSE.mokuro` beside `Straße.cbz`, whose stems rule v1 tells
+/// apart), nothing may be written for it: `None`.
 ///
 /// [`Folder::volume_files`]: sidecar_names::Folder::volume_files
-pub fn listed_sibling_in(cbz_path: &Path, suffix: &str, names: &[String]) -> Option<PathBuf> {
+pub fn listed_sibling_in(cbz_path: &Path, suffix: &str, listed: &Listed) -> Option<PathBuf> {
+    let names = &listed.files;
     let name = cbz_path.file_name()?.to_str()?;
     let directory = cbz_path.parent().unwrap_or_else(|| Path::new(""));
     let stem = py_stem(name);
@@ -131,6 +198,13 @@ pub fn listed_sibling_in(cbz_path: &Path, suffix: &str, names: &[String]) -> Opt
         return None;
     }
     let fold = sidecar_names::fold(&wanted);
+    if listed
+        .dirs
+        .iter()
+        .any(|d| *d == wanted || sidecar_names::fold(d) == fold)
+    {
+        return None;
+    }
     let candidates: Vec<&String> = names
         .iter()
         .filter(|n| **n == wanted || sidecar_names::fold(n) == fold)
@@ -536,9 +610,61 @@ mod tests {
         let d = dir.path();
         touch(d, &["V.cbz", "V.WEBP", "W.cbz"]);
         assert_eq!(sibling(&d.join("V.cbz"), ".webp"), Some(d.join("V.WEBP")));
-        assert_eq!(cover_path(&d.join("V.cbz")), d.join("V.WEBP"));
+        assert_eq!(cover_path(&d.join("V.cbz")), Some(d.join("V.WEBP")));
         assert_eq!(sibling(&d.join("W.cbz"), ".webp"), Some(d.join("W.webp")));
-        assert_eq!(nocover_marker_path(&d.join("V.cbz")), d.join("V.nocover"));
+        // Nothing listed: no marker, whatever a host would open for the built name.
+        assert_eq!(nocover_marker_path(&d.join("V.cbz")), None);
+        assert_eq!(cover_path(&d.join("W.cbz")), None);
+    }
+
+    /// A cover or marker is read only from a name the folder lists for the archive:
+    /// `STRASSE 1.webp` beside `Straße 1.cbz`, `Vol2\u{FE0F}.webp` beside `Vol2.cbz`
+    /// (one name by the filename fold, another archive's stem by rule v1) are no
+    /// covers, on a host that would open them for the built name too.
+    #[test]
+    fn covers_and_markers_are_listed_names_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        touch(
+            d,
+            &[
+                "Straße 1.cbz",
+                "STRASSE 1.webp",
+                "Vol2.cbz",
+                "Vol2\u{FE0F}.webp",
+                "Vol1.cbz",
+                "Vol1\u{200B}.nocover",
+            ],
+        );
+        for (cbz, suffix) in [
+            ("Straße 1.cbz", ".webp"),
+            ("Vol2.cbz", ".webp"),
+            ("Vol1.cbz", ".nocover"),
+        ] {
+            assert_eq!(listed_own_file(&d.join(cbz), suffix), None, "{cbz}");
+            // Nothing is written beside them either: the name is taken.
+            assert_eq!(sibling(&d.join(cbz), suffix), None, "{cbz}");
+        }
+    }
+
+    /// A folder spelled like a sidecar or a cover takes the name: nothing is written
+    /// beside it in another spelling, and it is no sidecar or cover.
+    #[test]
+    fn a_folder_takes_a_sidecars_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        touch(d, &["V.cbz"]);
+        fs::create_dir(d.join("v.MOKURO")).unwrap();
+        fs::create_dir(d.join("v.WEBP")).unwrap();
+        for suffix in [".mokuro", ".webp"] {
+            assert_eq!(sibling(&d.join("V.cbz"), suffix), None, "{suffix}");
+            assert_eq!(listed_sibling(&d.join("V.cbz"), suffix), None, "{suffix}");
+        }
+        assert_eq!(cover_path(&d.join("V.cbz")), None);
+        assert_eq!(
+            sibling(&d.join("V.cbz"), ".nocover"),
+            Some(d.join("V.nocover"))
+        );
     }
 
     #[test]

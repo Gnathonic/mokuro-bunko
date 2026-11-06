@@ -87,17 +87,46 @@ pub(crate) enum Existing {
 /// output of the same engine at a lower revision is replaced
 /// ([`super::upgrade::superseded_own_output`]); anything else is kept, and so is a
 /// `.gz` alone (the result would sit beside it as a second copy).
+///
+/// What is there is decided from a fresh listing of the folder, never by opening the
+/// names: an entry listed in another spelling of either name (or a folder of that
+/// name) is kept, so a host that would open it (casefold, APFS, NTFS) and one that
+/// would not (a case-sensitive disk, a remote store) answer alike. The caller holds
+/// the write lock of `plain` and resolved `plain`/`gz` under it.
 pub(crate) fn reconcile_existing(
     plain: &Path,
     gz: &Path,
     result: Option<&(String, u32)>,
 ) -> Existing {
-    let Some(meta) = fs::metadata(plain).ok() else {
-        return if fs::exists(gz) {
+    let directory = plain.parent().unwrap_or_else(|| Path::new(""));
+    let Some(listed) = bunko_library::sidecar::Listed::of(directory) else {
+        return Existing::Keep;
+    };
+    let name_of = |p: &Path| {
+        p.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+    let (plain_name, gz_name) = (name_of(plain), name_of(gz));
+    let taken_otherwise = |name: &str| {
+        let fold = bunko_core::names::fold_name(name);
+        listed.entries().any(|(n, dir)| {
+            (n != name || dir) && (n == name || bunko_core::names::fold_name(n) == fold)
+        })
+    };
+    if taken_otherwise(&plain_name) || taken_otherwise(&gz_name) {
+        return Existing::Keep;
+    }
+    if !listed.files.contains(&plain_name) {
+        return if listed.files.contains(&gz_name) {
             Existing::Keep
         } else {
             Existing::Absent
         };
+    }
+    let Some(meta) = fs::metadata(plain).ok() else {
+        return Existing::Keep;
     };
     let Some((engine, revision)) = result else {
         return Existing::Keep;
@@ -428,6 +457,15 @@ fn install(req: &CollectRequest) -> Outcome {
         let Some(_guard) = lock_with_patience(&req.locks, &plain) else {
             return Outcome::Busy(format!("{} is locked by a WebDAV write", plain.display()));
         };
+        // Under the lock, from a fresh listing: a client's upload that landed while the
+        // lock was awaited (in any spelling) is the volume's sidecar now, and stays.
+        match listed_sidecar_paths(&cbz, &row.sidecar_suffix()) {
+            None => return Outcome::Superseded(SHADOWED.into()),
+            Some(now) if now != (plain.clone(), gz.clone()) => {
+                return Outcome::Superseded(SUPERSEDED.into());
+            }
+            Some(_) => {}
+        }
         let result_facts = bunko_library::sidecar::read_capped(
             &req.result,
             bunko_library::sidecar::MAX_SIDECAR_BYTES,

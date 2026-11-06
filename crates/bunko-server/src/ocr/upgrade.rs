@@ -539,6 +539,14 @@ impl Upgrade {
             |p: &Path| Outcome::Busy(format!("{} is locked by a WebDAV write", p.display()));
         let _bare_guard = self.locks.try_lock(&bare).ok_or_else(|| locked(&bare))?;
         let _guard = self.locks.try_lock(&plain).ok_or_else(|| locked(&plain))?;
+        // Under the locks, from a fresh listing: a file that reached either name since
+        // (in any spelling) stays, and the result is discarded.
+        if bunko_library::sidecar::sibling(cbz, ".mokuro").as_ref() != Some(&bare)
+            || super::owed::listed_sidecar_paths(cbz, &layer_row.sidecar_suffix())
+                != Some((plain.clone(), gz.clone()))
+        {
+            return Err(Outcome::Superseded(super::collect::SUPERSEDED.into()));
+        }
         self.census.lock().remove(&rel);
         if self.judge(cbz, &rel).1 != Verdict::Edited {
             return Err(Outcome::Superseded(format!(
@@ -1031,6 +1039,14 @@ impl Upgrade {
         let Some(_guard) = self.locks.try_lock(&bare) else {
             return Err(format!("{} is locked by a WebDAV write", bare.display()));
         };
+        // Under the lock, from a fresh listing: a file that reached the name since, in
+        // another spelling, is the volume's primary now (judged by the next census).
+        if bunko_library::sidecar::sibling(cbz, ".mokuro").as_ref() != Some(&bare) {
+            return Err(format!(
+                "{} changed during its upgrade; the next census judges it again",
+                bare.display()
+            ));
+        }
         let rel = rel_of(&self.library, cbz).unwrap_or_default();
         let result = self.swap_locked(cbz, &bare, &rel, &install);
         if result.is_err() {
@@ -1053,7 +1069,7 @@ impl Upgrade {
             .as_ref()
             .and_then(|db| db.get_ocr_sidecar(&bare_rel).ok().flatten());
         let target = self.primary.lock().clone().map(|p| p.output_affecting());
-        let (judged, recipe) = if fs::exists(bare) {
+        let (judged, recipe) = if bunko_library::fsutil::listed_exactly(bare) {
             let entry = self.judged(cbz, rel, bare)?;
             (Some(entry), classify(bare, row.as_ref()))
         } else {

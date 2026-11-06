@@ -583,15 +583,15 @@ pub fn compile_series_volumes(
     let series_key = normalize_volume_title_key(&series.title);
     let mut entries: Vec<VolumeEntry> = Vec::new();
     let mut published: Option<HashMap<String, JsonObject>> = None;
-    let listed = sidecar::list_names(&series.path).unwrap_or_default();
-    let listed: Vec<&str> = listed.iter().map(String::as_str).collect();
+    let listing = sidecar::Listed::of(&series.path).unwrap_or_default();
+    let listed: Vec<&str> = listing.files.iter().map(String::as_str).collect();
     let folder = Folder::new(&listed);
     // The freeze: the series folder a member of a group at the root, or the volume of
     // one in the folder.
     let series_frozen = series.path.parent().is_some_and(|root| {
         fsutil::listed_groups(root, true).is_some_and(|(_, groups)| groups.is_frozen(&series.title))
     });
-    let groups = fsutil::fold_groups(&series.path, listed.iter().map(|n| (*n, false)));
+    let groups = fsutil::fold_groups(&series.path, listing.entries());
     for name in archive_names(&series.path) {
         let cbz_path = series.path.join(&name);
         let frozen = series_frozen || groups.is_frozen(&name);
@@ -641,7 +641,10 @@ pub fn compile_series_volumes(
             }
         };
         // The cover stat is never cached: thumbnails appear on their own schedule.
-        let cover = fsutil::stat(&sidecar::cover_path(&cbz_path));
+        // Only a cover the folder lists for the volume (never a built name a host
+        // might open in another spelling).
+        let cover = sidecar::listed_file_in(&cbz_path, ".webp", &listing)
+            .and_then(|path| fsutil::stat(&path));
         entry.cover_size = cover.as_ref().map(size_of);
         entry.cover_modified = cover.as_ref().map(py_mtime_int);
         entries.push(entry);

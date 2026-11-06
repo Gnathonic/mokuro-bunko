@@ -147,7 +147,7 @@ impl MadeCovers {
         if !is_cbz(cbz) {
             return None;
         }
-        let cover = cover_path(cbz);
+        let cover = cover_path(cbz)?;
         let key = Self::key(&cover);
         // Still listed under exactly this name (an archive replaced, not gone). A listing,
         // not a lookup: after a case-only rename the old name still opens on a
@@ -246,18 +246,19 @@ fn is_cbz(p: &Path) -> bool {
         .is_some_and(|e| e.to_string_lossy().eq_ignore_ascii_case("cbz"))
 }
 
-/// `<stem>.webp`, in the spelling the folder lists (`V.WEBP`). For reads only: where
-/// [`bunko_library::sidecar::sibling`] gives nothing (the name is another archive's,
-/// a hidden case variant's included) this is the built name, which must never be
-/// written; every writer asks `sibling` itself and writes nothing on `None`.
-pub fn cover_path(cbz: &Path) -> PathBuf {
-    bunko_library::sidecar::sibling(cbz, ".webp").unwrap_or_else(|| cbz.with_extension("webp"))
+/// `<stem>.webp` as the folder lists it for the archive (`V.WEBP`;
+/// [`bunko_library::sidecar::cover_path`]), `None` when it lists none: whether a cover
+/// is there is decided from the listing, never by opening a built name a host might
+/// resolve to another spelling. For reads only: every writer asks
+/// [`bunko_library::sidecar::sibling`] itself and writes nothing on `None`.
+pub fn cover_path(cbz: &Path) -> Option<PathBuf> {
+    bunko_library::sidecar::cover_path(cbz)
 }
 
-/// `<stem>.nocover`: a cover was looked for and there is none (listed spelling).
-pub fn nocover_path(cbz: &Path) -> PathBuf {
-    bunko_library::sidecar::sibling(cbz, ".nocover")
-        .unwrap_or_else(|| cbz.with_extension("nocover"))
+/// `<stem>.nocover` as the folder lists it for the archive: a cover was looked for
+/// and there is none. `None` when no marker is listed for it (as [`cover_path`]).
+pub fn nocover_path(cbz: &Path) -> Option<PathBuf> {
+    bunko_library::sidecar::nocover_marker_path(cbz)
 }
 
 /// `needs_thumbnail`.
@@ -272,7 +273,7 @@ pub fn needs_thumbnail_with(cbz: &Path, nocover: Option<&NoCoverSet>) -> bool {
         // Shadowed by another spelling of itself, or its cover's name is another
         // volume's: nothing is written for it.
         && bunko_library::sidecar::sibling(cbz, ".webp").is_some()
-        && !written_for(&cover_path(cbz), cbz)
+        && !cover_path(cbz).is_some_and(|cover| written_for(&cover, cbz))
         && !marked_nocover(cbz, nocover.is_some())
         && nocover.is_none_or(|n| !n.contains(cbz))
 }
@@ -284,7 +285,7 @@ pub fn needs_thumbnail_with(cbz: &Path, nocover: Option<&NoCoverSet>) -> bool {
 /// removed at start ([`clear_jxl_nocovers`]), the cloud one is left where it is and
 /// a missing cover is recorded locally as usual.
 fn marked_nocover(cbz: &Path, cloud: bool) -> bool {
-    written_for(&nocover_path(cbz), cbz) && !(cloud && holds_jxl(cbz))
+    nocover_path(cbz).is_some_and(|marker| written_for(&marker, cbz)) && !(cloud && holds_jxl(cbz))
 }
 
 /// `side` (a cover or a `.nocover` marker) is there and was written for the archive as
@@ -632,9 +633,13 @@ fn ensure_cover(
             }
         }
         None => {
+            // Under the write lock, the marker is looked up again and must still be the
+            // one the folder lists for the archive (decided from the listing, never by
+            // opening the name).
             if let Some(marker) = bunko_library::sidecar::sibling(cbz, ".nocover")
                 && let Ok(_guard) = made.write_lock(&marker)
-                && fs::exists(&marker)
+                && bunko_library::sidecar::sibling(cbz, ".nocover").as_ref() == Some(&marker)
+                && listed_exactly(&marker)
                 && let Err(e) = fs::remove_file(&marker)
             {
                 warn!("could not remove the stale {}: {e}", marker.display());
@@ -644,8 +649,7 @@ fn ensure_cover(
     info!(
         "Created thumbnail: {}",
         cover_path(cbz)
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
+            .and_then(|c| c.file_name().map(|n| n.to_string_lossy().into_owned()))
             .unwrap_or_default()
     );
     Ok(true)
@@ -696,7 +700,13 @@ fn publish_cover_with(
     // A cover written for this archive (a client's, landed meanwhile) stays. A stale
     // one is replaced; on a cloud library only while it is still the version judged
     // stale, so a client's cover landing meanwhile wins there too.
-    let mode = match fs::metadata(&out) {
+    // Whether a cover is there is the listing's (a built name is never opened).
+    let there = if listed_exactly(&out) {
+        fs::metadata(&out)
+    } else {
+        Err(std::io::ErrorKind::NotFound.into())
+    };
+    let mode = match there {
         Ok(meta) if describes(&meta, cbz) => return Ok(false),
         Ok(meta) => Mode::Replace {
             base: meta.version().cloned(),
@@ -1208,6 +1218,7 @@ pub fn clear_jxl_nocovers(library: &Path) -> usize {
     walk(library, true, &mut |p| {
         if is_cbz(p)
             && let Some(marker) = bunko_library::sidecar::sibling(p, ".nocover")
+            && listed_exactly(&marker)
             && fs::is_file(&marker)
         {
             marked.push((p.to_path_buf(), marker));
@@ -1288,6 +1299,16 @@ pub fn remove_corrupt_sidecars(library: &Path, db: Option<&Database>) -> usize {
 #[allow(clippy::disallowed_methods)] // fixtures are written with std::fs
 mod tests {
     use super::*;
+
+    /// The cover's name as these fixtures spell it (no other spelling is listed).
+    fn cover_of(cbz: &Path) -> PathBuf {
+        cbz.with_extension("webp")
+    }
+
+    /// The `.nocover` marker's name as these fixtures spell it.
+    fn marker(cbz: &Path) -> PathBuf {
+        cbz.with_extension("nocover")
+    }
     use std::io::Write;
 
     #[test]
@@ -1336,13 +1357,13 @@ mod tests {
         let thumbs = Thumbnails::default();
         let stop = CancellationToken::new();
         assert_eq!(thumbs.scan_once(&lib, &stop), 1);
-        let old = std::fs::read(cover_path(&vol)).unwrap();
+        let old = std::fs::read(cover_of(&vol)).unwrap();
 
         cbz(&vol, &[("p.png", &png(300, 200))]);
-        set_mtime(&cover_path(&vol), mtime(&vol) - Duration::from_secs(5));
+        set_mtime(&cover_of(&vol), mtime(&vol) - Duration::from_secs(5));
         assert_eq!(thumbnail_candidates(&lib), std::slice::from_ref(&vol));
         assert_eq!(thumbs.scan_once(&lib, &stop), 1);
-        let new = std::fs::read(cover_path(&vol)).unwrap();
+        let new = std::fs::read(cover_of(&vol)).unwrap();
         assert_ne!(new, old);
         let img = image::load_from_memory(&new).unwrap();
         assert_eq!(img.width(), 250, "the 300x200 page of the new archive");
@@ -1360,17 +1381,14 @@ mod tests {
         std::fs::create_dir_all(&series).unwrap();
         let vol = series.join("Vol 1.cbz");
         cbz(&vol, &[("p.png", &png(500, 700))]);
-        std::fs::write(cover_path(&vol), b"a client's cover").unwrap();
-        set_mtime(&cover_path(&vol), mtime(&vol) + Duration::from_secs(5));
+        std::fs::write(cover_of(&vol), b"a client's cover").unwrap();
+        set_mtime(&cover_of(&vol), mtime(&vol) + Duration::from_secs(5));
         assert!(thumbnail_candidates(&lib).is_empty());
         assert_eq!(
             Thumbnails::default().scan_once(&lib, &CancellationToken::new()),
             0
         );
-        assert_eq!(
-            std::fs::read(cover_path(&vol)).unwrap(),
-            b"a client's cover"
-        );
+        assert_eq!(std::fs::read(cover_of(&vol)).unwrap(), b"a client's cover");
     }
 
     /// The cover and the `.nocover` marker are written under the WebDAV write lock of
@@ -1420,13 +1438,13 @@ mod tests {
         let thumbs = Thumbnails::default();
         let stop = CancellationToken::new();
         assert_eq!(thumbs.scan_once(&lib, &stop), 0);
-        assert!(nocover_path(&vol).is_file());
+        assert!(marker(&vol).is_file());
 
         cbz(&vol, &[("p.png", &png(500, 700))]);
-        set_mtime(&nocover_path(&vol), mtime(&vol) - Duration::from_secs(5));
+        set_mtime(&marker(&vol), mtime(&vol) - Duration::from_secs(5));
         assert_eq!(thumbs.scan_once(&lib, &stop), 1);
-        assert!(cover_path(&vol).is_file());
-        assert!(!nocover_path(&vol).exists(), "the stale marker goes");
+        assert!(cover_of(&vol).is_file());
+        assert!(!marker(&vol).exists(), "the stale marker goes");
     }
 
     /// An archive dated in the future: a cover made now is older than it, so the age
@@ -1459,20 +1477,17 @@ mod tests {
         std::fs::create_dir_all(&series).unwrap();
         let vol = series.join("Vol 1.cbz");
         cbz(&vol, &[("p.png", &png(10, 10))]);
-        std::fs::write(cover_path(&vol), b"a client's cover").unwrap();
-        set_mtime(&cover_path(&vol), mtime(&vol) + Duration::from_secs(5));
+        std::fs::write(cover_of(&vol), b"a client's cover").unwrap();
+        set_mtime(&cover_of(&vol), mtime(&vol) + Duration::from_secs(5));
         let webp =
             bunko_thumb::make_thumbnail_limited(&png(10, 10), MAX_DECODE_BYTES, MAX_SIDE).unwrap();
         assert!(!publish_cover(&vol, &webp, &|_| false, &MadeCovers::default()).unwrap());
-        assert_eq!(
-            std::fs::read(cover_path(&vol)).unwrap(),
-            b"a client's cover"
-        );
+        assert_eq!(std::fs::read(cover_of(&vol)).unwrap(), b"a client's cover");
 
         // Stale (older than the archive): replaced.
-        set_mtime(&cover_path(&vol), mtime(&vol) - Duration::from_secs(5));
+        set_mtime(&cover_of(&vol), mtime(&vol) - Duration::from_secs(5));
         assert!(publish_cover(&vol, &webp, &|_| false, &MadeCovers::default()).unwrap());
-        assert_eq!(std::fs::read(cover_path(&vol)).unwrap(), webp);
+        assert_eq!(std::fs::read(cover_of(&vol)).unwrap(), webp);
     }
 
     fn cbz(path: &Path, members: &[(&str, &[u8])]) {
@@ -1507,11 +1522,11 @@ mod tests {
         let webp =
             bunko_thumb::make_thumbnail_limited(&png(10, 10), MAX_DECODE_BYTES, MAX_SIDE).unwrap();
         assert!(publish_cover(&here, &webp, &|_| false, &MadeCovers::default()).unwrap());
-        assert!(cover_path(&here).exists());
+        assert!(cover_of(&here).exists());
 
         let gone = series.join("Vol 2.cbz");
         assert!(!publish_cover(&gone, &webp, &|_| false, &MadeCovers::default()).unwrap());
-        assert!(!cover_path(&gone).exists());
+        assert!(!cover_of(&gone).exists());
         let names: Vec<_> = std::fs::read_dir(&series)
             .unwrap()
             .map(|e| e.unwrap().file_name().into_string().unwrap())
@@ -1539,20 +1554,20 @@ mod tests {
         let (made, deferred) =
             thumbs.make_covers_with(vec![other.clone(), moving.clone()], None, &stop, &busy);
         assert_eq!((made, &deferred), (1, &vec![moving.clone()]));
-        assert!(cover_path(&other).exists());
-        assert!(!cover_path(&moving).exists());
+        assert!(cover_of(&other).exists());
+        assert!(!cover_of(&moving).exists());
         assert_eq!(thumbs.pending(), 0);
 
         // The merge opened while the cover was being made: it is not published.
         let webp =
             bunko_thumb::make_thumbnail_limited(&png(10, 10), MAX_DECODE_BYTES, MAX_SIDE).unwrap();
         assert!(!publish_cover(&moving, &webp, &busy, &MadeCovers::default()).unwrap());
-        assert!(!cover_path(&moving).exists());
+        assert!(!cover_of(&moving).exists());
 
         // The merge done: the archive gets its cover.
         let (made, deferred) = thumbs.make_covers_with(deferred, None, &stop, &|_| false);
         assert_eq!((made, deferred), (1, vec![]));
-        assert!(cover_path(&moving).exists());
+        assert!(cover_of(&moving).exists());
     }
 
     /// A reader's MOVE of the archive lands while its cover is being published: the
@@ -1773,7 +1788,7 @@ mod tests {
             .insert(tmp.path().join("Old.webp"), (3, long_ago));
         assert!(publish_cover(&cbz_path, &webp, &|_| false, &made).unwrap());
         let kept: Vec<PathBuf> = made.0.lock().keys().cloned().collect();
-        assert_eq!(kept, [MadeCovers::key(&cover_path(&cbz_path))]);
+        assert_eq!(kept, [MadeCovers::key(&cover_of(&cbz_path))]);
     }
 
     /// The cloud's hooks (on its events thread) hand a MOVE's two follow-ups over in
@@ -1793,7 +1808,7 @@ mod tests {
                     .unwrap();
             let thumbs = Arc::new(Thumbnails::default());
             assert!(publish_cover(&from, &webp, &|_| false, &thumbs.made).unwrap());
-            let cover = std::fs::read(cover_path(&from)).unwrap();
+            let cover = std::fs::read(cover_of(&from)).unwrap();
             std::fs::rename(&from, &to).unwrap();
             {
                 // Held: both follow-ups are handed over before either can run.
@@ -1818,7 +1833,7 @@ mod tests {
                 ["Vol 1 renamed.cbz", "Vol 1 renamed.webp"],
                 "round {round}"
             );
-            assert_eq!(std::fs::read(cover_path(&to)).unwrap(), cover, "followed");
+            assert_eq!(std::fs::read(cover_of(&to)).unwrap(), cover, "followed");
         }
     }
 

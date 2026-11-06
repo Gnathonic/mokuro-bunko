@@ -174,6 +174,16 @@ pub fn pick_winner(dir: &Path, folded: &str, variants: Vec<String>) -> Option<St
     variants.into_iter().min()
 }
 
+/// Does `path`'s folder list exactly its name (as anything)? Whether a name Bunko built
+/// from a listing is there, decided by listing again, never by opening it (a host that
+/// folds names would open another spelling). False when the folder cannot be listed.
+pub fn listed_exactly(path: &Path) -> bool {
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
+        return false;
+    };
+    fs::read_dir(dir).is_ok_and(|entries| entries.flatten().any(|e| e.file_name() == name))
+}
+
 /// The spelling `dir` lists of the name `name` in any case (the [`pick_winner`] of
 /// several), or `None` when no entry folds like it (or `dir` cannot be listed).
 pub fn listed_name(dir: &Path, name: &str) -> Option<String> {

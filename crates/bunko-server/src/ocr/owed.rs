@@ -94,21 +94,21 @@ pub fn sidecar_paths(cbz: &Path, suffix: &str) -> (std::path::PathBuf, std::path
 /// spelling of it shadows it, or every listed spelling is another archive's. One listing.
 pub fn listed_sidecar_paths(cbz: &Path, suffix: &str) -> Option<(PathBuf, PathBuf)> {
     let directory = cbz.parent().unwrap_or_else(|| Path::new(""));
-    let names = sidecar::list_names(directory).unwrap_or_default();
-    listed_sidecar_paths_in(cbz, suffix, &names)
+    let listed = sidecar::Listed::of(directory).unwrap_or_default();
+    listed_sidecar_paths_in(cbz, suffix, &listed)
 }
 
-/// [`listed_sidecar_paths`] over `names`, the archive folder's file names.
+/// [`listed_sidecar_paths`] over `listed`, the archive folder's listing.
 pub fn listed_sidecar_paths_in(
     cbz: &Path,
     suffix: &str,
-    names: &[String],
+    listed: &sidecar::Listed,
 ) -> Option<(PathBuf, PathBuf)> {
     let directory = cbz.parent().unwrap_or_else(|| Path::new(""));
-    let names = names.to_vec();
+    let names = &listed.files;
     let gz_suffix = format!("{suffix}.gz");
-    let plain = sidecar::sibling_in(cbz, suffix, &names)?;
-    let gz = sidecar::sibling_in(cbz, &gz_suffix, &names)?;
+    let plain = sidecar::sibling_in(cbz, suffix, listed)?;
+    let gz = sidecar::sibling_in(cbz, &gz_suffix, listed)?;
     let listed = |p: &Path| {
         p.file_name()
             .and_then(|n| n.to_str())
@@ -194,7 +194,7 @@ fn compute_in(
     rows: &[Generation],
     facts: &dyn LibraryFacts,
     upgrade: Option<&dyn UpgradeProbe>,
-    listed: Option<(&[String], &Folder)>,
+    listed: Option<(&sidecar::Listed, &Folder)>,
 ) -> Option<OwedVolume> {
     let folder = listed.map(|(_, folder)| folder);
     let name = cbz.file_name()?.to_string_lossy().into_owned();
@@ -214,10 +214,10 @@ fn compute_in(
     // is another archive's (rule v1, a shadowed archive's included). Such a volume is
     // left as it is until its case variants are merged by hand (doctor reports them).
     let own_names;
-    let names: &[String] = match listed {
+    let names: &sidecar::Listed = match listed {
         Some((names, _)) => names,
         None => {
-            own_names = sidecar::list_names(cbz.parent().unwrap_or_else(|| Path::new("")))
+            own_names = sidecar::Listed::of(cbz.parent().unwrap_or_else(|| Path::new("")))
                 .unwrap_or_default();
             &own_names
         }
@@ -337,8 +337,8 @@ pub fn walk(
         by_folder.entry(directory).or_default().push(cbz);
     }
     for (directory, archives) in by_folder {
-        let listed = sidecar::list_names(directory).unwrap_or_default();
-        let names: Vec<&str> = listed.iter().map(String::as_str).collect();
+        let listed = sidecar::Listed::of(directory).unwrap_or_default();
+        let names: Vec<&str> = listed.files.iter().map(String::as_str).collect();
         let folder = Folder::new(&names);
         let stems = super::orphans::OrphanStems::new(&names);
         index.orphans.extend(

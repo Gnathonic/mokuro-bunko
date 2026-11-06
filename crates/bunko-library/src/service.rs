@@ -387,17 +387,26 @@ impl MetadataService {
         };
         let mut latest = 0.0f64;
         let mut files: Vec<String> = Vec::new();
+        let mut dirs: Vec<String> = Vec::new();
         for (name, path) in entries {
             let lower = crate::pyunicode::lower(&name);
-            let Some(meta) = fsutil::stat(&path).filter(|meta| meta.is_file()) else {
+            let Some(meta) = fsutil::stat(&path) else {
                 continue;
             };
+            if !meta.is_file() {
+                if meta.is_dir() {
+                    dirs.push(name);
+                }
+                continue;
+            }
             if lower.ends_with(".cbz") {
                 latest = latest.max(fsutil::py_mtime(&meta));
             }
             files.push(name);
         }
         files.sort();
+        let listed = crate::sidecar::Listed { files, dirs };
+        let files = &listed.files;
         // The first volume's cover as the thumbnail worker writes it: in the spelling
         // the folder lists (`v.webp` for `V.cbz`, rule v1, never a shadowed archive's).
         let cover_path = volumes
@@ -406,8 +415,11 @@ impl MetadataService {
                 let archive = files.iter().find(|n| {
                     bunko_core::sidecar_names::cbz_stem(n) == Some(volume.volume_title.as_str())
                 })?;
-                let cover =
-                    crate::sidecar::listed_sibling_in(&folder.path.join(archive), ".webp", &files)?;
+                let cover = crate::sidecar::listed_sibling_in(
+                    &folder.path.join(archive),
+                    ".webp",
+                    &listed,
+                )?;
                 let name = cover.file_name()?.to_str()?.to_string();
                 files.contains(&name).then_some(name)
             })
