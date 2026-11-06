@@ -386,8 +386,8 @@ fn a_compiled_series_json_spares_reading_the_volumes_it_lists() {
 
 /// 0.7.5's JPEG XL pages on a cloud library: the OCR queue counts them, the cover is
 /// the first JPEG XL page and decodes, and a `.nocover` record an older build kept
-/// for the volume goes at the cover loop's first pass ([`NoCoverSet::clear_jxl`]),
-/// while one of a volume without JPEG XL stays.
+/// for the volume goes at the cover loop's next pass ([`NoCoverSet::clear_jxl`]),
+/// while one of a volume without JPEG XL stays, and so does one this build wrote.
 #[test]
 fn a_cloud_volume_of_jpeg_xl_pages_is_counted_covered_and_loses_its_nocover_record() {
     use bunko_server::thumbs::NoCoverSet;
@@ -421,14 +421,68 @@ fn a_cloud_volume_of_jpeg_xl_pages_is_counted_covered_and_loses_its_nocover_reco
 
     let local = TempDir::new().unwrap();
     let file = local.path().join("nocover.json");
+    let earlier = NoCoverSet::load(file.clone(), t.root.clone());
+    earlier.insert(&j).unwrap();
+    earlier.insert(&n).unwrap();
+    // This build's own verdict stands.
+    assert!(earlier.clear_jxl().is_empty());
+    assert!(earlier.contains(&j));
+    drop(earlier);
+
     let records = NoCoverSet::load(file.clone(), t.root.clone());
-    records.insert(&j).unwrap();
-    records.insert(&n).unwrap();
-    assert_eq!(records.clear_jxl(), 1);
+    assert_eq!(records.clear_jxl(), std::slice::from_ref(&j));
     assert!(!records.contains(&j));
     assert!(records.contains(&n));
     let reloaded = NoCoverSet::load(file, t.root.clone());
     assert!(!reloaded.contains(&j), "saved");
     assert!(reloaded.contains(&n));
-    assert_eq!(records.clear_jxl(), 0);
+    assert!(records.clear_jxl().is_empty());
+}
+
+/// A library copied into the cloud folder (0.8's migration route) brings the
+/// `<stem>.nocover` files a build before JPEG XL covers wrote, and nothing in the
+/// cloud removes them. The cover loop does not believe one beside an archive of
+/// JPEG XL pages, so that volume is looked at, gets its cover, and a cover it
+/// still could not get is recorded locally; one beside any other archive stands.
+#[test]
+fn a_copied_in_nocover_file_does_not_hide_a_jpeg_xl_volume() {
+    use bunko_server::thumbs::{NoCoverSet, needs_thumbnail_with, thumbnail_candidates_with};
+    let page = std::fs::read(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../bunko-ocr/tests/fixtures/jxl/page-rgb.jxl"),
+    )
+    .unwrap();
+    let opts =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    let mut w = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    w.start_file("v/001.jxl", opts).unwrap();
+    w.write_all(&page).unwrap();
+    let jxl = w.finish().unwrap().into_inner();
+    let mut w = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    w.start_file("notes.txt", opts).unwrap();
+    w.write_all(b"no image").unwrap();
+    let plain = w.finish().unwrap().into_inner();
+    let t = T::start(&[
+        ("S/j.cbz", &jxl),
+        ("S/n.cbz", &plain),
+        ("S/j.nocover", b""),
+        ("S/n.nocover", b""),
+    ]);
+    let (j, n) = (t.root.join("S/j.cbz"), t.root.join("S/n.cbz"));
+    assert!(bunko_store::fs::is_file(t.root.join("S/j.nocover")));
+    assert!(bunko_store::fs::is_file(t.root.join("S/n.nocover")));
+
+    let local = TempDir::new().unwrap();
+    let records = NoCoverSet::load(local.path().join("nocover.json"), t.root.clone());
+    assert!(needs_thumbnail_with(&j, Some(&records)));
+    assert!(!needs_thumbnail_with(&n, Some(&records)));
+    assert_eq!(
+        thumbnail_candidates_with(&t.root, Some(&records)),
+        std::slice::from_ref(&j)
+    );
+    // Without a cover it could make, the local record holds it.
+    records.insert(&j).unwrap();
+    assert!(!needs_thumbnail_with(&j, Some(&records)));
+    // The cloud's file is left where it is.
+    assert!(bunko_store::fs::is_file(t.root.join("S/j.nocover")));
 }

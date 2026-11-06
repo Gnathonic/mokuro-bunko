@@ -28,6 +28,8 @@
 //! remote); and `.nocover` is not a file in the cloud but a local-only record,
 //! [`NoCoverSet`], kept in `<base>/cloud/<store-id>/nocover.json` until the store's
 //! durable `local_row` table offers `nocover` rows (it keeps only staging rows today).
+//! A `.nocover` file a copied-in library brought is still honoured, except beside an
+//! archive of JPEG XL pages (a build before 0.7.5 could not read those).
 //! An archive an open case merge is moving gets its cover only after the merge (it
 //! is looked at again every [`MERGE_RETRY`]): the merge moves the archive before its
 //! cover, and a cover made in between would meet the moving one as a duplicate.
@@ -181,8 +183,18 @@ pub fn needs_thumbnail_with(cbz: &Path, nocover: Option<&NoCoverSet>) -> bool {
     fs::is_file(cbz)
         && is_cbz(cbz)
         && !written_for(&cover_path(cbz), cbz)
-        && !written_for(&nocover_path(cbz), cbz)
+        && !marked_nocover(cbz, nocover.is_some())
         && nocover.is_none_or(|n| !n.contains(cbz))
+}
+
+/// A `<stem>.nocover` file beside the archive, written since it. In a cloud folder
+/// such a file never comes from this build (its markers are [`NoCoverSet`] records,
+/// D14) but from a library copied in, and one a build before JPEG XL covers left for
+/// an archive holding `.jxl` images is not believed: the local library's marker is
+/// removed at start ([`clear_jxl_nocovers`]), the cloud one is left where it is and
+/// a missing cover is recorded locally as usual.
+fn marked_nocover(cbz: &Path, cloud: bool) -> bool {
+    written_for(&nocover_path(cbz), cbz) && !(cloud && holds_jxl(cbz))
 }
 
 /// `side` (a cover or a `.nocover` marker) is there and was written for the archive as
@@ -212,6 +224,10 @@ pub struct NoCoverSet {
     file: PathBuf,
     library: PathBuf,
     set: Mutex<HashSet<(String, u64, i128)>>,
+    /// Paths of the records found in `file` at load whose archive [`Self::clear_jxl`]
+    /// has not looked at yet (an earlier build's records; one this build writes is
+    /// its own verdict).
+    unchecked: Mutex<HashSet<String>>,
 }
 
 impl NoCoverSet {
@@ -219,7 +235,7 @@ impl NoCoverSet {
     // unmounted: `file` is in the store's local directory, not in the library.
     #[allow(clippy::disallowed_methods)]
     pub fn load(file: PathBuf, library: PathBuf) -> NoCoverSet {
-        let set = std::fs::read(&file)
+        let set: HashSet<(String, u64, i128)> = std::fs::read(&file)
             .ok()
             .and_then(|b| serde_json::from_slice::<Vec<(String, u64, String)>>(&b).ok())
             .map(|rows| {
@@ -228,10 +244,12 @@ impl NoCoverSet {
                     .collect()
             })
             .unwrap_or_default();
+        let unchecked = set.iter().map(|(p, _, _)| p.clone()).collect();
         NoCoverSet {
             file,
             library,
             set: Mutex::new(set),
+            unchecked: Mutex::new(unchecked),
         }
     }
 
@@ -261,6 +279,7 @@ impl NoCoverSet {
                 "the archive is not in the library",
             ));
         };
+        self.unchecked.lock().remove(&k.0);
         let rows = {
             let mut set = self.set.lock();
             // A path keeps one record: its newest version.
@@ -277,6 +296,7 @@ impl NoCoverSet {
         let Some(rel) = crate::ocr::types::rel_of(&self.library, cbz) else {
             return Ok(());
         };
+        self.unchecked.lock().remove(&rel);
         let rows = {
             let mut set = self.set.lock();
             let before = set.len();
@@ -289,22 +309,35 @@ impl NoCoverSet {
         self.save(&rows)
     }
 
-    /// [`clear_jxl_nocovers`] for a cloud library: drop the record of every archive
-    /// that holds a `.jxl` image (a build before JPEG XL covers recorded it as having
-    /// none), so the next pass makes its cover. Returns how many records went.
-    pub fn clear_jxl(&self) -> usize {
-        let recorded: Vec<String> = {
-            let set = self.set.lock();
-            let mut paths: Vec<String> = set.iter().map(|(p, _, _)| p.clone()).collect();
+    /// [`clear_jxl_nocovers`] for a cloud library: drop the record an earlier build
+    /// kept for an archive that holds a `.jxl` image (a build before JPEG XL covers
+    /// recorded it as having none), so this pass makes its cover. Each loaded record
+    /// is looked at once, when its archive is in the library; one whose archive is
+    /// not (yet: a store still syncing) waits for a later pass, so the cover loop runs
+    /// this before every pass. Returns the archives whose record went.
+    pub fn clear_jxl(&self) -> Vec<PathBuf> {
+        let pending: Vec<String> = {
+            let unchecked = self.unchecked.lock();
+            if unchecked.is_empty() {
+                return Vec::new();
+            }
+            let mut paths: Vec<String> = unchecked.iter().cloned().collect();
             paths.sort();
             paths
         };
-        let gone: HashSet<String> = recorded
-            .into_iter()
-            .filter(|rel| holds_jxl(&self.library.join(rel)))
-            .collect();
+        let mut gone = HashSet::new();
+        for rel in pending {
+            let cbz = self.library.join(&rel);
+            if !fs::is_file(&cbz) {
+                continue;
+            }
+            self.unchecked.lock().remove(&rel);
+            if holds_jxl(&cbz) {
+                gone.insert(rel);
+            }
+        }
         if gone.is_empty() {
-            return 0;
+            return Vec::new();
         }
         for rel in &gone {
             info!("Looking for a JPEG XL cover again: {rel}");
@@ -317,7 +350,9 @@ impl NoCoverSet {
         if let Err(e) = self.save(&rows) {
             warn!("could not save the .nocover records: {e}");
         }
-        gone.len()
+        let mut cleared: Vec<PathBuf> = gone.iter().map(|rel| self.library.join(rel)).collect();
+        cleared.sort();
+        cleared
     }
 
     fn rows(set: &HashSet<(String, u64, i128)>) -> Vec<(String, u64, String)> {
@@ -885,9 +920,6 @@ impl Thumbnails {
         let me = self.clone();
         tokio::spawn(async move {
             let _watching = guard;
-            // The first pass first lets JPEG XL volumes an older build recorded as
-            // having no cover get one.
-            let mut first = true;
             loop {
                 let work = std::mem::take(&mut *queue.0.lock());
                 if !work.full && work.paths.is_empty() {
@@ -897,16 +929,16 @@ impl Thumbnails {
                     }
                 }
                 let (m, lib, s, n) = (me.clone(), library.clone(), stop.clone(), nocover.clone());
-                let clear_jxl = std::mem::take(&mut first);
                 let scan = tokio::task::spawn_blocking(move || {
-                    if clear_jxl {
-                        n.clear_jxl();
-                    }
+                    // JPEG XL volumes an older build recorded as having no cover get
+                    // one (each record once its archive is in the index), in this
+                    // pass whatever it was woken for.
+                    let cleared = n.clear_jxl();
                     let candidates = if work.full {
                         thumbnail_candidates_with(&lib, Some(&n))
                     } else {
                         let mut out = BTreeSet::new();
-                        for p in &work.paths {
+                        for p in work.paths.iter().chain(&cleared) {
                             if fs::is_dir(p) {
                                 out.extend(thumbnail_candidates_with(p, Some(&n)));
                             } else if needs_thumbnail_with(p, Some(&n)) {
@@ -1698,6 +1730,55 @@ mod tests {
         assert!(series.join("Vol 1.webp").is_file());
         assert!(series.join("Vol 2.webp").is_file());
         assert_eq!(clear_jxl_nocovers(&lib), 0);
+    }
+
+    /// [`NoCoverSet::clear_jxl`] looks at each record an earlier run kept once its
+    /// archive is in the library: a record whose archive is not there yet (a cloud
+    /// store still syncing) waits for a later pass, and a record this run wrote is
+    /// its own verdict.
+    #[test]
+    fn jxl_nocover_records_wait_for_their_archive() {
+        let page = std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../bunko-ocr/tests/fixtures/jxl/page-rgb.jxl"),
+        )
+        .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let lib = tmp.path().join("library");
+        let series = lib.join("S");
+        std::fs::create_dir_all(&series).unwrap();
+        let file = tmp.path().join("nocover.json");
+        let (old, plain, late) = (
+            series.join("old.cbz"),
+            series.join("plain.cbz"),
+            series.join("late.cbz"),
+        );
+        cbz(&old, &[("v/001.jxl", &page)]);
+        cbz(&plain, &[("notes.txt", b"x")]);
+        cbz(&late, &[("v/001.jxl", &page)]);
+        let earlier = NoCoverSet::load(file.clone(), lib.clone());
+        for a in [&old, &plain, &late] {
+            earlier.insert(a).unwrap();
+        }
+        drop(earlier);
+        std::fs::remove_file(&late).unwrap();
+
+        let set = NoCoverSet::load(file.clone(), lib.clone());
+        assert_eq!(set.clear_jxl(), std::slice::from_ref(&old));
+        assert_eq!(set.len(), 2);
+        assert!(
+            set.clear_jxl().is_empty(),
+            "the late archive is not there yet"
+        );
+        cbz(&late, &[("v/001.jxl", &page)]);
+        assert_eq!(set.clear_jxl(), std::slice::from_ref(&late));
+        assert_eq!(set.len(), 1);
+        assert!(set.contains(&plain));
+        // This run found no cover in `old` either: that record stays.
+        set.insert(&old).unwrap();
+        assert!(set.clear_jxl().is_empty());
+        assert!(set.contains(&old));
+        assert_eq!(NoCoverSet::load(file, lib).len(), 2, "saved");
     }
 
     #[test]
