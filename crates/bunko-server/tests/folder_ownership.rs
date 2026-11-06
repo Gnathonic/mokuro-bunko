@@ -985,3 +985,60 @@ async fn compiled_files_are_recognised_in_every_spelling_the_fold_joins() {
         "{root:?}"
     );
 }
+
+/// The OCR queue file and the cloud lease marker are recognised in every spelling the
+/// filename fold joins (`.MOKURO-QUEUE.JSON`, `.mokuro-queue.jſon`, a zero width space
+/// in it): every host makes them one name with Bunko's file. No account, an editor
+/// included, makes a file of such a name on a local library (the queue file answers
+/// 405, the marker 403, as a cloud store does), and a GET of any spelling serves the
+/// generated queue document, never a file a client or a hand made.
+#[tokio::test]
+async fn control_files_are_recognised_in_every_spelling_the_fold_joins() {
+    let env = Env::new();
+    let fake = br#"{"version":1,"fake":"bob"}"#.to_vec();
+    let r = env.put("bob", "/mokuro-reader/x.json", fake.clone()).await;
+    assert_eq!(r.status, 201, "{}", r.text());
+    let queue = [
+        ".mokuro-queue.json",
+        ".MOKURO-QUEUE.JSON",
+        ".mokuro-queue.j\u{17F}on",
+        ".mokuro\u{200B}-queue.json",
+    ];
+    let marker = [
+        ".mokuro-bunko.json",
+        ".MOKURO-BUNKO.JSON",
+        ".mokuro-bunko\u{200B}.json",
+    ];
+    for (names, status) in [(&queue[..], 405), (&marker[..], 403)] {
+        for name in names {
+            let path = format!("/mokuro-reader/{name}");
+            for user in ["bob", "editor"] {
+                let r = env.put(user, &path, fake.clone()).await;
+                assert_eq!(r.status, status, "{user} PUT {name:?}: {}", r.text());
+                let r = env.mkcol(user, &path).await;
+                assert_eq!(r.status, status, "{user} MKCOL {name:?}: {}", r.text());
+                let r = env.mv(user, "/mokuro-reader/x.json", &path).await;
+                assert_eq!(r.status, status, "{user} MOVE onto {name:?}: {}", r.text());
+            }
+        }
+    }
+    assert_eq!(names(&env.lib("")), ["x.json"]);
+    // One made by hand (or by an earlier beta) is never served for the queue file.
+    std::fs::write(env.lib(".MOKURO-QUEUE.JSON"), &fake).unwrap();
+    for name in queue {
+        let r = env
+            .send(
+                "reader",
+                "GET",
+                &format!("/mokuro-reader/{name}"),
+                &[],
+                Vec::new(),
+            )
+            .await;
+        assert_eq!(r.status, 200, "GET {name:?}: {}", r.text());
+        let doc = r.json();
+        assert_eq!(doc["version"], 1, "{name:?}");
+        assert!(doc.get("fake").is_none(), "GET {name:?}: {doc}");
+        assert!(doc.get("volumes").is_some(), "GET {name:?}: {doc}");
+    }
+}

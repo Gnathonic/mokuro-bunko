@@ -116,6 +116,15 @@
   stray then counts as that volume's for who may write or delete it (an account that
   does not control the volume, its maker included, no longer may), Bunko writes no file for the volume in
   its place, and `doctor` names it with the volume ("Ambiguous name").
+- **The OCR queue file and the cloud lease marker are recognised in every spelling the
+  filename fold joins.** A write of `/mokuro-reader/.MOKURO-QUEUE.JSON`,
+  `.mokuro-queue.jſon` or one with a zero width space in it answers 405 for every
+  account, as one of `.mokuro-queue.json` does, and a GET of any of them serves the
+  generated queue document; before, a local library stored an uploader's file under
+  such a name and then served it as the queue to every reader. Any request but a GET,
+  HEAD, OPTIONS, PROPFIND or COPY from it of `.mokuro-bunko.json` in any spelling, and a
+  COPY or MOVE onto it, answers 403 for every account on a local library too, as a
+  cloud store refuses it.
 - **Existing series get owners once, at startup.** A series folder whose volumes were
   all uploaded by one account, with no archive without a recorded uploader, becomes
   that account's. Every other folder (volumes from several accounts, archives copied
