@@ -234,7 +234,12 @@ pub(crate) async fn mkcol(inner: &Arc<Inner>, req: &Req) -> DavResult<Resp> {
             // makes it again (an unowned series folder, made by nobody's MKCOL), it
             // answers 409 as RFC 4918 has it (OWN-6, as C9 for a PUT). A concurrent
             // MKCOL of the same folder is not an error.
-            match fs::create_dir(&dir) {
+            let made = if other_spelling_listed(&dir, false) {
+                Ok(())
+            } else {
+                fs::create_dir(&dir)
+            };
+            match made {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -277,7 +282,12 @@ static SERIES_FOLDER_CREATE: parking_lot::Mutex<()> = parking_lot::Mutex::new(()
 /// nothing. Blocking.
 fn create_series_folder(inner: &Inner, req: &Req, dir: &Path) -> DavResult<()> {
     let _one = SERIES_FOLDER_CREATE.lock();
-    let created = match fs::create_dir(dir) {
+    let made = if other_spelling_listed(dir, true) {
+        Err(std::io::ErrorKind::AlreadyExists.into())
+    } else {
+        fs::create_dir(dir)
+    };
+    let created = match made {
         Ok(()) => true,
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => false,
         Err(e) => return Err(e.into()),
@@ -289,6 +299,18 @@ fn create_series_folder(inner: &Inner, req: &Req, dir: &Path) -> DavResult<()> {
         req.ctx.hooks.series_folder_created(&rel, actor);
     }
     Ok(())
+}
+
+/// Another spelling of `dir`'s name is listed beside it now: a concurrent request made
+/// it after PathCase resolved this one. That entry is this name (one name is one entry
+/// on every host), so nothing is made: the MKCOL ends as one that found its folder there
+/// already. `top`: `dir` is a series folder. Blocking.
+fn other_spelling_listed(dir: &Path, top: bool) -> bool {
+    let (Some(parent), Some(name)) = (dir.parent(), dir.file_name().and_then(|n| n.to_str()))
+    else {
+        return false;
+    };
+    crate::path_case::on_disk_name(parent, name, top).is_some_and(|listed| listed != name)
 }
 
 /// The `Destination` header as a decoded path (WsgiDAV rules; spec §8.3.7).

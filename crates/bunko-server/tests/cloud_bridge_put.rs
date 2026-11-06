@@ -469,11 +469,20 @@ async fn an_overwrite_and_a_sidecar_put_land_in_the_cloud() {
     assert_eq!(r.status, 204, "{}", r.text());
     assert_eq!(r.header("x-mokuro-upload"), Some("stored"));
     assert!(cloud(&fake, "Series/Vol 1.mokuro").as_deref() == Some(edited.as_slice()));
-    let uploads = fake.upload_log().len();
+    // The sidecar's uploads only: the overwrite made Bunko's cover stale, and the
+    // thumbnail worker may upload a new one at any time.
+    let sidecar_uploads = || {
+        fake.upload_log()
+            .iter()
+            .filter(|n| n.as_str() == "Vol 1.mokuro")
+            .count()
+    };
+    let uploads = sidecar_uploads();
     // Sent again unchanged: nothing is rewritten.
     let r = server.put(side_url, &edited, &[]).await;
     assert_eq!(r.status, 204, "{}", r.text());
-    assert_eq!(fake.upload_log().len(), uploads, "{:?}", fake.upload_log());
+    server.idle().await;
+    assert_eq!(sidecar_uploads(), uploads, "{:?}", fake.upload_log());
     // A new sidecar next to a new volume (a reader that OCR'd it itself).
     let r = server
         .put(
@@ -568,6 +577,9 @@ async fn a_bridge_move_answers_with_bunkos_cover_moved_along() {
         || cloud(&fake, "Series/Vol 1.webp").is_some(),
     )
     .await;
+    // The upload settled on Bunko's side too: a MOVE of a cover still on its way is a
+    // new upload at the new name, not a move of the node.
+    server.idle().await;
     let cover = fake
         .node_at(&format!("{ROOT}/Series/Vol 1.webp"))
         .unwrap()

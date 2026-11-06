@@ -1,6 +1,6 @@
 # The sources of a backend pack; see tests/pack_inputs.rs before changing.
 # BUNKO_BLESS=1 cargo test -p bunko-torch --test pack_inputs
-242eaca678f44984a061e664f248c0040e77924222a0acb11610b7c223416e7a  Cargo.toml [profile.*]
+7b71eeed962e14fcf55fd3712f862ad586c0bcadcc7fb5c4434522c18cac8322  Cargo.toml [profile.*]
 270c97d3d5df673e5f3540e720ecb1f53f77b570a6bf4c9340cf4e1a068466d2  crates/bunko-ncnn/Cargo.toml
 0ceaebb0a67031fd7c9134ff44dd45d4db5547acad393eb530c3611060d8a3ef  crates/bunko-ncnn/build.rs
 d372f55d2b5929872a917aeafc478d31229e3c0d74d93bc8fbf781abe42bb439  crates/bunko-ncnn/shim/bench/bench.cpp

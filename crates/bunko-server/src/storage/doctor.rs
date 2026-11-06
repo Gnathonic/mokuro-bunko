@@ -230,19 +230,32 @@ pub fn case_variant_rows(library: &Path) -> Vec<Row> {
         };
         for (name, _) in &listed {
             if let Some(rest) = name.strip_prefix(bunko_store::fs::CASE_RENAME_PREFIX) {
-                let to = rest.split_once('-').map_or(rest, |(_, to)| to);
+                // `<token>-<name>`; a name too long to carry is `<token>` alone.
+                let to = rest.split_once('-').map(|(_, to)| to);
                 out.push(row(
                     Verdict::Warn,
                     "Interrupted case rename",
-                    format!(
-                        "{} is hidden: a case-only rename to {to} stopped half-way",
-                        child(name)
-                    ),
-                    Some(format!(
-                        "Stop Bunko and rename {} to {}.",
-                        dir.join(name).display(),
-                        dir.join(to).display()
-                    )),
+                    match to {
+                        Some(to) => format!(
+                            "{} is hidden: a case-only rename to {to} stopped half-way",
+                            child(name)
+                        ),
+                        None => format!(
+                            "{} is hidden: a case-only rename stopped half-way",
+                            child(name)
+                        ),
+                    },
+                    Some(match to {
+                        Some(to) => format!(
+                            "Stop Bunko and rename {} to {}.",
+                            dir.join(name).display(),
+                            dir.join(to).display()
+                        ),
+                        None => format!(
+                            "Stop Bunko and rename {} back to the name it had.",
+                            dir.join(name).display()
+                        ),
+                    }),
                 ));
             }
         }
@@ -251,8 +264,7 @@ pub fn case_variant_rows(library: &Path) -> Vec<Row> {
             .filter(|(n, _)| {
                 !n.starts_with('.')
                     && !(rel.is_empty()
-                        && (bunko_core::reader_tree::is_per_user_root_name(n)
-                            || n.eq_ignore_ascii_case("thumbnails")))
+                        && (bunko_core::reader_tree::is_per_user_root_name(n) || n == "thumbnails"))
             })
             .collect();
         let losers =

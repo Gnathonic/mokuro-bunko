@@ -85,6 +85,19 @@ type Busy<'a> = &'a dyn Fn(&Path) -> bool;
 #[derive(Default)]
 pub struct MadeCovers(Mutex<HashMap<PathBuf, (u64, Instant)>>);
 
+/// The key a made cover is recorded under: its folder's canonical path plus its name.
+/// The worker publishes under the layout's library path while the DAV hooks report the
+/// canonical one (`/private/var/...` for `/var/...` on macOS, `\\?\C:\...` on Windows,
+/// any symlinked library root), and both must find the one record.
+fn made_key(cover: &Path) -> PathBuf {
+    match (cover.parent(), cover.file_name()) {
+        (Some(dir), Some(name)) if !dir.as_os_str().is_empty() => {
+            fs::canonicalize(dir).map_or_else(|_| cover.to_path_buf(), |d| d.join(name))
+        }
+        _ => cover.to_path_buf(),
+    }
+}
+
 impl MadeCovers {
     /// Forget the covers made longer ago than [`MADE_KEPT`].
     fn prune(made: &mut HashMap<PathBuf, (u64, Instant)>) {
@@ -103,10 +116,14 @@ impl MadeCovers {
             return None;
         }
         let cover = cover_path(cbz);
-        if !made.contains_key(&cover) || fs::exists(cbz) {
+        let key = made_key(&cover);
+        // Still listed under exactly this name (an archive replaced, not gone). A listing,
+        // not a lookup: after a case-only rename the old name still opens on a
+        // case-insensitive disk.
+        if !made.contains_key(&key) || listed_exactly(cbz) {
             return None;
         }
-        let (size, _) = made.remove(&cover)?;
+        let (size, _) = made.remove(&key)?;
         fs::metadata(&cover)
             .is_ok_and(|m| m.is_file() && m.len() == size)
             .then_some((cover, size))
@@ -124,8 +141,20 @@ impl MadeCovers {
             return;
         };
         let dest = cover_path(to);
+        // A case-only rename (`vol 1.cbz` to `Vol 1.cbz`): the cover is the one the new
+        // name resolves to. It is respelled like the archive, never removed.
+        if dest == cover || fs::same_file(&cover, &dest) {
+            let respelled = bunko_library::sidecar::with_suffix(to, ".webp");
+            let at = if respelled != cover && fs::rename(&cover, &respelled).is_ok() {
+                respelled
+            } else {
+                cover
+            };
+            made.insert(made_key(&at), (size, Instant::now()));
+            return;
+        }
         if !fs::exists(&dest) && fs::rename(&cover, &dest).is_ok() {
-            made.insert(dest, (size, Instant::now()));
+            made.insert(made_key(&dest), (size, Instant::now()));
             return;
         }
         if let Err(e) = fs::remove_file(&cover) {
@@ -152,6 +181,18 @@ impl MadeCovers {
                 );
             }
         }
+    }
+}
+
+/// `p`'s folder lists exactly its name.
+fn listed_exactly(p: &Path) -> bool {
+    let (Some(dir), Some(name)) = (p.parent(), p.file_name()) else {
+        return false;
+    };
+    match fs::read_dir(dir) {
+        Ok(entries) => entries.flatten().any(|e| e.file_name() == name),
+        // Unlistable: an archive that opens is there.
+        Err(_) => fs::exists(p),
     }
 }
 
@@ -554,7 +595,7 @@ fn publish_cover_with(
     }
     before_record(cbz);
     MadeCovers::prune(&mut made);
-    made.insert(out, (webp.len() as u64, Instant::now()));
+    made.insert(made_key(&out), (webp.len() as u64, Instant::now()));
     Ok(true)
 }
 
@@ -1415,6 +1456,35 @@ mod tests {
         );
     }
 
+    /// A case-only rename of an archive (`vol 1.cbz` to `Vol 1.cbz`) takes the cover
+    /// Bunko made along, respelled like it, never removed: the same listing on every
+    /// host. A move reported through another path form of the library (a symlinked
+    /// root; macOS `/private/var`, Windows `\\?\`) finds the record too.
+    #[test]
+    fn a_case_only_rename_respells_the_cover_made_for_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real");
+        let lib = real.join("library");
+        std::fs::create_dir_all(lib.join("S")).unwrap();
+        let from = lib.join("S/vol 1.cbz");
+        cbz(&from, &[("a.png", &png(10, 10))]);
+        let webp =
+            bunko_thumb::make_thumbnail_limited(&png(10, 10), MAX_DECODE_BYTES, MAX_SIDE).unwrap();
+        let made = MadeCovers::default();
+        assert!(publish_cover(&from, &webp, &|_| false, &made).unwrap());
+        // The hooks report canonical paths.
+        let canon = std::fs::canonicalize(&lib).unwrap();
+        let to = canon.join("S/Vol 1.cbz");
+        bunko_store::fs::rename(canon.join("S/vol 1.cbz"), &to).unwrap();
+        made.archive_moved(&canon.join("S/vol 1.cbz"), &to);
+        assert_eq!(names_in(&lib.join("S")), ["Vol 1.cbz", "Vol 1.webp"]);
+        // And it goes along again, under its new name.
+        let renamed = canon.join("S/Vol 2.cbz");
+        bunko_store::fs::rename(&to, &renamed).unwrap();
+        made.archive_moved(&to, &renamed);
+        assert_eq!(names_in(&lib.join("S")), ["Vol 2.cbz", "Vol 2.webp"]);
+    }
+
     /// The record of covers made is pruned as covers are made too, not only when an
     /// archive moves: a first scan of a large library does not keep one entry per
     /// volume for good.
@@ -1434,7 +1504,7 @@ mod tests {
             .insert(tmp.path().join("Old.webp"), (3, long_ago));
         assert!(publish_cover(&cbz_path, &webp, &|_| false, &made).unwrap());
         let kept: Vec<PathBuf> = made.0.lock().keys().cloned().collect();
-        assert_eq!(kept, [cover_path(&cbz_path)]);
+        assert_eq!(kept, [made_key(&cover_path(&cbz_path))]);
     }
 
     /// The cloud's hooks (on its events thread) hand a MOVE's two follow-ups over in

@@ -666,7 +666,14 @@ mod tests {
         }
         let names: Vec<String> = spec_files(d.path())
             .iter()
-            .map(|p| p.strip_prefix(d.path()).unwrap().display().to_string())
+            .map(|p| {
+                let rel = p.strip_prefix(d.path()).unwrap();
+                let parts: Vec<String> = rel
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                    .collect();
+                parts.join("/")
+            })
             .collect();
         assert_eq!(names, ["a.spec.mjs", "b.spec.mjs", "sub/c.spec.mjs"]);
     }

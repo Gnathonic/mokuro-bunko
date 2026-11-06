@@ -145,6 +145,18 @@ impl Database {
 
     /// The uploader of the volume a library-relative path belongs to.
     pub fn get_volume_owner(&self, library_relative_path: &str) -> Result<Option<String>> {
+        self.get_volume_owner_where(library_relative_path, |_| false)
+    }
+
+    /// [`Self::get_volume_owner`], whose fold fallback passes over every row for which
+    /// `still_listed(key)` holds: a row whose own spelling is still an entry of the
+    /// library belongs to that entry (a case variant a case-sensitive disk or a remote
+    /// store holds beside this one), never to this one.
+    pub fn get_volume_owner_where(
+        &self,
+        library_relative_path: &str,
+        still_listed: impl Fn(&str) -> bool,
+    ) -> Result<Option<String>> {
         let Some(key) = normalize_volume_key(library_relative_path) else {
             return Ok(None);
         };
@@ -174,7 +186,7 @@ impl Database {
                 .collect::<rusqlite::Result<_>>()?;
             Ok(rows
                 .into_iter()
-                .find(|(k, _)| bunko_core::sidecar_names::fold(k) == want)
+                .find(|(k, _)| bunko_core::sidecar_names::fold(k) == want && !still_listed(k))
                 .map(|(_, owner)| owner))
         })
     }

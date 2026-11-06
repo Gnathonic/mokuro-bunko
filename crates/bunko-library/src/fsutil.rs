@@ -101,6 +101,39 @@ pub fn list_dir_reachable(dir: &Path) -> io::Result<Vec<(String, PathBuf)>> {
     })
 }
 
+/// The winner among `variants`, listed spellings in `dir` of the fold `folded`: the
+/// store's case winner when it is one of them, else the byte-smallest (PathCase's rule,
+/// so what Bunko reads and writes is what a request reaches). `None` when empty.
+pub fn pick_winner(dir: &Path, folded: &str, variants: Vec<String>) -> Option<String> {
+    if variants.len() > 1
+        && let Some(w) = bunko_store::store_for(dir).and_then(|s| s.case_winner(dir, folded))
+        && variants.contains(&w)
+    {
+        return Some(w);
+    }
+    variants.into_iter().min()
+}
+
+/// The spelling `dir` lists of the name `name` in any case (the [`pick_winner`] of
+/// several), or `None` when no entry folds like it (or `dir` cannot be listed).
+pub fn listed_name(dir: &Path, name: &str) -> Option<String> {
+    let folded = bunko_core::sidecar_names::fold(name);
+    let variants: Vec<String> = list_dir(dir)
+        .ok()?
+        .into_iter()
+        .map(|(n, _)| n)
+        .filter(|n| n == name || bunko_core::sidecar_names::fold(n) == folded)
+        .collect();
+    pick_winner(dir, &folded, variants)
+}
+
+/// `dir/name` in the spelling `dir` lists ([`listed_name`]); the requested spelling when
+/// nothing there folds like it. What Bunko reads and writes for a name it builds itself
+/// (`series.json`, `catalog.json`): never a second spelling of an existing entry.
+pub fn spelled(dir: &Path, name: &str) -> PathBuf {
+    dir.join(listed_name(dir, name).unwrap_or_else(|| name.to_string()))
+}
+
 fn temp_suffix() -> String {
     const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789_";
     let mut hasher = RandomState::new().build_hasher();

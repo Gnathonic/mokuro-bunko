@@ -684,3 +684,32 @@ fn a_reader_shaped_edited_main_is_owed_one_primary_layer_under_the_default_repla
     h.at(62.0);
     assert!(h.s.owed.volumes.get("A/V1.cbz").is_none_or(|v| !v.upgrade));
 }
+
+/// A stale layer Bunko wrote is owed again whatever spelling of the volume's stem it
+/// has (`vol 1.fast.mokuro` beside `Vol 1.cbz`, an archive renamed outside Bunko): the
+/// same on a case-sensitive and a case-insensitive disk.
+#[test]
+fn a_stale_layer_in_another_spelling_is_run_again() {
+    let main = sealed(&hayai_at(2));
+    let stale = sealed(&hayai_at(1).replace(
+        r#""patch_budget":512"#,
+        r#""patch_budget":512,"generation":"fast""#,
+    ));
+    let on = UpgradeConfig {
+        enabled: true,
+        replace: vec![],
+    };
+    let rows = vec![primary(), layer("g-2", "fast")];
+    let mut h = harness_db(rows, Arc::new(FileFacts), Some(on));
+    h.add("A/Vol 1.cbz", 3);
+    let lib = h.library();
+    std::fs::write(lib.join("A/vol 1.mokuro"), &main).unwrap();
+    std::fs::write(lib.join("A/vol 1.fast.mokuro"), &stale).unwrap();
+    upgrade_of(&h).set_engine_revision("hayai-nova", 2);
+    h.at(0.0);
+    assert_eq!(
+        h.s.owed.volumes["A/Vol 1.cbz"].rows,
+        [Arc::<str>::from("g-2")],
+        "the stale layer is owed, not the main"
+    );
+}

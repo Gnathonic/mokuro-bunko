@@ -248,7 +248,10 @@ pub fn with_ocr_sha256(manifest: &mut JsonObject, digest: &str) {
 /// `_damage_by_volume_title`). Missing or corrupt file: empty.
 pub fn damage_by_volume_title(series_dir: &Path) -> HashMap<String, (i64, i64)> {
     let mut damage = HashMap::new();
-    let Ok(text) = fs::read_to_string(series_dir.join(crate::paths::SERIES_FILE_NAME)) else {
+    let Ok(text) = fs::read_to_string(crate::fsutil::spelled(
+        series_dir,
+        crate::paths::SERIES_FILE_NAME,
+    )) else {
         return damage;
     };
     let Ok(JsonValue::Object(raw)) = crate::pyjson::parse(&text) else {

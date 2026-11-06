@@ -15,8 +15,7 @@
 - **The reader's per-user names are reserved in any spelling.** `History/`,
   `Goals.json`, `Volume-Data.json` and the like are the caller's own `history/`,
   `goals.json` and `volume-data.json`, never library paths. A series folder spelled
-  like one is hidden until it is renamed (`doctor` names it), and so is one named
-  `Thumbnails/`.
+  like one is hidden until it is renamed (`doctor` names it).
 - **Series have owners, and an uploader controls only what is its own.** The account
   that creates a series folder owns it. An `uploader` account can no longer add files
   or folders to a series another account owns; it adds new volumes to a series nobody

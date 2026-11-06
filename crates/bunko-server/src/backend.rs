@@ -202,10 +202,25 @@ impl AuthBackend for DbAuthBackend {
     }
 
     fn volume_uploader(&self, rel: &str) -> Result<Option<String>, OwnerUnknown> {
-        self.db.get_volume_owner(rel).map_err(|e| {
-            warn!("volume owner lookup failed: {e}");
-            OwnerUnknown
-        })
+        // The fold fallback finds a volume renamed outside Bunko; a row whose own
+        // spelling is still listed is that other entry's (a shadowed case variant), and
+        // never makes its uploader the owner of this one.
+        let library = self.layout.library();
+        let still_listed = |key: &str| {
+            let (dir, name) = key.rsplit_once('/').unwrap_or(("", key));
+            match bunko_library::fsutil::list_dir(&library.join(dir)) {
+                Ok(entries) => entries.iter().any(|(n, _)| n == name),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+                // Unlistable: the row may well be another entry's; it decides nothing.
+                Err(_) => true,
+            }
+        };
+        self.db
+            .get_volume_owner_where(rel, still_listed)
+            .map_err(|e| {
+                warn!("volume owner lookup failed: {e}");
+                OwnerUnknown
+            })
     }
 
     fn is_library_folder(&self, virtual_path: &str) -> bool {
@@ -492,9 +507,11 @@ mod tests {
         );
     }
 
-    /// A library root that cannot be listed cannot tell whether another spelling of an
-    /// owned series is live: its owner is unknown, never "none" (an addition through a
-    /// spelling the store folds onto `S/` would otherwise pass).
+    /// A library root that cannot be listed cannot tell whether an owned series is live,
+    /// in any spelling: its owner is unknown, never "none" (an addition through a
+    /// spelling the store folds onto `S/` would otherwise pass). The same on every host:
+    /// the folder is never looked up by name (a case-insensitive disk would find `S/`
+    /// for `s`).
     #[cfg(unix)]
     #[test]
     fn an_unlistable_root_leaves_the_owner_unknown() {
@@ -509,7 +526,7 @@ mod tests {
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
         if !listable {
             assert_eq!(variant, Some((503, Some(10))));
-            assert_eq!(named, Some((403, None)));
+            assert_eq!(named, Some((503, Some(10))));
         }
     }
 
@@ -528,6 +545,51 @@ mod tests {
             .store(true, std::sync::atomic::Ordering::Relaxed);
         assert_eq!(backend.ownership_pending(), Ok(false));
         assert!(db.series_folder_adoption_pending().unwrap());
+    }
+
+    /// The volume-owner fold fallback finds a volume renamed outside Bunko (only
+    /// `S/V.cbz` is listed; alice uploaded it as `S/v.cbz`): still hers, on every host.
+    /// It never stands in for a row whose own spelling is still listed: on a store that
+    /// holds both (a case-sensitive disk, a cloud folder before its merge), alice's
+    /// `S/v.cbz` gives her no control of the untracked `S/V.cbz` a request reaches.
+    #[test]
+    fn a_fold_matched_upload_row_is_never_another_entrys() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = StorageLayout::new(dir.path());
+        let series = layout.library().join("S");
+        bunko_store::fs::create_dir_all(&series).unwrap();
+        bunko_store::fs::write(series.join("V.cbz"), b"admin's").unwrap();
+        bunko_store::fs::write(series.join("other.cbz"), b"x").unwrap();
+        let db = Arc::new(Database::open(dir.path().join("mokuro.db")).unwrap());
+        db.record_series_folder_owner("S", "carol").unwrap();
+        db.record_volume_upload("S/v.cbz", "alice").unwrap();
+        db.record_volume_upload("S/other.cbz", "bob").unwrap();
+        let backend = DbAuthBackend::new(db.clone(), layout);
+        // Renamed outside Bunko: alice's.
+        assert_eq!(backend.volume_uploader("S/V.cbz"), Ok(Some("alice".into())));
+        assert_eq!(
+            decide(&backend, "DELETE", "/mokuro-reader/S/V.cbz", "alice"),
+            None
+        );
+        // Her own spelling written beside it: two entries where the store keeps both.
+        bunko_store::fs::write(series.join("v.cbz"), b"alice's").unwrap();
+        let mut listed: Vec<String> = bunko_store::fs::read_dir(&series)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        listed.sort();
+        if listed.len() == 3 {
+            assert_eq!(backend.volume_uploader("S/V.cbz"), Ok(None));
+            assert_eq!(
+                decide(&backend, "DELETE", "/mokuro-reader/S/V.cbz", "alice"),
+                Some((403, None))
+            );
+            assert_eq!(
+                decide(&backend, "PUT", "/mokuro-reader/S/V.cbz", "alice"),
+                Some((403, None))
+            );
+        }
     }
 
     #[test]

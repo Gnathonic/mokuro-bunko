@@ -130,6 +130,15 @@ async fn series_page_config_status_cover_and_static() {
     );
     let by_path = env.send(get("/catalog/api/series/Dr%20Stone")).await;
     assert_eq!(by_path.text(), series.text());
+    // Any spelling of the name is that series, on every host (the library is
+    // case-insensitive): the answer names it as the library spells it.
+    for respelled in [
+        "/catalog/api/series?name=dr+stone",
+        "/catalog/api/series/DR%20STONE",
+    ] {
+        let r = env.send(get(respelled)).await;
+        assert_eq!((r.status, r.text()), (200, series.text()), "{respelled}");
+    }
     assert_eq!(
         env.send(get("/catalog/api/series")).await.text(),
         r#"{"error": "Missing series name"}"#
@@ -167,6 +176,17 @@ async fn series_page_config_status_cover_and_static() {
     assert_eq!(cover.status, 200);
     assert_eq!(&cover.body[..], b"RIFFwebp");
     assert_eq!(cover.header("content-type"), Some("image/webp"));
+    for respelled in [
+        "/catalog/api/cover?path=dr%20stone/VOLUME%2001.webp",
+        "/catalog/api/cover/DR%20STONE/volume%2001.webp",
+    ] {
+        let r = env.send(get(respelled)).await;
+        assert_eq!(
+            (r.status, &r.body[..]),
+            (200, &b"RIFFwebp"[..]),
+            "{respelled}"
+        );
+    }
     // Revalidated on every use: a cover remade under the same name shows at once.
     assert_eq!(cover.header("cache-control"), Some("no-cache"));
     let etag = cover.header("etag").expect("an ETag").to_string();

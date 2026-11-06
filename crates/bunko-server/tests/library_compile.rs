@@ -605,3 +605,38 @@ async fn deleting_the_last_volume_retires_the_series_file() {
     assert!(back.contains(r#""spine_offset":-40"#), "{back}");
     env.runtime.stop().await;
 }
+
+/// A series file in another spelling (`Series.json`, made outside Bunko) is the
+/// series file: the compiler reads and writes it there and never puts a second
+/// `series.json` beside it, so a reader's GET of `series.json` (which reaches
+/// `Series.json`) gets the compiled one. The same on every host; `catalog.json` too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_series_file_in_another_spelling_is_the_one_compiled() {
+    let env = Env::new(|_| {});
+    let dir = env.series_dir("Kingdom");
+    write_cbz(&dir.join("V.cbz"), 1);
+    std::fs::write(dir.join("Series.json"), "{}").unwrap();
+    std::fs::write(env.library.join("Catalog.json"), "{}").unwrap();
+    env.runtime.recompile_all_now().await;
+    let names = |d: &std::path::Path| -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(d)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| !n.starts_with('.'))
+            .collect();
+        v.sort();
+        v
+    };
+    assert_eq!(names(&dir), ["Series.json", "V.cbz"]);
+    let compiled = std::fs::read_to_string(dir.join("Series.json")).unwrap();
+    assert!(compiled.contains("\"volumes\""), "{compiled}");
+    assert!(
+        !names(&env.library).iter().any(|n| n == "catalog.json"),
+        "{:?}",
+        names(&env.library)
+    );
+    let catalog = std::fs::read_to_string(env.library.join("Catalog.json")).unwrap();
+    assert!(catalog.contains("Kingdom"), "{catalog}");
+    env.runtime.stop().await;
+}

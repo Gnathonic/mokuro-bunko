@@ -102,13 +102,13 @@ pub fn orphan_series_files_where(
                 && fsutil::is_dir(path)
         })
         .filter_map(|(title, path)| {
-            let children = fsutil::list_dir(&path).ok()?;
+            let children = fsutil::list_dir_reachable(&path).ok()?;
             let archive = children
                 .iter()
                 .any(|(name, child)| is_cbz_name(name) && fsutil::is_file(child));
-            let series_file = children
-                .into_iter()
-                .find(|(name, child)| name == SERIES_FILE_NAME && fsutil::is_file(child))?;
+            let series_file = children.into_iter().find(|(name, child)| {
+                bunko_core::sidecar_names::fold(name) == SERIES_FILE_NAME && fsutil::is_file(child)
+            })?;
             (!archive).then_some((title, series_file.1))
         })
         .collect()
@@ -499,8 +499,10 @@ fn listed_sidecar_sha256(stats: &VolumeStats) -> Option<String> {
 /// empty when missing or unreadable).
 fn load_published(series_dir: &Path) -> HashMap<String, JsonObject> {
     let mut by_title = HashMap::new();
-    let Ok(text) = bunko_store::fs::read_to_string(series_dir.join(crate::paths::SERIES_FILE_NAME))
-    else {
+    let Ok(text) = bunko_store::fs::read_to_string(fsutil::spelled(
+        series_dir,
+        crate::paths::SERIES_FILE_NAME,
+    )) else {
         return by_title;
     };
     let Ok(JsonValue::Object(raw)) = pyjson::parse(&text) else {

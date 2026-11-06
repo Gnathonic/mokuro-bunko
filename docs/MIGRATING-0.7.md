@@ -251,8 +251,7 @@ with the rename that finishes it.
 Series folders spelled like a reader's per-user name (`history`, `History`,
 `goals.json`, `Goals.json`, `volume-data.json`, ...) are hidden in 0.8: those names
 are each account's own files in every spelling. Doctor names them; rename them (for
-example to `History (series)`). The legacy `thumbnails/` folder is recognised in any
-case, so a series named `Thumbnails/` must be renamed too.
+example to `History (series)`).
 
 ### First-run setup from another computer
 

@@ -16,7 +16,7 @@ use bunko_store::{Durability, Mode, Origin, Version, WriteIntent, fs};
 use serde_json::{Map, Value};
 use sha2::Digest;
 
-use super::owed::sidecar_paths;
+use super::owed::{listed_sidecar_paths, sidecar_paths};
 use super::types::{Job, LibraryFacts, PathLocks, Stamp, stamp_of};
 
 /// Everything one installation needs, owned (it crosses to a helper thread).
@@ -66,6 +66,9 @@ pub enum Outcome {
     /// the next walk finds the row done.
     Superseded(String),
 }
+
+/// Why a result was discarded for a volume another spelling of itself shadows.
+pub const SHADOWED: &str = "another spelling of the volume shadows it; the result was discarded";
 
 /// Why a result was discarded for a file already at its destination.
 pub const SUPERSEDED: &str = "a sidecar was already at the destination; the result was discarded";
@@ -208,7 +211,9 @@ pub fn volume_uuid_for(
         if other.primary || other.id == row.id {
             continue;
         }
-        let (plain, gz) = sidecar_paths(cbz, &other.sidecar_suffix());
+        let Some((plain, gz)) = listed_sidecar_paths(cbz, &other.sidecar_suffix()) else {
+            continue;
+        };
         for candidate in [plain, gz] {
             let Some(uuid) = sidecar_volume_uuid(&candidate) else {
                 continue;
@@ -410,7 +415,11 @@ fn install(req: &CollectRequest) -> Outcome {
             Err(outcome) => return outcome,
         }
     } else {
-        let (plain, gz) = sidecar_paths(&cbz, &row.sidecar_suffix());
+        // The spelling the folder lists (a client's `v.mokuro` for `V.cbz` is this
+        // volume's primary on every host): never a second spelling beside it.
+        let Some((plain, gz)) = listed_sidecar_paths(&cbz, &row.sidecar_suffix()) else {
+            return Outcome::Superseded(SHADOWED.into());
+        };
         let Some(_guard) = lock_with_patience(&req.locks, &plain) else {
             return Outcome::Busy(format!("{} is locked by a WebDAV write", plain.display()));
         };

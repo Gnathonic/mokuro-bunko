@@ -289,8 +289,16 @@ fn volume_progress(job: &Map<String, Value>) -> Value {
     })
 }
 
+/// `relative` in the library's spelling, whatever case the request spells it in (the
+/// DAV paths are canonicalized the same way at the edge), so a catalog request answers
+/// the same on every host. Blocking.
+fn library_spelling(library: &std::path::Path, relative: &str) -> String {
+    bunko_dav::LibraryPathCanonicalizer::new(library).canonicalize(relative, None)
+}
+
 fn get_series(deps: &LibraryDeps, name: &str) -> Response {
     let library = deps.runtime.library_path();
+    let name = &library_spelling(library, name);
     let base = resolve(library).unwrap_or_else(|| library.to_path_buf());
     let Some(series_dir) = resolve(&library.join(name)) else {
         return json_error(403, "Forbidden");
@@ -413,6 +421,7 @@ async fn serve_cover(deps: &LibraryDeps, cover: &str, headers: &HeaderMap) -> Re
     let library = deps.runtime.library_path().to_path_buf();
     let cover = cover.to_owned();
     let checked = blocking(move || -> Result<CoverFile, Response> {
+        let cover = library_spelling(&library, &cover);
         let base = resolve(&library).unwrap_or_else(|| library.clone());
         let file = resolve(&library.join(&cover)).ok_or_else(|| util::text(400, "Invalid path"))?;
         if !is_within(&file, &base) {
@@ -579,10 +588,8 @@ fn build_manifest(deps: &LibraryDeps, series: &str, volume: &str, headers: &Head
     let library = deps.runtime.library_path();
     // The names as the library lists them, whatever case the request spells them in
     // (the DAV paths are canonicalized the same way at the edge).
-    let canonical = (!series.contains(['/', '\\']) && !volume.contains(['/', '\\'])).then(|| {
-        bunko_dav::LibraryPathCanonicalizer::new(library)
-            .canonicalize(&format!("{series}/{volume}.cbz"), None)
-    });
+    let canonical = (!series.contains(['/', '\\']) && !volume.contains(['/', '\\']))
+        .then(|| library_spelling(library, &format!("{series}/{volume}.cbz")));
     let (series, volume, archive_file) = match canonical.as_deref().and_then(|c| c.split_once('/'))
     {
         Some((s, v)) => (

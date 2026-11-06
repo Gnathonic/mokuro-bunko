@@ -364,7 +364,7 @@ pub fn classify_change(library_root: &Path, path: &Path) -> LibraryChange {
     if parts.len() < 2 {
         return LibraryChange::Library;
     }
-    if parts[0].eq_ignore_ascii_case("thumbnails") {
+    if parts[0] == "thumbnails" {
         return LibraryChange::Ignore;
     }
     LibraryChange::Series(parts[0].clone())
@@ -429,9 +429,11 @@ mod tests {
             classify_change(root, Path::new("/lib/History/v.cbz")),
             LibraryChange::Ignore
         );
+        // The cover cache is `thumbnails/` exactly; it is no reserved name (a series
+        // may be called `Thumbnails`), the same on every host.
         assert_eq!(
             classify_change(root, Path::new("/lib/Thumbnails/a.webp")),
-            LibraryChange::Ignore
+            LibraryChange::Series("Thumbnails".into())
         );
         assert!(is_relevant_change(Path::new("/lib/S/v.mokuro.gz"), false));
         assert!(is_relevant_change(Path::new("/lib/S/v.webp"), false));

@@ -188,22 +188,34 @@ pub const CASE_RENAME_PREFIX: &str = ".bunko-case-";
 
 /// `std::fs::rename`, except between two names of one file. POSIX makes that a no-op
 /// (Linux casefold, hard links), while APFS and NTFS rename. Bunko behaves the same on
-/// every host: when `from` and `to` differ but [`same_file`] holds, the entry goes
-/// through a hidden `.bunko-case-<random>-<to's name>` in `from`'s folder, then to
-/// `to`. When the second step fails the first is undone and its error returned. A
-/// crash between the two leaves the temporary name behind (doctor reports it).
+/// every host: when `from` and `to` differ but [`same_file`] holds, a plain rename is
+/// tried first and its result read back from the listing (never a probe of the host);
+/// when `to` is not listed yet, or `from` still is, the entry goes through a hidden
+/// `.bunko-case-<random>-<to's name>` (`.bunko-case-<random>` when that would be too
+/// long a name) in `from`'s folder, then to `to`. When the second step fails the first
+/// is undone and its error returned. A crash between the two leaves the temporary name
+/// behind (doctor reports it). Two hard links of one file end as the one name `to`.
 pub(crate) fn local_rename(from: &Path, to: &Path) -> io::Result<()> {
     if from == to || !same_file(from, to) {
         return std::fs::rename(from, to);
     }
-    let (Some(parent), Some(name)) = (from.parent(), to.file_name()) else {
+    let (Some(parent), Some(from_name), Some(name)) =
+        (from.parent(), from.file_name(), to.file_name())
+    else {
         return std::fs::rename(from, to);
     };
-    let temp = parent.join(format!(
-        "{CASE_RENAME_PREFIX}{}-{}",
-        temp_token(),
-        name.to_string_lossy()
-    ));
+    let to_parent = to.parent().unwrap_or(parent);
+    std::fs::rename(from, to)?;
+    if listed(to_parent, name) && !listed(parent, from_name) {
+        return Ok(());
+    }
+    let mut temp_name = format!("{CASE_RENAME_PREFIX}{}", temp_token());
+    let full = format!("{temp_name}-{}", name.to_string_lossy());
+    // 255 bytes is the longest name APFS, ext4 and NTFS (in UTF-16 units) take.
+    if full.len() <= 255 {
+        temp_name = full;
+    }
+    let temp = parent.join(temp_name);
     std::fs::rename(from, &temp)?;
     if let Err(e) = std::fs::rename(&temp, to) {
         if let Err(back) = std::fs::rename(&temp, from) {
@@ -216,7 +228,16 @@ pub(crate) fn local_rename(from: &Path, to: &Path) -> io::Result<()> {
         }
         return Err(e);
     }
+    // Hard links: the second step was itself a rename between two names of one file.
+    if listed(parent, temp.file_name().unwrap_or_default()) && same_file(&temp, to) {
+        std::fs::remove_file(&temp)?;
+    }
     Ok(())
+}
+
+/// `dir` lists exactly `name`.
+fn listed(dir: &Path, name: &std::ffi::OsStr) -> bool {
+    std::fs::read_dir(dir).is_ok_and(|entries| entries.flatten().any(|e| e.file_name() == name))
 }
 
 /// A short token unique enough for a temporary name in one folder.

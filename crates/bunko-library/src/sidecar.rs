@@ -74,42 +74,52 @@ pub fn nocover_marker_path(cbz_path: &Path) -> PathBuf {
 ///
 /// [`fsutil::case_losers`]: crate::fsutil::case_losers
 pub fn sibling(cbz_path: &Path, suffix: &str) -> Option<PathBuf> {
+    let directory = cbz_path.parent().unwrap_or_else(|| Path::new(""));
+    match list_names(directory) {
+        Some(names) => sibling_in(cbz_path, suffix, &names),
+        None => Some(with_suffix(cbz_path, suffix)),
+    }
+}
+
+/// [`sibling`] over `names`, the archive folder's file names (listed once by a caller
+/// that resolves several).
+///
+/// Of several listed spellings that are all the archive's, the one a request reaches
+/// (the store's case winner, else the byte-smallest; the rule PathCase serves by), so
+/// what Bunko reads, writes and serves is one file on every host.
+pub fn sibling_in(cbz_path: &Path, suffix: &str, names: &[String]) -> Option<PathBuf> {
     let name = cbz_path.file_name()?.to_str()?;
     let directory = cbz_path.parent().unwrap_or_else(|| Path::new(""));
     let stem = py_stem(name);
     let wanted = format!("{stem}{suffix}");
-    let Some(names) = list_names(directory) else {
-        return Some(directory.join(wanted));
-    };
     let losers = crate::fsutil::case_losers(directory, names.iter().map(String::as_str));
     if losers.contains(name) {
         return None;
     }
-    if names.contains(&wanted) {
-        return Some(directory.join(wanted));
-    }
     let fold = sidecar_names::fold(&wanted);
     let candidates: Vec<&String> = names
         .iter()
-        .filter(|n| sidecar_names::fold(n) == fold)
+        .filter(|n| **n == wanted || sidecar_names::fold(n) == fold)
         .collect();
     if candidates.is_empty() {
         return Some(directory.join(wanted));
     }
-    // Another archive whose stem is spelled exactly like a candidate's owns it.
+    // Another archive whose stem is spelled exactly like a candidate's owns it (a
+    // shadowed one owns nothing).
     let other_stems: Vec<&str> = names
         .iter()
-        .filter(|n| n.as_str() != name)
+        .filter(|n| n.as_str() != name && !losers.contains(n.as_str()))
         .filter_map(|n| sidecar_names::cbz_stem(n))
         .collect();
-    candidates
+    let ours: Vec<String> = candidates
         .into_iter()
         .filter(|c| {
             let cut = c.len().saturating_sub(suffix.len());
             !c.is_char_boundary(cut) || !other_stems.contains(&&c[..cut])
         })
-        .min()
-        .map(|c| directory.join(c))
+        .cloned()
+        .collect();
+    crate::fsutil::pick_winner(directory, &fold, ours).map(|c| directory.join(c))
 }
 
 /// `split_layer_sidecar`: `("Vol 1", "hayai-nova")` for

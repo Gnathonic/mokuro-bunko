@@ -44,9 +44,7 @@ pub struct FolderAdoption {
 /// A top-level library name that can be a series folder: not the cloud-root owner's
 /// own tree, the cover cache, or a dot name (staging).
 fn is_series_folder_name(name: &str) -> bool {
-    !reader_tree::is_per_user_root_name(name)
-        && !name.eq_ignore_ascii_case("thumbnails")
-        && !name.starts_with('.')
+    !reader_tree::is_per_user_root_name(name) && name != "thumbnails" && !name.starts_with('.')
 }
 
 /// The series folders listed at the library root (through the store: an index read on
@@ -88,16 +86,15 @@ pub fn live_series_keys(library: &Path) -> std::io::Result<HashSet<String>> {
         .collect())
 }
 
-/// Is a folder of `folder`'s series listed at the library root? The folder itself is
-/// one lookup; any other spelling takes the root listing, and `Err` when that cannot
-/// be read: "not listed" would make an owned series anyone's. Blocking.
+/// Is a folder of `folder`'s series listed at the library root? Always from the root
+/// listing, `Err` when that cannot be read: "not listed" would make an owned series
+/// anyone's. Never by opening the name: a case-insensitive disk would find `S/` for
+/// `s`, a case-sensitive one would not, so the answer would depend on the host.
+/// Blocking.
 pub fn series_folder_is_live(library: &Path, folder: &str) -> std::io::Result<bool> {
     let Some(folder) = top_level(folder) else {
         return Ok(false);
     };
-    if is_series_folder_name(folder) && bunko_store::fs::is_dir(library.join(folder)) {
-        return Ok(true);
-    }
     let key = fold_series_title_key(folder);
     Ok(live_series_keys(library)?.contains(&key))
 }

@@ -285,6 +285,19 @@ pub fn engine_of(data: &Value) -> Option<(String, u32)> {
     Some((stamp_id(data)?, block_revision(block)))
 }
 
+/// The plain sidecar `<stem><suffix>` of `cbz` as it exists: the constructed name when
+/// it is a file, else the spelling the folder lists ([`super::owed::listed_sidecar_paths`]:
+/// `vol 1.hayai.mokuro` for `Vol 1.cbz`), so whether a layer is owed again does not
+/// depend on the host's case rules. Lists the folder only when the constructed name
+/// misses.
+fn existing_plain(cbz: &Path, suffix: &str) -> PathBuf {
+    let (plain, _) = super::owed::sidecar_paths(cbz, suffix);
+    if fs::metadata(&plain).is_ok_and(|m| m.is_file()) {
+        return plain;
+    }
+    super::owed::listed_sidecar_paths(cbz, suffix).map_or(plain, |(p, _)| p)
+}
+
 /// Bunko's own output of `engine` (sealed, no `edited` block) at a revision below
 /// `revision`: the one file an install of `engine` at `revision` replaces in place.
 /// Anything else at its destination (a person's file, an edit, another engine's, an
@@ -451,8 +464,7 @@ impl Upgrade {
         if row.primary {
             return false;
         }
-        let (plain, _) = super::owed::sidecar_paths(cbz, &row.sidecar_suffix());
-        self.own_outdated(&plain, &row.engine)
+        self.own_outdated(&existing_plain(cbz, &row.sidecar_suffix()), &row.engine)
     }
 
     /// The file at `plain` is Bunko's own output of `engine` at a revision below the
@@ -500,8 +512,7 @@ impl Upgrade {
         if !super::owed::row_done(cbz, &layer, None) {
             return true;
         }
-        let (plain, _) = super::owed::sidecar_paths(cbz, &layer.sidecar_suffix());
-        self.own_outdated(&plain, &layer.engine)
+        self.own_outdated(&existing_plain(cbz, &layer.sidecar_suffix()), &layer.engine)
     }
 
     /// An upgrade job's result for a volume whose main a reader marked EDITED (D4: edits
@@ -519,7 +530,8 @@ impl Upgrade {
         let rel = rel_of(&self.library, cbz).unwrap_or_default();
         let bare = bunko_library::sidecar::sibling(cbz, ".mokuro")
             .ok_or_else(|| Outcome::Failed("the volume is shadowed by another spelling".into()))?;
-        let (plain, gz) = super::owed::sidecar_paths(cbz, &layer_row.sidecar_suffix());
+        let (plain, gz) = super::owed::listed_sidecar_paths(cbz, &layer_row.sidecar_suffix())
+            .ok_or_else(|| Outcome::Superseded(super::collect::SHADOWED.into()))?;
         let locked =
             |p: &Path| Outcome::Busy(format!("{} is locked by a WebDAV write", p.display()));
         let _bare_guard = self.locks.try_lock(&bare).ok_or_else(|| locked(&bare))?;

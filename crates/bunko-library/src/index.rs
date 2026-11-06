@@ -138,7 +138,12 @@ fn scan_dir(
         .filter(|name| crate::sidecar::is_cbz_name(name) && !losers.contains(*name))
         .map(|name| (&name[..name.len() - 4], name.as_str()))
         .collect();
-    let listed: Vec<&str> = sorted_names.iter().map(|name| name.as_str()).collect();
+    // What rule v1 reads: the names a request reaches (a shadowed spelling is none).
+    let listed: Vec<&str> = sorted_names
+        .iter()
+        .map(|name| name.as_str())
+        .filter(|name| !losers.contains(*name))
+        .collect();
     let folder = Folder::new(&listed);
     let mut volumes = Vec::new();
     let mut series_cover = None;
@@ -159,8 +164,29 @@ fn scan_dir(
                 _ => has_mokuro = true,
             }
         }
-        let has_webp = has(".webp");
-        let cover = has_webp.then(|| format!("{series_name}/{volume_name}.webp"));
+        // The cover and the marker in any spelling of the stem (rule v1: `V.WEBP`), as
+        // the thumbnail worker finds them: listed under their own names.
+        let files = archive
+            .map(|name| folder.volume_files(name))
+            .unwrap_or_default();
+        let listed_as = |wanted: fn(&sidecar_names::VolumeFile) -> bool, suffix: &str| {
+            let exact = format!("{volume_name}{suffix}");
+            if filenames.contains(&exact) {
+                return Some(exact);
+            }
+            files
+                .iter()
+                .find(|(_, f)| wanted(f))
+                .map(|(n, _)| (*n).to_string())
+        };
+        let cover_name = listed_as(|f| matches!(f, sidecar_names::VolumeFile::Cover), ".webp");
+        let has_webp = cover_name.is_some();
+        let has_nocover = listed_as(
+            |f| matches!(f, sidecar_names::VolumeFile::NoCover),
+            ".nocover",
+        )
+        .is_some();
+        let cover = cover_name.map(|name| format!("{series_name}/{name}"));
         if series_cover.is_none() {
             series_cover.clone_from(&cover);
         }
@@ -169,7 +195,7 @@ fn scan_dir(
                 .pending_ocr
                 .push((series_name.to_owned(), volume_name.clone()));
         }
-        if has_cbz && !has_webp && !has(".nocover") {
+        if has_cbz && !has_webp && !has_nocover {
             snapshot.pending_thumbnails += 1;
         }
         volumes.push(VolumeSnapshot {
@@ -492,6 +518,28 @@ mod tests {
         assert_eq!(flags("B"), (false, true));
         assert_eq!(flags("C"), (false, false));
         assert_eq!(flags("D"), (true, false));
+    }
+
+    /// A cover or a no-cover marker in another spelling of the stem (`a.WEBP`) is the
+    /// volume's on every host: the catalog shows it under its listed name, and the volume
+    /// is not waiting for a thumbnail the worker will never make.
+    #[test]
+    fn a_cover_in_any_spelling_is_the_volumes() {
+        let dir = tempfile::tempdir().unwrap();
+        let series = dir.path().join("S");
+        bunko_store::fs::create_dir(&series).unwrap();
+        for name in ["A.cbz", "a.WEBP", "B.cbz", "b.NOCOVER", "C.cbz"] {
+            bunko_store::fs::write(series.join(name), b"x").unwrap();
+        }
+        let snapshot = scan_library(dir.path());
+        assert_eq!(snapshot.pending_thumbnails, 1);
+        let covers: Vec<Option<&str>> = snapshot.series[0]
+            .volumes
+            .iter()
+            .map(|v| v.cover.as_deref())
+            .collect();
+        assert_eq!(covers, [Some("S/a.WEBP"), None, None]);
+        assert_eq!(snapshot.series[0].cover.as_deref(), Some("S/a.WEBP"));
     }
 
     /// D27: a personal correction is one account's own, never a layer of the volume.

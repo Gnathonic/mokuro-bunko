@@ -7,7 +7,7 @@
 //! nothing. Every claim still re-checks its one job on disk ([`still_owed`]).
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use bunko_core::generations::Generation;
@@ -51,6 +51,42 @@ pub fn sidecar_paths(cbz: &Path, suffix: &str) -> (std::path::PathBuf, std::path
     let mut gz = plain.clone().into_os_string();
     gz.push(".gz");
     (plain, gz.into())
+}
+
+/// [`sidecar_paths`] as Bunko reads and writes them: each name in the spelling the
+/// archive's folder lists (`v.mokuro` for `V.cbz`,
+/// [`bunko_library::sidecar::sibling_in`]), else the constructed name; a pair keeps one
+/// spelling (`v.mokuro` when only `v.mokuro.gz` is listed). Bunko never writes a second
+/// spelling of a sidecar. `None` when nothing may be written for the archive: another
+/// spelling of it shadows it, or every listed spelling is another archive's. One listing.
+pub fn listed_sidecar_paths(cbz: &Path, suffix: &str) -> Option<(PathBuf, PathBuf)> {
+    let directory = cbz.parent().unwrap_or_else(|| Path::new(""));
+    let names = sidecar::list_names(directory).unwrap_or_default();
+    let gz_suffix = format!("{suffix}.gz");
+    let plain = sidecar::sibling_in(cbz, suffix, &names)?;
+    let gz = sidecar::sibling_in(cbz, &gz_suffix, &names)?;
+    let listed = |p: &Path| {
+        p.file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| names.iter().any(|l| l == n))
+    };
+    let with_gz = |p: &Path| {
+        let mut s = p.as_os_str().to_owned();
+        s.push(".gz");
+        PathBuf::from(s)
+    };
+    Some(match (listed(&plain), listed(&gz)) {
+        (false, true) => {
+            let name = gz.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+            let base = name.get(..name.len().saturating_sub(3)).unwrap_or(name);
+            (directory.join(base), gz)
+        }
+        (true, false) => {
+            let gz = with_gz(&plain);
+            (plain, gz)
+        }
+        _ => (plain, gz),
+    })
 }
 
 /// `needs_sidecar`, the other way round: the row's sidecar or its `.gz` exists, in any
@@ -475,5 +511,45 @@ mod tests {
         assert!(!still_owed(lib, "S/V1.cbz", &rows()[0], false));
         assert!(!still_owed(lib, "S/V2.cbz", &rows()[1], false));
         assert!(still_owed(lib, "S/X.cbz", &rows()[0], false));
+    }
+
+    /// A result goes to the spelling the folder lists, on every host: a reader's
+    /// `v.mokuro` beside `V.cbz` is the volume's primary, so the collector keeps it
+    /// (the result is discarded) instead of writing `V.mokuro` beside it on a
+    /// case-sensitive disk. A pair keeps the listed spelling; nothing listed keeps the
+    /// archive's.
+    #[test]
+    fn a_result_goes_to_the_listed_spelling() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = dir.path().join("S");
+        std::fs::create_dir_all(&s).unwrap();
+        std::fs::write(s.join("V.cbz"), b"zip").unwrap();
+        let pair = |a: &str, b: &str| Some((s.join(a), s.join(b)));
+        assert_eq!(
+            listed_sidecar_paths(&s.join("V.cbz"), ".mokuro"),
+            pair("V.mokuro", "V.mokuro.gz")
+        );
+        std::fs::write(s.join("v.mokuro.gz"), b"{}").unwrap();
+        assert_eq!(
+            listed_sidecar_paths(&s.join("V.cbz"), ".mokuro"),
+            pair("v.mokuro", "v.mokuro.gz")
+        );
+        std::fs::remove_file(s.join("v.mokuro.gz")).unwrap();
+        std::fs::write(s.join("v.mokuro"), b"{\"pages\":[]}").unwrap();
+        let (plain, gz) = listed_sidecar_paths(&s.join("V.cbz"), ".mokuro").unwrap();
+        assert_eq!(
+            (plain.clone(), gz.clone()),
+            (s.join("v.mokuro"), s.join("v.mokuro.gz"))
+        );
+        assert!(matches!(
+            crate::ocr::collect::reconcile_existing(&plain, &gz, Some(&("hayai-nova".into(), 9))),
+            crate::ocr::collect::Existing::Keep
+        ));
+        // A layer in another spelling of the stem.
+        std::fs::write(s.join("v.fast.mokuro"), b"{}").unwrap();
+        assert_eq!(
+            listed_sidecar_paths(&s.join("V.cbz"), ".fast.mokuro"),
+            pair("v.fast.mokuro", "v.fast.mokuro.gz")
+        );
     }
 }

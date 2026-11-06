@@ -546,6 +546,9 @@ if none, an OCR layer file `<stem>.<layer>.mokuro[.gz]` (layer matches `^(?=[a-z
 borrows the owner of `<stem>.cbz`; allowed iff `owner == username`. 0.8: the key is the canonical
 spelling Bunko wrote; a lookup that misses falls back to the filename fold (NFC + lowercase) among
 the rows that match it ignoring ASCII case, so a volume respelled outside Bunko keeps its uploader.
+A row whose own spelling is still listed in its folder is passed over: it belongs to that entry (a
+case variant a case-sensitive disk or a cloud folder holds beside this one), never to the one the
+request reaches.
 Consequently an uploader can delete **files** they uploaded (and their sidecars/layers) but never a folder.
 
 ### 4.7 `gate_read(environ, start_response, path)` (`auth.py:441-468`)

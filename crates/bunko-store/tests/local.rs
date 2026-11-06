@@ -218,3 +218,33 @@ fn same_file_tells_one_entry_from_two() {
     assert!(!fs::same_file(&a, &d.path().join("b")));
     assert!(!fs::same_file(&a, &d.path().join("missing")));
 }
+
+/// A case-only rename of a name near the 255-byte limit still takes effect: the
+/// temporary name never carries more than the file system takes.
+#[test]
+fn a_case_only_rename_of_a_long_name_takes_effect() {
+    let d = tmp();
+    // 78 three-byte characters plus `v.cbz`: 239 bytes.
+    let stem = "巻".repeat(78);
+    let from = d.path().join(format!("{stem}v.cbz"));
+    let to = d.path().join(format!("{stem}V.cbz"));
+    std::fs::write(&from, b"zip").unwrap();
+    fs::rename(&from, &to).unwrap();
+    assert_eq!(names(d.path()), [format!("{stem}V.cbz")]);
+    assert_eq!(std::fs::read(&to).unwrap(), b"zip");
+}
+
+/// Two hard links of one file end as the one name renamed to, with no temporary name
+/// left behind (rename semantics: the source name goes).
+#[cfg(unix)]
+#[test]
+fn a_rename_between_two_hard_links_leaves_one_name() {
+    let d = tmp();
+    let a = d.path().join("a.cbz");
+    let b = d.path().join("b.cbz");
+    std::fs::write(&a, b"zip").unwrap();
+    std::fs::hard_link(&a, &b).unwrap();
+    fs::rename(&a, &b).unwrap();
+    assert_eq!(names(d.path()), ["b.cbz"]);
+    assert_eq!(std::fs::read(&b).unwrap(), b"zip");
+}

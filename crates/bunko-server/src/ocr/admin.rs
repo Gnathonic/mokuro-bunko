@@ -135,6 +135,9 @@ fn compute_stats(ocr: &OcrControl, rows: &[Generation]) -> Value {
         .db()
         .and_then(|db| db.ocr_sidecar_producers().ok())
         .unwrap_or_default();
+    // Each folder's names, folded and listed once: a row's files count in any spelling,
+    // as they do on a case-insensitive disk (`v.mokuro` for `V.cbz`).
+    let mut folded: HashMap<std::path::PathBuf, std::collections::HashSet<String>> = HashMap::new();
     for row in rows {
         let mut done = 0u64;
         let mut present: std::collections::HashSet<String> = Default::default();
@@ -143,7 +146,20 @@ fn compute_stats(ocr: &OcrControl, rows: &[Generation]) -> Value {
             let rel = super::types::rel_of(&library, cbz).unwrap_or_default();
             // The row's own files: a row retired from primary left bare ones.
             let (plain, gz) = super::owed::sidecar_paths(cbz, &row.files_suffix());
-            if bunko_store::fs::exists(&plain) || bunko_store::fs::exists(&gz) {
+            let dir = cbz.parent().unwrap_or(std::path::Path::new(""));
+            let names = folded.entry(dir.to_path_buf()).or_insert_with(|| {
+                bunko_library::sidecar::list_names(dir)
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|n| bunko_core::sidecar_names::fold(n))
+                    .collect()
+            });
+            let listed = |p: &std::path::Path| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| names.contains(&bunko_core::sidecar_names::fold(n)))
+            };
+            if listed(&plain) || listed(&gz) {
                 done += 1;
                 present.insert(rel.clone());
             } else if !row.primary && skipped.get(&rel).is_some_and(|g| g.contains(&row.id)) {

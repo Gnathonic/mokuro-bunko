@@ -316,8 +316,9 @@ impl MetadataService {
         }
         let data = dump_series_file(&folder.title, facts, index, volumes)
             .map_err(|error| WriteError::Io(std::io::Error::other(error)))?;
+        // The spelling the folder lists (`Series.json`): never a second one beside it.
         write_if_changed(
-            &folder.path.join(SERIES_FILE_NAME),
+            &fsutil::spelled(&folder.path, SERIES_FILE_NAME),
             &data,
             self.locks.as_ref(),
         )
@@ -327,7 +328,7 @@ impl MetadataService {
         let data = dump_catalog_file(entries)
             .map_err(|error| WriteError::Io(std::io::Error::other(error)))?;
         write_if_changed(
-            &self.library_path.join(CATALOG_FILE_NAME),
+            &fsutil::spelled(&self.library_path, CATALOG_FILE_NAME),
             &data,
             self.locks.as_ref(),
         )

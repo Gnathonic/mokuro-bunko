@@ -1731,6 +1731,12 @@ mod tests {
         };
         let oldest = bunko_engines::torch::abi::OLDEST_PACK_RELEASE;
         let t = bunko_update::TARGET;
+        // A target this build is not (macOS arm runners are `aarch64-apple-darwin`).
+        let other = if t == "aarch64-apple-darwin" {
+            "x86_64-unknown-linux-gnu"
+        } else {
+            "aarch64-apple-darwin"
+        };
         write(oldest, t, 4);
         let kept = pack_this_release_keeps(&pack, bunko_core::VERSION).unwrap();
         assert_eq!(kept.bunko_version, oldest);
@@ -1739,7 +1745,7 @@ mod tests {
         for (version, target, size) in [
             ("0.0.1", t, 4),
             ("999.0.0", t, 4),
-            (oldest, "aarch64-apple-darwin", 4),
+            (oldest, other, 4),
             (oldest, t, 5),
             ("", t, 4),
         ] {
