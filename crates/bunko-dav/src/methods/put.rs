@@ -85,7 +85,7 @@ pub(crate) async fn put(inner: &Arc<Inner>, req: &Req, body: Body) -> Resp {
     resp
 }
 
-fn failure_response(rej: &Rejection) -> Resp {
+pub(crate) fn failure_response(rej: &Rejection) -> Resp {
     let body = upload::failure_json(rej.reason, &rej.detail, rej.retry).into_bytes();
     let len = body.len();
     let mut resp = Response::new(Body::from(body));

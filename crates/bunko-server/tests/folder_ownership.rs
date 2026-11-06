@@ -36,6 +36,23 @@ impl Resp {
     }
 }
 
+/// A request path as a client sends it: spaces and every non-ASCII byte
+/// percent-encoded (a `%` already there is kept).
+fn enc(path: &str) -> String {
+    const SET: &percent_encoding::AsciiSet = &percent_encoding::CONTROLS.add(b' ');
+    percent_encoding::utf8_percent_encode(path, SET).to_string()
+}
+
+/// The names `dir` lists.
+fn names(dir: &std::path::Path) -> Vec<String> {
+    let mut out: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    out.sort();
+    out
+}
+
 fn basic(user: &str) -> String {
     use base64::Engine;
     format!(
@@ -108,7 +125,7 @@ impl Env {
         headers: &[(&str, &str)],
         body: Vec<u8>,
     ) -> Resp {
-        let uri = path.replace(' ', "%20");
+        let uri = enc(path);
         let mut b = Request::builder()
             .method(method)
             .uri(uri)
@@ -148,7 +165,7 @@ impl Env {
     }
 
     async fn mv(&self, user: &str, from: &str, to: &str) -> Resp {
-        let dest = format!("http://localhost:8080{}", to.replace(' ', "%20"));
+        let dest = format!("http://localhost:8080{}", enc(to));
         self.send(
             user,
             "MOVE",
@@ -671,4 +688,147 @@ async fn a_folder_joining_a_series_keeps_its_owner_only_when_it_agrees() {
         .await;
     assert_eq!(r.status, 201, "{}", r.text());
     assert_eq!(env.owner("Two Words"), None);
+}
+
+/// Every host makes `STRASSE.mokuro` one name with `Straße.mokuro`, `Vol\u{200B}1.webp`
+/// one with `Vol1.webp` (Linux casefold drops the zero width space), `οδοσ` one with
+/// `ΟΔΟΣ`, `ı` one with `i`: names a listed volume's files would have. Rule v1, Mokuro
+/// Reader's, does not give them to the volume. Such a name is governed by the volume
+/// for authorization (an account that does not control it gets 403), and written for
+/// nobody (an account that does gets 409 `ambiguous-name`), so no file ever takes a
+/// volume's name without being its file. The same on every host and for every role.
+#[tokio::test]
+async fn names_the_wider_fold_joins_with_a_volume_are_governed_and_never_written() {
+    let env = Env::new();
+    std::fs::create_dir_all(env.lib("Shared")).unwrap();
+    for name in [
+        "Stra\u{df}e.cbz",
+        "Vol1.cbz",
+        "\u{39f}\u{394}\u{39f}\u{3a3}.cbz",
+        "i.cbz",
+        "V.cbz",
+    ] {
+        let r = env
+            .put("alice", &format!("/mokuro-reader/Shared/{name}"), cbz(1))
+            .await;
+        assert_eq!(r.status, 201, "{name}: {}", r.text());
+    }
+    let listed = names(&env.lib("Shared"));
+    let disputed = [
+        "STRASSE.mokuro",
+        "STRASSE.webp",
+        "strasse.nocover",
+        "STRASSE.hayai.mokuro",
+        "Stra\u{17F}\u{17F}e.mokuro.gz",
+        "Vol\u{200B}1.mokuro",
+        "Vol1\u{FE0F}.webp",
+        "\u{3bf}\u{3b4}\u{3bf}\u{3c3}.mokuro",
+        "\u{131}.webp",
+        "V.EDIT.mokuro",
+        "V.edit\u{AD}.mokuro",
+    ];
+    let body = br#"{"pages":[]}"#.to_vec();
+    for name in disputed {
+        let path = format!("/mokuro-reader/Shared/{name}");
+        // bob controls none of these volumes.
+        let r = env.put("bob", &path, body.clone()).await;
+        assert_eq!(r.status, 403, "bob {name:?}: {}", r.text());
+        assert_eq!(
+            r.json()["detail"],
+            "This file belongs to a volume this account did not upload.",
+            "bob {name:?}"
+        );
+        // alice controls them, and the editor everything: written for nobody.
+        for user in ["alice", "editor"] {
+            let r = env.put(user, &path, body.clone()).await;
+            assert_eq!(r.status, 409, "{user} {name:?}: {}", r.text());
+            assert_eq!(r.json()["reason"], "ambiguous-name", "{user} {name:?}");
+        }
+        let r = env.mkcol("editor", &path).await;
+        assert_eq!(r.status, 409, "MKCOL {name:?}: {}", r.text());
+        let to = format!("http://localhost:8080{}", enc(&path));
+        let r = env
+            .send(
+                "editor",
+                "COPY",
+                "/mokuro-reader/Shared/V.cbz",
+                &[("destination", to.as_str())],
+                Vec::new(),
+            )
+            .await;
+        assert_eq!(r.status, 409, "COPY onto {name:?}: {}", r.text());
+    }
+    // A name only the fold gives a volume file suffix (a Kelvin sign, a zero width
+    // space), and an archive whose files by the fold are listed names rule v1 does not
+    // give it (a stray `C.mokuro`, made by hand, and `C\u{200D}.cbz`).
+    std::fs::write(env.lib("Shared/C.mokuro"), b"{}").unwrap();
+    for name in ["W.mo\u{212A}uro", "W.cb\u{200B}z", "C\u{200D}.cbz"] {
+        let path = format!("/mokuro-reader/Shared/{name}");
+        let r = env.put("editor", &path, cbz(1)).await;
+        assert_eq!(r.status, 409, "{name:?}: {}", r.text());
+        assert_eq!(r.json()["reason"], "ambiguous-name", "{name:?}");
+    }
+    std::fs::remove_file(env.lib("Shared/C.mokuro")).unwrap();
+    assert_eq!(names(&env.lib("Shared")), listed, "nothing was written");
+    // The spellings rule v1 gives the volumes are its files, as ever.
+    let r = env
+        .put(
+            "alice",
+            "/mokuro-reader/Shared/stra\u{df}e.mokuro",
+            body.clone(),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.text());
+    let r = env
+        .put(
+            "bob",
+            "/mokuro-reader/Shared/STRA\u{df}E.webp",
+            b"x".to_vec(),
+        )
+        .await;
+    assert_eq!(r.status, 403, "{}", r.text());
+    // The file now listed is reached in any spelling, by its controller.
+    let r = env
+        .put(
+            "alice",
+            "/mokuro-reader/Shared/STRASSE.MOKURO",
+            body.clone(),
+        )
+        .await;
+    assert!(matches!(r.status, 201 | 204), "{}: {}", r.status, r.text());
+    let r = env
+        .put("bob", "/mokuro-reader/Shared/STRASSE.MOKURO", body.clone())
+        .await;
+    assert_eq!(r.status, 403, "{}", r.text());
+    assert!(names(&env.lib("Shared")).contains(&"stra\u{df}e.mokuro".to_string()));
+}
+
+/// A series folder's owner is found by the folder a request reaches, however it spells
+/// it: `STRASSE/` reaches `Straße/` on every host, though their series keys
+/// (`fold_series_title_key`) differ. (The request path takes the listed spelling before
+/// auth reads it: `bunko_dav::PathCase::rewrite_request`.)
+#[tokio::test]
+async fn an_owned_series_is_closed_in_every_spelling_the_fold_joins() {
+    let env = Env::new();
+    assert_eq!(
+        env.mkcol("alice", "/mokuro-reader/Stra\u{df}e")
+            .await
+            .status,
+        201
+    );
+    for path in [
+        "/mokuro-reader/STRASSE/Vol 9.cbz",
+        "/mokuro-reader/Stra\u{17F}\u{17F}e/Vol 9.cbz",
+        "/mokuro-reader/Stra\u{df}e\u{200B}/Vol 9.cbz",
+    ] {
+        let r = env.put("bob", path, cbz(1)).await;
+        assert_eq!(r.status, 403, "{path:?}: {}", r.text());
+        assert_eq!(
+            r.json()["detail"],
+            "This series belongs to another account."
+        );
+    }
+    let r = env.mkcol("bob", "/mokuro-reader/STRASSE/Extras").await;
+    assert_eq!(r.status, 403, "{}", r.text());
+    assert!(names(&env.lib("Stra\u{df}e")).is_empty());
 }

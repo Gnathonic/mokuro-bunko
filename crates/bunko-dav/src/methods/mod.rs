@@ -86,6 +86,9 @@ pub(crate) async fn dispatch(inner: Arc<Inner>, req: Request<Body>, ctx: DavCont
     if let Some(resp) = frozen_refusal(&inner, &r).await {
         return resp;
     }
+    if let Some(resp) = disputed_refusal(&inner, &r).await {
+        return resp;
+    }
     let result = match r.method.as_str() {
         "OPTIONS" => read::options(&inner, &r).await,
         "PROPFIND" => read::propfind(&inner, &r, body).await,
@@ -488,6 +491,90 @@ async fn frozen_refusal(inner: &Arc<Inner>, r: &Req) -> Option<Resp> {
     .await
     .ok()
     .flatten()?;
+    Some(response::status_page(StatusCode::CONFLICT, &refusal))
+}
+
+/// Where the filename fold and sidecar names rule v1 part ways about a name
+/// ([`bunko_core::sidecar_names::fold_disputed`]): a PUT, MKCOL, PROPPATCH or LOCK of
+/// it, or a COPY or MOVE onto it, answers 409, for every account. Every host makes
+/// `S/STRASSE.mokuro` one name with `S/Straße.mokuro`, the OCR file of a listed
+/// `S/Straße.cbz`, but rule v1 (Mokuro Reader's) does not give it to that volume: such
+/// a file would take the volume's name without being its file, governed by nobody. The
+/// same for an archive whose files by the fold would be such names
+/// (`S/Straße.cbz` beside `S/STRASSE.mokuro`), and for a name only the fold gives a
+/// volume file suffix (`V.mo\u{212A}uro`). Decided from the folder's listing, the
+/// name in the spelling the folder lists it in (the one a write reaches), so every
+/// host answers alike. Reads, DELETE and a MOVE away are left alone: they are how such
+/// a name is cleared up.
+async fn disputed_refusal(inner: &Arc<Inner>, r: &Req) -> Option<Resp> {
+    let target = match r.method.as_str() {
+        "PUT" | "MKCOL" | "PROPPATCH" | "LOCK" => r.path.clone(),
+        "COPY" | "MOVE" => write::destination_path(r).ok()?,
+        _ => return None,
+    };
+    let paths::Target::Library(rel) = paths::classify(&target) else {
+        return None;
+    };
+    let roots = inner.roots.clone();
+    let library = roots.library.clone();
+    let refusal = blocking(move || -> Option<String> {
+        let rel = rel.trim_end_matches('/');
+        let (dir, name) = rel.rsplit_once('/').unwrap_or(("", rel));
+        if name.is_empty() || name == "." || name == ".." {
+            return None;
+        }
+        let parent = if dir.trim_matches('/').is_empty() {
+            library.clone()
+        } else {
+            let dir = crate::path_case::resolve_existing(&library, dir, true);
+            roots.library_member(&library, &dir)?
+        };
+        let files = crate::personal::names_in(&parent);
+        let folded = crate::fold_name(name);
+        let spelled = files
+            .iter()
+            .find(|n| *n == name)
+            .or_else(|| files.iter().find(|n| crate::fold_name(n) == folded))
+            .cloned()
+            .unwrap_or_else(|| name.to_string());
+        let refs: Vec<&str> = files.iter().map(String::as_str).collect();
+        let disputed = bunko_core::sidecar_names::fold_disputed(&spelled, &refs);
+        if disputed.is_empty() {
+            return None;
+        }
+        Some(if disputed == [spelled.clone()] {
+            format!(
+                "{spelled:?} is, on every host (Bunko joins names as the case-insensitive \
+                 filesystems do), a name ending in a volume file suffix (.cbz, .mokuro, \
+                 .mokuro.gz, .webp, .nocover) it does not spell itself: Bunko creates or \
+                 writes no such name. Choose another name."
+            )
+        } else {
+            let joined = disputed
+                .iter()
+                .map(|n| format!("{n:?}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "{spelled:?} is tied to {joined} here on every host (Bunko joins names \
+                 as the case-insensitive filesystems do), but the sidecar naming rule \
+                 Mokuro Reader shares does not make them one volume's archive and file: \
+                 Bunko creates or writes no such ambiguous name. Spell it exactly like the \
+                 volume's stem, or choose another name."
+            )
+        })
+    })
+    .await
+    .ok()
+    .flatten()?;
+    if r.method == "PUT" && crate::put_gives_verdict(&r.path) {
+        return Some(put::failure_response(&crate::upload::Rejection::new(
+            409,
+            "ambiguous-name",
+            refusal,
+            false,
+        )));
+    }
     Some(response::status_page(StatusCode::CONFLICT, &refusal))
 }
 
