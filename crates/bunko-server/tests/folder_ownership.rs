@@ -1376,3 +1376,233 @@ async fn a_hand_made_archive_the_fold_ties_to_a_layer_never_blocks_corrections()
         );
     }
 }
+
+/// Two archives whose volume names the filename fold joins while they are spelled
+/// otherwise: `X\u{200B}.curated.cbz`, `STRASSE.curated.cbz`, `Vol\u{17F}.curated.cbz`,
+/// `\u{131}X.curated.cbz`, `X\u{200B}.edit.cbz` beside `X.cbz`, `Stra\u{df}e.cbz`,
+/// `Vols.cbz`, `iX.cbz` (a nested archive is the volume of its shorter stem), and
+/// `X.5.cbz` beside `X\u{200B}.cbz` (layer `5` of one is the other's primary on every
+/// host).
+const VOLUME_NAME_TIES: [(&str, &str); 8] = [
+    ("X\u{200B}.curated.cbz", "X.cbz"),
+    ("STRASSE.curated.cbz", "Stra\u{df}e.cbz"),
+    ("Vol\u{17F}.curated.cbz", "Vols.cbz"),
+    ("\u{131}X.curated.cbz", "iX.cbz"),
+    ("X\u{200B}.edit.cbz", "X.cbz"),
+    ("X\u{200B}.edit-2.cbz", "X.cbz"),
+    ("STRASSE.EDIT.cbz", "Stra\u{df}e.cbz"),
+    ("X.5.cbz", "X\u{200B}.cbz"),
+];
+
+/// One volume name per filename fold, first come first served, as on a
+/// case-insensitive disk. Bob's `STRASSE.curated.cbz` in a shared series keeps a later
+/// `Straße.cbz` out (409 `ambiguous-name`, whoever sends it, by PUT, COPY or MOVE), so
+/// no volume is accepted whose own layers it would then refuse, and bob keeps full
+/// control of his archive. The other way round, `Straße.cbz` keeps
+/// `STRASSE.curated.cbz` out, for its own uploader too, and every layer of it is
+/// written.
+#[tokio::test]
+async fn one_volume_name_per_fold_first_come_first_served() {
+    let env = Env::new();
+    let body = br#"{"pages":[]}"#.to_vec();
+    std::fs::create_dir_all(env.lib("Src")).unwrap();
+    for (i, (squat, volume)) in VOLUME_NAME_TIES.iter().enumerate() {
+        // A shared series (made by hand: nobody owns it), the squatter first.
+        let folder = format!("A{i}");
+        std::fs::create_dir_all(env.lib(&folder)).unwrap();
+        let at = |name: &str| format!("/mokuro-reader/{folder}/{name}");
+        let r = env.put("bob", &at(squat), cbz(1)).await;
+        assert_eq!(r.status, 201, "bob PUT {squat:?}: {}", r.text());
+        for user in ["alice", "editor"] {
+            let r = env.put(user, &at(volume), cbz(2)).await;
+            assert_eq!(
+                r.status,
+                409,
+                "{user} PUT {volume:?} after {squat:?}: {}",
+                r.text()
+            );
+            assert_eq!(r.json()["reason"], "ambiguous-name", "{user} {volume:?}");
+            let detail = r.json()["detail"].as_str().unwrap().to_string();
+            assert!(detail.contains(&format!("{squat:?}")), "{detail}");
+        }
+        let r = env.put("editor", "/mokuro-reader/Src/W.cbz", cbz(1)).await;
+        assert!(matches!(r.status, 201 | 204), "{}", r.text());
+        let to = format!("http://localhost:8080{}", enc(&at(volume)));
+        let r = env
+            .send(
+                "editor",
+                "COPY",
+                "/mokuro-reader/Src/W.cbz",
+                &[("destination", to.as_str())],
+                Vec::new(),
+            )
+            .await;
+        assert_eq!(r.status, 409, "COPY onto {volume:?}: {}", r.text());
+        let r = env
+            .mv("editor", "/mokuro-reader/Src/W.cbz", &at(volume))
+            .await;
+        assert_eq!(r.status, 409, "MOVE onto {volume:?}: {}", r.text());
+        assert!(env.lib("Src/W.cbz").is_file());
+        assert_eq!(names(&env.lib(&folder)), [squat.to_string()]);
+        // Bob's archive stays his: replaced and deleted by him.
+        let r = env.put("bob", &at(squat), cbz(3)).await;
+        assert_eq!(r.status, 204, "bob replaces {squat:?}: {}", r.text());
+        let r = env.delete("bob", &at(squat)).await;
+        assert_eq!(r.status, 204, "bob deletes {squat:?}: {}", r.text());
+        // Gone, the name is free.
+        let r = env.put("alice", &at(volume), cbz(2)).await;
+        assert_eq!(r.status, 201, "alice PUT {volume:?}: {}", r.text());
+
+        // The other way round: the volume first.
+        let folder = format!("B{i}");
+        std::fs::create_dir_all(env.lib(&folder)).unwrap();
+        let at = |name: &str| format!("/mokuro-reader/{folder}/{name}");
+        let r = env.put("alice", &at(volume), cbz(2)).await;
+        assert_eq!(r.status, 201, "alice PUT {volume:?}: {}", r.text());
+        for user in ["alice", "editor"] {
+            let r = env.put(user, &at(squat), cbz(1)).await;
+            assert_eq!(
+                r.status,
+                409,
+                "{user} PUT {squat:?} after {volume:?}: {}",
+                r.text()
+            );
+            assert_eq!(r.json()["reason"], "ambiguous-name", "{user} {squat:?}");
+            let detail = r.json()["detail"].as_str().unwrap().to_string();
+            assert!(detail.contains(&format!("{volume:?}")), "{detail}");
+        }
+        // Bob controls no volume here: refused whichever check comes first.
+        let r = env.put("bob", &at(squat), cbz(1)).await;
+        assert!(
+            matches!(r.status, 403 | 409),
+            "bob PUT {squat:?}: {} {}",
+            r.status,
+            r.text()
+        );
+        let r = env.put("editor", "/mokuro-reader/Src/W.cbz", cbz(1)).await;
+        assert!(matches!(r.status, 201 | 204), "{}", r.text());
+        let r = env
+            .mv("editor", "/mokuro-reader/Src/W.cbz", &at(squat))
+            .await;
+        assert_eq!(r.status, 409, "MOVE onto {squat:?}: {}", r.text());
+        assert_eq!(names(&env.lib(&folder)), [volume.to_string()]);
+        // Every file of the volume is written: its OCR file, its curated layer, each
+        // account's own correction; the archive is its uploader's.
+        let stem = volume.strip_suffix(".cbz").unwrap();
+        for (user, name) in [
+            ("alice", format!("{stem}.mokuro")),
+            ("alice", format!("{stem}.curated.mokuro")),
+            ("reader", format!("{stem}.edit.mokuro")),
+            ("bob", format!("{stem}.edit.mokuro")),
+        ] {
+            let r = env.put(user, &at(&name), body.clone()).await;
+            assert_eq!(r.status, 201, "{user} PUT {name:?}: {}", r.text());
+        }
+        let r = env.put("alice", &at(volume), cbz(1)).await;
+        assert_eq!(r.status, 204, "alice replaces {volume:?}: {}", r.text());
+        let r = env.delete("alice", &at(volume)).await;
+        assert_eq!(r.status, 204, "alice deletes {volume:?}: {}", r.text());
+    }
+}
+
+/// Such a pair already listed (made before this release, or outside Bunko) is like a
+/// frozen case-variant group for the volumes' files: both archives are read, no file of
+/// either volume is written (409 naming the pair), nothing is lost, and either archive
+/// is replaced or deleted by its controller, which clears the tie.
+#[tokio::test]
+async fn a_volume_name_tie_already_listed_holds_both_volumes_files() {
+    let env = Env::new();
+    let body = br#"{"pages":[]}"#.to_vec();
+    for (i, (squat, volume)) in VOLUME_NAME_TIES.iter().enumerate() {
+        let folder = format!("P{i}");
+        std::fs::create_dir_all(env.lib(&folder)).unwrap();
+        let at = |name: &str| format!("/mokuro-reader/{folder}/{name}");
+        let stem = volume.strip_suffix(".cbz").unwrap();
+        let squat_stem = squat.strip_suffix(".cbz").unwrap();
+        for name in [squat.to_string(), volume.to_string()] {
+            std::fs::write(env.lib(&format!("{folder}/{name}")), cbz(1)).unwrap();
+        }
+        std::fs::write(env.lib(&format!("{folder}/{stem}.mokuro")), b"{\"hand\":1}").unwrap();
+        let listed = names(&env.lib(&folder));
+        for name in [
+            squat.to_string(),
+            volume.to_string(),
+            format!("{stem}.mokuro"),
+        ] {
+            let r = env.send("reader", "GET", &at(&name), &[], Vec::new()).await;
+            assert_eq!(r.status, 200, "GET {name:?}: {}", r.text());
+        }
+        for name in [
+            format!("{stem}.mokuro"),
+            format!("{stem}.curated.mokuro"),
+            format!("{stem}.webp"),
+            format!("{squat_stem}.mokuro"),
+            format!("{squat_stem}.hayai.mokuro"),
+        ] {
+            let r = env.put("editor", &at(&name), body.clone()).await;
+            assert_eq!(r.status, 409, "PUT {name:?}: {}", r.text());
+            assert_eq!(r.json()["reason"], "ambiguous-name", "{name:?}");
+            let detail = r.json()["detail"].as_str().unwrap().to_string();
+            for archive in [squat, volume] {
+                assert!(detail.contains(&format!("{archive:?}")), "{detail}");
+            }
+        }
+        assert_eq!(names(&env.lib(&folder)), listed, "nothing written");
+        assert_eq!(
+            std::fs::read(env.lib(&format!("{folder}/{stem}.mokuro"))).unwrap(),
+            b"{\"hand\":1}"
+        );
+        // An account's own correction is never the library's to refuse.
+        let r = env
+            .put("reader", &at(&format!("{stem}.edit.mokuro")), body.clone())
+            .await;
+        assert_eq!(r.status, 201, "{}", r.text());
+        // The archives themselves: replaced, then one deleted, by their controller.
+        for archive in [squat, volume] {
+            let r = env.put("editor", &at(archive), cbz(2)).await;
+            assert_eq!(r.status, 204, "replace {archive:?}: {}", r.text());
+        }
+        let (gone, kept) = if i % 2 == 0 {
+            (squat, volume)
+        } else {
+            (volume, squat)
+        };
+        let r = env.delete("editor", &at(gone)).await;
+        assert_eq!(r.status, 204, "DELETE {gone:?}: {}", r.text());
+        let kept_stem = kept.strip_suffix(".cbz").unwrap();
+        let r = env
+            .put("editor", &at(&format!("{kept_stem}.webp")), b"x".to_vec())
+            .await;
+        assert!(
+            matches!(r.status, 201 | 204),
+            "{kept:?}'s cover once {gone:?} is gone: {} {}",
+            r.status,
+            r.text()
+        );
+    }
+    // Or one archive respelled to the other's volume name (the repair doctor names).
+    std::fs::create_dir_all(env.lib("R")).unwrap();
+    for name in ["Stra\u{df}e.cbz", "STRASSE.curated.cbz"] {
+        std::fs::write(env.lib(&format!("R/{name}")), cbz(1)).unwrap();
+    }
+    let r = env
+        .mv(
+            "editor",
+            "/mokuro-reader/R/STRASSE.curated.cbz",
+            "/mokuro-reader/R/Stra\u{df}e.curated.cbz",
+        )
+        .await;
+    assert!(matches!(r.status, 201 | 204), "{}: {}", r.status, r.text());
+    assert_eq!(
+        names(&env.lib("R")),
+        ["Stra\u{df}e.cbz", "Stra\u{df}e.curated.cbz"]
+    );
+    let r = env
+        .put(
+            "editor",
+            "/mokuro-reader/R/Stra\u{df}e.mokuro",
+            body.clone(),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.text());
+}

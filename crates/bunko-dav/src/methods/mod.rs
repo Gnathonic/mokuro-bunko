@@ -525,6 +525,11 @@ async fn frozen_refusal(inner: &Arc<Inner>, r: &Req) -> Option<Resp> {
 /// library is written. A write of the shared layer, or of the cloud-root owner's
 /// correction (written in the library), beside a listed stray that is one name with it
 /// is never judged as the stray: it answers 409 naming the stray.
+///
+/// One volume name per fold ([`volume_name_refusal`]): no archive is created whose
+/// volume name the fold joins with a listed archive's spelled otherwise
+/// (`S/STRASSE.curated.cbz` beside `S/Straße.cbz`, either way round), and where two
+/// such archives are listed already, no file of either volume is written.
 async fn disputed_refusal(inner: &Arc<Inner>, r: &Req) -> Option<Resp> {
     let target = match r.method.as_str() {
         "PUT" | "MKCOL" | "PROPPATCH" | "LOCK" => r.path.clone(),
@@ -569,14 +574,15 @@ async fn disputed_refusal(inner: &Arc<Inner>, r: &Req) -> Option<Resp> {
             }
         }
         let folded = crate::fold_name(name);
-        let respelled = source.as_deref().and_then(|src| {
+        // A MOVE's source in this very folder: it leaves the listing.
+        let source_here = source.as_deref().and_then(|src| {
             let src = src.trim_end_matches('/');
             let (src_dir, src_name) = src.rsplit_once('/').unwrap_or(("", src));
-            (src_name != name
-                && crate::fold_name(src_name) == folded
-                && resolved_dir(src_dir) == resolved_dir(dir))
-            .then(|| src_name.to_string())
+            (resolved_dir(src_dir) == resolved_dir(dir)).then(|| src_name.to_string())
         });
+        let respelled = source_here
+            .clone()
+            .filter(|src_name| src_name != name && crate::fold_name(src_name) == folded);
         let spelled = if let Some(src_name) = respelled {
             // The source renamed (`S/STRASSE.mokuro` to `S/Stra\u{df}e.mokuro`, the
             // repair doctor names): judged as the name it takes, without the source.
@@ -610,6 +616,9 @@ async fn disputed_refusal(inner: &Arc<Inner>, r: &Req) -> Option<Resp> {
             }
         };
         let refs: Vec<&str> = files.iter().map(String::as_str).collect();
+        if let Some(refusal) = volume_name_refusal(&spelled, &refs, source_here.as_deref()) {
+            return Some(refusal);
+        }
         let disputed = bunko_core::sidecar_names::fold_disputed(&spelled, &refs);
         if disputed.is_empty() {
             let class = bunko_core::sidecar_names::shadows_reserved_layer(&spelled, &refs)?;
@@ -673,6 +682,73 @@ async fn disputed_refusal(inner: &Arc<Inner>, r: &Req) -> Option<Resp> {
         )));
     }
     Some(response::status_page(StatusCode::CONFLICT, &refusal))
+}
+
+/// One volume name per filename fold
+/// ([`bunko_core::sidecar_names::volume_name_ties`]), for a write of `name` (spelled
+/// as the folder lists it, when it does) in a folder whose listed FILES are `files`
+/// (`source`: a MOVE's own source in this folder, which leaves it):
+///
+/// * an archive not listed yet (a PUT, a COPY or MOVE onto it) whose volume name the
+///   fold joins with a listed archive's spelled otherwise (`STRASSE.curated.cbz`
+///   beside `Straße.cbz`, `Straße.cbz` beside `STRASSE.curated.cbz`,
+///   `X\u{200B}.cbz` beside `X.5.cbz`) is refused, as a case-insensitive disk keeps
+///   one spelling of a name: the first one listed keeps it;
+/// * any other name a listed archive with such a tie governs, by either fold
+///   ([`bunko_core::sidecar_names::governing_archives_by_either_fold`]: its sidecars,
+///   layers, cover, a name nested under it) is refused naming the pair, while the
+///   pair is listed (made before this release, or outside Bunko).
+///
+/// An archive already listed is replaced, deleted and moved away as ever: that is how
+/// a pair is cleared up. Reads are never refused.
+fn volume_name_refusal(name: &str, files: &[&str], source: Option<&str>) -> Option<String> {
+    use bunko_core::sidecar_names::{
+        cbz_stem, governing_archives_by_either_fold, volume_name_ties,
+    };
+    let quoted = |names: &[&str]| {
+        names
+            .iter()
+            .map(|n| format!("{n:?}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    if cbz_stem(name).is_some() {
+        if files.contains(&name) {
+            return None;
+        }
+        let others: Vec<&str> = files
+            .iter()
+            .copied()
+            .filter(|n| Some(*n) != source)
+            .collect();
+        let ties = volume_name_ties(name, &others);
+        if ties.is_empty() {
+            return None;
+        }
+        return Some(format!(
+            "{name:?} would be one volume name with {} here on every host (Bunko joins \
+             names as the case-insensitive filesystems do, and a nested archive such as \
+             <stem>.curated.cbz is the volume <stem>'s), spelled otherwise: Bunko keeps \
+             one spelling of a volume name, the one listed first. Spell it exactly like \
+             that volume, or choose another name.",
+            quoted(&ties)
+        ));
+    }
+    for archive in governing_archives_by_either_fold(name, files) {
+        let ties = volume_name_ties(archive, files);
+        if ties.is_empty() {
+            continue;
+        }
+        return Some(format!(
+            "{archive:?} and {} are one volume name on every host (Bunko joins names as \
+             the case-insensitive filesystems do), spelled otherwise (made before this \
+             release, or outside Bunko): no file of either volume, {name:?} included, is \
+             written until one of those archives is renamed or deleted (doctor names \
+             them). Reads still serve them.",
+            quoted(&ties)
+        ));
+    }
+    None
 }
 
 /// 0.5.2 `_forget_ocr_records`.

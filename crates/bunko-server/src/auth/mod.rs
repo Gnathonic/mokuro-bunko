@@ -486,9 +486,14 @@ impl Listing {
     }
 
     /// The path, a new archive, would turn a reserved layer of a listed volume into its
-    /// own primary (OWN-2), by either fold.
+    /// own primary (OWN-2), as rule v1 reads it (`V.edit.cbz`, `v.EDIT.cbz` beside
+    /// `V.cbz`). One the filename fold alone makes such an archive
+    /// (`STRASSE.curated.cbz` beside `Straße.cbz`, `V.ed\u{200B}it.cbz`) is created by
+    /// nobody: DAV answers it 409 `ambiguous-name` for every account
+    /// (`bunko_dav`'s one volume name per fold, and its shadowing archives), the
+    /// volume's own controller included.
     fn hides_reserved_layer(&self) -> bool {
-        sidecar_names::hides_reserved_layer_by_either_fold(&self.name, &self.refs())
+        sidecar_names::hides_reserved_layer(&self.name, &self.refs())
     }
 
     /// The folder lists the path's name, in any spelling the filename fold joins: a

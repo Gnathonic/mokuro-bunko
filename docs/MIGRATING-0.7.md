@@ -316,6 +316,28 @@ progress user's correction, which is the cloud folder's own file) answers 409 na
 it. On a local library doctor names it; delete it (or rename it apart). A dotted
 volume's own primary (`V.EDIT.mokuro` beside `V.EDIT.cbz`) is not such a file.
 
+**One volume name per fold.** An archive's volume name is its stem without the
+trailing `.edit`, `.edit-<n>`, `.curated` or `.curated-<n>` ids the wider fold reads in
+it (`STRASSE.curated.cbz` belongs to a volume `STRASSE`). Two archives of a folder whose
+volume names the wider fold joins while they are spelled differently
+(`STRASSE.curated.cbz` and `Straße.cbz`, `Volſ.curated.cbz` and `Vols.cbz`,
+`ıX.curated.cbz` and `iX.cbz`, `X.edit.cbz` with a zero width space after `X` and
+`X.cbz`, `v.curated.cbz` and `V.cbz`), or one of whose files would be one name with a
+file of the other only by the wider fold (`X.cbz` with a zero width space after `X`,
+and `X.5.cbz`), are one volume name, as a case-insensitive disk would have it: 0.8
+keeps the one listed first and refuses the other (an upload, or a COPY or MOVE onto
+it, answers 409 `ambiguous-name`, whichever came first, for every account that may
+add it). Where a
+library already holds such a pair (made by hand, or by an earlier release), both
+archives stay readable, and every other write to either volume's files (OCR files,
+layers, covers, `.nocover`, a curated publish) answers 409 `ambiguous-name` naming the
+pair; each account's own correction still goes to its own copy. On a local library
+doctor names each pair ("Ambiguous volume names"). To clear one, rename one archive
+with its sidecars, cover and layers so that both spell the volume name alike
+(`STRASSE.curated.cbz` to `Straße.curated.cbz`) or the names differ, or delete the one
+that should not be there; whoever controls an archive may still replace, move or
+delete it.
+
 Series folders spelled like a reader's per-user name (`history`, `History`,
 `goals.json`, `Goals.json`, `volume-data.json`, ...) are hidden in 0.8, from WebDAV
 and the catalog alike: those names are each account's own files in every spelling.

@@ -720,6 +720,143 @@ pub fn shadowing_archive(name: &str) -> Option<LayerClass> {
         .map(|(_, class)| class)
 }
 
+/// The base stem of an archive stem: the stem of the volume it belongs to, its own
+/// unless it is nested as a reserved layer of a shorter one (`<s>.curated`,
+/// `<s>.edit-2`): every trailing `.<id>` whose id, run through the filename fold
+/// ([`fold`]) and rule v1's stem fold, is a personal, curated or `curated-<n>` id, cut
+/// off, the rest as spelled. `X.curated` and `X.ed\u{200B}it` are `X`'s, `Vol 1.5` and
+/// `V.fast` their own.
+fn volume_base(stem: &str) -> &str {
+    let mut base = stem;
+    while let Some((up, id)) = base.rsplit_once('.') {
+        let id = stem_fold(&fold(id));
+        if up.is_empty() || !is_layer_id(&id) || layer_class(&id) == LayerClass::Other {
+            break;
+        }
+        base = up;
+    }
+    base
+}
+
+/// One `.cbz` archive of a listing, as [`volume_name_ties`] compares it.
+struct ArchiveName<'a> {
+    name: &'a str,
+    /// The whole name, filename-folded.
+    folded: String,
+    /// [`volume_base`], as spelled and filename-folded.
+    base: &'a str,
+    base_fold: String,
+    /// The stem, filename-folded and folded by rule v1.
+    stem_fold_wide: String,
+    stem_fold_v1: String,
+}
+
+impl<'a> ArchiveName<'a> {
+    fn new(name: &'a str) -> Option<Self> {
+        let stem = cbz_stem(name)?;
+        let base = volume_base(stem);
+        Some(ArchiveName {
+            name,
+            folded: fold(name),
+            base,
+            base_fold: fold(base),
+            stem_fold_wide: fold(stem),
+            stem_fold_v1: stem_fold(stem),
+        })
+    }
+
+    /// Do the two archives' volume names collide ([`volume_name_ties`])?
+    fn tied(&self, other: &ArchiveName<'_>) -> bool {
+        // One name (case variants of one entry: the freeze's), or one volume as spelled.
+        if self.folded == other.folded || self.base == other.base {
+            return false;
+        }
+        if self.base_fold == other.base_fold {
+            return true;
+        }
+        // `<s>.mokuro` of one is `<t>.<id>.mokuro` of the other: `s` is `t.<id>`.
+        let overlap = |a: &str, b: &str| {
+            let nested = |long: &str, short: &str| {
+                long.strip_prefix(short)
+                    .and_then(|rest| rest.strip_prefix('.'))
+                    .is_some_and(is_layer_id)
+            };
+            a == b || nested(a, b) || nested(b, a)
+        };
+        overlap(&self.stem_fold_wide, &other.stem_fold_wide)
+            && !overlap(&self.stem_fold_v1, &other.stem_fold_v1)
+    }
+}
+
+/// One volume name per filename fold: the listed `.cbz` archives of `names` (a
+/// folder's listed FILES) whose volume names collide with the archive `name`'s by the
+/// filename fold ([`fold`]) while they are spelled differently, sorted. Two archives
+/// collide when
+///
+/// * their base stems ([`volume_base`]: the stem of the volume an archive belongs to,
+///   `<s>` of a nested `<s>.curated.cbz` or `<s>.edit.cbz`) fold alike but are not
+///   spelled alike: `STRASSE.curated.cbz`, `Vol\u{17F}.curated.cbz`,
+///   `\u{131}X.curated.cbz`, `X\u{200B}.edit.cbz`, `x.curated.cbz` beside
+///   `Stra\u{df}e.cbz`, `Vols.cbz`, `iX.cbz`, `X.cbz` and `X.cbz`;
+/// * or a sidecar name of one is one name with a sidecar name of the other by the fold
+///   only, rule v1 telling them apart: `X\u{200B}.cbz` beside `X.5.cbz`
+///   (`X\u{200B}.5.mokuro`, layer `5` of the first by rule v1, is `X.5.mokuro`, the
+///   second's primary, on every host).
+///
+/// Two spellings the fold joins are one volume name, as on a case-insensitive disk:
+/// Bunko creates no archive with a tie (409 `ambiguous-name`, whichever came first),
+/// and a tie already listed (made before this release, or outside Bunko) leaves the
+/// files of both volumes unwritten until one archive is renamed or deleted. Archives of
+/// one base stem as spelled (`V.curated.cbz` beside `V.cbz`, governed by rule v1 as
+/// ever; `V.ed\u{200B}it.cbz`, [`shadowing_archive`]) and spellings of one whole name (a
+/// case-variant group, frozen: [`crate::fold_groups`]) are no ties. `name` is never its
+/// own.
+pub fn volume_name_ties<'a>(name: &str, names: &[&'a str]) -> Vec<&'a str> {
+    let Some(archive) = ArchiveName::new(name) else {
+        return Vec::new();
+    };
+    let mut out: Vec<&'a str> = names
+        .iter()
+        .filter(|n| **n != name)
+        .filter_map(|n| ArchiveName::new(n))
+        .filter(|other| archive.tied(other))
+        .map(|other| other.name)
+        .collect();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// Every pair of listed archives of `names` whose volume names collide
+/// ([`volume_name_ties`]), each pair once, sorted.
+pub fn volume_name_tie_pairs<'a>(names: &[&'a str]) -> Vec<(&'a str, &'a str)> {
+    let archives: Vec<ArchiveName<'a>> = names.iter().filter_map(|n| ArchiveName::new(n)).collect();
+    // Only archives whose folded stems start with one segment can collide.
+    let mut by_head: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (i, a) in archives.iter().enumerate() {
+        let head = a.stem_fold_wide.split('.').next().unwrap_or_default();
+        by_head.entry(head).or_default().push(i);
+    }
+    let mut out = Vec::new();
+    for group in by_head.values() {
+        for (k, &i) in group.iter().enumerate() {
+            for &j in &group[k + 1..] {
+                let (a, b) = (&archives[i], &archives[j]);
+                if a.tied(b) {
+                    out.push(if a.name < b.name {
+                        (a.name, b.name)
+                    } else {
+                        (b.name, a.name)
+                    });
+                }
+            }
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
 #[cfg(test)]
 mod tests {
     /// Hidden: every spelling of a name but the winner, and the files rule v1 gives to a
@@ -1220,6 +1357,75 @@ mod tests {
                 &["\u{3bf}\u{3b4}\u{3bf}\u{3c2}.mokuro"]
             )
             .is_empty()
+        );
+    }
+
+    /// One volume name per filename fold: two archives whose base stems fold alike
+    /// while spelled apart, or whose sidecar names the fold alone joins, collide in
+    /// either order; one base stem as spelled, one whole name, and unrelated names do
+    /// not.
+    #[test]
+    fn archives_the_fold_makes_one_volume_name_collide() {
+        let tied = [
+            ("X\u{200B}.curated.cbz", "X.cbz"),
+            ("STRASSE.curated.cbz", "Stra\u{df}e.cbz"),
+            ("Vol\u{17F}.curated.cbz", "Vols.cbz"),
+            ("\u{131}X.curated.cbz", "iX.cbz"),
+            ("X\u{200B}.edit.cbz", "X.cbz"),
+            ("X\u{200B}.edit-2.cbz", "X.cbz"),
+            ("STRASSE.EDIT.cbz", "Stra\u{df}e.cbz"),
+            ("x.curated.cbz", "X.cbz"),
+            ("X\u{200B}.curated.cbz", "X.edit.cbz"),
+            ("Cafe\u{301}.curated.cbz", "Caf\u{e9}.cbz"),
+            // A sidecar name the fold alone joins (layer `5` of one, primary of the
+            // other; a layer id only the fold reads).
+            ("X\u{200B}.cbz", "X.5.cbz"),
+            ("X.cbz", "X.5\u{200B}.cbz"),
+            ("Vol.cbz", "Vol\u{200B}.extra.cbz"),
+        ];
+        for (a, b) in tied {
+            assert_eq!(volume_name_ties(a, &[b]), [b], "{a:?} beside {b:?}");
+            assert_eq!(volume_name_ties(b, &[a]), [a], "{b:?} beside {a:?}");
+            let mut pair = [a, b];
+            pair.sort_unstable();
+            assert_eq!(
+                volume_name_tie_pairs(&[a, b, "Other.cbz", "X.mokuro"]),
+                [(pair[0], pair[1])]
+            );
+        }
+        let apart = [
+            // One base stem as spelled: rule v1 decides, as ever.
+            ("X.curated.cbz", "X.cbz"),
+            ("X.EDIT.cbz", "X.cbz"),
+            ("X.ed\u{200B}it.cbz", "X.cbz"),
+            ("X.cura\u{200B}ted.cbz", "X.cbz"),
+            // Rule v1 ties them too (rule 4: the longer stem's primary).
+            ("V.cbz", "V.5.cbz"),
+            ("V.cbz", "v.5.cbz"),
+            ("V.cbz", "V.Fast.cbz"),
+            ("Berserk.cbz", "Berserk.v01.cbz"),
+            // One whole name: a case-variant group.
+            ("X\u{200B}.cbz", "X.cbz"),
+            ("v.cbz", "V.cbz"),
+            // Unrelated.
+            ("Vol 1.cbz", "Vol 2.cbz"),
+            ("Stra\u{df}e.cbz", "Strasse 2.cbz"),
+            ("X.cbz", "X.mokuro"),
+            ("X.cbz", "X\u{200B}.curated.mokuro"),
+        ];
+        for (a, b) in apart {
+            assert!(volume_name_ties(a, &[b]).is_empty(), "{a:?} beside {b:?}");
+            assert!(volume_name_ties(b, &[a]).is_empty(), "{b:?} beside {a:?}");
+            assert!(volume_name_tie_pairs(&[a, b]).is_empty(), "{a:?} {b:?}");
+        }
+        assert!(volume_name_ties("X.cbz", &["X.cbz"]).is_empty());
+        assert!(volume_name_ties("X.mokuro", &["X\u{200B}.cbz"]).is_empty());
+        assert_eq!(
+            volume_name_ties(
+                "X.cbz",
+                &["X\u{200B}.curated.cbz", "X\u{200C}.edit.cbz", "Y.cbz"]
+            ),
+            ["X\u{200B}.curated.cbz", "X\u{200C}.edit.cbz"]
         );
     }
 

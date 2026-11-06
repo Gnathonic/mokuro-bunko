@@ -963,3 +963,77 @@ async fn an_archive_the_fold_ties_to_a_layer_never_blocks_that_layer_in_the_clou
         assert!(e.users(&format!("{user}/edits/H/X.edit.mokuro")).exists());
     }
 }
+
+/// In a cloud library too: one volume name per filename fold, whichever came first
+/// (`STRASSE.curated.cbz` and `Straße.cbz` are one volume name), and a pair made in
+/// the cloud folder holds both volumes' files while it is read as ever.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn one_volume_name_per_fold_in_the_cloud() {
+    fn enc(path: &str) -> String {
+        const SET: &percent_encoding::AsciiSet = &percent_encoding::CONTROLS.add(b' ');
+        percent_encoding::utf8_percent_encode(path, SET).to_string()
+    }
+    let (squat, volume) = ("STRASSE.curated.cbz", "Stra\u{df}e.cbz");
+    let fake = library_fake();
+    for folder in ["A", "B"] {
+        fake.reader_put(&format!("{ROOT}/{folder}/notes.txt"), b"shared");
+    }
+    for name in [squat, volume] {
+        fake.reader_put(&format!("{ROOT}/P/{name}"), &cbz(1));
+    }
+    let e = env(LibraryBackend::GDrive, Some(fake.clone())).await;
+    for name in ["alice", "bob"] {
+        e.services
+            .db
+            .create_user(name, "pass1234", Role::Uploader, UserStatus::Active, "")
+            .unwrap();
+    }
+    let send = |user: &'static str, method: &'static str, path: String, body: Vec<u8>| {
+        let e = &e;
+        async move {
+            let (status, body) = e.req(Some(user), method, &enc(&path), &[], &body).await;
+            (status, String::from_utf8_lossy(&body).into_owned())
+        }
+    };
+    let layer = br#"{"pages":[]}"#.to_vec();
+    // The squatter first: the volume is refused, the squatter keeps its archive.
+    let (status, body) = send("bob", "PUT", format!("/mokuro-reader/A/{squat}"), cbz(1)).await;
+    assert_eq!(status, 201, "bob PUT {squat:?}: {body}");
+    let (status, body) = send("alice", "PUT", format!("/mokuro-reader/A/{volume}"), cbz(1)).await;
+    assert_eq!(status, 409, "alice PUT {volume:?}: {body}");
+    assert!(body.contains("ambiguous-name"), "{body}");
+    let (status, body) = send("bob", "DELETE", format!("/mokuro-reader/A/{squat}"), vec![]).await;
+    assert_eq!(status, 204, "bob DELETE {squat:?}: {body}");
+    // The volume first: the squatter is refused, the volume's layers are written.
+    let (status, body) = send("alice", "PUT", format!("/mokuro-reader/B/{volume}"), cbz(1)).await;
+    assert_eq!(status, 201, "alice PUT {volume:?}: {body}");
+    let (status, body) = send("alice", "PUT", format!("/mokuro-reader/B/{squat}"), cbz(1)).await;
+    assert_eq!(status, 409, "alice PUT {squat:?}: {body}");
+    assert!(body.contains("ambiguous-name"), "{body}");
+    let (status, body) = send(
+        "alice",
+        "PUT",
+        "/mokuro-reader/B/Stra\u{df}e.curated.mokuro".into(),
+        layer.clone(),
+    )
+    .await;
+    assert_eq!(status, 201, "alice PUT the curated layer: {body}");
+    // A pair made in the cloud: read, never written to.
+    for name in [squat, volume] {
+        let (status, _) = send("boss", "GET", format!("/mokuro-reader/P/{name}"), vec![]).await;
+        assert_eq!(status, 200, "GET {name:?}");
+    }
+    let (status, body) = send(
+        "boss",
+        "PUT",
+        "/mokuro-reader/P/Stra\u{df}e.curated.mokuro".into(),
+        layer.clone(),
+    )
+    .await;
+    assert_eq!(status, 409, "PUT beside the pair: {body}");
+    assert!(body.contains("ambiguous-name"), "{body}");
+    assert!(
+        fake.node_at(&format!("{ROOT}/P/Stra\u{df}e.curated.mokuro"))
+            .is_none()
+    );
+}
