@@ -719,11 +719,14 @@ async fn a_frozen_group_is_left_exactly_as_it_is() {
             Some(bunko_core::fold_groups::Frozen::Reserved { .. })
         ));
         let history = tree(&env.lib("History"));
+        // The ordinary series' corrupt sidecars go (`S/V.fast.mokuro`,
+        // `Kingdom/a.mokuro`), never `History/h.mokuro`.
         assert_eq!(
             bunko_server::thumbs::remove_corrupt_sidecars(&env.lib(""), None),
-            1,
-            "only Kingdom/a.mokuro, never History/h.mokuro"
+            2
         );
+        assert!(env.lib("S/V.fast.mokuro").symlink_metadata().is_err());
+        assert!(env.lib("Kingdom/a.mokuro").symlink_metadata().is_err());
         let _ = bunko_server::library::adopt_unowned_corrections(
             &env.services.db,
             &env.services.dav.overlays(),
