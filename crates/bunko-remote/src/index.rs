@@ -44,9 +44,9 @@ const DIR_BUMP_NS: i64 = 1_000;
 /// from an older rule is recomputed at open.
 const WINNER_RULE: &str = "2";
 /// The filename fold the stored `entry.fold` column holds (meta `fold_rule`). 2: full
-/// Unicode case folding ([`bunko_core::names::fold_name`]). An index from an older rule
-/// is refolded at open.
-const FOLD_RULE: &str = "2";
+/// Unicode case folding; 3: and the default-ignorable code points dropped
+/// ([`bunko_core::names::fold_name`]). An index from an older rule is refolded at open.
+const FOLD_RULE: &str = "3";
 /// Subtrees larger than this are not walked for [`Index::subtree_loss`].
 const LOSS_CAP: i64 = 20_000;
 
