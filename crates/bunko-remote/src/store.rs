@@ -1595,7 +1595,6 @@ impl<B: Backend> LibraryStore for RemoteStore<B> {
     fn caps(&self) -> Caps {
         Caps {
             remote: true,
-            case_sensitive: true,
             symlinks: false,
             local_paths: false,
             atomic_replace: self.core.caps.atomic_replace,

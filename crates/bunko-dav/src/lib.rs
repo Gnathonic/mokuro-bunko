@@ -41,7 +41,7 @@ use http::{HeaderMap, Request, Response, StatusCode};
 pub use bunko_core::reader_tree::Caller;
 pub use cache::{CacheConfig, PropfindCache};
 pub use hooks::{AuditEvent, DavHooks, NoHooks, PutFollowUp};
-pub use path_case::{LibraryPathCanonicalizer, PathCase, fold_name, is_case_sensitive};
+pub use path_case::{LibraryPathCanonicalizer, PathCase, fold_name};
 pub use personal::{EDITS_DIR, MAX_LAYER_BYTES, PersonalOverlays};
 pub use upload::{DamageMemory, DigestAlgo, parse_content_digest};
 pub use write_locks::{AccountWriteGuard, AccountWriteLocks, PathWriteLocks, WriteLockGuard};
@@ -210,7 +210,7 @@ impl Dav {
             history: config.history,
         };
         let cache = PropfindCache::new(config.propfind_cache, roots.clone());
-        let path_case = PathCase::new(LibraryPathCanonicalizer::new(roots.library.clone(), None));
+        let path_case = PathCase::new(LibraryPathCanonicalizer::new(roots.library.clone()));
         Ok(Dav {
             inner: Arc::new(Inner {
                 roots,

@@ -41,7 +41,6 @@ impl LibraryStore for LocalStore {
     fn caps(&self) -> Caps {
         Caps {
             remote: false,
-            case_sensitive: false,
             symlinks: true,
             local_paths: true,
             atomic_replace: true,

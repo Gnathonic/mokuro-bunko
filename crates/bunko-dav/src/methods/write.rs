@@ -432,6 +432,17 @@ pub(crate) async fn copy_move(inner: &Arc<Inner>, req: &Req, is_move: bool) -> D
             dest = None;
         }
     }
+    // A case-fixing MOVE whose destination still exists is another entry: a second
+    // spelling of the name (only a case-sensitive disk or a remote store holds one).
+    // Bunko keeps one spelling per name, and `Overwrite: T` would delete the other
+    // spelling's content (or, where `same_file` cannot tell, the source itself).
+    if renames_source && dest.is_some() {
+        return Err(DavError::new(
+            StatusCode::CONFLICT,
+            "Another spelling of this name already exists here; Bunko keeps one spelling \
+             per name: merge them first.",
+        ));
+    }
     let dest_parent = match paths::uri_parent(&dest_path) {
         Some(p) => lookup(inner, &p, req).await?,
         None => None,

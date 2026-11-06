@@ -373,3 +373,15 @@ pub fn decode_gzip(data: &[u8]) -> Vec<u8> {
         .unwrap();
     out
 }
+
+/// Does `dir` hold two entries after writing both spellings of a name? A fixture
+/// capability check (only a case-sensitive filesystem can), for the few assertions
+/// about a state an insensitive disk cannot hold. Never used by production code.
+pub fn holds_two_spellings(dir: &Path, a: &str, b: &str) -> bool {
+    let names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.iter().any(|n| n == a) && names.iter().any(|n| n == b)
+}

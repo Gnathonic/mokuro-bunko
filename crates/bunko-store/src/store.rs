@@ -12,8 +12,6 @@ use crate::meta::{Meta, Version};
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Caps {
     pub remote: bool,
-    /// Lookup is byte-exact (PathCase folds at the edge and skips its probe).
-    pub case_sensitive: bool,
     pub symlinks: bool,
     /// Files have real local paths (X-Accel, mmap, `local_path` in place).
     pub local_paths: bool,
@@ -201,8 +199,9 @@ pub trait LibraryStore: Send + Sync + 'static {
     fn recently_removed(&self, _p: &Path) -> Option<SystemTime> {
         None
     }
-    /// The spelling PathCase folds a request to when no exact spelling exists
-    /// (spec §5.9). `None`: PathCase keeps its own choice.
+    /// The winner among two or more fold-equal spellings in `parent`, the exact one
+    /// included (spec §5.9): every request spelling resolves to it. `None`: PathCase
+    /// takes the byte-smallest.
     fn case_winner(&self, _parent: &Path, _fold: &str) -> Option<String> {
         None
     }

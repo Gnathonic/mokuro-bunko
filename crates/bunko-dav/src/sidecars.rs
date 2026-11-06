@@ -114,17 +114,26 @@ mod tests {
         assert!(got.contains(&"vol 01.hayai.mokuro".to_string()));
         assert!(got.contains(&"VOL 01.MOKURO".to_string()));
 
-        // Archives that differ only in case need a case-sensitive filesystem (not the
-        // default on Windows or macOS, where this would overwrite `Vol 01.cbz`).
-        if !crate::path_case::is_case_sensitive(&d.join("Vol 01.cbz")) {
-            return;
-        }
-        std::fs::write(d.join("vol 01.cbz"), b"x").unwrap();
-        std::fs::write(d.join("VOL 01.cbz"), b"x").unwrap();
-        let got = names("Vol 01.cbz");
+        // Archives that differ only in case: a listing only a case-sensitive store can
+        // hold. Rule v1 is a function of the listing, so it is checked on the listing
+        // itself, the same on every host.
+        let listing = [
+            "Vol 01.cbz",
+            "vol 01.cbz",
+            "VOL 01.cbz",
+            "vol 01.hayai.mokuro",
+            "VOL 01.MOKURO",
+        ];
+        let got = sidecar_names::sweep_set("Vol 01.cbz", &listing);
         assert!(!got.contains(&"vol 01.hayai.mokuro".to_string()));
         assert!(!got.contains(&"VOL 01.MOKURO".to_string()));
-        assert!(names("vol 01.cbz").contains(&"vol 01.hayai.mokuro".to_string()));
+        assert!(
+            sidecar_names::sweep_set("vol 01.cbz", &listing)
+                .contains(&"vol 01.hayai.mokuro".to_string())
+        );
+        assert!(
+            sidecar_names::sweep_set("VOL 01.cbz", &listing).contains(&"VOL 01.MOKURO".to_string())
+        );
     }
 
     /// C11: an archive nested under a volume's name leaves that volume's correction

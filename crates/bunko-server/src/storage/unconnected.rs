@@ -53,7 +53,6 @@ impl LibraryStore for UnconnectedStore {
     fn caps(&self) -> Caps {
         Caps {
             remote: true,
-            case_sensitive: true,
             ..Caps::default()
         }
     }

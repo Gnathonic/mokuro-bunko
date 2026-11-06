@@ -1,20 +1,30 @@
-//! Library paths behave as on NTFS: case-insensitive, case-preserving (0.5.3
-//! `webdav/path_case.py` and `middleware/path_case.py`).
+//! Library paths are case-insensitive and case-preserving on every host (0.5.3
+//! `webdav/path_case.py` and `middleware/path_case.py`; design 0.8 D5).
 //!
-//! The library has to stay valid on the most restrictive filesystem bunko runs on. On
-//! NTFS (and APFS) `Kingdom/` and `kingdom/` are one folder, so a library holding both
-//! cannot be copied to, synced with, or served from Windows. On a case-sensitive host they
-//! are two folders, and an upload spelled `kingdom/` used to create the second one beside
-//! the first (the catalog then showed one of them and hid the other's
-//! volumes).
+//! Bunko works to the lowest common denominator of the filesystems it runs on. On NTFS
+//! and APFS `Kingdom/` and `kingdom/` are one folder, so the library behaves that way
+//! everywhere: Linux (case-sensitive or casefold), macOS, Windows, SMB mounts and every
+//! remote store. A name that differs only in case from an existing entry addresses that
+//! entry, and Bunko never creates a second spelling. Nothing here probes the host: the
+//! answer is computed from the folder listing alone, so it is the same on every host.
 //!
 //! [`PathCase::rewrite_request`] closes that at the edge, before anything else reads the
-//! request path: every segment of a library request path that names something already on
-//! disk takes the on-disk spelling, so a PUT, MKCOL, PROPFIND or GET for
+//! request path: every segment of a library request path that names something already in
+//! the library takes its listed spelling, so a PUT, MKCOL, PROPFIND or GET for
 //! `kingdom/Vol 13.cbz` lands in (or reads) `Kingdom/`, and every layer below -- the auth
 //! gate's ownership checks, the series.json PUT, the DAV handler, the database rows keyed
-//! by library path -- sees one spelling for one file. A segment that names nothing on disk
-//! keeps the client's spelling: that is the case-preserving half.
+//! by library path -- sees one spelling for one file. A segment that names nothing keeps
+//! the client's spelling: that is the case-preserving half.
+//!
+//! A folder that already holds two or more spellings of one name (only a case-sensitive
+//! disk or a remote store can) is addressed through ONE of them, whatever the request
+//! spells, the exact spelling of another included: the store's case winner (a remote
+//! store's oldest spelling, the one its case merge keeps), else the byte-smallest. The
+//! others are shadowed.
+//!
+//! The per-user names at the reader root (`history`, `goals.json`, ...) are reserved in
+//! every spelling: a request for `/mokuro-reader/History/x` is rewritten to the canonical
+//! `history/x`, the caller's own tree, and never resolves into the library.
 //!
 //! Renaming to fix the case stays possible, as it is on NTFS: a MOVE whose destination is
 //! a case-variant of its own source keeps the destination's spelling (rewriting it to the
@@ -25,80 +35,122 @@ use std::path::{Path, PathBuf};
 use bunko_core::reader_tree;
 use bunko_store::fs;
 use http::{Uri, request::Parts};
-use unicode_normalization::UnicodeNormalization;
 
 use crate::paths::{self, READER_ROOT};
 
+pub use bunko_store::fs::same_file;
+
 /// The spelling-insensitive form two names collide under: NFC (so a decomposed and a
-/// composed spelling collide, as on APFS), then a full Unicode lowercase -- the two steps
-/// the series-identity fold applies, minus its whitespace collapsing, which no filesystem
-/// does to a name.
+/// composed spelling collide, as on APFS), then a full Unicode lowercase
+/// ([`bunko_core::sidecar_names::fold`], the one filename fold). Rare names may fold
+/// otherwise than a filesystem's own table does (`ß`/`ss`, final sigma, the Kelvin
+/// sign, the long s).
 pub fn fold_name(name: &str) -> String {
-    name.nfc().collect::<String>().to_lowercase()
+    bunko_core::sidecar_names::fold(name)
 }
 
-/// Python `str.swapcase` (close enough for a probe: any cased letter changes).
-fn swapcase(name: &str) -> String {
-    name.chars()
-        .flat_map(|c| {
-            if c.is_lowercase() {
-                c.to_uppercase().collect::<Vec<_>>()
-            } else if c.is_uppercase() {
-                c.to_lowercase().collect::<Vec<_>>()
-            } else {
-                vec![c]
-            }
-        })
-        .collect()
-}
-
-/// Do `a` and `b` name one existing file or folder (Python `os.path.samefile`)? `false`
-/// when either is missing.
-pub(crate) fn same_file(a: &Path, b: &Path) -> bool {
-    match (fs::metadata(a), fs::metadata(b)) {
-        (Ok(x), Ok(y)) => match (x.dev().zip(x.ino()), y.dev().zip(y.ino())) {
-            (Some(p), Some(q)) => p == q,
-            // Windows: the final path of an open handle carries the on-disk spelling.
-            _ => matches!(
-                (fs::canonicalize(a), fs::canonicalize(b)),
-                (Ok(x), Ok(y)) if x == y
-            ),
-        },
-        _ => false,
+/// The one listed spelling `name` resolves to in `parent`, or `None` when nothing there
+/// folds like it.
+///
+/// Every spelling, the exact one included, resolves to a single winner: when two or more
+/// listed names fold alike (only a case-sensitive disk or a remote store can hold them),
+/// the store's [`case_winner`] when it is listed (a remote store's oldest spelling, the
+/// one its case merge keeps), else the byte-smallest. The other spellings are never
+/// addressed. The listing is always scanned: no probe, no exact fast path.
+///
+/// At the library root (`top`) a name that folds to a per-user name (`History`,
+/// `Goals.json`) is never a library entry.
+///
+/// [`case_winner`]: bunko_store::LibraryStore::case_winner
+pub(crate) fn on_disk_name(parent: &Path, name: &str, top: bool) -> Option<String> {
+    if top && reader_tree::is_per_user_root_name(name) {
+        return None;
     }
-}
-
-/// Whether the filesystem holding `path` tells names apart by case. Probed by asking for
-/// `path` under its own name case-swapped: only a case-insensitive filesystem finds the
-/// same directory there. A name with no cased letter (or one that cannot be probed) counts
-/// as case-sensitive, which only costs a directory scan per unmatched segment.
-pub fn is_case_sensitive(path: &Path) -> bool {
-    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-        return true;
-    };
-    let swapped = swapcase(name);
-    if swapped == name {
-        return true;
+    let target = fold_name(name);
+    let mut variants: Vec<String> = Vec::new();
+    for entry in fs::read_dir(parent).ok()?.flatten() {
+        let entry_name = entry.file_name();
+        // A name that is not UTF-8 can never be what a (UTF-8) request spells.
+        let Some(entry_name) = entry_name.to_str() else {
+            continue;
+        };
+        if top && reader_tree::is_per_user_root_name(entry_name) {
+            continue;
+        }
+        if entry_name == name || fold_name(entry_name) == target {
+            variants.push(entry_name.to_string());
+        }
     }
-    !same_file(path, &path.with_file_name(swapped))
+    pick_winner(parent, &target, variants)
 }
 
-/// Maps a library-relative path onto the spelling already on disk (0.5.3
+/// The winner among `variants` (listed spellings of the fold `target` in `parent`).
+pub(crate) fn pick_winner(parent: &Path, target: &str, variants: Vec<String>) -> Option<String> {
+    if variants.len() > 1
+        && let Some(w) = bunko_store::store_for(parent).and_then(|s| s.case_winner(parent, target))
+        && variants.contains(&w)
+    {
+        return Some(w);
+    }
+    variants.into_iter().min()
+}
+
+/// `relative` (below `base`) with every existing segment in its listed spelling
+/// ([`on_disk_name`]); segments past the first one that names nothing keep the requested
+/// spelling. `top_reserved`: `base` is the library root, where per-user names are never
+/// library entries. `.`/`..` segments are never resolved through (the path is returned
+/// unchanged); empty segments are carried through.
+#[allow(dead_code)] // the overlay and history lookups use it next
+pub(crate) fn resolve_existing(base: &Path, relative: &str, top_reserved: bool) -> String {
+    resolve(base, relative, None, top_reserved)
+}
+
+fn resolve(base: &Path, relative: &str, keep: Option<&str>, top_reserved: bool) -> String {
+    let mut parts: Vec<String> = relative.split('/').map(str::to_string).collect();
+    if parts.iter().any(|p| p == "." || p == "..") {
+        return relative.to_string();
+    }
+    let named: Vec<usize> = (0..parts.len()).filter(|&i| !parts[i].is_empty()).collect();
+    let keep = keep.map(|k| k.trim_matches('/'));
+    let mut parent = base.to_path_buf();
+    let mut resolved: Vec<String> = Vec::new();
+    for (position, &index) in named.iter().enumerate() {
+        let part = parts[index].clone();
+        let Some(on_disk) = on_disk_name(&parent, &part, top_reserved && position == 0) else {
+            break;
+        };
+        let is_last = position + 1 == named.len();
+        if is_last
+            && on_disk != part
+            && keep.is_some_and(|k| {
+                let mut candidate = resolved.join("/");
+                if !candidate.is_empty() {
+                    candidate.push('/');
+                }
+                candidate.push_str(&on_disk);
+                candidate == k
+            })
+        {
+            break;
+        }
+        parent.push(&on_disk);
+        parts[index] = on_disk.clone();
+        resolved.push(on_disk);
+    }
+    parts.join("/")
+}
+
+/// Maps a library-relative path onto the spelling already in the library (0.5.3
 /// `LibraryPathCanonicalizer`).
 #[derive(Debug, Clone)]
 pub struct LibraryPathCanonicalizer {
     library: PathBuf,
-    case_sensitive: bool,
 }
 
 impl LibraryPathCanonicalizer {
-    /// `case_sensitive: None` probes the filesystem holding `library`.
-    pub fn new(library: impl Into<PathBuf>, case_sensitive: Option<bool>) -> Self {
-        let library = library.into();
-        let case_sensitive = case_sensitive.unwrap_or_else(|| is_case_sensitive(&library));
+    pub fn new(library: impl Into<PathBuf>) -> Self {
         Self {
-            library,
-            case_sensitive,
+            library: library.into(),
         }
     }
 
@@ -106,55 +158,8 @@ impl LibraryPathCanonicalizer {
         &self.library
     }
 
-    pub fn case_sensitive(&self) -> bool {
-        self.case_sensitive
-    }
-
-    /// The name `name` is spelled with in `parent`, or `None` when absent. The exact
-    /// spelling wins over a variant (a library that already holds both keeps both
-    /// addressable); among variants only, the store's case winner
-    /// ([`bunko_store::LibraryStore::case_winner`]: on a remote store the oldest
-    /// spelling, the one a case merge keeps), else the first in sorted order, so the
-    /// choice is stable.
-    ///
-    /// At the library root (`top`) a per-user name (`history`, `goals.json`: the
-    /// cloud-root owner's own files) is never a variant: a request for a library
-    /// `HISTORY/` must not be rewritten into another account's tree.
-    fn on_disk_name(&self, parent: &Path, name: &str, top: bool) -> Option<String> {
-        if self.case_sensitive && fs::symlink_metadata(parent.join(name)).is_ok() {
-            return Some(name.to_string());
-        }
-        let target = fold_name(name);
-        let mut variants: Vec<String> = Vec::new();
-        for entry in fs::read_dir(parent).ok()?.flatten() {
-            let entry_name = entry.file_name();
-            // A name that is not UTF-8 can never be what a (UTF-8) request spells.
-            let Some(entry_name) = entry_name.to_str() else {
-                continue;
-            };
-            if entry_name == name {
-                return Some(name.to_string());
-            }
-            if top && reader_tree::is_per_user_root_name(entry_name) {
-                continue;
-            }
-            if fold_name(entry_name) == target {
-                variants.push(entry_name.to_string());
-            }
-        }
-        // Several variants: a remote store names its case-merge winner, the oldest
-        // spelling (spec §5.9); a local library keeps the first in sorted order.
-        if variants.len() > 1
-            && let Some(w) =
-                bunko_store::store_for(parent).and_then(|s| s.case_winner(parent, &target))
-            && variants.contains(&w)
-        {
-            return Some(w);
-        }
-        variants.into_iter().min()
-    }
-
-    /// `relative` with every existing segment in its on-disk spelling.
+    /// `relative` with every existing segment in its listed spelling (see
+    /// [`on_disk_name`] for which one, when a folder lists several).
     ///
     /// `keep_last_if_variant_of` is a MOVE's (already canonical) source: when the last
     /// segment resolves to that very entry, the client is renaming it and the requested
@@ -162,38 +167,7 @@ impl LibraryPathCanonicalizer {
     /// refused downstream. Empty segments (a trailing or doubled slash) are carried
     /// through untouched so the request keeps its exact shape.
     pub fn canonicalize(&self, relative: &str, keep_last_if_variant_of: Option<&str>) -> String {
-        let mut parts: Vec<String> = relative.split('/').map(str::to_string).collect();
-        if parts.iter().any(|p| p == "." || p == "..") {
-            return relative.to_string();
-        }
-        let named: Vec<usize> = (0..parts.len()).filter(|&i| !parts[i].is_empty()).collect();
-        let keep = keep_last_if_variant_of.map(|k| k.trim_matches('/'));
-        let mut parent = self.library.clone();
-        let mut resolved: Vec<String> = Vec::new();
-        for (position, &index) in named.iter().enumerate() {
-            let part = parts[index].clone();
-            let Some(on_disk) = self.on_disk_name(&parent, &part, position == 0) else {
-                break;
-            };
-            let is_last = position + 1 == named.len();
-            if is_last
-                && on_disk != part
-                && keep.is_some_and(|k| {
-                    let mut candidate = resolved.join("/");
-                    if !candidate.is_empty() {
-                        candidate.push('/');
-                    }
-                    candidate.push_str(&on_disk);
-                    candidate == k
-                })
-            {
-                break;
-            }
-            parent.push(&on_disk);
-            parts[index] = on_disk.clone();
-            resolved.push(on_disk);
-        }
-        parts.join("/")
+        resolve(&self.library, relative, keep_last_if_variant_of, true)
     }
 }
 
@@ -330,7 +304,6 @@ mod tests {
         assert_eq!(fold_name("Kingdom"), "kingdom");
         // Decomposed É (E + U+0301) folds with the composed é.
         assert_eq!(fold_name("POKE\u{301}MON"), fold_name("Pok\u{e9}mon"));
-        assert_eq!(swapcase("Kingdom 第1巻"), "kINGDOM 第1巻");
     }
 
     #[test]
@@ -348,16 +321,5 @@ mod tests {
         );
         assert_eq!(library_relative("/mokuro-reader"), None);
         assert_eq!(library_relative("/inbox/x"), None);
-    }
-
-    #[test]
-    fn probes_this_filesystem() {
-        let dir = tempfile::tempdir().unwrap();
-        let lib = dir.path().join("Library");
-        std::fs::create_dir(&lib).unwrap();
-        // Whatever the host is, the probe must agree with a direct look.
-        let insensitive = std::fs::metadata(dir.path().join("lIBRARY")).is_ok();
-        assert_eq!(is_case_sensitive(&lib), !insensitive);
-        assert!(is_case_sensitive(&dir.path().join("123")));
     }
 }
