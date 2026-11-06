@@ -83,31 +83,9 @@ pub fn hidden_names<'a>(
     entries: impl IntoIterator<Item = (&'a str, bool)>,
     preferred: impl Fn(&str) -> Option<String>,
 ) -> HashSet<String> {
-    let entries: Vec<(&str, bool)> = entries.into_iter().collect();
-    let mut hidden = case_losers(entries.iter().map(|(n, _)| *n), preferred);
-    let shadowed_archives: Vec<&str> = entries
-        .iter()
-        .filter(|(n, dir)| !dir && hidden.contains(*n) && cbz_stem(n).is_some())
-        .map(|(n, _)| *n)
-        .collect();
-    if shadowed_archives.is_empty() {
-        return hidden;
-    }
-    let files: Vec<&str> = entries
-        .iter()
-        .filter(|(_, dir)| !dir)
-        .map(|(n, _)| *n)
-        .collect();
-    let folder = Folder::new(&files);
-    for archive in shadowed_archives {
-        hidden.extend(
-            folder
-                .volume_files(archive)
-                .into_iter()
-                .map(|(n, _)| n.to_string()),
-        );
-    }
-    hidden
+    crate::fold_groups::FoldGroups::new(entries, preferred)
+        .hidden()
+        .clone()
 }
 
 /// `name` minus `suffix`, the suffix matched in any ASCII case.

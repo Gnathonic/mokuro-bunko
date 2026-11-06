@@ -6,6 +6,7 @@
 pub mod casefold_table;
 pub mod config;
 pub mod engines;
+pub mod fold_groups;
 pub mod generations;
 pub mod ignorable_table;
 pub mod names;

@@ -317,21 +317,23 @@ impl MetadataService {
         let data = dump_series_file(&folder.title, facts, index, volumes)
             .map_err(|error| WriteError::Io(std::io::Error::other(error)))?;
         // The spelling the folder lists (`Series.json`): never a second one beside it.
-        write_if_changed(
-            &fsutil::spelled(&folder.path, SERIES_FILE_NAME),
-            &data,
-            self.locks.as_ref(),
-        )
+        let path = fsutil::spelled(&folder.path, SERIES_FILE_NAME);
+        // Nothing is written in a frozen case-variant group (the series folder a member
+        // of one, or two spellings of `series.json` in it).
+        if fsutil::frozen_path(&self.library_path, &path).is_some() {
+            return Ok(false);
+        }
+        write_if_changed(&path, &data, self.locks.as_ref())
     }
 
     fn publish_catalog(&self, entries: &[(String, SeriesFacts)]) -> Result<bool, WriteError> {
         let data = dump_catalog_file(entries)
             .map_err(|error| WriteError::Io(std::io::Error::other(error)))?;
-        write_if_changed(
-            &fsutil::spelled(&self.library_path, CATALOG_FILE_NAME),
-            &data,
-            self.locks.as_ref(),
-        )
+        let path = fsutil::spelled(&self.library_path, CATALOG_FILE_NAME);
+        if fsutil::frozen_path(&self.library_path, &path).is_some() {
+            return Ok(false);
+        }
+        write_if_changed(&path, &data, self.locks.as_ref())
     }
 
     /// Publish one series file, logging and rescheduling on failure.
@@ -405,7 +407,7 @@ impl MetadataService {
                     bunko_core::sidecar_names::cbz_stem(n) == Some(volume.volume_title.as_str())
                 })?;
                 let cover =
-                    crate::sidecar::sibling_in(&folder.path.join(archive), ".webp", &files)?;
+                    crate::sidecar::listed_sibling_in(&folder.path.join(archive), ".webp", &files)?;
                 let name = cover.file_name()?.to_str()?.to_string();
                 files.contains(&name).then_some(name)
             })
@@ -494,7 +496,9 @@ impl MetadataService {
         }
         let mut retired = 0;
         for (title, path) in orphans {
-            if !self.regenerable(&normalize_volume_title_key(&title), &path)? {
+            if fsutil::frozen_path(&self.library_path, &path).is_some()
+                || !self.regenerable(&normalize_volume_title_key(&title), &path)?
+            {
                 continue;
             }
             let Some(_guard) = self.locks.try_lock(&path) else {

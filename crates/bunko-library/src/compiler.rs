@@ -458,12 +458,16 @@ fn compiled_before_bom_tolerance(object: &JsonObject, stats: &VolumeStats) -> bo
             .is_some_and(sidecar::starts_with_bom)
 }
 
+/// Cache a compiled entry. `frozen`: the volume is in a case-variant group
+/// ([`bunko_core::fold_groups`]); its entry is cached (a read), but its recorded
+/// identity (`volume_identities`) is not re-keyed from it until the group is merged.
 fn put_entry(
     store: &dyn MetadataStore,
     key: &str,
     series_key: &str,
     entry: &VolumeEntry,
     stats: &VolumeStats,
+    frozen: bool,
 ) -> StoreResult<()> {
     let object = entry_to_object(entry);
     let text = pyjson::dumps(
@@ -478,8 +482,21 @@ fn put_entry(
         cbz_size: stats.cbz_size,
         cbz_mtime: stats.cbz_mtime,
         sidecar_key: &stats.sidecar_key,
-        identity: identity_from_entry(&object),
+        identity: if frozen {
+            None
+        } else {
+            identity_from_entry(&object)
+        },
     })
+}
+
+/// Is the archive `cbz_path` (in a series folder directly under the library root) in a
+/// case-variant group, or below one ([`fsutil::frozen`])? From the listings.
+fn frozen_volume(cbz_path: &Path) -> bool {
+    cbz_path
+        .parent()
+        .and_then(Path::parent)
+        .is_some_and(|root| fsutil::frozen_path(root, cbz_path).is_some())
 }
 
 /// The sidecar's SHA-256 as the provider lists it, when that is the hash
@@ -569,8 +586,15 @@ pub fn compile_series_volumes(
     let listed = sidecar::list_names(&series.path).unwrap_or_default();
     let listed: Vec<&str> = listed.iter().map(String::as_str).collect();
     let folder = Folder::new(&listed);
+    // The freeze: the series folder a member of a group at the root, or the volume of
+    // one in the folder.
+    let series_frozen = series.path.parent().is_some_and(|root| {
+        fsutil::listed_groups(root, true).is_some_and(|(_, groups)| groups.is_frozen(&series.title))
+    });
+    let groups = fsutil::fold_groups(&series.path, listed.iter().map(|n| (*n, false)));
     for name in archive_names(&series.path) {
         let cbz_path = series.path.join(&name);
+        let frozen = series_frozen || groups.is_frozen(&name);
         let volume_title = py_stem(&name).to_owned();
         let Some(stats) = volume_stats(&cbz_path, Some(&folder)) else {
             continue;
@@ -588,7 +612,7 @@ pub fn compile_series_volumes(
                 && let Some(digest) = sidecar::sidecar_sha256(sidecar)
             {
                 found.mokuro_sha256 = Some(digest);
-                put_entry(store, &key, &series_key, found, &stats)?;
+                put_entry(store, &key, &series_key, found, &stats, frozen)?;
             }
         }
         if entry.is_none()
@@ -596,7 +620,7 @@ pub fn compile_series_volumes(
             && let Some(found) =
                 published_entry(&mut published, &series.path, &volume_title, &stats)
         {
-            put_entry(store, &key, &series_key, &found, &stats)?;
+            put_entry(store, &key, &series_key, &found, &stats, frozen)?;
             entry = Some(found);
         }
         let mut entry = match entry {
@@ -611,7 +635,7 @@ pub fn compile_series_volumes(
                 if let Some(store) = store
                     && cacheable
                 {
-                    put_entry(store, &key, &series_key, &entry, &stats)?;
+                    put_entry(store, &key, &series_key, &entry, &stats, frozen)?;
                 }
                 entry
             }
@@ -733,6 +757,7 @@ pub fn missing_pages_now(
             &normalize_volume_title_key(series_title),
             &entry,
             &stats,
+            frozen_volume(cbz_path),
         )?;
         return Ok(missing_page_count(
             entry.page_count,
@@ -754,6 +779,7 @@ pub fn missing_pages_now(
             &normalize_volume_title_key(series_title),
             &entry,
             &stats,
+            frozen_volume(cbz_path),
         )?;
     }
     Ok(missing_page_count(

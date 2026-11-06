@@ -301,7 +301,29 @@ impl Database {
         cbz_mtime: f64,
         sidecar_key: &str,
     ) -> Result<()> {
-        let identity = identity_from_entry(entry);
+        self.put_cached_volume_entry_with(
+            volume_key,
+            series_key,
+            entry,
+            (cbz_size, cbz_mtime, sidecar_key),
+            true,
+        )
+    }
+
+    /// [`Self::put_cached_volume_entry`]; the `volume_uuid` is kept only when
+    /// `remember_identity` (never for a volume in a frozen case-variant group, whose
+    /// records stay as they are until it is merged). `stat`: `(cbz_size, cbz_mtime,
+    /// sidecar_key)`.
+    pub fn put_cached_volume_entry_with(
+        &self,
+        volume_key: &str,
+        series_key: &str,
+        entry: &Map<String, Value>,
+        stat: (i64, f64, &str),
+        remember_identity: bool,
+    ) -> Result<()> {
+        let (cbz_size, cbz_mtime, sidecar_key) = stat;
+        let identity = identity_from_entry(entry).filter(|_| remember_identity);
         let entry_json = unicode_json_map(entry);
         self.write(|conn| {
             if let Some(uuid) = &identity {

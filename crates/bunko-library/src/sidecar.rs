@@ -51,15 +51,16 @@ pub fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
 }
 
 /// `<stem>.webp` beside the archive (`OCRProcessor.get_cover_path`), in the spelling
-/// the folder lists ([`sibling`]); the constructed name when there is none to use.
+/// the folder lists ([`listed_sibling`]); the constructed name when there is none to
+/// use. For reads: a writer asks [`sibling`].
 pub fn cover_path(cbz_path: &Path) -> PathBuf {
-    sibling(cbz_path, ".webp").unwrap_or_else(|| with_suffix(cbz_path, ".webp"))
+    listed_sibling(cbz_path, ".webp").unwrap_or_else(|| with_suffix(cbz_path, ".webp"))
 }
 
 /// `<stem>.nocover` beside the archive: "thumbnailing was tried and failed" (listed
 /// spelling, as [`cover_path`]).
 pub fn nocover_marker_path(cbz_path: &Path) -> PathBuf {
-    sibling(cbz_path, ".nocover").unwrap_or_else(|| with_suffix(cbz_path, ".nocover"))
+    listed_sibling(cbz_path, ".nocover").unwrap_or_else(|| with_suffix(cbz_path, ".nocover"))
 }
 
 /// The file `<stem><suffix>` of the archive `cbz_path` as Bunko reads and writes it:
@@ -67,14 +68,14 @@ pub fn nocover_marker_path(cbz_path: &Path) -> PathBuf {
 /// constructed `<stem><suffix>` (a brand-new name keeps the archive's spelling). Bunko
 /// never creates a second spelling of a name.
 ///
-/// `None` when nothing may be read or written for it: the archive is shadowed by
-/// another spelling of itself ([`fsutil::case_losers`], a case-sensitive disk only), or
-/// every listed spelling of the name belongs to another archive (rule v1: an exact
-/// stem is that archive's, a shadowed archive's included), so writing it would
+/// `None` when nothing may be written for it: the folder's case-variant groups freeze
+/// the archive or the name ([`bunko_core::fold_groups`]: the archive is a member of a
+/// group, its own files hold one, or the name is a file rule v1 gives a frozen
+/// archive), or every listed spelling of the name belongs to another archive (rule v1:
+/// an exact stem is that archive's, a shadowed archive's included), so writing it would
 /// overwrite that volume's file. Such a volume is owed nothing until the case variants
-/// are merged by hand (doctor reports them).
-///
-/// [`fsutil::case_losers`]: crate::fsutil::case_losers
+/// are merged by hand (doctor reports them). The freeze of a folder above this one is
+/// the walk's ([`crate::fsutil::frozen`]).
 pub fn sibling(cbz_path: &Path, suffix: &str) -> Option<PathBuf> {
     let directory = cbz_path.parent().unwrap_or_else(|| Path::new(""));
     match list_names(directory) {
@@ -83,8 +84,32 @@ pub fn sibling(cbz_path: &Path, suffix: &str) -> Option<PathBuf> {
     }
 }
 
+/// [`sibling`] for reads: the file the folder lists for the archive (a frozen one's
+/// included, the reachable winner being served as ever), `None` when the archive is
+/// shadowed or the name is another archive's.
+pub fn listed_sibling(cbz_path: &Path, suffix: &str) -> Option<PathBuf> {
+    let directory = cbz_path.parent().unwrap_or_else(|| Path::new(""));
+    match list_names(directory) {
+        Some(names) => listed_sibling_in(cbz_path, suffix, &names),
+        None => Some(with_suffix(cbz_path, suffix)),
+    }
+}
+
 /// [`sibling`] over `names`, the archive folder's file names (listed once by a caller
-/// that resolves several).
+/// that resolves several): `None` where the freeze holds the archive or the name, else
+/// [`listed_sibling_in`].
+pub fn sibling_in(cbz_path: &Path, suffix: &str, names: &[String]) -> Option<PathBuf> {
+    let name = cbz_path.file_name()?.to_str()?;
+    let directory = cbz_path.parent().unwrap_or_else(|| Path::new(""));
+    let groups = crate::fsutil::fold_groups(directory, names.iter().map(|n| (n.as_str(), false)));
+    let wanted = format!("{}{suffix}", py_stem(name));
+    if groups.is_frozen(name) || groups.is_frozen(&wanted) {
+        return None;
+    }
+    listed_sibling_in(cbz_path, suffix, names)
+}
+
+/// [`listed_sibling`] over `names`.
 ///
 /// The listed names that are `<stem><suffix>` by the filename fold
 /// ([`sidecar_names::fold`]) are that one name: a new file there would be a second
@@ -96,7 +121,7 @@ pub fn sibling(cbz_path: &Path, suffix: &str) -> Option<PathBuf> {
 /// stems rule v1 tells apart), nothing may be written for it: `None`.
 ///
 /// [`Folder::volume_files`]: sidecar_names::Folder::volume_files
-pub fn sibling_in(cbz_path: &Path, suffix: &str, names: &[String]) -> Option<PathBuf> {
+pub fn listed_sibling_in(cbz_path: &Path, suffix: &str, names: &[String]) -> Option<PathBuf> {
     let name = cbz_path.file_name()?.to_str()?;
     let directory = cbz_path.parent().unwrap_or_else(|| Path::new(""));
     let stem = py_stem(name);

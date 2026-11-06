@@ -87,6 +87,66 @@ pub fn case_losers<'a>(
     bunko_core::sidecar_names::case_losers(names, |fold| store.as_ref()?.case_winner(dir, fold))
 }
 
+/// The fold groups of `dir`'s listing `entries` (`(name, is_dir)`): which names no
+/// request reaches and which the freeze holds
+/// ([`bunko_core::fold_groups::FoldGroups`]), the store's case winner preferred.
+pub fn fold_groups<'a>(
+    dir: &Path,
+    entries: impl IntoIterator<Item = (&'a str, bool)>,
+) -> bunko_core::fold_groups::FoldGroups {
+    let store = bunko_store::store_for(dir);
+    bunko_core::fold_groups::FoldGroups::new(entries, |fold| store.as_ref()?.case_winner(dir, fold))
+}
+
+/// `dir`'s UTF-8 entries as `(name, is_dir)`, and their [`fold_groups`]. At a library
+/// root (`top`) the reader's per-user names are left out: they are never library
+/// entries (a series spelled like one is [`bunko_core::fold_groups::Frozen::Reserved`]).
+/// `None` when `dir` cannot be listed.
+pub fn listed_groups(
+    dir: &Path,
+    top: bool,
+) -> Option<(Vec<(String, bool)>, bunko_core::fold_groups::FoldGroups)> {
+    let mut entries = Vec::new();
+    for entry in fs::read_dir(dir).ok()?.flatten() {
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        if top && bunko_core::reader_tree::is_per_user_root_name(&name) {
+            continue;
+        }
+        entries.push((name, entry.file_type().is_ok_and(|t| t.is_dir())));
+    }
+    let groups = fold_groups(dir, entries.iter().map(|(n, d)| (n.as_str(), *d)));
+    Some((entries, groups))
+}
+
+/// Where the library path `rel` (below the library root `library`) meets the freeze:
+/// a per-user name at the root, or a segment a case-variant group freezes
+/// ([`bunko_core::fold_groups::frozen_along`]). Nothing Bunko does on its own (OCR,
+/// covers, sweeps, adoption, record keeping) writes, moves, deletes or re-keys such a
+/// path. From the listings alone: the same on every host.
+pub fn frozen(library: &Path, rel: &str) -> Option<bunko_core::fold_groups::Frozen> {
+    bunko_core::fold_groups::frozen_along(rel, true, |folder| {
+        let dir = if folder.is_empty() {
+            library.to_path_buf()
+        } else {
+            library.join(folder)
+        };
+        listed_groups(&dir, folder.is_empty()).map(|(_, groups)| groups)
+    })
+}
+
+/// [`frozen`] for a path below `library` (`None` for one outside it).
+pub fn frozen_path(library: &Path, path: &Path) -> Option<bunko_core::fold_groups::Frozen> {
+    let rel = path.strip_prefix(library).ok()?;
+    let rel = rel
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/");
+    frozen(library, &rel)
+}
+
 /// [`list_dir`] without the [`case_losers`]: the entries a request can reach.
 pub fn list_dir_reachable(dir: &Path) -> io::Result<Vec<(String, PathBuf)>> {
     let entries = list_dir(dir)?;

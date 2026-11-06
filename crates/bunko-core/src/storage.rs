@@ -106,7 +106,8 @@ impl StorageLayout {
     /// series folder in every reader. The first start of 0.8 on this storage removes
     /// it when the library lists exactly that name and it is an empty folder; one
     /// holding anything, or any other spelling (a series `Thumbnails/`), is an ordinary
-    /// folder and stays. Only that once (the marker [`Self::LEGACY_COVERS_CHECKED`] in the
+    /// folder and stays, and so does it while another spelling is listed beside it (a
+    /// case-variant group is frozen, [`crate::fold_groups`]). Only that once (the marker [`Self::LEGACY_COVERS_CHECKED`] in the
     /// storage base): after it, `thumbnails` is a name like any other, and an empty
     /// series folder a user makes with that name stays, as it does in a cloud library.
     /// From the listing, never by opening the name, so every host answers alike.
@@ -117,9 +118,15 @@ impl StorageLayout {
         }
         let library = self.library();
         let listed = std::fs::read_dir(&library).is_ok_and(|entries| {
-            entries
+            let spellings: Vec<(String, bool)> = entries
                 .flatten()
-                .any(|e| e.file_name() == "thumbnails" && e.file_type().is_ok_and(|t| t.is_dir()))
+                .filter_map(|e| {
+                    let name = e.file_name().into_string().ok()?;
+                    (crate::names::fold_name(&name) == "thumbnails")
+                        .then(|| (name, e.file_type().is_ok_and(|t| t.is_dir())))
+                })
+                .collect();
+            matches!(spellings.as_slice(), [(name, true)] if name == "thumbnails")
         });
         let folder = library.join("thumbnails");
         if listed && std::fs::read_dir(&folder).is_ok_and(|mut e| e.next().is_none()) {
@@ -337,6 +344,17 @@ mod tests {
             std::fs::create_dir_all(lib.join("Thumbnails")).unwrap();
         });
         assert_eq!(left, ["Thumbnails"]);
+        // Beside another spelling (only a case-sensitive disk lists both): a frozen
+        // case-variant group, left as it is.
+        let (left, _dir, _) = first(&|lib| {
+            std::fs::create_dir_all(lib.join("thumbnails")).unwrap();
+            let _ = std::fs::create_dir(lib.join("Thumb\u{200B}nails"));
+        });
+        if left.len() == 2 {
+            assert_eq!(left, ["Thumb\u{200B}nails", "thumbnails"]);
+        } else {
+            assert_eq!(left, Vec::<String>::new());
+        }
     }
 
     /// A cloud library never gets `library/` on disk; the rest is still created.
