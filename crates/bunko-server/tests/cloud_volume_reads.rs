@@ -383,3 +383,52 @@ fn a_compiled_series_json_spares_reading_the_volumes_it_lists() {
     assert_ne!(mixed[1].mokuro_sha256, compiled[1].mokuro_sha256);
     assert_eq!(mixed[1].page_count, 9);
 }
+
+/// 0.7.5's JPEG XL pages on a cloud library: the OCR queue counts them, the cover is
+/// the first JPEG XL page and decodes, and a `.nocover` record an older build kept
+/// for the volume goes at the cover loop's first pass ([`NoCoverSet::clear_jxl`]),
+/// while one of a volume without JPEG XL stays.
+#[test]
+fn a_cloud_volume_of_jpeg_xl_pages_is_counted_covered_and_loses_its_nocover_record() {
+    use bunko_server::thumbs::NoCoverSet;
+    let page = std::fs::read(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../bunko-ocr/tests/fixtures/jxl/page-rgb.jxl"),
+    )
+    .unwrap();
+    let mut w = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    let opts =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    for name in ["v/002.jxl", "v/001.JXL", "v/info.txt"] {
+        w.start_file(name, opts).unwrap();
+        w.write_all(&page).unwrap();
+    }
+    let jxl = w.finish().unwrap().into_inner();
+    let mut w = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    w.start_file("notes.txt", opts).unwrap();
+    w.write_all(b"no image").unwrap();
+    let plain = w.finish().unwrap().into_inner();
+    let t = T::start(&[("S/j.cbz", &jxl), ("S/n.cbz", &plain)]);
+    let (j, n) = (t.root.join("S/j.cbz"), t.root.join("S/n.cbz"));
+
+    assert_eq!(bunko_server::ocr::owed::archive_pages(&j), Some(2));
+    let Cover::Image(cover) = cover_image(&j) else {
+        panic!("no cover")
+    };
+    assert!(cover == page, "the first sorted JPEG XL page");
+    let webp = bunko_thumb::make_thumbnail(&cover).expect("a JPEG XL cover decodes");
+    assert_eq!(&webp[0..4], b"RIFF");
+
+    let local = TempDir::new().unwrap();
+    let file = local.path().join("nocover.json");
+    let records = NoCoverSet::load(file.clone(), t.root.clone());
+    records.insert(&j).unwrap();
+    records.insert(&n).unwrap();
+    assert_eq!(records.clear_jxl(), 1);
+    assert!(!records.contains(&j));
+    assert!(records.contains(&n));
+    let reloaded = NoCoverSet::load(file, t.root.clone());
+    assert!(!reloaded.contains(&j), "saved");
+    assert!(reloaded.contains(&n));
+    assert_eq!(records.clear_jxl(), 0);
+}

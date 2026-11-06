@@ -289,6 +289,37 @@ impl NoCoverSet {
         self.save(&rows)
     }
 
+    /// [`clear_jxl_nocovers`] for a cloud library: drop the record of every archive
+    /// that holds a `.jxl` image (a build before JPEG XL covers recorded it as having
+    /// none), so the next pass makes its cover. Returns how many records went.
+    pub fn clear_jxl(&self) -> usize {
+        let recorded: Vec<String> = {
+            let set = self.set.lock();
+            let mut paths: Vec<String> = set.iter().map(|(p, _, _)| p.clone()).collect();
+            paths.sort();
+            paths
+        };
+        let gone: HashSet<String> = recorded
+            .into_iter()
+            .filter(|rel| holds_jxl(&self.library.join(rel)))
+            .collect();
+        if gone.is_empty() {
+            return 0;
+        }
+        for rel in &gone {
+            info!("Looking for a JPEG XL cover again: {rel}");
+        }
+        let rows = {
+            let mut set = self.set.lock();
+            set.retain(|(p, _, _)| !gone.contains(p));
+            Self::rows(&set)
+        };
+        if let Err(e) = self.save(&rows) {
+            warn!("could not save the .nocover records: {e}");
+        }
+        gone.len()
+    }
+
     fn rows(set: &HashSet<(String, u64, i128)>) -> Vec<(String, u64, String)> {
         let mut rows: Vec<_> = set
             .iter()
@@ -854,6 +885,9 @@ impl Thumbnails {
         let me = self.clone();
         tokio::spawn(async move {
             let _watching = guard;
+            // The first pass first lets JPEG XL volumes an older build recorded as
+            // having no cover get one.
+            let mut first = true;
             loop {
                 let work = std::mem::take(&mut *queue.0.lock());
                 if !work.full && work.paths.is_empty() {
@@ -863,7 +897,11 @@ impl Thumbnails {
                     }
                 }
                 let (m, lib, s, n) = (me.clone(), library.clone(), stop.clone(), nocover.clone());
+                let clear_jxl = std::mem::take(&mut first);
                 let scan = tokio::task::spawn_blocking(move || {
+                    if clear_jxl {
+                        n.clear_jxl();
+                    }
                     let candidates = if work.full {
                         thumbnail_candidates_with(&lib, Some(&n))
                     } else {
@@ -990,7 +1028,7 @@ fn check_sidecar_capped(path: &Path, cap: u64) -> SidecarCheck {
 /// Upgrade from 0.7.4 and older, which could not read JPEG XL and so marked a volume
 /// of JPEG XL pages `.nocover`: drop the marker of every archive holding a `.jxl`
 /// image, so the next scan makes its cover. One-shot at startup; returns how many
-/// markers went.
+/// markers went. A cloud library's records are [`NoCoverSet::clear_jxl`]'s.
 pub fn clear_jxl_nocovers(library: &Path) -> usize {
     let mut marked = Vec::new();
     walk(library, &mut |p| {
