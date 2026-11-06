@@ -3,15 +3,16 @@
 //! (earliest-finish, warm sessions, backoffs, autobench gating), phase C takes.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::Arc;
 
 use bunko_core::generations::Generation;
 use bunko_proto::{PoolsSpec, RowSpec};
 use bunko_sched::breaker::{BackoffState, backoff_state};
 use bunko_sched::eft::{
-    EftLane, EftParams, InflightCard, WarmMachine, earliest_finish_claim, lane_free_in,
+    EftLane, EftParams, InflightCard, WarmMachine, earliest_finish_claim_where, lane_free_in,
     single_volume_rows, warm_session_wins,
 };
-use bunko_sched::failures::{Eligibility, eligibility, failure_key};
+use bunko_sched::failures::{Eligibility, Fleet, eligibility_in, failure_key};
 use bunko_sched::job_order::{JobKey, order_jobs};
 use bunko_sched::plan::{LanePricing, MachineBench, Pricing};
 use serde_json::{Map, Value};
@@ -223,6 +224,15 @@ impl Scheduler {
         let now = self.now();
         let poll = self.settings.poll_interval;
         let primary = self.primary().map(|p| p.id.clone());
+        let library_version = self.deps.version.clone();
+        let fleet = Fleet {
+            library_version: &library_version,
+            machine_versions: self
+                .machines
+                .keys()
+                .map(|pid| self.release_of(pid))
+                .collect(),
+        };
         let mut jobs = Vec::new();
         let mut stale: Vec<String> = Vec::new();
         for (rel, vol) in &self.owed.volumes {
@@ -247,8 +257,8 @@ impl Scheduler {
                 };
                 let key = self.failure_key_of(&job, row);
                 let record = self.failures.get(&key).and_then(Value::as_object);
-                match eligibility(record, Some(vol.mtime), now, poll) {
-                    Eligibility::BackedOff => continue,
+                match eligibility_in(record, Some(vol.mtime), now, poll, &fleet) {
+                    Eligibility::BackedOff | Eligibility::Parked => continue,
                     Eligibility::Replaced => stale.push(key),
                     _ => {}
                 }
@@ -304,6 +314,115 @@ impl Scheduler {
             .map(|p| p.pools)
             .unwrap_or_default();
         runner_pools(&machine_pools(&stored, &row.pools.to_value()))
+    }
+
+    /// The page suffixes of `rel`'s volume (lowercase, with the dot), read from its zip
+    /// directory and kept while its size and mtime stay. None: not readable here (the
+    /// claim's own checks then decide).
+    fn page_suffixes(&mut self, rel: &str) -> Option<Arc<[String]>> {
+        let path = self.library().join(rel);
+        let meta = bunko_store::fs::metadata(&path).ok()?;
+        let stamp = (meta.len(), crate::ocr::types::mtime_ns(&meta));
+        if let Some((size, mtime, suffixes)) = self.page_suffixes.get(rel)
+            && (*size, *mtime) == stamp
+        {
+            return Some(suffixes.clone());
+        }
+        let volume = bunko_library::Volume::open(&path).ok()?;
+        let suffixes: BTreeSet<String> = volume
+            .pages()
+            .iter()
+            .filter_map(|page| {
+                let name = page.path.rsplit('/').next().unwrap_or(&page.path);
+                name.rfind('.').map(|i| name[i..].to_ascii_lowercase())
+            })
+            .collect();
+        let suffixes: Arc<[String]> = suffixes.into_iter().collect();
+        if self.page_suffixes.len() >= 4096 {
+            self.page_suffixes.clear();
+        }
+        self.page_suffixes
+            .insert(rel.to_string(), (stamp.0, stamp.1, suffixes.clone()));
+        Some(suffixes)
+    }
+
+    /// Whether machine `pid`'s release reads every page of `job`'s volume. This server's
+    /// own OCR does; a processor is judged by the version it registered with
+    /// ([`bunko_proto::PAGE_FORMATS_SINCE`]), so a volume is looked into only for a
+    /// processor older than some page format. A volume it cannot read waits for one
+    /// that can instead of failing there.
+    pub fn machine_reads(&mut self, pid: &str, job: &Job) -> bool {
+        let Some(machine) = self.machines.get(pid) else {
+            return false;
+        };
+        if machine.local || bunko_proto::release_reads_every_page_format(&machine.host.version) {
+            return true;
+        }
+        let (version, label) = (machine.host.version.clone(), machine.label());
+        let Some(suffixes) = self.page_suffixes(&job.rel) else {
+            return true;
+        };
+        let unread: Vec<&str> = suffixes
+            .iter()
+            .filter(|s| !bunko_proto::release_reads_page(&version, s))
+            .map(String::as_str)
+            .collect();
+        if unread.is_empty() {
+            return true;
+        }
+        if self.unreadable_logged.insert((job.clone(), label.clone())) {
+            let version = if version.is_empty() {
+                "unknown"
+            } else {
+                &version
+            };
+            self.log(format!(
+                "Not offering {} to {label}: its release ({version}) cannot read {} pages",
+                job.file_name(),
+                unread.join(", ")
+            ));
+        }
+        false
+    }
+
+    /// The release machine `pid` runs: what it registered with; this server's own OCR
+    /// runs the library's.
+    pub fn release_of(&self, pid: &str) -> String {
+        match self.machines.get(pid) {
+            Some(m) if m.local && m.host.version.is_empty() => self.deps.version.clone(),
+            Some(m) => m.host.version.clone(),
+            None => String::new(),
+        }
+    }
+
+    /// Whether machine `pid` may try `job` again, given its failure record: a failure of
+    /// the volume itself only by a release that has not tried it (or any once the
+    /// library's release changed); see `bunko_sched::failures::machine_may_retry`.
+    fn may_retry_on(&self, pid: &str, job: &Job) -> bool {
+        let Some(row) = self.row(&job.gid) else {
+            return true;
+        };
+        let key = self.failure_key_of(job, row);
+        let Some(record) = self.failures.get(&key).and_then(Value::as_object) else {
+            return true;
+        };
+        let mtime = self.owed.volumes.get(&*job.rel).map(|v| v.mtime);
+        if bunko_sched::failures::replaced_since_failure(mtime, record) {
+            return true;
+        }
+        bunko_sched::failures::machine_may_retry(
+            Some(record),
+            &self.release_of(pid),
+            self.now(),
+            self.settings.poll_interval,
+            &self.deps.version,
+        )
+    }
+
+    /// Whether machine `pid` may be given `job`: it may try it again after a failure,
+    /// and its release reads the volume's pages ([`Self::machine_reads`]).
+    pub fn machine_takes(&mut self, pid: &str, job: &Job) -> bool {
+        self.may_retry_on(pid, job) && self.machine_reads(pid, job)
     }
 
     /// `_slot_refusal`: why this machine may not be offered the row.
@@ -837,6 +956,9 @@ impl Scheduler {
                 self.forget_candidate(&job);
                 continue;
             }
+            if !self.machine_takes(&pid, &job) {
+                continue;
+            }
             if unmeasured.contains(&*job.gid) {
                 self.want_autobench(&pid, &row);
                 continue;
@@ -974,15 +1096,35 @@ impl Scheduler {
             .take(bunko_sched::eft::EFT_LOOKAHEAD)
             .map(|j| (j.clone(), j.gid.to_string(), self.known_pages(&j.rel)))
             .collect();
+        // A lane whose release cannot read a volume is no candidate for it, or the lane
+        // that can would step aside for one that never takes it.
+        let lane_pids: Vec<(u64, String)> = lanes
+            .iter()
+            .filter_map(|l| {
+                self.lanes
+                    .iter()
+                    .find(|x| x.id == l.key)
+                    .map(|x| (l.key, x.pid.clone()))
+            })
+            .collect();
+        let mut cannot: HashSet<(Job, u64)> = HashSet::new();
+        for (job, _, _) in &jobs {
+            for (key, pid) in &lane_pids {
+                if !self.machine_takes(pid, job) {
+                    cannot.insert((job.clone(), *key));
+                }
+            }
+        }
         let decision = {
             let pricing = self.pricing();
-            earliest_finish_claim(
+            earliest_finish_claim_where(
                 &jobs,
                 &lanes,
                 &lane.id,
                 |g, m| pricing.rate_for(g, Some(m), 0, 0.0),
                 |g, m| pricing.startup_for(g, Some(m)).seconds,
                 EftParams::default(),
+                |job, key| !cannot.contains(&(job.clone(), *key)),
             )
         };
         let Some(decision) = decision else {
@@ -1075,12 +1217,21 @@ impl Scheduler {
         let singles = single_volume_rows(&pairs, &warm_rows, &unavailable);
         let mut out = HashSet::new();
         for (gid, job) in singles {
+            // Only a warm session whose release reads the volume may keep it.
+            let readers: Vec<String> = warm_on[&gid]
+                .iter()
+                .filter(|pid| self.machine_takes(pid, &job))
+                .cloned()
+                .collect();
+            if readers.is_empty() {
+                continue;
+            }
             let pages = self.deps.facts.page_count(&job.path(&self.library()));
             let leave = {
                 let pricing = self.pricing();
                 let mine_rate = pricing.rate_for(&gid, Some(&my_name), 0, 0.0);
                 let mine_startup = pricing.startup_for(&gid, Some(&my_name)).seconds;
-                let warm: Vec<WarmMachine> = warm_on[&gid]
+                let warm: Vec<WarmMachine> = readers
                     .iter()
                     .filter_map(|pid| self.machines.get(pid))
                     .map(|m| {

@@ -112,6 +112,43 @@ impl OcrStatusSource for Progress {
     }
 }
 
+/// Volume 02 keeps failing: nothing in it could be decoded.
+struct Failing;
+
+impl OcrStatusSource for Failing {
+    fn progress(&self) -> Option<Map<String, Value>> {
+        None
+    }
+
+    fn volume_failure(&self, series: &str, volume: &str) -> Option<String> {
+        (series == "Dr Stone" && volume == "Volume 02")
+            .then(|| "This volume has no pages that could be decoded.".to_string())
+    }
+}
+
+/// A volume whose OCR keeps failing is "OCR failed", with the public text of the failure
+/// for the badge's hover text, instead of "OCR pending"; the other volumes' entries are
+/// unchanged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failing_volume_says_so_instead_of_pending() {
+    let mut env = catalog_env(|_| {}).await;
+    assert!(env.runtime.recompile_all_now().await > 0);
+    env.deps.ocr_status = Some(Arc::new(Failing));
+    let series = env
+        .send(get("/catalog/api/series?name=Dr+Stone"))
+        .await
+        .json();
+    let v2 = &series["volumes"][1];
+    assert_eq!(v2["ocr_pending"], false);
+    assert_eq!(v2["ocr_failed"], true);
+    assert_eq!(
+        v2["ocr_failure"],
+        "This volume has no pages that could be decoded."
+    );
+    let v1 = series["volumes"][0].as_object().unwrap();
+    assert!(!v1.contains_key("ocr_failed") && !v1.contains_key("ocr_failure"));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn series_page_config_status_cover_and_static() {
     let mut env = catalog_env(|c| c.catalog.reader_url = "https://reader.example".into()).await;

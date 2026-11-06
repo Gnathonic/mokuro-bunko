@@ -427,6 +427,12 @@ async fn a_steady_stream_of_changes_still_fires_at_the_cap() {
     // for a whole debounce (a 50 ms sleep took over 100 ms on macOS): the pass then
     // fires early, rightly, because the quiet period really elapsed, and the run says
     // nothing about the cap. Such a run is repeated, never judged.
+    //
+    // What is timed is the pass's START (the metadata thread taking the work), which is
+    // what the cap decides. The compile after it (a folder scan, SQLite commits, an
+    // atomic write) runs at the file system's pace: on Windows it now and then took
+    // over half a second on its own, and CI saw series.json only 1.5-2.6 s in, while
+    // in every measured run the start came within 50 ms of the cap.
     let policy = fast_policy();
     let mut stalled = Vec::new();
     for _ in 0..10 {
@@ -437,16 +443,16 @@ async fn a_steady_stream_of_changes_still_fires_at_the_cap() {
         let series_file = dir.join("series.json");
         // A change is scheduled somewhere inside its call, so the quiet period between
         // two changes is at most from one call's start to the next call's end (or to
-        // the check that found the file).
+        // the check that saw the pass start).
         let start = Instant::now();
         let mut last_call: Option<Instant> = None;
         let mut longest_quiet = Duration::ZERO;
         let fired_by = loop {
-            let found = series_file.is_file();
+            let fired = env.runtime.passes_run() > 0;
             if let Some(last) = last_call {
                 longest_quiet = longest_quiet.max(last.elapsed());
             }
-            if found {
+            if fired {
                 break start.elapsed();
             }
             assert!(
@@ -461,6 +467,10 @@ async fn a_steady_stream_of_changes_still_fires_at_the_cap() {
             last_call = Some(called);
             tokio::time::sleep(Duration::from_millis(20)).await;
         };
+        assert!(
+            wait_for(Duration::from_secs(10), || series_file.is_file()).await,
+            "the pass the cap fired wrote no series.json"
+        );
         env.runtime.stop().await;
         if longest_quiet >= policy.debounce {
             stalled.push((longest_quiet, fired_by));
@@ -469,11 +479,11 @@ async fn a_steady_stream_of_changes_still_fires_at_the_cap() {
         // Steady: only the cap, armed by the first change, could have fired it.
         assert!(
             fired_by >= policy.max_debounce,
-            "fired before the cap: {fired_by:?} (longest quiet {longest_quiet:?})"
+            "the pass started before the cap: {fired_by:?} (longest quiet {longest_quiet:?})"
         );
         assert!(
             fired_by < Duration::from_millis(1500),
-            "fired long after the cap: {fired_by:?}"
+            "the pass started long after the cap: {fired_by:?}"
         );
         return;
     }

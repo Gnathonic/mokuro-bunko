@@ -15,6 +15,10 @@ pub const REASON_ARCHIVE: &str = "archive incomplete";
 pub const REASON_INTERRUPTED: &str = "interrupted \u{2014} will retry";
 pub const REASON_ENGINE: &str = "engine error";
 pub const REASON_RETRY: &str = "failed \u{2014} will retry";
+/// Failures of the volume itself are parked (`bunko_sched::failures::FailureKind::parks`):
+/// they come back with a replaced archive or another release, not by time.
+pub const REASON_NO_PAGES: &str = "no decodable pages \u{2014} waits for a new archive or release";
+pub const REASON_DAMAGED: &str = "damaged archive \u{2014} waits for a new archive or release";
 
 const ARCHIVE_WORDS: &[&str] = &[
     "zip",
@@ -117,6 +121,11 @@ pub fn failure_reason(error: &Value) -> &'static str {
         Value::String(s) => s.to_lowercase(),
         other => other.to_string().to_lowercase(),
     };
+    match bunko_sched::failures::FailureKind::of(&text) {
+        bunko_sched::failures::FailureKind::NoReadablePages => return REASON_NO_PAGES,
+        bunko_sched::failures::FailureKind::DamagedArchive => return REASON_DAMAGED,
+        _ => {}
+    }
     if text.starts_with("download failed") {
         REASON_DOWNLOAD
     } else if ARCHIVE_WORDS.iter().any(|w| text.contains(w)) {
@@ -792,6 +801,14 @@ mod tests {
             REASON_INTERRUPTED
         );
         assert_eq!(failure_reason(&json!("hmm")), REASON_RETRY);
+        // A failure of the volume itself is parked: no "will retry".
+        for e in ["no page images found in V1.cbz", "every page failed"] {
+            assert_eq!(failure_reason(&json!(e)), REASON_NO_PAGES, "{e}");
+        }
+        assert_eq!(
+            failure_reason(&json!("archive /x/V1.cbz: no end of central directory")),
+            REASON_DAMAGED
+        );
     }
 
     #[test]

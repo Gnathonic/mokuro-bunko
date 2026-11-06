@@ -51,9 +51,15 @@ pub fn discover(backends_dir: &Path) -> Vec<PathBuf> {
         .filter(|p| p.join(PACK_JSON).is_file())
         .filter_map(|p| {
             let name = p.file_name()?.to_string_lossy().into_owned();
-            let variant = loader::read_manifest(&p)
+            // The variant only says what the pack is (libtorch or Vulkan, which GPU), so
+            // it comes from the manifest whatever the pack's release: a new release
+            // lists the old one's packs during its automatic update. Opening a pack
+            // checks its release.
+            let variant = std::fs::read_to_string(p.join(PACK_JSON))
+                .ok()
+                .and_then(|text| bunko_torch::abi::PackManifest::parse(&text).ok())
                 .map(|m| m.variant)
-                .unwrap_or_else(|_| name.clone());
+                .unwrap_or_else(|| name.clone());
             // The Vulkan pack speaks the same ABI but is not a libtorch backend: it is
             // opened beside one (`crate::vulkan`).
             (variant != crate::vulkan::VARIANT).then(|| (rank(&variant), name, p))
@@ -574,6 +580,43 @@ mod tests {
         let (p, why) = crate::runtime::place_runnable(Some("auto"), &devices, fmts);
         assert_eq!((p.device.as_str(), why), ("gpu:0", None));
         assert_eq!(device_formats(&r, "gpu:0", older), vec!["fp32", "fp16"]);
+    }
+
+    /// Regression: during an automatic update the NEW release lists the packs of the old
+    /// one. Their release-checked manifest read failed, so they were classified by
+    /// directory name: `vulkan-0.7.4` slipped past the Vulkan filter, and with every
+    /// pack ranked "anything else" it sorted first by name. The update then staged the
+    /// Vulkan pack instead of the libtorch one and failed on hayai-nova. A pack's
+    /// variant comes from its manifest whatever its release; opening it checks that.
+    #[test]
+    fn another_releases_packs_are_classified_by_their_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mk = |name: &str, variant: &str| {
+            let d = tmp.path().join(name);
+            std::fs::create_dir_all(&d).unwrap();
+            let m = serde_json::json!({
+                "format": 1, "variant": variant, "torch": "2.13.0", "abi": 1,
+                "os": std::env::consts::OS, "arch": std::env::consts::ARCH,
+                "library": bunko_torch::abi::library_file_name(), "files": [],
+                "bunko_version": "0.0.1"
+            });
+            std::fs::write(d.join(PACK_JSON), m.to_string()).unwrap();
+        };
+        mk("torch-cu130-2.13.0", "cu130");
+        mk("torch-cpu-2.13.0", "cpu");
+        mk("vulkan-0.0.1", crate::vulkan::VARIANT);
+        let names: Vec<String> = discover(tmp.path())
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        // The Vulkan pack is never a libtorch candidate, and cu130 ranks as a GPU pack:
+        // first where its driver is, after cpu where it is not.
+        let want = if vendor_present("cu130") {
+            ["torch-cu130-2.13.0", "torch-cpu-2.13.0"]
+        } else {
+            ["torch-cpu-2.13.0", "torch-cu130-2.13.0"]
+        };
+        assert_eq!(names, want);
     }
 
     #[test]

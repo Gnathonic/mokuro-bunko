@@ -235,6 +235,21 @@ pub fn build_sample(library: &Path, out: &Path, wanted: i64) -> Result<(i64, i64
             }
         }
     }
+    // Every machine benchmarks with this one sample, so it keeps to volumes every 0.7
+    // release reads (no page format of `bunko_proto::PAGE_FORMATS_SINCE`); a library of
+    // nothing else benchmarks with what it has.
+    let newer = |cbz: &PathBuf| {
+        bunko_library::Volume::open(cbz).is_ok_and(|v| {
+            v.pages().iter().any(|page| {
+                page.path
+                    .rfind('.')
+                    .is_some_and(|i| !bunko_proto::release_reads_page("0.7.0", &page.path[i..]))
+            })
+        })
+    };
+    let (plain, newer): (Vec<PathBuf>, Vec<PathBuf>) =
+        ordered.into_iter().partition(|cbz| !newer(cbz));
+    let ordered = if plain.is_empty() { newer } else { plain };
     let wanted = wanted.clamp(MIN_SAMPLE_PAGES, MAX_SAMPLE_PAGES);
     let per_archive = 4.max(((wanted as f64) / (ordered.len() as f64)).ceil() as i64);
     // unmounted: the benchmark sample lives in the `.processing` spool.
@@ -1711,6 +1726,55 @@ mod tests {
             json!({"detect": "cpu", "engine": "gpu:0"}),
             "a pin the runner did not honour is replaced by where it ran"
         );
+    }
+
+    /// A stored `.cbz` of `pages` members `NNN.<suffix>`.
+    #[allow(clippy::disallowed_methods)] // fixtures are written with std::fs
+    fn cbz_of(path: &Path, pages: usize, suffix: &str) {
+        use std::io::Write;
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut z = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        for i in 0..pages {
+            z.start_file(format!("{:03}.{suffix}", i + 1), opts)
+                .unwrap();
+            z.write_all(b"page").unwrap();
+        }
+        z.finish().unwrap();
+    }
+
+    #[allow(clippy::disallowed_methods)] // the sample is read back with std::fs
+    fn sample_suffixes(sample: &Path) -> Vec<String> {
+        let mut zip = zip::ZipArchive::new(std::fs::File::open(sample).unwrap()).unwrap();
+        let mut out: Vec<String> = (0..zip.len())
+            .map(|i| {
+                let name = zip.by_index(i).unwrap().name().to_string();
+                name[name.rfind('.').unwrap()..].to_string()
+            })
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// Regression: the one benchmark sample every machine reads could hold JPEG XL
+    /// pages, which a processor older than 0.7.5 cannot read. Pages every 0.7 release
+    /// reads come first; a library of nothing else still benchmarks with what it has.
+    #[test]
+    fn the_sample_keeps_to_pages_every_release_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = dir.path().join("library");
+        cbz_of(&lib.join("A/V1.cbz"), 8, "jpg");
+        cbz_of(&lib.join("B/J1.cbz"), 8, "jxl");
+        let out = dir.path().join("sample.zip");
+        build_sample(&lib, &out, 16).unwrap();
+        assert_eq!(sample_suffixes(&out), vec![".jpg"]);
+
+        let only = dir.path().join("only-jxl");
+        cbz_of(&only.join("B/J1.cbz"), 8, "jxl");
+        build_sample(&only, &out, 16).unwrap();
+        assert_eq!(sample_suffixes(&out), vec![".jxl"]);
     }
 
     #[test]

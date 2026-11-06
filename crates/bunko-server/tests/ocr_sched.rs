@@ -180,6 +180,94 @@ fn eft_lets_the_slow_lane_take_what_the_fast_lane_cannot_finish_sooner() {
     assert!(!s.is_empty(), "the slow lane took nothing: fast {f:?}");
 }
 
+/// Regression: a processor older than the release that taught the OCR a page format
+/// (JPEG XL: 0.7.5) was handed volumes of those pages, failed every one with "no page
+/// images found", and each failure held the volume back an hour for everyone. It is
+/// offered only volumes it can read; the others wait, unrecorded, for one that can.
+#[test]
+fn a_processor_is_never_offered_pages_its_release_cannot_read() {
+    let mut h = harness(vec![primary()]);
+    h.add("A/V1.cbz", 3);
+    h.add_jxl("B/J1.cbz", 3);
+    h.at(0.0);
+    let mut old = h.connect_version("old", 2, "0.7.4");
+    let got = names(&volumes(&old.drain()));
+    assert_eq!(got, vec!["A/V1.cbz"], "0.7.4 cannot read JPEG XL pages");
+    assert!(h.s.failures.is_empty());
+    let mut new = h.connect_version("new", 1, "0.7.5");
+    assert_eq!(names(&volumes(&new.drain())), vec!["B/J1.cbz"]);
+}
+
+/// Regression: the earliest-finish walk left a JPEG XL volume to a faster lane whose
+/// release cannot read it, so the lane that could kept stepping aside.
+#[test]
+fn eft_never_leaves_a_volume_to_a_lane_that_cannot_read_it() {
+    let mut h = harness(vec![primary()]);
+    h.add_jxl("A/J1.cbz", 100);
+    h.at(0.0);
+    for _ in 0..2 {
+        h.s.rates().record_volume("g-1@able", 100.0, 100.0, false);
+        h.s.rates()
+            .record_volume("g-1@fast-old", 100.0, 10.0, false);
+    }
+    h.run(|s| s.hold_queue("able"));
+    h.run(|s| s.hold_queue("fast-old"));
+    let mut able = h.connect_version("able", 1, "0.7.5");
+    let mut fast_old = h.connect_version("fast-old", 1, "0.7.4");
+    h.run(|s| {
+        s.release_queue("able");
+        s.release_queue("fast-old");
+    });
+    assert!(
+        volumes(&fast_old.drain()).is_empty(),
+        "0.7.4 cannot read it"
+    );
+    assert_eq!(
+        names(&volumes(&able.drain())),
+        vec!["A/J1.cbz"],
+        "the lane that can read it stepped aside for one that cannot"
+    );
+}
+
+/// Regression: a row's last volume was left to a warm session on a faster machine whose
+/// release cannot read it.
+#[test]
+fn a_warm_session_that_cannot_read_the_last_volume_does_not_keep_it() {
+    /// Page counts from the zip directory (what the metadata cache gives a server): the
+    /// warm-session handoff needs one.
+    struct ZipFacts;
+    impl LibraryFacts for ZipFacts {
+        fn missing_pages(&self, cbz: &std::path::Path) -> i64 {
+            LibraryFacts::missing_pages(&bunko_server::ocr::types::FileFacts, cbz)
+        }
+        fn page_count(&self, cbz: &std::path::Path) -> Option<i64> {
+            bunko_server::ocr::owed::archive_pages(cbz)
+        }
+    }
+    let mut h = harness_with(vec![primary()], Arc::new(ZipFacts));
+    h.add("A/V1.cbz", 100);
+    h.add_jxl("B/J1.cbz", 100);
+    h.at(0.0);
+    for _ in 0..2 {
+        h.s.rates().record_volume("g-1@able", 100.0, 100.0, false);
+        h.s.rates()
+            .record_volume("g-1@fast-old", 100.0, 10.0, false);
+    }
+    let mut fast_old = h.connect_version("fast-old", 1, "0.7.4");
+    let ops = fast_old.drain();
+    assert_eq!(names(&volumes(&ops)), vec!["A/V1.cbz"]);
+    let sid = opened(&ops)[0].clone();
+    let claim = volumes(&ops)[0].1.clone();
+    h.event(&fast_old, ready(&sid));
+    h.event(&fast_old, started(&sid, &claim, 100));
+    let mut able = h.connect_version("able", 1, "0.7.5");
+    assert_eq!(
+        names(&volumes(&able.drain())),
+        vec!["B/J1.cbz"],
+        "the last volume waited for a warm session that cannot read it"
+    );
+}
+
 #[test]
 fn two_dead_sessions_stop_the_row_on_that_machine() {
     let mut h = harness(vec![primary()]);
@@ -354,6 +442,113 @@ fn returned_claims_open_the_breaker() {
     assert!(volumes(&p.drain()).is_empty());
 }
 
+/// The catalog's "OCR failed" badge: a volume whose primary row has a live failure
+/// record, with the public text of its kind (never the error, which names a
+/// processor's paths). A replaced archive makes the record void: pending again.
+#[test]
+fn failing_volumes_carry_the_public_text_of_their_failure() {
+    let mut h = harness(vec![primary()]);
+    h.add("A/V1.cbz", 2);
+    h.at(0.0);
+    let mut p = h.connect("box", 1);
+    let ops = p.drain();
+    let sid = opened(&ops)[0].clone();
+    let claim = volumes(&ops)[0].1.clone();
+    h.event(&p, ready(&sid));
+    h.event(
+        &p,
+        Event::VolumeFailed {
+            sid: sid.clone(),
+            id: claim,
+            error: "no page images found in V1.cbz".into(),
+        },
+    );
+    let failing = h.s.failing_volumes();
+    assert_eq!(
+        failing.get("a/v1.cbz").map(String::as_str),
+        Some("This volume has no pages that could be decoded."),
+        "{failing:?}"
+    );
+    // A new archive in its place: the record no longer speaks for it.
+    let cbz = h.add("A/V1.cbz", 3);
+    let later = std::time::UNIX_EPOCH + std::time::Duration::from_secs_f64(h.t0 + 5.0);
+    std::fs::File::options()
+        .write(true)
+        .open(&cbz)
+        .unwrap()
+        .set_modified(later)
+        .unwrap();
+    assert!(h.s.failing_volumes().is_empty());
+}
+
+/// A failure of the volume itself (nothing in it decodes) is parked: no backoff
+/// brings it back to the release that failed it, however long it waits; a machine of a
+/// release that has not tried it gets it at once.
+#[test]
+fn a_failure_of_the_volume_is_parked_until_another_release_can_try() {
+    let mut h = harness(vec![primary()]);
+    h.add("A/V1.cbz", 2);
+    h.at(0.0);
+    let mut p = h.connect_version("box", 1, "0.7.6");
+    let ops = p.drain();
+    let sid = opened(&ops)[0].clone();
+    let claim = volumes(&ops)[0].1.clone();
+    h.event(&p, ready(&sid));
+    h.event(
+        &p,
+        Event::VolumeFailed {
+            sid: sid.clone(),
+            id: claim,
+            error: "no page images found in V1.cbz".into(),
+        },
+    );
+    let rec = &h.s.failures["A/V1.cbz"];
+    assert_eq!(rec["tried_by"], serde_json::json!(["0.7.6"]));
+    assert_eq!(rec["library_version"], "0.7.0-test");
+    h.event(&p, exit(&sid, Some(0)));
+    h.at(365.0 * 86400.0);
+    assert!(
+        volumes(&p.drain()).is_empty(),
+        "retried by the release that failed it"
+    );
+    let mut newer = h.connect_version("newer", 1, "0.7.7");
+    assert_eq!(names(&volumes(&newer.drain())), vec!["A/V1.cbz"]);
+}
+
+/// An admin's "retry": the failure records go (one volume's, or all), so a parked
+/// volume is offered again at once, even to the release that failed it.
+#[test]
+fn an_admin_retry_brings_a_parked_volume_back() {
+    let mut h = harness(vec![primary()]);
+    h.add("A/V1.cbz", 2);
+    h.add("B/V2.cbz", 2);
+    h.at(0.0);
+    let mut p = h.connect_version("box", 2, "0.7.6");
+    let ops = p.drain();
+    let sid = opened(&ops)[0].clone();
+    h.event(&p, ready(&sid));
+    for (_, claim, _) in volumes(&ops) {
+        h.event(
+            &p,
+            Event::VolumeFailed {
+                sid: sid.clone(),
+                id: claim,
+                error: "no page images found".into(),
+            },
+        );
+    }
+    h.event(&p, exit(&sid, Some(0)));
+    assert_eq!(h.s.failures.len(), 2);
+    h.at(86400.0);
+    assert!(volumes(&p.drain()).is_empty());
+    assert_eq!(h.s.retry_failed(Some("A/V1.cbz")), 1);
+    assert!(h.s.failures.contains_key("B/V2.cbz"));
+    h.at(86401.0);
+    assert_eq!(names(&volumes(&p.drain())), vec!["A/V1.cbz"]);
+    assert_eq!(h.s.retry_failed(None), 1);
+    assert!(h.s.failures.is_empty());
+}
+
 #[test]
 fn failure_backoff_waits_the_retry_delay() {
     let mut h = harness(vec![primary()]);
@@ -369,7 +564,7 @@ fn failure_backoff_waits_the_retry_delay() {
         Event::VolumeFailed {
             sid: sid.clone(),
             id: claim,
-            error: "every page failed".into(),
+            error: "CUDA out of memory".into(),
         },
     );
     let rec =
