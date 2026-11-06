@@ -296,8 +296,33 @@ fn library_spelling(library: &std::path::Path, relative: &str) -> String {
     bunko_dav::LibraryPathCanonicalizer::new(library).canonicalize(relative, None)
 }
 
+/// Is `relative` below a top-level name spelled like a per-user name (`history/`,
+/// `HISTORY/`)? Never the library's, in any spelling, on any host: the catalog
+/// answers 404 for it, as the DAV tree never resolves it into the library.
+fn under_per_user_name(relative: &str) -> bool {
+    let first = relative
+        .trim_start_matches(['/', '\\'])
+        .split(['/', '\\'])
+        .next()
+        .unwrap_or("");
+    bunko_core::reader_tree::is_per_user_root_name(first)
+}
+
+/// [`under_per_user_name`] for a resolved path below the resolved library `base`
+/// (`S/../history/x` included).
+fn resolves_under_per_user_name(path: &std::path::Path, base: &std::path::Path) -> bool {
+    path.strip_prefix(base)
+        .ok()
+        .and_then(|rel| rel.components().next())
+        .and_then(|first| first.as_os_str().to_str())
+        .is_some_and(bunko_core::reader_tree::is_per_user_root_name)
+}
+
 fn get_series(deps: &LibraryDeps, name: &str) -> Response {
     let library = deps.runtime.library_path();
+    if under_per_user_name(name) {
+        return json_error(404, "Series not found");
+    }
     let name = &library_spelling(library, name);
     let base = resolve(library).unwrap_or_else(|| library.to_path_buf());
     let Some(series_dir) = resolve(&library.join(name)) else {
@@ -305,6 +330,9 @@ fn get_series(deps: &LibraryDeps, name: &str) -> Response {
     };
     if !is_within(&series_dir, &base) {
         return json_error(403, "Forbidden");
+    }
+    if resolves_under_per_user_name(&series_dir, &base) {
+        return json_error(404, "Series not found");
     }
     let Some(series) = deps.runtime.index().series(name) else {
         return json_error(404, "Series not found");
@@ -433,11 +461,17 @@ async fn serve_cover(deps: &LibraryDeps, cover: &str, headers: &HeaderMap) -> Re
     let library = deps.runtime.library_path().to_path_buf();
     let cover = cover.to_owned();
     let checked = blocking(move || -> Result<CoverFile, Response> {
+        if under_per_user_name(&cover) {
+            return Err(util::text(404, "Not found"));
+        }
         let cover = library_spelling(&library, &cover);
         let base = resolve(&library).unwrap_or_else(|| library.clone());
         let file = resolve(&library.join(&cover)).ok_or_else(|| util::text(400, "Invalid path"))?;
         if !is_within(&file, &base) {
             return Err(util::text(403, "Forbidden"));
+        }
+        if resolves_under_per_user_name(&file, &base) {
+            return Err(util::text(404, "Not found"));
         }
         let meta = bunko_store::fs::metadata(&file)
             .ok()
@@ -598,6 +632,9 @@ async fn manifest(State(deps): State<LibraryDeps>, req: Request) -> Response {
 
 fn build_manifest(deps: &LibraryDeps, series: &str, volume: &str, headers: &HeaderMap) -> Response {
     let library = deps.runtime.library_path();
+    if under_per_user_name(series) {
+        return json_error(404, "Volume not found");
+    }
     // The names as the library lists them, whatever case the request spells them in
     // (the DAV paths are canonicalized the same way at the edge).
     let canonical = (!series.contains(['/', '\\']) && !volume.contains(['/', '\\']))
@@ -628,6 +665,9 @@ fn build_manifest(deps: &LibraryDeps, series: &str, volume: &str, headers: &Head
     };
     if !is_within(&series_dir, &base) || !is_within(&archive, &base) {
         return json_error(403, "Forbidden");
+    }
+    if resolves_under_per_user_name(&series_dir, &base) {
+        return json_error(404, "Volume not found");
     }
     if series_dir == base || volume.contains('/') || volume.contains('\\') {
         return json_error(404, "Volume not found");

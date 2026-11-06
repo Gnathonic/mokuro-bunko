@@ -70,7 +70,9 @@ pub fn nocover_marker_path(cbz_path: &Path) -> PathBuf {
 /// `None` when nothing may be read or written for it: the archive is shadowed by
 /// another spelling of itself ([`fsutil::case_losers`], a case-sensitive disk only), or
 /// every listed spelling of the name belongs to another archive (rule v1: an exact
-/// stem is that archive's), so writing it would overwrite that volume's file.
+/// stem is that archive's, a shadowed archive's included), so writing it would
+/// overwrite that volume's file. Such a volume is owed nothing until the case variants
+/// are merged by hand (doctor reports them).
 ///
 /// [`fsutil::case_losers`]: crate::fsutil::case_losers
 pub fn sibling(cbz_path: &Path, suffix: &str) -> Option<PathBuf> {
@@ -104,11 +106,12 @@ pub fn sibling_in(cbz_path: &Path, suffix: &str, names: &[String]) -> Option<Pat
     if candidates.is_empty() {
         return Some(directory.join(wanted));
     }
-    // Another archive whose stem is spelled exactly like a candidate's owns it (a
-    // shadowed one owns nothing).
+    // Another archive whose stem is spelled exactly like a candidate's owns it (rule
+    // v1). A shadowed one too: it is hidden, never disowned, and its files are never
+    // written for the archive that shadows it.
     let other_stems: Vec<&str> = names
         .iter()
-        .filter(|n| n.as_str() != name && !losers.contains(n.as_str()))
+        .filter(|n| n.as_str() != name)
         .filter_map(|n| sidecar_names::cbz_stem(n))
         .collect();
     let ours: Vec<String> = candidates

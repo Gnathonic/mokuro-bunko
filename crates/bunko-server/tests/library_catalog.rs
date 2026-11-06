@@ -492,3 +492,30 @@ async fn manifest_is_gated_like_the_archive() {
         .allow_anonymous_download = true;
     assert_eq!(env.send(get(uri)).await.status, 200);
 }
+
+/// A library folder spelled like a per-user name (`history/`, a legacy folder or the
+/// cloud-root owner's own tree) is never the catalog's, in any spelling, on any host:
+/// not listed (the index fallback included), its page, covers and manifest 404.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_per_user_named_folder_is_never_in_the_catalog() {
+    let env = catalog_env(|_| {}).await;
+    let dir = env.series_dir("history");
+    write_cbz(&dir.join("v.cbz"), 1);
+    std::fs::write(dir.join("v.webp"), b"RIFFwebp").unwrap();
+    let listing = env.send(get("/catalog/api/library")).await;
+    assert_eq!(listing.status, 200);
+    assert!(!listing.text().contains("history"), "{}", listing.text());
+    for path in [
+        "/catalog/api/cover/history/v.webp",
+        "/catalog/api/cover/HISTORY/v.webp",
+        "/catalog/api/cover/Aria/../history/v.webp",
+        "/catalog/api/series/history",
+        "/catalog/api/series?name=History",
+    ] {
+        let r = env.send(get(path)).await;
+        assert_eq!(r.status, 404, "{path}: {}", r.text());
+    }
+    assert!(env.runtime.recompile_all_now().await > 0);
+    let listing = env.send(get("/catalog/api/library")).await;
+    assert!(!listing.text().contains("history"), "{}", listing.text());
+}

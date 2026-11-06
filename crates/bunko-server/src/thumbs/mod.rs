@@ -558,9 +558,12 @@ fn ensure_cover(
                 Some(set) => set
                     .insert(cbz)
                     .map_err(|e| format!("could not record the missing cover: {e}"))?,
+                // Never a marker another archive's listed `.nocover` would be.
                 None => {
-                    fs::File::create(nocover_path(cbz))
-                        .map_err(|e| format!("could not write the .nocover marker: {e}"))?;
+                    if let Some(marker) = bunko_library::sidecar::sibling(cbz, ".nocover") {
+                        fs::File::create(marker)
+                            .map_err(|e| format!("could not write the .nocover marker: {e}"))?;
+                    }
                 }
             }
             return Ok(false);
@@ -583,8 +586,8 @@ fn ensure_cover(
             }
         }
         None => {
-            let marker = nocover_path(cbz);
-            if fs::exists(&marker)
+            if let Some(marker) = bunko_library::sidecar::sibling(cbz, ".nocover")
+                && fs::exists(&marker)
                 && let Err(e) = fs::remove_file(&marker)
             {
                 warn!("could not remove the stale {}: {e}", marker.display());

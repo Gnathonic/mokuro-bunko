@@ -285,17 +285,13 @@ pub fn engine_of(data: &Value) -> Option<(String, u32)> {
     Some((stamp_id(data)?, block_revision(block)))
 }
 
-/// The plain sidecar `<stem><suffix>` of `cbz` as it exists: the constructed name when
-/// it is a file, else the spelling the folder lists ([`super::owed::listed_sidecar_paths`]:
-/// `vol 1.hayai.mokuro` for `Vol 1.cbz`), so whether a layer is owed again does not
-/// depend on the host's case rules. Lists the folder only when the constructed name
-/// misses.
-fn existing_plain(cbz: &Path, suffix: &str) -> PathBuf {
-    let (plain, _) = super::owed::sidecar_paths(cbz, suffix);
-    if fs::metadata(&plain).is_ok_and(|m| m.is_file()) {
-        return plain;
-    }
-    super::owed::listed_sidecar_paths(cbz, suffix).map_or(plain, |(p, _)| p)
+/// The plain sidecar `<stem><suffix>` of `cbz` as Bunko reads and writes it: the
+/// spelling the folder lists ([`super::owed::listed_sidecar_paths`]: `vol 1.hayai.mokuro`
+/// for `Vol 1.cbz`, the winner of several), the one an install replaces, so whether a
+/// layer is owed again is judged on the very file it would write, on every host. `None`
+/// when nothing may be written for the archive (it owes nothing).
+fn existing_plain(cbz: &Path, suffix: &str) -> Option<PathBuf> {
+    super::owed::listed_sidecar_paths(cbz, suffix).map(|(plain, _)| plain)
 }
 
 /// Bunko's own output of `engine` (sealed, no `edited` block) at a revision below
@@ -464,7 +460,8 @@ impl Upgrade {
         if row.primary {
             return false;
         }
-        self.own_outdated(&existing_plain(cbz, &row.sidecar_suffix()), &row.engine)
+        existing_plain(cbz, &row.sidecar_suffix())
+            .is_some_and(|plain| self.own_outdated(&plain, &row.engine))
     }
 
     /// The file at `plain` is Bunko's own output of `engine` at a revision below the
@@ -509,10 +506,13 @@ impl Upgrade {
         let Some(layer) = self.edited_main_layer().filter(|_| outdated) else {
             return false;
         };
+        let Some(plain) = existing_plain(cbz, &layer.sidecar_suffix()) else {
+            return false;
+        };
         if !super::owed::row_done(cbz, &layer, None) {
             return true;
         }
-        self.own_outdated(&existing_plain(cbz, &layer.sidecar_suffix()), &layer.engine)
+        self.own_outdated(&plain, &layer.engine)
     }
 
     /// An upgrade job's result for a volume whose main a reader marked EDITED (D4: edits

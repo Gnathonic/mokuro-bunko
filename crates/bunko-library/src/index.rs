@@ -138,11 +138,14 @@ fn scan_dir(
         .filter(|name| crate::sidecar::is_cbz_name(name) && !losers.contains(*name))
         .map(|name| (&name[..name.len() - 4], name.as_str()))
         .collect();
-    // What rule v1 reads: the names a request reaches (a shadowed spelling is none).
+    // What rule v1 reads: the names a request reaches, and every shadowed archive. A
+    // shadowed archive is no volume here, but the files its exact stem names stay its
+    // own (as the OCR walk and the writers read them), never the volume's that shadows
+    // it.
     let listed: Vec<&str> = sorted_names
         .iter()
         .map(|name| name.as_str())
-        .filter(|name| !losers.contains(*name))
+        .filter(|name| !losers.contains(*name) || crate::sidecar::is_cbz_name(name))
         .collect();
     let folder = Folder::new(&listed);
     let mut volumes = Vec::new();
@@ -222,7 +225,9 @@ fn scan_dir(
 
 /// Scan the whole library tree once (`_scan_library`): a top-down walk,
 /// sibling directories by name, hidden directories (and their subtrees)
-/// skipped, symlinked directories listed but not descended.
+/// skipped, symlinked directories listed but not descended. A top-level folder spelled
+/// like a per-user name (`history/`, `History/`: the cloud-root owner's own tree, or a
+/// legacy folder) is never a series, as in the compiled catalog.
 pub fn scan_library(library_path: &Path) -> LibrarySnapshot {
     let mut snapshot = LibrarySnapshot::default();
     if !fsutil::is_dir(library_path) {
@@ -233,6 +238,9 @@ pub fn scan_library(library_path: &Path) -> LibrarySnapshot {
     while let Some((dir, name)) = stack.pop() {
         let subdirs = scan_dir(&dir, &name, &mut snapshot);
         for (child, path) in subdirs.into_iter().rev() {
+            if name == "." && bunko_core::reader_tree::is_per_user_root_name(&child) {
+                continue;
+            }
             if bunko_store::fs::symlink_metadata(&path)
                 .is_ok_and(|meta| meta.file_type().is_symlink())
             {
@@ -254,6 +262,9 @@ pub fn scan_library(library_path: &Path) -> LibrarySnapshot {
 /// folder on the way) or would not list it (no volumes).
 fn scan_one_series(library_path: &Path, name: &str) -> Option<SeriesSnapshot> {
     let mut dir = library_path.to_path_buf();
+    if bunko_core::reader_tree::is_per_user_root_name(name.split('/').next().unwrap_or("")) {
+        return None;
+    }
     for part in name.split('/') {
         if part.is_empty() || part == "." || part == ".." || part.starts_with('.') {
             return None;
