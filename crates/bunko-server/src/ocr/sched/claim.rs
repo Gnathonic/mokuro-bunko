@@ -41,6 +41,9 @@ impl From<&PageSuffixes> for Suffixes {
     }
 }
 
+/// The most page-suffix reads asked of a helper at a time (remote store).
+pub const SUFFIX_BATCH: usize = 8;
+
 /// The pseudo row id upgrade jobs are ordered under: after every real row.
 pub const UPGRADE_ORDER_KEY: &str = "\u{10FFFF}upgrade";
 
@@ -354,7 +357,14 @@ impl Scheduler {
         if self.remote_library() {
             // Only an owed volume keeps them: anything else would be asked for again
             // and again.
-            if self.owed.volumes.contains_key(rel) && !self.suffixes_failed.contains(rel) {
+            // At most a batch is asked for at a time, in the order the volumes were
+            // looked at (claim priority): an older processor facing a long backlog of
+            // unknown volumes is offered the first it reads after one batch, not after
+            // the whole backlog; the next pass asks for the next ones.
+            if self.suffixes_wanted.len() < SUFFIX_BATCH
+                && self.owed.volumes.contains_key(rel)
+                && !self.suffixes_failed.contains(rel)
+            {
                 self.suffixes_wanted.insert(rel.to_string());
             }
             return Suffixes::Wait;
@@ -370,23 +380,31 @@ impl Scheduler {
     }
 
     /// Read the page suffixes `machine_reads` asked for, on a helper thread (one batch
-    /// at a time; called at the end of every pump).
+    /// of at most [`SUFFIX_BATCH`] at a time, in the order asked; called at the end of
+    /// every pump). Each batch answers on its own, so the lanes look again after it.
     pub(super) fn start_suffix_reads(&mut self) {
         if self.suffixes_reading || self.suffixes_wanted.is_empty() || self.stopping {
             return;
         }
         self.suffixes_reading = true;
         let library = self.library();
-        let rels: Vec<String> = std::mem::take(&mut self.suffixes_wanted)
-            .into_iter()
-            .collect();
+        let n = self.suffixes_wanted.len().min(SUFFIX_BATCH);
+        let rels: Vec<String> = self.suffixes_wanted.drain(..n).collect();
         self.run_background(Box::new(move || {
             let read = rels
                 .into_iter()
                 .map(|rel| {
                     let path = library.join(&rel);
                     let stamp = stamp_of(&path);
-                    let read = read_page_suffixes(&path).map_err(|e| e.to_string());
+                    // A panic on a malformed archive must still answer, or no read
+                    // would start again and the scan would never end: the volume is
+                    // then judged by the claim's own checks, as a damaged one is.
+                    let read = std::panic::catch_unwind(|| read_page_suffixes(&path))
+                        .unwrap_or_else(|_| {
+                            tracing::warn!("reading the page formats of {rel} panicked");
+                            Ok(PageSuffixes::Unreadable)
+                        })
+                        .map_err(|e| e.to_string());
                     (rel, stamp, read)
                 })
                 .collect();

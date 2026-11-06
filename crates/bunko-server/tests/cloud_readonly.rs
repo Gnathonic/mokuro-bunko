@@ -1343,3 +1343,73 @@ fn a_cloud_volumes_page_formats_are_read_off_the_actor() {
         "the actor read an archive"
     );
 }
+
+/// An older processor facing a long backlog of cloud volumes whose page formats are not
+/// known yet is offered the first it reads after one helper batch
+/// ([`bunko_server::ocr::sched::SUFFIX_BATCH`] reads), not after the whole backlog has
+/// been read, and the batch reports on its own.
+#[test]
+fn an_older_processor_is_offered_work_after_one_batch_of_page_format_reads() {
+    use bunko_server::ocr::sched::SUFFIX_BATCH;
+    const BACKLOG: usize = 40;
+    let c = cloud_sched();
+    let fake = c.remote.backend().clone();
+    for i in 0..BACKLOG {
+        fake.reader_put(
+            &format!("{ROOT}/Backlog/Vol {:02}.cbz", i + 1),
+            &cbz_of(3, "jpg"),
+        );
+    }
+    c.remote.feed().poll_now();
+    let last = c
+        .layout
+        .library()
+        .join(format!("Backlog/Vol {BACKLOG:02}.cbz"));
+    eventually_sync("the backlog in the index", || {
+        bunko_store::fs::is_file(&last)
+    });
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (mut sched, _clock) = sched_with(&c.layout, Exec::Threads(tx), Arc::new(CachedCounts));
+    sched.handle(Msg::Tick);
+    while sched.walks == 0 {
+        let msg = rx
+            .recv_timeout(Duration::from_secs(20))
+            .expect("a helper's answer");
+        sched.handle(msg);
+    }
+    assert!(
+        sched.owed.volumes.len() > BACKLOG,
+        "{:?}",
+        sched.owed.volumes.keys()
+    );
+    fake.reset_calls();
+
+    let (_, mut old) = connect(&mut sched, "old", 2, "0.7.4");
+    assert!(volume_ops(&drain(&mut old)).is_empty());
+    assert!(sched.suffixes_reading, "a batch is being read");
+    assert!(sched.suffixes_wanted.len() <= SUFFIX_BATCH);
+    // The first batch's answer arrives once its reads are done; the next batch cannot
+    // start before the actor has taken it, so the read log holds that batch only.
+    let batch = loop {
+        let msg = rx
+            .recv_timeout(Duration::from_secs(20))
+            .expect("a helper's answer");
+        if let Msg::PageSuffixesRead(read) = &msg {
+            let n = read.len();
+            sched.handle(msg);
+            break n;
+        }
+        sched.handle(msg);
+    };
+    assert!((1..=SUFFIX_BATCH).contains(&batch), "batch of {batch}");
+    let read: std::collections::HashSet<_> =
+        fake.read_log().iter().map(|r| r.pid.clone()).collect();
+    assert!(
+        read.len() <= SUFFIX_BATCH,
+        "{} archives read before the first offer",
+        read.len()
+    );
+    let got = volume_ops(&drain(&mut old));
+    assert!(!got.is_empty(), "offered nothing after the first batch");
+    assert!(sched.failures.is_empty());
+}

@@ -19,7 +19,7 @@ mod session;
 mod settle;
 mod status;
 
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -45,7 +45,7 @@ use super::types::{Job, LibraryFacts, PathLocks};
 
 pub use availability::availability_of;
 pub use bench::{BenchRequest, BenchState, cpu_label, physical_cores};
-pub use claim::{catalog_can_run, supported_for};
+pub use claim::{SUFFIX_BATCH, catalog_can_run, supported_for};
 pub use registry::{
     FailedLogin, Machine, PublicNames, RegisterInput, RegisterOutcome, SocketRefusal, TransferStats,
 };
@@ -358,8 +358,9 @@ pub struct Scheduler {
     pub eft_deadlines: EftDeadlines<Job>,
     pub left_logged: HashSet<(Job, String)>,
     /// Volumes whose page suffixes `machine_reads` wants read on a helper thread (a
-    /// remote store; they are kept on the owed volume, [`OwedVolume::page_suffixes`]).
-    pub suffixes_wanted: BTreeSet<String>,
+    /// remote store; they are kept on the owed volume, [`OwedVolume::page_suffixes`]),
+    /// in the order asked (claim priority), at most [`SUFFIX_BATCH`].
+    pub suffixes_wanted: indexmap::IndexSet<String>,
     /// A helper is reading page suffixes ([`Msg::PageSuffixesRead`]).
     pub suffixes_reading: bool,
     /// Volumes whose suffixes could not be read; asked again after the next walk.
@@ -448,7 +449,7 @@ impl Scheduler {
             returned_by: HashMap::new(),
             eft_deadlines: EftDeadlines::new(),
             left_logged: HashSet::new(),
-            suffixes_wanted: BTreeSet::new(),
+            suffixes_wanted: indexmap::IndexSet::new(),
             suffixes_reading: false,
             suffixes_failed: HashSet::new(),
             unreadable_logged: HashSet::new(),
