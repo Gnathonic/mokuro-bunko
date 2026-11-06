@@ -295,29 +295,53 @@ impl Roots {
         }
     }
 
-    /// The spelling of the per-user root name `canonical` under `base`: the listed
-    /// entry that folds like it under `users/<u>/`, else `canonical`. Always `canonical`
-    /// in the library root (the cloud-root owner's base). Blocking (one listing).
+    /// The spelling of the per-user root name `canonical` under `base`: `canonical`
+    /// itself when `users/<u>/` lists it so (the file Bunko has always written; a stray
+    /// `Goals.json` made beside it outside Bunko is left alone), else the listed entry
+    /// that folds like it (the one a request reaches, when several do), else
+    /// `canonical`. Always `canonical` in the library root (the cloud-root owner's
+    /// base). From the listing: the same on every host. Blocking (one listing).
     fn per_user_name(&self, base: &Path, canonical: &str) -> String {
         if base == self.library {
+            return canonical.to_string();
+        }
+        let Some((entries, _)) = crate::path_case::listed_groups(base, false) else {
+            return canonical.to_string();
+        };
+        if entries.iter().any(|(n, _)| n == canonical) {
             return canonical.to_string();
         }
         crate::path_case::on_disk_name(base, canonical, false)
             .unwrap_or_else(|| canonical.to_string())
     }
 
-    /// Is the per-user path `phys` (below `caller`'s base) listed exactly as spelled, each
-    /// segment the entry its folder lists ([`crate::path_case::reachable_as_spelled`])?
+    /// Is the per-user path `phys` (below `caller`'s base) listed exactly as spelled:
+    /// its per-user name the one [`Self::per_user_name`] picks, and every segment below
+    /// it the entry its folder lists ([`crate::path_case::reachable_as_spelled`])?
     /// Whether a per-user file exists, decided from the listings: the cloud-root owner's
     /// `goals.json` beside a listed `Goals.json` does not exist on any host.
     fn per_user_listed(&self, caller: Caller<'_>, phys: &Path) -> bool {
         let Some(base) = self.user_base(caller) else {
             return false;
         };
-        match paths::relative_posix(phys, &base) {
-            Some(rel) => crate::path_case::reachable_as_spelled(&base, &rel, false),
-            None => false,
+        let Some(rel) = paths::relative_posix(phys, &base) else {
+            return false;
+        };
+        let (first, rest) = rel.split_once('/').unwrap_or((rel.as_str(), ""));
+        if base == self.library {
+            return crate::path_case::reachable_as_spelled(&base, &rel, false);
         }
+        let Some(canonical) = reader_tree::canonical_per_user_rel(first) else {
+            return false;
+        };
+        let canonical = canonical.trim_matches('/');
+        if self.per_user_name(&base, canonical) != first
+            || !crate::path_case::listed_groups(&base, false)
+                .is_some_and(|(entries, _)| entries.iter().any(|(n, _)| n == first))
+        {
+            return false;
+        }
+        crate::path_case::reachable_as_spelled(&base.join(first), rest, false)
     }
 
     /// Library-relative `/`-path of a physical path, or `None` when outside the library
