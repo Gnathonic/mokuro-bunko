@@ -493,16 +493,29 @@ mod tests {
     #[test]
     fn an_unlistable_root_leaves_the_owner_unknown() {
         use std::os::unix::fs::PermissionsExt;
-        let (_dir, _db, backend) = owned_library();
+        let (_dir, db, backend) = owned_library();
         let root = backend.layout.library();
+        bunko_store::fs::create_dir_all(root.join("Dr Stone")).unwrap();
+        db.record_series_folder_owner("Dr Stone", "alice").unwrap();
         // Searchable (`S/` is still reached by name) but not listable.
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o311)).unwrap();
         let listable = bunko_store::fs::read_dir(&root).is_ok(); // root reads anything
-        let variant = decide(&backend, "PUT", "/mokuro-reader/s/W.cbz", "bob");
+        // A case-insensitive filesystem (APFS, NTFS) reaches `S/` by the name `s`.
+        let folds_case = bunko_store::fs::is_dir(root.join("s"));
+        // No filesystem folds a run of spaces: only the root listing would find this.
+        let variant = decide(&backend, "PUT", "/mokuro-reader/Dr  Stone/W.cbz", "bob");
+        let case_only = decide(&backend, "PUT", "/mokuro-reader/s/W.cbz", "bob");
         let named = decide(&backend, "PUT", "/mokuro-reader/S/W.cbz", "bob");
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
         if !listable {
             assert_eq!(variant, Some((503, Some(10))));
+            // Reached by name it is `S/` itself, alice's; otherwise only listing tells.
+            let case_only_expected = if folds_case {
+                (403, None)
+            } else {
+                (503, Some(10))
+            };
+            assert_eq!(case_only, Some(case_only_expected));
             assert_eq!(named, Some((403, None)));
         }
     }
