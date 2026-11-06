@@ -128,6 +128,13 @@
     // State
     // ------------------------------------------------------------------
 
+    // The anonymous visitors' row: where its expanded state is kept, and how
+    // many visitors it lists. Declared before `state`, whose literal reads
+    // the key at load (a `const` read before its line throws).
+    const ANON_OPEN_KEY = 'bunko.analytics.anonExpanded';
+    const ANON_LIST_MAX = 100;
+    const ANON_OVERVIEW_MAX = 10;
+
     const state = {
         view: 'overview',
         range: '30d',
@@ -155,9 +162,6 @@
     // "anon_group"`, `visitors`: how many) in the bandwidth lists; the row
     // expands to each visitor (`principals?anon=only`). Display only: every
     // count elsewhere stays per visitor.
-    const ANON_OPEN_KEY = 'bunko.analytics.anonExpanded';
-    const ANON_LIST_MAX = 100;
-    const ANON_OVERVIEW_MAX = 10;
 
     function anonOpenPref() {
         try {
