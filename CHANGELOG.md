@@ -76,23 +76,48 @@
   library as on a cloud one.
 - **Series have owners, and an uploader controls only what is its own.** The account
   that creates a series folder owns it. An `uploader` account can no longer add files
-  or folders to a series another account owns; it adds new volumes to a series nobody
+  or folders to a series another account owns, in any spelling of the folder that
+  reaches it (`STRASSE/` for an owned `Straße/`); it adds new volumes to a series nobody
   owns, as before. It can no longer add or replace a cover, an OCR file, a layer file
-  or an archive named after a volume it did not upload, unless it owns the series:
-  the series owner controls every volume in it, whoever added it, and may delete it
-  and the series folder. Its own corrections (`<Volume>.edit.mokuro`) stay its own
-  everywhere. No uploader adds an archive named like a volume's correction or curated
+  or an archive named after a volume it did not upload, unless it owns the series. A
+  file is named after a volume by sidecar names rule v1 and by the wider filename fold
+  alike (`STRASSE.webp` and `Vol1.mokuro` with a zero width space in it are named
+  after `Straße.cbz` and `Vol1.cbz`), and an uploader must control every volume either
+  names. The series owner may add, replace and delete any file in the series, whoever
+  added its volume, and may delete the series folder, but for a case-variant group
+  frozen there (409 for everyone) and the accounts' own corrections
+  (`<Volume>.edit.mokuro`), which stay each account's own everywhere. No uploader adds an archive named like a volume's correction or curated
   layer (`V.edit.cbz`, `V.curated.cbz` beside `V.cbz`), that volume's own uploader
   included. Editors and admins are not limited. This closes a way for an uploader to
   take over another account's volume with an archive named after it (`V.curated.cbz`
   beside `V.cbz`, or `Title.cbz` beside `Title.v01.cbz`).
 - **`series.json` updates need the series' owner.** An uploader may submit them only
   for a series it owns; being the only uploader of every volume in it is no longer
-  enough.
+  enough. A `series.json` update for a series folder a case-variant group freezes (a
+  member folder, or a `series.json` listed in two spellings) answers 409, as WebDAV
+  writes there do.
+- **`series.json` and `catalog.json` are recognised in every spelling the filename
+  fold joins**, not only in any ASCII case: `ſeries.json`, `series` + a zero width
+  space + `.json`, `CATALOG.json` with a variation selector are those files on every
+  host, so a PUT of one is a metadata update (or refused as compiled) and never makes
+  a raw file the compiler then reads as the series' facts.
+- **No name the filename fold ties to a volume's files without rule v1 doing so is
+  written.** Every host makes `STRASSE.mokuro` one name with `Straße.mokuro`, the OCR
+  file of a listed `Straße.cbz` (likewise `ı.webp` beside `i.cbz`, a non-final `σ`
+  beside a final `Σ`, a name with a default-ignorable character in it, a layer id in
+  another case: `V.EDIT.mokuro`), but sidecar names rule v1 does not give it to that
+  volume. A PUT, MKCOL, PROPPATCH or LOCK of such a name, or a COPY or MOVE onto it,
+  answers 409 (`ambiguous-name` in a PUT's verdict) for every account; so does an
+  archive whose own files by the fold would be listed names rule v1 does not give it
+  (`Straße.cbz` beside a `STRASSE.mokuro`), and a name only the fold gives a `.cbz`,
+  `.mokuro`, `.mokuro.gz`, `.webp` or `.nocover` ending (`V.mo` + a Kelvin sign +
+  `uro`). Reads, DELETE and a MOVE away still work on one already there.
 - **Existing series get owners once, at startup.** A series folder whose volumes were
   all uploaded by one account, with no archive without a recorded uploader, becomes
   that account's. Every other folder (volumes from several accounts, archives copied
-  in by hand, empty) has no owner and stays shared. Until this is done, an uploader's
+  in by hand, empty, and a folder listed at the root beside another spelling of its
+  name, `Kingdom/` beside `kingdom/` or `Straße/` beside `STRASSE/`, whose uploaders
+  are counted together and which is frozen anyway) has no owner and stays shared. Until this is done, an uploader's
   new files and folders are answered "try again shortly" (503); on a cloud library it
   is done once the first sync finishes (a library that is not connected holds nothing
   back and is done at a later start). A database upgraded from 0.7 records schema

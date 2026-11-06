@@ -258,7 +258,10 @@ volume whose name would take one of the set's files as its own (`V.edit.cbz` bes
 held `V.edit.mokuro`). Reads still work: the spelling in use is served as before. Bunko itself does
 no OCR, no upgrade, no cover, `.nocover` or orphan clean-up there, deletes no corrupt
 sidecar there, moves no old correction out of it, writes no `series.json` into a member
-folder and changes none of its upload, OCR or identity records. So `Kingdom/` beside
+folder (and a `series.json` update for one answers 409), gives no member series folder
+an owner at the first 0.8 start (a series split across `Kingdom/` and `kingdom/` stays
+shared, as one with volumes from several accounts does) and changes none of its upload,
+OCR, identity or owner records. So `Kingdom/` beside
 `kingdom/` gets no new volumes, OCR or corrections until the merge, and `Vol.cbz`
 beside `VOL.mokuro` and `vol.mokuro` is held too (deleting it would delete one of
 them). Merge them while the server is stopped: move each volume with all its files
@@ -268,7 +271,13 @@ apart; the next metadata pass picks them up. Upload ownership and OCR records ar
 by path, so a merged volume needs its `volume_uploads`, `ocr_sidecars` and
 `volume_identities` rows renamed too (an ownership lookup that misses follows a row of
 another spelling only once that spelling is no longer listed as an entry of its own,
-and the OCR and identity rows do not follow at all). Move each account's corrections
+and the OCR and identity rows do not follow at all). Merging series folders, reconcile
+their `series_folder_owners` rows as well: rows are keyed by the series' lowercase name
+(`series_key`), so `Kingdom/` and `kingdom/` share one, but `Straße/` and `STRASSE/`
+have one each. Keep at most one row for the merged folder, with its `folder_name` the
+spelling you kept and its `owner_username` the account that should own it (delete the
+row to leave the series shared, as adoption left it), and delete the row of the
+spelling that went. Move each account's corrections
 from `users/<u>/edits/<hidden spelling>/` to the folder in use the same way. Its
 uploader cannot fix that by uploading it again if they have only the Uploader role
 (the upload over the merged file is refused) unless an admin, editor or inviter deletes
@@ -278,9 +287,16 @@ case-only rename left when it was interrupted, with the rename that finishes it.
 Sidecar names rule v1 (which files are a volume's, shared with Mokuro Reader) is
 unchanged: stems compare up to NFC and lowercase, layer ids exactly. A file that is
 one name with a volume's OCR, cover or layer file only by the wider fold
-(`STRASSE.mokuro` beside `Straße.cbz`) or only by the case of the layer id
-(`Vol.FAST.mokuro`) is not that volume's; Bunko writes no such file beside it either
-(it would be a second spelling), so that volume is owed none. Rename such a file to
+(`STRASSE.mokuro` beside `Straße.cbz`; `Vol1.webp` with a zero width space after
+`Vol`, beside `Vol1.cbz`) or only by the case of the layer id (`Vol.FAST.mokuro`) is not that
+volume's; Bunko writes no such file beside it either (it would be a second spelling),
+so that volume is owed none. 0.8 no longer makes such a file: a PUT, MKCOL, PROPPATCH
+or LOCK of one, or a COPY or MOVE onto one, answers 409 (`ambiguous-name`) for every
+account, and so does an archive whose own files would be such names (`Straße.cbz`
+beside `STRASSE.mokuro`) and a name that only the wider fold gives a `.cbz`, `.mokuro`,
+`.webp` or `.nocover` ending. For who may write or delete such a file it counts as the
+volume's: an uploader needs control of that volume, as for its own files. One already
+there (made by hand or before 0.8) stays readable and deletable. Rename such a file to
 the volume's exact stem and a lowercase id to have it count.
 
 Series folders spelled like a reader's per-user name (`history`, `History`,
