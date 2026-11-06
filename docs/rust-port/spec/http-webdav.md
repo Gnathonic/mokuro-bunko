@@ -737,9 +737,11 @@ existence is decided from the listings: every segment must be listed exactly as 
 entry a request for it reaches (`path_case::reachable_as_spelled`), else `None`, never by opening the
 requested spelling (so `Vol 2.cbz` beside a listed `vol 2.cbz` is missing on APFS, NTFS and casefold
 too, and a hidden entry, below, is missing for everyone). A per-user path (`Target::Progress`) is
-found the same way: under `users/<u>/` its per-user name is the entry that folder lists in any
-spelling (a `Goals.json` made there outside Bunko is the account's `goals.json`, read and written
-under its own spelling), and each segment must be listed exactly so; in the cloud-root owner's
+found the same way: under `users/<u>/` its per-user name is the canonical one when that folder lists
+it so (a stray `Goals.json` made beside `goals.json` outside Bunko is left alone, never read or
+written), else the entry it lists in another spelling (a `Goals.json` alone is the account's
+`goals.json`, read and written under its own spelling), and each segment must be listed exactly so;
+in the cloud-root owner's
 folder the name is the canonical one, so a listed `Goals.json` is not found there on any host.
 
 Per-user isolation: two users PUT/GET the same URL and get different files. `users/<username>` is
@@ -784,10 +786,15 @@ auth gate (4.3 step 5/6, 4.4 steps 2-3).
   (`STRASSE.mokuro` beside `Straße.cbz`), and everything inside a member folder. A PUT, DELETE,
   MKCOL, COPY, MOVE, PROPPATCH or LOCK whose target, COPY/MOVE source or destination is frozen, in
   any folder on the way, answers `409 Conflict` before anything else in DAV (after PathCase and the
-  auth gate), its body naming the folder and the members and pointing to doctor and MIGRATING-0.7's
+  auth gate), as spelled and where the handler would write it (the physical path the request
+  resolves to: a `.` segment, `%2E` included, stays in its folder, symlinks are followed, `\` is a
+  separator on Windows; a `..` segment is held, never "not frozen"), its body naming the folder and the members and pointing to doctor and MIGRATING-0.7's
   manual merge (`methods::frozen_refusal`); so does a DELETE, COPY or MOVE of a folder holding a group
-  anywhere below it, and a COPY or MOVE onto one. A correction (overlay) of a frozen archive's name
-  answers 409 too. Reads (GET, HEAD, PROPFIND) are unchanged: the winner is served, the losers stay
+  anywhere below it, and a COPY or MOVE onto one (checked again under the folder's write lock). A
+  new archive whose own files rule v1 (rule 4: an exact stem is the archive's primary) would take one
+  the group holds or hides is frozen too (`V.edit.cbz` beside a frozen `V.cbz`'s `V.edit.mokuro`,
+  `v.hayai.cbz` beside a hidden `v.cbz`'s `v.hayai.mokuro`): writing it would move that file out of
+  the group. A correction (overlay) of a frozen archive's name answers 409 too. Reads (GET, HEAD, PROPFIND) are unchanged: the winner is served, the losers stay
   hidden. Decided from the folder listings alone, the same on every host; a case-insensitive disk can
   hold no group, so nothing is frozen there.
 * `OSError` while listing -> empty list.

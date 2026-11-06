@@ -252,8 +252,10 @@ Each set is **frozen** until you merge it: nothing changes in it, through any sp
 Every member, the one in use included, every file the reader's naming rule gives (or
 would give) to an archive of the set, and everything inside a member folder: a PUT,
 DELETE, MKCOL, COPY, MOVE (from or onto), PROPPATCH or LOCK of any of them answers 409
-with the set's names, and so does a DELETE, COPY or MOVE of a folder holding a set, or
-onto one. Reads still work: the spelling in use is served as before. Bunko itself does
+with the set's names, however the path is spelled (`S/./V.mokuro` too), and so does a
+DELETE, COPY or MOVE of a folder holding a set, or onto one, and an upload of a new
+volume whose name would take one of the set's files as its own (`V.edit.cbz` beside a
+held `V.edit.mokuro`). Reads still work: the spelling in use is served as before. Bunko itself does
 no OCR, no upgrade, no cover, `.nocover` or orphan clean-up there, deletes no corrupt
 sidecar there, moves no old correction out of it, writes no `series.json` into a member
 folder and changes none of its upload, OCR or identity records. So `Kingdom/` beside
@@ -287,7 +289,8 @@ and the catalog alike: those names are each account's own files in every spellin
 Nothing is done to them either (no OCR, covers, clean-up or correction adoption).
 Doctor names them; rename them (for example to `History (series)`). An account's own
 `Goals.json` or `History/` under `users/<u>/` (made there by hand) is its `goals.json`
-or `history/`, kept in its spelling. In a cloud
+or `history/`, kept in its spelling, while it is the only spelling there; beside the
+`goals.json` or `history/` Bunko wrote, it is a stray Bunko leaves alone (delete it). In a cloud
 library the progress user's reading history and settings are the cloud folder's
 `history/`, `goals.json`, ...; while the folder holds one only in another spelling (a
 `History/` from 0.7), the progress user's writes to it answer 409 until it is renamed.

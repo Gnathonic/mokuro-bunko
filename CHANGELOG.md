@@ -31,8 +31,10 @@
   files are such a set: `Vol.cbz` beside `VOL.mokuro` and `vol.mokuro`), and everything
   inside a member folder. A PUT, DELETE, MKCOL, COPY, MOVE (from or onto), PROPPATCH or
   LOCK of any of them answers 409 naming the set, new names included (`v.mokuro.gz`,
-  `V.hayai.mokuro`, an account's `V.edit.mokuro`), and so does a DELETE, COPY or MOVE of
-  a folder holding a set, or onto one (a MOVE of such a folder no longer takes it
+  `V.hayai.mokuro`, an account's `V.edit.mokuro`, and a new volume whose own files would
+  take one of the set's: `V.edit.cbz` beside a held `V.edit.mokuro`), however the path
+  spells it (`S/./V.mokuro` and `%2E` segments too), and so does a DELETE, COPY or MOVE
+  of a folder holding a set, or onto one (a MOVE of such a folder no longer takes it
   along). Bunko itself does nothing there either: no OCR is owed or installed, no
   upgrade, no cover or `.nocover`, no orphan, kept-layer or corrupt-sidecar sweep, no
   correction adoption, no `series.json`, and no upload, OCR or identity record is
@@ -43,7 +45,10 @@
   file that is one name with a volume's OCR, cover or layer file only by the wider
   fold (`STRASSE.mokuro` beside `Straße.cbz`) or only by the id's case
   (`Vol.FAST.mokuro`) is not that volume's, and Bunko writes none beside it either (it
-  would be a second spelling): that volume owes no such OCR or cover.
+  would be a second spelling): that volume owes no such OCR or cover. A folder spelled
+  like a volume's OCR file or cover (`v.MOKURO/` beside `V.cbz`) takes that name the
+  same way. Whether a volume has a cover or a `.nocover` marker, and the cover size in
+  `series.json`, come only from a file its folder lists for it.
 - **The reader's per-user names are reserved in any spelling.** `History/`,
   `Goals.json`, `Volume-Data.json` and the like are the caller's own `history/`,
   `goals.json` and `volume-data.json`, never library paths. A series folder spelled
@@ -54,7 +59,9 @@
   spelling (a `History/` from 0.7), that entry is the name, and the progress user's
   writes to it are refused (409) until it is renamed, never written beside it. Under
   `users/<u>/` a `Goals.json` or `History/` made by hand is the account's own
-  `goals.json` or `history/`, read and written in its spelling, on every host. Nothing
+  `goals.json` or `history/`, read and written in its spelling, on every host, while it
+  is the only spelling there; beside the `goals.json` or `history/` Bunko wrote it is a
+  stray, never read or written. Nothing
   Bunko does on its own touches a series spelled like a per-user name (no OCR, covers,
   sweeps or correction adoption).
 - **No `thumbnails/` folder in the library.** Every start made an empty
@@ -396,6 +403,12 @@
 - **A volume's cover and `.nocover` marker are written under the WebDAV write lock of
   their name**, as OCR results are: a client writing the cover in another spelling at
   that moment no longer races Bunko into a second spelling or an overwrite.
+- **A client's upload that lands while Bunko waits for its write lock stays.** An OCR
+  result, the upgrade's swap and edited-main layer, the numbered-OCR clean-up and a
+  stale `.nocover` removal decide again under the lock from a fresh folder listing: an
+  OCR file the client uploaded meanwhile, in any spelling, is kept and the result is
+  discarded (the clean-up replaced it with the numbered copy, and on a case-sensitive
+  disk an OCR result was written beside it in a second spelling).
 - **A folder holding two spellings of a volume, moved in the cloud, keeps both
   uploaders' records** (the first volume's move deleted the other spelling's record).
 - **Layers an earlier beta's upgrade kept are found through the folder listings** at
