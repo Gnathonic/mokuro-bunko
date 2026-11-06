@@ -517,11 +517,15 @@ async fn background_passes(env: &Env) {
     env.services.library.recompile_all_now().await;
 }
 
-/// The DAV write matrix. Every answer must be 409.
+/// The freeze's own refusal ([`bunko_core::fold_groups::Frozen::describe`]): any other
+/// 409 (a lock, a missing parent) would say nothing about the freeze.
+const FROZEN: &str = "lists case variants of one name";
+
+/// The DAV write matrix. Every answer must be the freeze's 409.
 async fn every_write(env: &Env) -> Vec<String> {
     let mut wrong = Vec::new();
     let mut check = |what: String, (code, body): (u16, String)| {
-        if code != 409 {
+        if code != 409 || !body.contains(FROZEN) {
             wrong.push(format!("{what}: {code} {body}"));
         }
     };
@@ -631,6 +635,21 @@ async fn every_write(env: &Env) -> Vec<String> {
                 .await,
             );
         }
+    }
+    // A `series.json` update of a member folder (a request to the compiler, handled
+    // before WebDAV), in any spelling of the folder or the name.
+    for rel in [
+        "Kingdom/series.json",
+        "kingdom/series.json",
+        "KINGDOM/Series.JSON",
+        "Kingdom/\u{17F}eries.json",
+    ] {
+        let path = format!("/mokuro-reader/{rel}");
+        check(
+            format!("PUT {rel}"),
+            env.send("admin", "PUT", &path, &[], br#"{"title":"K"}"#)
+                .await,
+        );
     }
     // An account's own corrections of either spelling (its overlay).
     for rel in ["S/V.edit.mokuro", "S/v.edit.mokuro", "S/V.edit-2.mokuro"] {

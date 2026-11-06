@@ -289,11 +289,16 @@ pub fn is_compiled_metadata_path(path: &str) -> bool {
     if rel.is_empty() || reader_tree::is_per_user_rel(rel) {
         return false;
     }
-    if rel.eq_ignore_ascii_case("catalog.json") {
-        return true;
-    }
+    // Every spelling the filename fold joins (`ſeries.json`, `catalog\u{200B}.json`):
+    // every host makes them one file with the compiled one.
     let parts: Vec<&str> = rel.split('/').collect();
-    parts.len() == 2 && !parts[0].trim().is_empty() && parts[1].eq_ignore_ascii_case("series.json")
+    match parts.as_slice() {
+        [name] => bunko_core::names::is_fixed_name(name, "catalog.json"),
+        [series, name] => {
+            !series.trim().is_empty() && bunko_core::names::is_fixed_name(name, "series.json")
+        }
+        _ => false,
+    }
 }
 
 /// `posixpath.normpath("/" + p.strip("/"))`.

@@ -38,18 +38,20 @@ pub fn library_relative(virtual_path: &str) -> Option<String> {
     Some(relative.to_owned())
 }
 
-/// True for the ROOT `catalog.json` only (case-insensitive).
+/// True for the ROOT `catalog.json` only, in any spelling the filename fold joins
+/// (`bunko_core::names::is_fixed_name`).
 pub fn is_catalog_file_path(virtual_path: &str) -> bool {
-    library_relative(virtual_path)
-        .is_some_and(|relative| pyunicode::lower(&relative) == CATALOG_FILE_NAME)
+    library_relative(virtual_path).is_some_and(|relative| {
+        !relative.contains('/') && bunko_core::names::is_fixed_name(&relative, CATALOG_FILE_NAME)
+    })
 }
 
 /// `/mokuro-reader/<Series>/series.json` -> `<Series>` (exactly one folder
-/// level, file name case-insensitive, non-blank series).
+/// level, file name in any spelling the filename fold joins, non-blank series).
 pub fn series_title_from_series_file_path(virtual_path: &str) -> Option<String> {
     let relative = library_relative(virtual_path)?;
     let (head, tail) = relative.rsplit_once('/')?;
-    if pyunicode::lower(tail) != SERIES_FILE_NAME
+    if !bunko_core::names::is_fixed_name(tail, SERIES_FILE_NAME)
         || head.contains('/')
         || pyunicode::strip(head).is_empty()
     {

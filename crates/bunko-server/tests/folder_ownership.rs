@@ -832,3 +832,55 @@ async fn an_owned_series_is_closed_in_every_spelling_the_fold_joins() {
     assert_eq!(r.status, 403, "{}", r.text());
     assert!(names(&env.lib("Stra\u{df}e")).is_empty());
 }
+
+/// `series.json` and `catalog.json` are recognised in every spelling the filename fold
+/// joins (`ſeries.json`, `series\u{200B}.json`, `catalog\u{200B}.json`): every host makes
+/// them one file with the compiled one. An account without the metadata right gets no
+/// raw file of such a name; an update goes to the compiler as one to `series.json`.
+#[tokio::test]
+async fn compiled_files_are_recognised_in_every_spelling_the_fold_joins() {
+    let env = Env::new();
+    std::fs::create_dir_all(env.lib("T")).unwrap();
+    let r = env.put("alice", "/mokuro-reader/T/Vol 1.cbz", cbz(1)).await;
+    assert_eq!(r.status, 201, "{}", r.text());
+    let update = br#"{"version":2,"series_title":"x","updated_at":"2026-10-31T00:00:00.000Z","external_ids":{},"titles":{},"synonyms":[]}"#;
+    for path in [
+        "/mokuro-reader/T/\u{17F}eries.json",
+        "/mokuro-reader/T/series\u{200B}.json",
+        "/mokuro-reader/T/SERIES\u{AD}.JSON",
+    ] {
+        let r = env.put("bob", path, update.to_vec()).await;
+        assert_eq!(r.status, 403, "{path:?}: {}", r.text());
+        assert!(
+            r.text().contains("cannot submit metadata updates"),
+            "{path:?}: {}",
+            r.text()
+        );
+        // An editor's is an update request to the compiler, never a raw write.
+        let r = env.put("editor", path, update.to_vec()).await;
+        assert!(
+            matches!(r.status, 204 | 400),
+            "{path:?}: {} {}",
+            r.status,
+            r.text()
+        );
+    }
+    for path in [
+        "/mokuro-reader/catalog\u{200B}.json",
+        "/mokuro-reader/CATALOG\u{FE0F}.json",
+    ] {
+        let r = env.put("bob", path, b"{}".to_vec()).await;
+        assert_eq!(r.status, 403, "{path:?}: {}", r.text());
+        assert!(r.text().contains("compiled by the server"), "{}", r.text());
+    }
+    let t = names(&env.lib("T"));
+    assert!(
+        t.iter().all(|n| n == "Vol 1.cbz" || n == "series.json"),
+        "{t:?}"
+    );
+    let root = names(&env.lib(""));
+    assert!(
+        root.iter().all(|n| n == "T" || n == "catalog.json"),
+        "{root:?}"
+    );
+}

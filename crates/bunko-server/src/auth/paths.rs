@@ -110,16 +110,22 @@ pub fn layer_id_of_path(path: &str) -> Option<String> {
     Some(id.to_string())
 }
 
-/// The ROOT `catalog.json` only (ASCII case-insensitive).
+/// The ROOT `catalog.json` only, in any spelling the filename fold joins
+/// (`bunko_core::names::is_fixed_name`: `CATALOG.json`, `catalog\u{200B}.json`).
 pub fn is_catalog_file_path(path: &str) -> bool {
-    library_relative_normalized(path).is_some_and(|r| r.eq_ignore_ascii_case("catalog.json"))
+    library_relative_normalized(path)
+        .is_some_and(|r| !r.contains('/') && bunko_core::names::is_fixed_name(&r, "catalog.json"))
 }
 
-/// `/mokuro-reader/<Series>/series.json` → `<Series>`.
+/// `/mokuro-reader/<Series>/series.json` → `<Series>`, the file name in any spelling the
+/// filename fold joins (`ſeries.json`, `series\u{200B}.json`).
 pub fn series_title_from_series_file_path(path: &str) -> Option<String> {
     let rel = library_relative_normalized(path)?;
     let (head, tail) = rel.rsplit_once('/')?;
-    if !tail.eq_ignore_ascii_case("series.json") || head.contains('/') || head.trim().is_empty() {
+    if !bunko_core::names::is_fixed_name(tail, "series.json")
+        || head.contains('/')
+        || head.trim().is_empty()
+    {
         return None;
     }
     Some(head.to_string())
@@ -242,6 +248,23 @@ mod tests {
         assert!(is_catalog_file_path("/mokuro-reader/catalog.json"));
         assert!(is_catalog_file_path("/mokuro-reader//CATALOG.json"));
         assert!(is_catalog_file_path("/mokuro-reader/x/../catalog.json"));
+        // Every spelling the filename fold joins, as every host makes them one file.
+        for p in [
+            "/mokuro-reader/catalog\u{200B}.json",
+            "/mokuro-reader/CATALOG\u{FE0F}.JSON",
+        ] {
+            assert!(is_catalog_file_path(p), "{p:?}");
+            assert!(is_compiled_metadata_path(p), "{p:?}");
+        }
+        for p in [
+            "/mokuro-reader/S/\u{17F}eries.json",
+            "/mokuro-reader/T/series\u{200B}.json",
+            "/mokuro-reader/T/SERIES\u{AD}.JSON",
+        ] {
+            assert!(is_series_file_path(p), "{p:?}");
+            assert!(is_compiled_metadata_path(p), "{p:?}");
+        }
+        assert!(!is_series_file_path("/mokuro-reader/T/series.json.bak"));
         assert!(!is_catalog_file_path("/mokuro-reader/S/catalog.json"));
         assert_eq!(
             series_title_from_series_file_path("/mokuro-reader/One Piece/series.json").as_deref(),

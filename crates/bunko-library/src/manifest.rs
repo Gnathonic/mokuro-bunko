@@ -196,7 +196,7 @@ pub fn build_volume_manifest(
     let series_file = names
         .iter()
         .copied()
-        .find(|n| n.eq_ignore_ascii_case(crate::paths::SERIES_FILE_NAME))
+        .find(|n| bunko_core::names::is_fixed_name(n, crate::paths::SERIES_FILE_NAME))
         .and_then(|name| Some((name, file_meta(&entries[name])?)));
 
     let entry_or_null = |item: Option<(&str, Meta)>| match item {

@@ -76,9 +76,34 @@ pub fn fold_name(name: &str) -> String {
         .collect()
 }
 
+/// Is `name` the fixed name `fixed` (`series.json`, `catalog.json`, a per-user name)
+/// in some spelling: one entry with it by the filename fold ([`fold_name`])? Every name
+/// the server treats specially is recognised this way, so `ſeries.json`,
+/// `SERIES.JSON` and `series\u{200B}.json`, which every host makes one file, are
+/// `series.json` everywhere it is checked.
+pub fn is_fixed_name(name: &str, fixed: &str) -> bool {
+    fold_name(name) == fold_name(fixed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::fold_name;
+
+    #[test]
+    fn fixed_names_are_recognised_in_every_spelling_the_fold_joins() {
+        for name in [
+            "series.json",
+            "Series.JSON",
+            "\u{17F}eries.json",
+            "series\u{200B}.json",
+            "SER\u{AD}IES.json",
+        ] {
+            assert!(super::is_fixed_name(name, "series.json"), "{name:?}");
+        }
+        for name in ["series.json.bak", "series_json", "serie.json", "seriesjson"] {
+            assert!(!super::is_fixed_name(name, "series.json"), "{name:?}");
+        }
+    }
 
     #[test]
     fn names_any_host_joins_fold_alike() {

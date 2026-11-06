@@ -1405,7 +1405,10 @@ impl<B: Backend> RemoteStore<B> {
         let trash = |vg: &str, n: &RNode, rel: RelPath| {
             let mut p = Planned::trash(vg, n, rel.clone());
             p.hooks = false;
-            if series_dir && !n.is_dir && nfc(&n.name_raw).eq_ignore_ascii_case("series.json") {
+            if series_dir
+                && !n.is_dir
+                && bunko_core::names::is_fixed_name(&nfc(&n.name_raw), "series.json")
+            {
                 p.kind = StepKind::Submit;
                 p.series = Some(rel);
             }
@@ -1961,7 +1964,9 @@ impl<B: Backend> RemoteStore<B> {
         };
         let series_dir = w.segments().len() == 1;
         let is_series = |n: &Named| {
-            series_dir && n.part == Part::Other && n.name.eq_ignore_ascii_case("series.json")
+            series_dir
+                && n.part == Part::Other
+                && bunko_core::names::is_fixed_name(&n.name, "series.json")
         };
         let wstem = wg
             .iter()
