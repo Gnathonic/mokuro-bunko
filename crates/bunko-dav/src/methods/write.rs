@@ -94,6 +94,11 @@ fn delete_resource(
             let Some(_guard) = inner.write_locks.try_lock(phys) else {
                 return Err(write_lock_conflict(req, target, "delete", None));
             };
+            // A hidden entry (a case variant, or a hidden archive's own file) is never
+            // deleted: the folder goes whole or not at all.
+            if crate::path_case::holds_hidden(phys) {
+                return Err(hidden_inside());
+            }
             fs::remove_dir_all(phys)?;
             if let Some(rel) = inner.roots.library_rel(phys).filter(|r| !r.is_empty()) {
                 req.ctx.hooks.forget_volume_uploads_under_prefix(&rel);
@@ -233,12 +238,16 @@ pub(crate) async fn mkcol(inner: &Arc<Inner>, req: &Req) -> DavResult<Resp> {
             // The parent was checked above, but may have gone since: a MKCOL never
             // makes it again (an unowned series folder, made by nobody's MKCOL), it
             // answers 409 as RFC 4918 has it (OWN-6, as C9 for a PUT). A concurrent
-            // MKCOL of the same folder is not an error.
-            let made = if other_spelling_listed(&dir, false) {
-                Ok(())
-            } else {
-                fs::create_dir(&dir)
+            // MKCOL of the same folder is not an error. The name is held (the folded
+            // write lock a PUT of it takes too) from the check to the create.
+            let Some(_guard) = inner2.write_locks.try_lock(&dir) else {
+                let target = folder_audit_target(&inner2, parent.path(), parent.phys());
+                return Err(write_lock_conflict(&req2, target, "mkdir", None));
             };
+            if other_spelling_listed(&dir, false) {
+                return Err(mapped_url());
+            }
+            let made = fs::create_dir(&dir);
             match made {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
@@ -282,11 +291,14 @@ static SERIES_FOLDER_CREATE: parking_lot::Mutex<()> = parking_lot::Mutex::new(()
 /// nothing. Blocking.
 fn create_series_folder(inner: &Inner, req: &Req, dir: &Path) -> DavResult<()> {
     let _one = SERIES_FOLDER_CREATE.lock();
-    let made = if other_spelling_listed(dir, true) {
-        Err(std::io::ErrorKind::AlreadyExists.into())
-    } else {
-        fs::create_dir(dir)
+    let Some(_guard) = inner.write_locks.try_lock(dir) else {
+        let target = folder_audit_target(inner, &format!("/{}", crate::paths::READER_ROOT), None);
+        return Err(write_lock_conflict(req, target, "mkdir", None));
     };
+    if other_spelling_listed(dir, true) {
+        return Err(mapped_url());
+    }
+    let made = fs::create_dir(dir);
     let created = match made {
         Ok(()) => true,
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => false,
@@ -301,55 +313,98 @@ fn create_series_folder(inner: &Inner, req: &Req, dir: &Path) -> DavResult<()> {
     Ok(())
 }
 
-/// A MOVE that only changes the case of `src`'s name (to `dest`) is refused (409)
-/// while its folder lists another spelling of that name besides `src` (a shadowed case
-/// variant, which only a case-sensitive disk or a remote store holds): the name would
-/// pass to that other entry, and every request for it would reach the wrong one.
-/// Checked under the move's write locks, from the listing alone. Blocking.
-fn case_fix_allowed(src: &Path, dest: &Path) -> DavResult<()> {
-    let (Some(parent), Some(src_name), Some(dest_name)) = (
-        src.parent(),
-        src.file_name().and_then(|n| n.to_str()),
-        dest.file_name().and_then(|n| n.to_str()),
-    ) else {
+/// Whether `dest` may take what a MOVE or COPY brings, checked under the operation's
+/// write locks, from the listings alone (every host answers alike):
+///
+/// * A MOVE that only changes the case of `src`'s name (to `dest`) is refused (409)
+///   while its folder lists another spelling of that name besides `src` (a shadowed case
+///   variant, which only a case-sensitive disk or a remote store holds): the name would
+///   pass to that other entry, and every request for it would reach the wrong one.
+/// * Any other destination in the library is refused (409) when its folder lists the
+///   name in another spelling than the reachable `dest` itself
+///   ([`crate::path_case::spelled_otherwise`]): one made since PathCase resolved the
+///   request (a concurrent upload), or a hidden case variant's own file. Bunko never
+///   makes a second spelling of a name, nor writes over a hidden entry.
+///
+/// Blocking.
+fn dest_spelling_allowed(inner: &Inner, src: Option<&Path>, dest: &Path) -> DavResult<()> {
+    let (Some(parent), Some(dest_name)) =
+        (dest.parent(), dest.file_name().and_then(|n| n.to_str()))
+    else {
         return Ok(());
     };
-    if dest.parent() != Some(parent)
-        || src_name == dest_name
-        || crate::fold_name(src_name) != crate::fold_name(dest_name)
+    if let Some(src) = src
+        && let Some(src_name) = src.file_name().and_then(|n| n.to_str())
+        && src.parent() == Some(parent)
+        && src_name != dest_name
+        && crate::fold_name(src_name) == crate::fold_name(dest_name)
     {
+        let folded = crate::fold_name(src_name);
+        let other = fs::read_dir(parent).is_ok_and(|entries| {
+            entries.flatten().any(|e| {
+                e.file_name().to_str().is_some_and(|n| {
+                    n != src_name
+                        && crate::fold_name(n) == folded
+                        && !(n == dest_name && crate::path_case::same_file(src, &parent.join(n)))
+                })
+            })
+        });
+        if other {
+            return Err(DavError::new(
+                StatusCode::CONFLICT,
+                "Another spelling of this name already exists here; Bunko keeps one spelling \
+                 per name: merge them first.",
+            ));
+        }
         return Ok(());
     }
-    let folded = crate::fold_name(src_name);
-    let other = fs::read_dir(parent).is_ok_and(|entries| {
-        entries.flatten().any(|e| {
-            e.file_name().to_str().is_some_and(|n| {
-                n != src_name
-                    && crate::fold_name(n) == folded
-                    && !(n == dest_name && crate::path_case::same_file(src, &parent.join(n)))
-            })
-        })
-    });
-    if other {
-        return Err(DavError::new(
-            StatusCode::CONFLICT,
-            "Another spelling of this name already exists here; Bunko keeps one spelling \
-             per name: merge them first.",
-        ));
+    if !dest.starts_with(&inner.roots.library) {
+        return Ok(());
+    }
+    if crate::path_case::spelled_otherwise(parent, dest_name, parent == inner.roots.library) {
+        return Err(case_variant());
     }
     Ok(())
 }
 
-/// Another spelling of `dir`'s name is listed beside it now: a concurrent request made
-/// it after PathCase resolved this one. That entry is this name (one name is one entry
-/// on every host), so nothing is made: the MKCOL ends as one that found its folder there
-/// already. `top`: `dir` is a series folder. Blocking.
+/// 409: the destination's folder lists its name in another spelling.
+fn case_variant() -> DavError {
+    DavError::new(
+        StatusCode::CONFLICT,
+        "Another spelling of this name is listed here (made since this request was \
+         resolved, or a hidden case variant's own file); Bunko keeps one spelling per \
+         name: send the request again, or merge the case variants first.",
+    )
+}
+
+/// 409: a folder holding a hidden entry is never deleted or replaced whole.
+fn hidden_inside() -> DavError {
+    DavError::new(
+        StatusCode::CONFLICT,
+        "This folder holds a hidden case variant (another spelling of a name, or its own \
+         files); Bunko never deletes one: merge the case variants first (doctor names \
+         them).",
+    )
+}
+
+/// 405: a MKCOL of a name that is mapped (in another spelling).
+fn mapped_url() -> DavError {
+    DavError::new(
+        StatusCode::METHOD_NOT_ALLOWED,
+        "MKCOL can only be executed on an unmapped URL.",
+    )
+}
+
+/// The folder lists `dir`'s name in another spelling than `dir`'s own: one made after
+/// PathCase resolved this request (a concurrent MKCOL or upload), or a hidden one. That
+/// entry is this name (one name is one entry on every host): nothing is made, and the
+/// MKCOL answers as for a mapped URL (405). `top`: `dir` is a series folder. Blocking.
 fn other_spelling_listed(dir: &Path, top: bool) -> bool {
     let (Some(parent), Some(name)) = (dir.parent(), dir.file_name().and_then(|n| n.to_str()))
     else {
         return false;
     };
-    crate::path_case::on_disk_name(parent, name, top).is_some_and(|listed| listed != name)
+    crate::path_case::spelled_otherwise(parent, name, top)
 }
 
 /// The `Destination` header as a decoded path (WsgiDAV rules; spec §8.3.7).
@@ -755,7 +810,7 @@ fn move_file(
     let Some(_guard) = inner.write_locks.try_lock_all(&[src, dest]) else {
         return Err(write_lock_conflict(req, target, "move", Some(dest_v)));
     };
-    case_fix_allowed(src, dest)?;
+    dest_spelling_allowed(inner, Some(src), dest)?;
     let old_rel = inner.roots.library_rel(src);
     let new_rel = inner.roots.library_rel(dest);
     primary_leaving(inner, req, src);
@@ -804,6 +859,7 @@ fn move_personal(
     let Some(_guard) = inner.write_locks.try_lock_all(&[src, dest]) else {
         return Err(write_lock_conflict(req, target, operation, Some(dest_v)));
     };
+    dest_spelling_allowed(inner, Some(src), dest)?;
     if is_move {
         if let Some(parent) = dest.parent() {
             fs::create_dir_all(parent)?;
@@ -837,6 +893,7 @@ fn copy_file(
     let Some(_guard) = inner.write_locks.try_lock(dest) else {
         return Err(write_lock_conflict(req, target, "copy", Some(dest_v)));
     };
+    dest_spelling_allowed(inner, None, dest)?;
     copy_one(src, dest)?;
     effects.note_arrived(inner, dest);
     forget_ocr_records(req, inner.roots.library_rel(dest).as_deref(), false);
@@ -899,7 +956,7 @@ fn move_folder(
     let Some(_guard) = inner.write_locks.try_lock_all(&[src, dest]) else {
         return Err(write_lock_conflict(req, target, "move", Some(dest_v)));
     };
-    case_fix_allowed(src, dest)?;
+    dest_spelling_allowed(inner, Some(src), dest)?;
     let old_prefix = inner.roots.library_rel(src);
     let new_prefix = inner.roots.library_rel(dest);
     let volumes = cbz_under(src);
@@ -986,12 +1043,30 @@ fn copy_folder(
     let Some(src_phys) = src.phys() else {
         return Err(DavError::status(StatusCode::FORBIDDEN));
     };
+    // A destination folder holding a hidden entry is never replaced: the copy would
+    // delete it, or write over its own files through another spelling.
+    if dest.is_some() && crate::path_case::holds_hidden(dest_phys) {
+        return Err(hidden_inside());
+    }
+    // A new destination folder: its name is held from the check to the create.
+    let made = match dest {
+        Some(_) => None,
+        None => {
+            let Some(guard) = inner.write_locks.try_lock(dest_phys) else {
+                let target = folder_audit_target(inner, dest_v, Some(dest_phys));
+                return Err(write_lock_conflict(req, target, "copy", Some(dest_v)));
+            };
+            dest_spelling_allowed(inner, None, dest_phys)?;
+            Some(guard)
+        }
+    };
     if let Some(existing) = dest
         && infinity
     {
         prune_unmatched(inner, req, existing, src_phys, dest_phys, effects)?;
     }
     fs::create_dir_all(dest_phys)?;
+    drop(made);
     effects.touch(dest_v, Some(dest_phys));
     if !infinity {
         return Ok(());
@@ -1007,13 +1082,9 @@ fn copy_folder(
         };
         let mut entries: Vec<_> = entries.flatten().collect();
         entries.sort_by_key(|e| e.file_name());
-        // A source member another listed spelling shadows is never reached, so never
-        // copied (its content stays its own).
-        let names: Vec<String> = entries
-            .iter()
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .collect();
-        let hidden = crate::path_case::shadowed(&from, names.iter().map(String::as_str));
+        // A source member no request reaches (another spelling of a name, a hidden
+        // archive's own file) is never copied: its content stays its own.
+        let hidden = crate::path_case::hidden(&from, &listed_pairs(&entries));
         for e in entries {
             let name = e.file_name().to_string_lossy().into_owned();
             if paths::is_staging_name(&name) || hidden.contains(&name) {
@@ -1021,8 +1092,13 @@ fn copy_folder(
             }
             // The destination member is the entry already there in any spelling (the
             // one a request reaches), as on a case-insensitive disk: never a second
-            // spelling beside it.
-            let at = crate::path_case::on_disk_name(&to, &name, false).unwrap_or(name);
+            // spelling beside it, and never a hidden entry's name.
+            let listed = crate::path_case::on_disk_name(&to, &name, false);
+            if listed.is_none() && crate::path_case::spelled_otherwise(&to, &name, false) {
+                return Err(case_variant());
+            }
+            let exists = listed.is_some();
+            let at = listed.unwrap_or(name);
             let (f, t, v) = (e.path(), to.join(&at), format!("{vto}/{at}"));
             match fs::metadata(&f) {
                 Ok(m) if m.is_dir() => {
@@ -1035,7 +1111,7 @@ fn copy_folder(
                     }
                 }
                 Ok(_) => {
-                    if fs::exists(&t) {
+                    if exists {
                         delete_file(inner, req, &v, &t, effects)?;
                     }
                     copy_file(inner, req, &f, &v, &t, effects)?;
@@ -1067,8 +1143,8 @@ fn prune_unmatched(
             .iter()
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect();
-        // A shadowed destination member is never reached: it is never deleted.
-        let hidden = crate::path_case::shadowed(&d, names.iter().map(String::as_str));
+        // A destination member no request reaches is never deleted.
+        let hidden = crate::path_case::hidden(&d, &listed_pairs(&entries));
         for (e, name) in entries.into_iter().zip(names) {
             if paths::is_staging_name(&name) || hidden.contains(&name) {
                 continue;
@@ -1096,6 +1172,17 @@ fn prune_unmatched(
         }
     }
     Ok(())
+}
+
+/// The UTF-8 names of listed `entries`, each with whether it is a folder.
+fn listed_pairs(entries: &[fs::DirEntry]) -> Vec<(String, bool)> {
+    entries
+        .iter()
+        .filter_map(|e| {
+            let name = e.file_name().to_str()?.to_string();
+            Some((name, e.file_type().is_ok_and(|t| t.is_dir())))
+        })
+        .collect()
 }
 
 /// Delete one destination member [`prune_unmatched`] found unmatched, by its listed

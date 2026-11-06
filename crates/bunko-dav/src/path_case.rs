@@ -40,23 +40,55 @@ use crate::paths::{self, READER_ROOT};
 
 pub use bunko_store::fs::same_file;
 
-/// The spelling-insensitive form two names collide under: NFC (so a decomposed and a
-/// composed spelling collide, as on APFS), then a full Unicode lowercase
-/// ([`bunko_core::sidecar_names::fold`], the one filename fold). Rare names may fold
-/// otherwise than a filesystem's own table does (`ß`/`ss`, final sigma, the Kelvin
-/// sign, the long s).
+/// The spelling-insensitive form two names collide under: the one filename fold
+/// ([`bunko_core::names::fold_name`]): canonical normalization (a decomposed and a
+/// composed spelling are one name, as on APFS) and full Unicode case folding (`ß` and
+/// `ss`, final sigma, the Kelvin and long-s signs, as Linux casefold has them), so Bunko
+/// joins every pair of names any host it runs on joins.
 pub fn fold_name(name: &str) -> String {
-    bunko_core::sidecar_names::fold(name)
+    bunko_core::names::fold_name(name)
+}
+
+/// `parent`'s listed UTF-8 names with whether each is a folder (a name that is not
+/// UTF-8 can never be what a UTF-8 request spells). At the library root (`top`) the
+/// per-user names (`history`, `Goals.json`, any spelling) are left out: they are never
+/// library entries. `None` when `parent` cannot be listed.
+fn listing(parent: &Path, top: bool) -> Option<Vec<(String, bool)>> {
+    let mut out = Vec::new();
+    for entry in fs::read_dir(parent).ok()?.flatten() {
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        if top && reader_tree::is_per_user_root_name(&name) {
+            continue;
+        }
+        let dir = entry.file_type().is_ok_and(|t| t.is_dir());
+        out.push((name, dir));
+    }
+    Some(out)
+}
+
+/// The names of `entries` (`parent`'s listing) no request reaches
+/// ([`bunko_core::sidecar_names::hidden_names`]): every spelling of a name but the one
+/// [`on_disk_name`] picks, and every file rule v1 gives to a shadowed archive (its
+/// sidecars, cover and layers, named by its exact stem). No listing shows them, no
+/// request reads, writes or deletes them, and no new name is made beside them.
+fn hidden_in(parent: &Path, entries: &[(String, bool)]) -> std::collections::HashSet<String> {
+    let store = bunko_store::store_for(parent);
+    bunko_core::sidecar_names::hidden_names(entries.iter().map(|(n, d)| (n.as_str(), *d)), |fold| {
+        store.as_ref()?.case_winner(parent, fold)
+    })
 }
 
 /// The one listed spelling `name` resolves to in `parent`, or `None` when nothing there
-/// folds like it.
+/// that a request may reach folds like it.
 ///
 /// Every spelling, the exact one included, resolves to a single winner: when two or more
 /// listed names fold alike (only a case-sensitive disk or a remote store can hold them),
 /// the store's [`case_winner`] when it is listed (a remote store's oldest spelling, the
-/// one its case merge keeps), else the byte-smallest. The other spellings are never
-/// addressed. The listing is always scanned: no probe, no exact fast path.
+/// one its case merge keeps), else the byte-smallest. The other spellings, and the files
+/// rule v1 gives to a shadowed archive ([`hidden_in`]), are never addressed. The listing
+/// is always scanned: no probe, no exact fast path.
 ///
 /// At the library root (`top`) a name that folds to a per-user name (`History`,
 /// `Goals.json`) is never a library entry.
@@ -66,44 +98,109 @@ pub(crate) fn on_disk_name(parent: &Path, name: &str, top: bool) -> Option<Strin
     if top && reader_tree::is_per_user_root_name(name) {
         return None;
     }
+    let entries = listing(parent, top)?;
+    reachable_in(parent, &entries, name)
+}
+
+/// [`on_disk_name`] over `entries`, `parent`'s [`listing`].
+fn reachable_in(parent: &Path, entries: &[(String, bool)], name: &str) -> Option<String> {
     let target = fold_name(name);
-    let mut variants: Vec<String> = Vec::new();
-    for entry in fs::read_dir(parent).ok()?.flatten() {
-        let entry_name = entry.file_name();
-        // A name that is not UTF-8 can never be what a (UTF-8) request spells.
-        let Some(entry_name) = entry_name.to_str() else {
+    let variants: Vec<&str> = entries
+        .iter()
+        .map(|(n, _)| n.as_str())
+        .filter(|n| *n == name || fold_name(n) == target)
+        .collect();
+    if variants.is_empty() {
+        return None;
+    }
+    let hidden = hidden_in(parent, entries);
+    variants
+        .into_iter()
+        .filter(|n| !hidden.contains(*n))
+        .min()
+        .map(str::to_string)
+}
+
+/// Does `parent` list `name` in another spelling than the reachable `name` itself: some
+/// listed entry folds like it (a hidden one included), and `name` is not the entry a
+/// request for it reaches? Then nothing may be created under `name` there, and nothing
+/// spelled `name` is read, written or deleted: it would be a second spelling of an
+/// existing name, or a hidden entry's. From the listing alone, so every host answers
+/// alike. False when `parent` cannot be listed (or is gone: the write fails there).
+pub(crate) fn spelled_otherwise(parent: &Path, name: &str, top: bool) -> bool {
+    if top && reader_tree::is_per_user_root_name(name) {
+        return false;
+    }
+    let Some(entries) = listing(parent, top) else {
+        return false;
+    };
+    let target = fold_name(name);
+    let any = entries
+        .iter()
+        .any(|(n, _)| n == name || fold_name(n) == target);
+    any && reachable_in(parent, &entries, name).as_deref() != Some(name)
+}
+
+/// Is every segment of `relative` (below `base`) listed in its folder exactly as spelled,
+/// as the entry a request for it reaches ([`on_disk_name`])? Whether a library path
+/// exists, decided from the listings alone: a host that would open another spelling
+/// (APFS, NTFS, casefold) answers as a case-sensitive one and a remote store do.
+/// `top_reserved`: `base` is the library root. `.`/`..` segments never are.
+pub(crate) fn reachable_as_spelled(base: &Path, relative: &str, top_reserved: bool) -> bool {
+    let mut parent = base.to_path_buf();
+    for (position, segment) in relative.split('/').filter(|s| !s.is_empty()).enumerate() {
+        if segment == "." || segment == ".." {
+            return false;
+        }
+        if on_disk_name(&parent, segment, top_reserved && position == 0).as_deref() != Some(segment)
+        {
+            return false;
+        }
+        parent.push(segment);
+    }
+    true
+}
+
+/// The names listed in `parent` (`entries`: name and whether it is a folder) that no
+/// request reaches ([`hidden_in`]): no listing shows them, nothing is copied from or
+/// over them, nothing deletes them.
+pub(crate) fn hidden(
+    parent: &Path,
+    entries: &[(String, bool)],
+) -> std::collections::HashSet<String> {
+    hidden_in(parent, entries)
+}
+
+/// `parent`'s listing (UTF-8 names, each with whether it is a folder) and its
+/// [`hidden`] names. Empty when it cannot be listed.
+pub(crate) fn listed_with_hidden(
+    parent: &Path,
+) -> (Vec<(String, bool)>, std::collections::HashSet<String>) {
+    let entries = listing(parent, false).unwrap_or_default();
+    let hidden = hidden_in(parent, &entries);
+    (entries, hidden)
+}
+
+/// Does the folder `dir`, or any folder below it (symlinked folders not followed), hold
+/// an entry no request reaches ([`hidden`])? A write that would delete or replace the
+/// folder whole is refused while it does: a hidden entry is never deleted.
+pub(crate) fn holds_hidden(dir: &Path) -> bool {
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Some(entries) = listing(&d, false) else {
             continue;
         };
-        if top && reader_tree::is_per_user_root_name(entry_name) {
-            continue;
+        if !hidden_in(&d, &entries).is_empty() {
+            return true;
         }
-        if entry_name == name || fold_name(entry_name) == target {
-            variants.push(entry_name.to_string());
+        for (name, is_dir) in entries {
+            let child = d.join(&name);
+            if is_dir && !fs::symlink_metadata(&child).is_ok_and(|m| m.file_type().is_symlink()) {
+                stack.push(child);
+            }
         }
     }
-    pick_winner(parent, &target, variants)
-}
-
-/// The winner among `variants` (listed spellings of the fold `target` in `parent`).
-pub(crate) fn pick_winner(parent: &Path, target: &str, variants: Vec<String>) -> Option<String> {
-    if variants.len() > 1
-        && let Some(w) = bunko_store::store_for(parent).and_then(|s| s.case_winner(parent, target))
-        && variants.contains(&w)
-    {
-        return Some(w);
-    }
-    variants.into_iter().min()
-}
-
-/// The names listed in `parent` that another listed spelling shadows (the rule of
-/// [`on_disk_name`], [`bunko_core::sidecar_names::case_losers`]): no request reaches
-/// them, so no listing shows them.
-pub(crate) fn shadowed<'a>(
-    parent: &Path,
-    names: impl IntoIterator<Item = &'a str>,
-) -> std::collections::HashSet<String> {
-    let store = bunko_store::store_for(parent);
-    bunko_core::sidecar_names::case_losers(names, |fold| store.as_ref()?.case_winner(parent, fold))
+    false
 }
 
 /// `relative` (below `base`) with every existing segment in its listed spelling
@@ -118,7 +215,7 @@ pub(crate) fn resolve_existing(base: &Path, relative: &str, top_reserved: bool) 
 /// The library entry `relative` (a stored path, below the library root `library`) leads
 /// to through the listings, in its listed spelling: each segment the winner of the names
 /// that fold like it ([`on_disk_name`]). `None` when a segment names nothing, or is
-/// spelled exactly like a listed entry another spelling shadows (the path is that hidden
+/// spelled exactly like a listed entry no request reaches (the path is that hidden
 /// entry's, never the winner's). No probe: the same on every host.
 pub(crate) fn listed_entry(library: &Path, relative: &str) -> Option<String> {
     let mut parent = library.to_path_buf();
@@ -127,13 +224,13 @@ pub(crate) fn listed_entry(library: &Path, relative: &str) -> Option<String> {
         if segment == "." || segment == ".." {
             return None;
         }
-        let winner = on_disk_name(&parent, segment, position == 0)?;
-        if winner != segment
-            && fs::read_dir(&parent)
-                .ok()?
-                .flatten()
-                .any(|e| e.file_name().to_str() == Some(segment))
-        {
+        let top = position == 0;
+        if top && reader_tree::is_per_user_root_name(segment) {
+            return None;
+        }
+        let entries = listing(&parent, top)?;
+        let winner = reachable_in(&parent, &entries, segment)?;
+        if winner != segment && entries.iter().any(|(n, _)| n == segment) {
             return None;
         }
         parent.push(&winner);
@@ -205,6 +302,14 @@ impl LibraryPathCanonicalizer {
     /// through untouched so the request keeps its exact shape.
     pub fn canonicalize(&self, relative: &str, keep_last_if_variant_of: Option<&str>) -> String {
         resolve(&self.library, relative, keep_last_if_variant_of, true)
+    }
+
+    /// Is every segment of `relative` listed exactly so, as the entry a request reaches
+    /// ([`reachable_as_spelled`])? What [`Self::canonicalize`] returns is, unless a
+    /// segment names nothing or only a hidden entry (a case variant, or a hidden
+    /// archive's own file): those are never served. From the listings alone.
+    pub fn reaches(&self, relative: &str) -> bool {
+        reachable_as_spelled(&self.library, relative, true)
     }
 }
 

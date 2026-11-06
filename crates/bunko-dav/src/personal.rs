@@ -98,7 +98,8 @@ fn resolve_existing(library: &Path, base: &Path, rel: &str) -> Option<String> {
     }
     let mut library_dir = Some(library.to_path_buf());
     let mut overlay_dir = base.to_path_buf();
-    for part in parts.iter_mut() {
+    let last = parts.iter().rposition(|p| !p.is_empty());
+    for (index, part) in parts.iter_mut().enumerate() {
         let segment = part.clone();
         if segment.is_empty() {
             continue;
@@ -126,9 +127,19 @@ fn resolve_existing(library: &Path, base: &Path, rel: &str) -> Option<String> {
                     .collect()
             })
             .unwrap_or_default();
+        // The correction file itself: an overlay spelled otherwise that rule v1 gives
+        // to another archive of the library folder (a hidden case variant's own
+        // correction, named by its exact stem) is that archive's, never this one's.
+        let others_file = |n: &String| {
+            Some(index) == last
+                && personal_name(&segment).is_some()
+                && library_dir
+                    .as_deref()
+                    .is_some_and(|d| owned_by_another(d, &segment, n))
+        };
         let (mut ours, theirs): (Vec<String>, Vec<String>) = alike
             .into_iter()
-            .partition(|n| *n == segment || !listed_here.contains(n));
+            .partition(|n| *n == segment || (!listed_here.contains(n) && !others_file(n)));
         if ours.is_empty() && !theirs.is_empty() {
             return None;
         }
@@ -146,6 +157,24 @@ fn resolve_existing(library: &Path, base: &Path, rel: &str) -> Option<String> {
         *part = chosen;
     }
     Some(parts.join("/"))
+}
+
+/// Does rule v1, over the library folder `dir`'s files, give the overlay name `other` to
+/// an archive that `segment` (a correction name) is not the correction of? Then `other`
+/// is that archive's correction (`v.edit.mokuro` is the hidden `v.cbz`'s beside a
+/// reachable `V.cbz`), however alike the two names fold.
+fn owned_by_another(dir: &Path, segment: &str, other: &str) -> bool {
+    let mut names = names_in(dir);
+    names.retain(|n| sidecar_names::cbz_stem(n).is_some());
+    let archives = names.clone();
+    names.push(segment.to_string());
+    names.push(other.to_string());
+    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    let folder = sidecar_names::Folder::new(&refs);
+    archives.iter().any(|archive| {
+        let files = folder.volume_files(archive);
+        files.iter().any(|(n, _)| *n == other) && !files.iter().any(|(n, _)| *n == segment)
+    })
 }
 
 /// A library file that is a personal correction.

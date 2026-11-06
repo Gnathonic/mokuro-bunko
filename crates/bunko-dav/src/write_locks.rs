@@ -2,7 +2,7 @@
 //!
 //! Non-blocking: a write that finds its path (or an ancestor or descendant of it) held
 //! fails at once with 423 instead of queueing. Keys are the folded components of the
-//! resolved path (the one filename fold: NFC, then lowercase), so `Series/Vol.CBZ`
+//! resolved path (the one filename fold, `bunko_core::names::fold_name`), so `Series/Vol.CBZ`
 //! conflicts with `series/vol.cbz`, and a decomposed spelling with the composed one: one
 //! name is one entry on every host. Reads never take these locks: they see the old file until the atomic
 //! rename.

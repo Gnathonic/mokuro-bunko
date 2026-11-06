@@ -519,3 +519,27 @@ async fn a_per_user_named_folder_is_never_in_the_catalog() {
     let listing = env.send(get("/catalog/api/library")).await;
     assert!(!listing.text().contains("history"), "{}", listing.text());
 }
+
+/// A hidden archive's own cover (`v.webp` beside the hidden `v.cbz`, where the disk
+/// keeps both spellings) is never served, through any spelling; a cover the listings
+/// reach is, in any spelling (`V.webp` beside `V.cbz` only).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hidden_archives_cover_is_never_served() {
+    let env = catalog_env(|_| {}).await;
+    let dir = env.series_dir("S");
+    write_cbz(&dir.join("V.cbz"), 1);
+    let two = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(dir.join("v.cbz"))
+        .is_ok();
+    std::fs::write(dir.join("v.webp"), b"RIFFwebp").unwrap();
+    for path in ["/catalog/api/cover/S/v.webp", "/catalog/api/cover/s/V.WEBP"] {
+        let r = env.send(get(path)).await;
+        if two {
+            assert_eq!(r.status, 404, "{path}: {}", r.text());
+        } else {
+            assert_eq!(r.status, 200, "{path}: {}", r.text());
+        }
+    }
+}

@@ -473,6 +473,16 @@ async fn serve_cover(deps: &LibraryDeps, cover: &str, headers: &HeaderMap) -> Re
         if resolves_under_per_user_name(&file, &base) {
             return Err(util::text(404, "Not found"));
         }
+        // A name the listings do not reach as spelled (nothing, or a hidden case
+        // variant's own file) is not served, on any host.
+        let rel = file
+            .strip_prefix(&base)
+            .ok()
+            .map(|r| r.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_default();
+        if !bunko_dav::LibraryPathCanonicalizer::new(&base).reaches(&rel) {
+            return Err(util::text(404, "Not found"));
+        }
         let meta = bunko_store::fs::metadata(&file)
             .ok()
             .filter(|m| m.is_file())

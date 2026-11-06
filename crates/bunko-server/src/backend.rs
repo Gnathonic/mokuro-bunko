@@ -170,9 +170,29 @@ impl AuthBackend for DbAuthBackend {
         }
     }
 
+    /// A library path exists when every segment is listed exactly so, as the entry a
+    /// request reaches ([`ListedWalk::walk`]): decided from the listings, never by
+    /// opening the name, so `Vol 2.cbz` beside a listed `vol 2.cbz` is no existing file
+    /// on any host. The caller's own per-user entries are Bunko's, in their canonical
+    /// spelling.
+    ///
+    /// [`ListedWalk::walk`]: bunko_library::fsutil::ListedWalk::walk
     fn physical_exists(&self, virtual_path: &str, caller: Option<Caller<'_>>) -> bool {
-        self.virtual_to_physical(virtual_path, caller)
-            .is_some_and(bunko_store::fs::exists)
+        let Some(phys) = self.virtual_to_physical(virtual_path, caller) else {
+            return false;
+        };
+        let library = self.layout.library();
+        let rel = phys
+            .strip_prefix(&library)
+            .ok()
+            .and_then(|r| r.to_str())
+            .map(|r| r.replace('\\', "/"));
+        match rel {
+            Some(rel) if !rel.is_empty() && !reader_tree::is_per_user_rel(&rel) => {
+                listed_as_spelled(&library, &rel)
+            }
+            _ => bunko_store::fs::exists(&phys),
+        }
     }
 
     fn is_volume_primary(&self, virtual_path: &str) -> bool {
@@ -208,9 +228,13 @@ impl AuthBackend for DbAuthBackend {
         })
     }
 
+    /// A listed folder, reached as spelled ([`listed_as_spelled`]), never a path opened
+    /// by name.
     fn is_library_folder(&self, virtual_path: &str) -> bool {
-        paths::library_rel(virtual_path)
-            .is_some_and(|rel| bunko_store::fs::is_dir(self.layout.library().join(rel)))
+        let library = self.layout.library();
+        paths::library_rel(virtual_path).is_some_and(|rel| {
+            listed_as_spelled(&library, &rel) && bunko_store::fs::is_dir(library.join(rel))
+        })
     }
 
     fn ownership_pending(&self) -> Result<bool, OwnerUnknown> {
@@ -262,6 +286,17 @@ pub(crate) fn volume_owner_in(
     db.get_volume_owner_where(&key, |stored| walk.same_entry(stored, &key))
 }
 
+/// Does the library-relative `rel` lead, through the listings alone, to itself: every
+/// segment listed exactly so, as the entry a request reaches
+/// ([`bunko_library::fsutil::ListedWalk::walk`])?
+fn listed_as_spelled(library: &std::path::Path, rel: &str) -> bool {
+    let rel = rel.trim_matches('/');
+    matches!(
+        bunko_library::fsutil::ListedWalk::new(library).walk(rel),
+        Ok(bunko_library::fsutil::ListedPath::Reaches(listed)) if listed == rel
+    )
+}
+
 /// See [`AuthBackend::library_listing`]: the files of the library folder that holds
 /// the path, as rule v1 lists them (no folders); empty when that folder is not there
 /// (a PUT into it answers 409 later), `None` when it cannot be read.
@@ -270,6 +305,11 @@ fn library_listing(layout: &StorageLayout, virtual_path: &str) -> Option<Vec<Str
         return Some(Vec::new());
     };
     let dir = rel.rsplit_once('/').map_or("", |(dir, _)| dir);
+    // A folder not listed as spelled is not there, on every host (a case-insensitive
+    // disk would open another spelling of it).
+    if !dir.is_empty() && !listed_as_spelled(&layout.library(), dir) {
+        return Some(Vec::new());
+    }
     let entries = match bunko_store::fs::read_dir(layout.library().join(dir)) {
         Ok(entries) => entries,
         Err(e)
@@ -687,6 +727,40 @@ mod tests {
             Some("alice")
         );
         assert_eq!(db.get_volume_owner_exact("S/v.cbz").unwrap(), None);
+    }
+
+    /// A row left behind by a volume deleted outside Bunko never takes over another
+    /// account's new upload of another spelling of that name: auth judged that upload
+    /// with no owner, and it is the writer's own on every host. Only an overwrite of an
+    /// existing file (the volume respelled outside Bunko) takes a fold-matched row over.
+    #[test]
+    fn a_stale_row_never_takes_a_new_upload() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = StorageLayout::new(dir.path());
+        let library = layout.library();
+        bunko_store::fs::create_dir_all(library.join("Shared")).unwrap();
+        bunko_store::fs::write(library.join("Shared/a.cbz"), b"a").unwrap();
+        let db = Arc::new(Database::open(dir.path().join("mokuro.db")).unwrap());
+        db.record_volume_upload("Shared/v.cbz", "alice").unwrap();
+        let backend = DbAuthBackend::new(db.clone(), layout.clone());
+        assert_eq!(backend.volume_uploader("Shared/V.cbz"), Ok(None));
+        // Whether a library file exists is read from the listing: `A.cbz` beside the
+        // listed `a.cbz` is no existing file, on a host that would open it too.
+        assert!(backend.physical_exists("/mokuro-reader/Shared/a.cbz", None));
+        assert!(!backend.physical_exists("/mokuro-reader/Shared/A.cbz", None));
+        assert!(!backend.physical_exists("/mokuro-reader/shared/a.cbz", None));
+        bunko_store::fs::write(library.join("Shared/V.cbz"), b"bob's").unwrap();
+        use bunko_dav::DavHooks;
+        let hooks = crate::davhooks::ServerDavHooks::new(db.clone(), library.clone());
+        hooks.record_volume_upload("Shared/V.cbz", "bob", false);
+        assert_eq!(
+            backend.volume_uploader("Shared/V.cbz"),
+            Ok(Some("bob".into()))
+        );
+        assert_eq!(
+            decide(&backend, "DELETE", "/mokuro-reader/Shared/V.cbz", "alice"),
+            Some((403, None))
+        );
     }
 
     /// A shadowed case variant's row (both spellings listed: a case-sensitive disk) is

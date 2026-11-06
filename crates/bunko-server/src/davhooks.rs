@@ -75,13 +75,18 @@ impl DavHooks for ServerDavHooks {
         crate::ocr::provenance::reattach_on_put(dest, staged);
     }
 
-    fn record_volume_upload(&self, rel: &str, actor: &str, _existed_before: bool) {
+    fn record_volume_upload(&self, rel: &str, actor: &str, existed_before: bool) {
         let walk = ListedWalk::new(&self.library);
         let key = bunko_db::normalize_volume_key(rel).unwrap_or_default();
+        // A row under another spelling of this volume's name is taken over only when
+        // this write replaced an existing file (the volume, respelled outside Bunko).
+        // A new file never inherits a row left behind by one deleted outside Bunko: auth
+        // judged it with no owner, and it is the writer's.
         Self::log(
             "record_volume_upload",
-            self.db
-                .record_volume_upload_where(rel, actor, |k| walk.same_entry(k, &key)),
+            self.db.record_volume_upload_where(rel, actor, |k| {
+                existed_before && walk.same_entry(k, &key)
+            }),
         );
     }
     fn forget_volume_upload(&self, rel: &str) {

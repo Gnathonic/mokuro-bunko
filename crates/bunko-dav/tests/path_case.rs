@@ -176,10 +176,17 @@ async fn a_moves_case_variant_destination_is_not_an_existing_resource() {
         std::fs::hard_link(series.join("Vol9.cbz"), series.join("vol9.cbz")).unwrap();
     }
 
-    // Not a MOVE: the other spelling reaches the volume.
-    let r = env
-        .req(None, "GET", "/mokuro-reader/series/vol9.cbz", &[], b"")
-        .await;
+    // Not a MOVE: the other spelling reaches the volume (through PathCase, as every
+    // request does).
+    let r = req(
+        &env,
+        None,
+        "GET",
+        "/mokuro-reader/series/vol9.cbz",
+        &[],
+        b"",
+    )
+    .await;
     assert_eq!(r.code(), 200);
 
     let d = dest("/mokuro-reader/series/vol9.cbz");
@@ -790,15 +797,14 @@ async fn a_put_never_makes_a_second_spelling() {
         .into_iter()
         .filter(|n| n.eq_ignore_ascii_case("vol 2.cbz"))
         .collect();
-    assert_eq!(spellings.len(), 1, "{spellings:?}");
-    if spellings == ["vol 2.cbz"] && r.code() == 409 {
-        assert_eq!(
-            std::fs::read(env.lib("series/vol 2.cbz")).unwrap(),
-            b"first"
-        );
-    } else {
-        assert_eq!(r.code(), 204, "{}", r.text());
-    }
+    // One answer on every host: the folder's listing decides that the requested
+    // spelling is not there, and that another spelling is.
+    assert_eq!(r.code(), 409, "{}", r.text());
+    assert_eq!(spellings, ["vol 2.cbz"]);
+    assert_eq!(
+        std::fs::read(env.lib("series/vol 2.cbz")).unwrap(),
+        b"first"
+    );
 }
 
 /// The temporary name an interrupted case-only rename leaves is Bunko's own: never

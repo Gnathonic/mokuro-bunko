@@ -315,6 +315,9 @@ impl Roots {
             Target::Library(rel) => {
                 if let Some(file) = self.personal(&rel) {
                     let phys = self.personal_path(&file.rel, caller?)?;
+                    if !self.listed_as_spelled(&phys) {
+                        return None;
+                    }
                     let meta = fs::metadata(&phys).ok().filter(|m| !m.is_dir())?;
                     return Some(Self::resource(
                         norm,
@@ -324,6 +327,9 @@ impl Roots {
                     ));
                 }
                 let phys = self.library_member(&self.library, &rel)?;
+                if !self.listed_as_spelled(&phys) {
+                    return None;
+                }
                 let meta = fs::metadata(&phys).ok()?;
                 Some(Self::resource(
                     norm,
@@ -333,6 +339,19 @@ impl Roots {
                 ))
             }
             Target::Inbox | Target::Other => None,
+        }
+    }
+
+    /// Does a library path exist as spelled: is each of its segments listed exactly so,
+    /// as the entry a request reaches ([`crate::path_case::reachable_as_spelled`])? A
+    /// path outside the library (an overlay, found through its listings already) is
+    /// taken as it is. Never decided by opening the name: `Vol 2.cbz` beside a listed
+    /// `vol 2.cbz` does not exist on APFS, NTFS and casefold either, and a hidden case
+    /// variant's own files are not there for anyone. Blocking.
+    fn listed_as_spelled(&self, phys: &Path) -> bool {
+        match paths::relative_posix(phys, &self.library) {
+            Some(rel) => crate::path_case::reachable_as_spelled(&self.library, &rel, true),
+            None => true,
         }
     }
 
@@ -627,20 +646,22 @@ impl Roots {
         if let Some(caller) = caller.filter(|c| !c.owns_cloud_root)
             && let Some(folder_rel) = self.library_rel(dir)
         {
-            out.extend(self.overlays_in(caller, &folder_rel, vpath, &stems));
+            out.extend(self.overlays_in(caller, &folder_rel, vpath, dir));
             out.sort_by(|a, b| a.path().cmp(b.path()));
         }
         out
     }
 
-    /// `caller`'s overlays of the library folder `folder_rel` (virtual folder `vpath`)
-    /// whose archive is among `stems`.
+    /// `caller`'s overlays of the library folder `folder_rel` (virtual folder `vpath`,
+    /// physical `folder`) that rule v1, over the folder's whole listing, gives to an
+    /// archive a request reaches: never a hidden case variant's (named by its exact
+    /// stem), nor one beside no archive.
     fn overlays_in(
         &self,
         caller: Caller<'_>,
         folder_rel: &str,
         vpath: &str,
-        stems: &std::collections::HashSet<String>,
+        folder: &Path,
     ) -> Vec<Resource> {
         let Some(dir) =
             personal::overlay_path(&self.library, &self.users, caller.username, folder_rel)
@@ -650,24 +671,46 @@ impl Roots {
         let Ok(entries) = fs::read_dir(&dir) else {
             return Vec::new();
         };
+        let overlays: Vec<(String, PathBuf)> = entries
+            .flatten()
+            .map(|e| (e.file_name().to_string_lossy().into_owned(), e.path()))
+            .filter(|(name, _)| personal::personal_name(name).is_some())
+            .collect();
+        if overlays.is_empty() {
+            return Vec::new();
+        }
+        let (listed, hidden) = crate::path_case::listed_with_hidden(folder);
+        let files: Vec<&str> = listed
+            .iter()
+            .filter(|(n, d)| !d && !paths::is_staging_name(n))
+            .map(|(n, _)| n.as_str())
+            .collect();
+        let archives: Vec<&str> = files
+            .iter()
+            .copied()
+            .filter(|n| sidecar_names::cbz_stem(n).is_some() && !hidden.contains(*n))
+            .collect();
+        let mut names = files.clone();
+        names.extend(overlays.iter().map(|(n, _)| n.as_str()));
+        let rule = sidecar_names::Folder::new(&names);
+        let shown: std::collections::HashSet<&str> = archives
+            .iter()
+            .flat_map(|archive| rule.volume_files(archive))
+            .filter_map(|(n, file)| {
+                matches!(file, sidecar_names::VolumeFile::Layer { .. }).then_some(n)
+            })
+            .collect();
         let mut out = Vec::new();
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if personal::personal_name(&name).is_none()
-                || !matches!(
-                    sidecar_names::classify(&name, stems),
-                    SidecarClass::Layer { .. }
-                )
-            {
+        for (name, phys) in &overlays {
+            if !shown.contains(name.as_str()) {
                 continue;
             }
-            let phys = entry.path();
-            if let Ok(meta) = fs::metadata(&phys)
+            if let Ok(meta) = fs::metadata(phys)
                 && !meta.is_dir()
             {
                 out.push(Self::resource(
-                    paths::join_uri(vpath, &name),
-                    phys,
+                    paths::join_uri(vpath, name),
+                    phys.clone(),
                     Stat::from_meta(&meta),
                     FileKind::Personal,
                 ));
@@ -721,13 +764,12 @@ impl Roots {
             let Some(folder) = self.library_member(&self.library, &rel) else {
                 continue;
             };
-            let stems = personal::stems_of(&personal::names_in(&folder));
             let vpath = if rel.is_empty() {
                 format!("/{READER_ROOT}")
             } else {
                 format!("/{READER_ROOT}/{rel}")
             };
-            out.extend(self.overlays_in(caller, &rel, &vpath, &stems));
+            out.extend(self.overlays_in(caller, &rel, &vpath, &folder));
         }
         out.sort_by(|a, b| a.path().cmp(b.path()));
         out
@@ -745,12 +787,17 @@ impl Roots {
         };
         let entries: Vec<_> = entries.flatten().collect();
         // Another spelling of a listed name (only a case-sensitive disk or a remote
-        // store holds one) is shadowed: no request reaches it, so it is not listed.
-        let names: Vec<String> = entries
+        // store holds one) is shadowed, and so are the files rule v1 gives to a
+        // shadowed archive: no request reaches them, so they are not listed.
+        let names: Vec<(String, bool)> = entries
             .iter()
-            .filter_map(|e| e.file_name().to_str().map(str::to_string))
+            .filter_map(|e| {
+                let name = e.file_name().to_str()?.to_string();
+                Some((name, e.file_type().is_ok_and(|t| t.is_dir())))
+            })
+            .filter(|(n, _)| !(reader_root && reader_tree::is_per_user_root_name(n)))
             .collect();
-        let shadowed = crate::path_case::shadowed(dir, names.iter().map(String::as_str));
+        let shadowed = crate::path_case::hidden(dir, &names);
         let mut out: Vec<Resource> = Vec::new();
         for entry in entries {
             let name = entry.file_name().to_string_lossy().into_owned();
