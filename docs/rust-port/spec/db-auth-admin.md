@@ -971,7 +971,7 @@ else `revoke_auth_token(t)` -> 200 `{"revoked": true|false}` (false if unknown/a
 order in the JSON object: canWriteProgress, canAddFiles, canModifyDelete, metadata. `created_at` is the
 raw DB string. Pinned by `tests/integration/test_login_me.py`.
 
-**0.8 (Rust).** Both 200 bodies end with two more keys, signed in or not:
+**0.7.8 (Rust).** Both 200 bodies end with two more keys, signed in or not:
 `"per_user_files"` = `bunko_core::reader_tree::advertised()`, i.e.
 `["volume-data.json","profiles.json","goals.json","positions.json","history/"]` (a trailing `/` is a
 per-account directory tree), then `"version"` = the running `bunko_core::VERSION` (`0.7.8`

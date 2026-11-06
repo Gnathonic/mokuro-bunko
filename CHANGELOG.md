@@ -1,6 +1,9 @@
 # Changelog
 
-## [Unreleased]
+## [0.7.8] - 2026-11-05
+
+Reading history and positions.json are kept per account, as in 0.8: Mokuro Reader
+syncs its reading history and opens volumes where another device stopped.
 
 ### Added
 - **positions.json is kept per account.** Mokuro Reader's position index (the newest
@@ -16,17 +19,6 @@
   History files are never moved, copied or locked, and saving progress or history no
   longer drops the cached library listing. `/login/api/me` lists `history/` among the
   `per_user_files`.
-- **Per-account files on a cloud library's folder.** The account named as the readers'
-  progress account (Storage tab) now really shares its files with a reader that reads
-  the cloud folder directly: its volume-data, profiles, goals, positions and reading
-  history are the cloud folder's own, as the 0.8 design intended; every other account
-  keeps its own files on this server. A change of that account in the admin panel
-  applies at once. The cloud folder's `.mokuro-bunko.json` lists the per-account files
-  (`per_user_files`), so a reader reading the cloud directly can sync its reading
-  history there too.
-- **`/login/api/me` reports the server version** (`version`), signed in or not. A reader
-  turns reading-history sync on from 0.8.0, the first version that keeps history per
-  account.
 - **`history` is a reserved series name.** `/mokuro-reader/history` is each account's
   reading history now, so a series folder named exactly `history` at the library root
   can no longer be reached; the server logs a warning at startup with the rename to
