@@ -321,6 +321,12 @@
   taken in.
 
 ### Fixed
+- **OCR failures in a cloud library are remembered.** Bunko keeps a failure record
+  only while the volume's archive is still in the library, and looked for it on the
+  local disk, where a cloud library's archives never are. Every scan therefore dropped
+  every record: a volume in which nothing decodes was offered again, at once, to the
+  release that had just failed it, the backoff never grew, and the catalog never marked
+  the volume as failing. The archive is now looked for in the cloud library's index.
 - **A new account cannot take an existing name in other letter case.** `ALICE` could
   register beside `alice`; on a Windows or macOS disk, which ignore case, both then
   read and wrote one `users/alice/` folder (progress, reading history, corrections),

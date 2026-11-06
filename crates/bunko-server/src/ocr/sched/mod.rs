@@ -1036,7 +1036,8 @@ impl Scheduler {
         }
     }
 
-    /// `_prune_failure_records`.
+    /// `_prune_failure_records`. A record's archive is looked for through the store (an
+    /// index read on a cloud library, whose root never exists on disk).
     pub fn prune_failures(&mut self) {
         let names: Vec<String> = self.settings.rows.iter().map(|r| r.name.clone()).collect();
         let library = self.library();
@@ -1046,7 +1047,9 @@ impl Scheduler {
             .filter(|(_, v)| {
                 v.as_object().is_some_and(|r| {
                     bunko_sched::failures::keep_record(r, &names, |s, v| {
-                        bunko_sched::failures::archive_exists_in(&library, s, v)
+                        bunko_sched::failures::archive_exists_with(&library, s, v, |p| {
+                            bunko_store::fs::is_file(p)
+                        })
                     })
                 })
             })

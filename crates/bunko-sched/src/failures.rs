@@ -410,6 +410,18 @@ pub fn keep_record(
 
 /// `archive_still_there` against a real library directory.
 pub fn archive_exists_in(library: &Path, series: &str, volume: &str) -> bool {
+    archive_exists_with(library, series, volume, Path::is_file)
+}
+
+/// `archive_still_there` with the file test given: a library on a store (a cloud
+/// library's root is a mount that never exists on disk) answers through the store,
+/// which this crate does not know.
+pub fn archive_exists_with(
+    library: &Path,
+    series: &str,
+    volume: &str,
+    is_file: impl Fn(&Path) -> bool,
+) -> bool {
     let folder = if series.is_empty() {
         library.to_path_buf()
     } else {
@@ -417,7 +429,7 @@ pub fn archive_exists_in(library: &Path, series: &str, volume: &str) -> bool {
     };
     ARCHIVE_EXTENSIONS
         .iter()
-        .any(|ext| folder.join(format!("{volume}{ext}")).is_file())
+        .any(|ext| is_file(&folder.join(format!("{volume}{ext}"))))
 }
 
 /// `<storage>/.ocr-failures.json`.
