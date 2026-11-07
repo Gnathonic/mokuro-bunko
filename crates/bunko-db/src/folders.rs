@@ -16,6 +16,45 @@ use crate::error::Result;
 use crate::uploads::fold_series_title_key;
 use rusqlite::{Connection, OptionalExtension, params};
 
+/// [`Database::move_series_folder_owner`] inside the caller's transaction.
+pub(crate) fn move_series_folder_owner_in(
+    conn: &Connection,
+    old: &str,
+    new: &str,
+    old_lives_on: bool,
+    joins: Option<&[String]>,
+) -> Result<()> {
+    let (Some(old_key), Some(new_key)) = (key_of(old), key_of(new)) else {
+        return Ok(());
+    };
+    let moving = owner_at(conn, &old_key)?;
+    if old_key == new_key {
+        if moving.is_some() && !old_lives_on {
+            conn.execute(
+                "UPDATE series_folder_owners SET folder_name = ? WHERE series_key = ?",
+                params![new.trim_matches('/'), new_key],
+            )?;
+        }
+        return Ok(());
+    }
+    match (moving.as_deref(), joins) {
+        (moving, Some(uploaders)) => {
+            let existing = owner_at(conn, &new_key)?;
+            if !joined_part_agrees(existing.as_deref(), moving, uploaders) {
+                forget(conn, &new_key)?;
+            }
+        }
+        (None, None) => {
+            forget(conn, &new_key)?;
+        }
+        (Some(m), None) => put(conn, &new_key, new, m)?,
+    }
+    if !old_lives_on {
+        forget(conn, &old_key)?;
+    }
+    Ok(())
+}
+
 /// One owned folder.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SeriesFolderOwner {
@@ -26,12 +65,12 @@ pub struct SeriesFolderOwner {
 }
 
 /// The record key of a folder name, `None` for a name that folds to nothing.
-fn key_of(folder: &str) -> Option<String> {
+pub(crate) fn key_of(folder: &str) -> Option<String> {
     let key = fold_series_title_key(folder.trim_matches('/'));
     (!key.is_empty()).then_some(key)
 }
 
-fn owner_at(conn: &Connection, key: &str) -> Result<Option<String>> {
+pub(crate) fn owner_at(conn: &Connection, key: &str) -> Result<Option<String>> {
     Ok(conn
         .prepare_cached("SELECT owner_username FROM series_folder_owners WHERE series_key = ?")?
         .query_row([key], |r| r.get(0))
@@ -109,37 +148,7 @@ impl Database {
         old_lives_on: bool,
         joins: Option<&[String]>,
     ) -> Result<()> {
-        let (Some(old_key), Some(new_key)) = (key_of(old), key_of(new)) else {
-            return Ok(());
-        };
-        self.write(|conn| {
-            let moving = owner_at(conn, &old_key)?;
-            if old_key == new_key {
-                if moving.is_some() && !old_lives_on {
-                    conn.execute(
-                        "UPDATE series_folder_owners SET folder_name = ? WHERE series_key = ?",
-                        params![new.trim_matches('/'), new_key],
-                    )?;
-                }
-                return Ok(());
-            }
-            match (moving.as_deref(), joins) {
-                (moving, Some(uploaders)) => {
-                    let existing = owner_at(conn, &new_key)?;
-                    if !joined_part_agrees(existing.as_deref(), moving, uploaders) {
-                        forget(conn, &new_key)?;
-                    }
-                }
-                (None, None) => {
-                    forget(conn, &new_key)?;
-                }
-                (Some(m), None) => put(conn, &new_key, new, m)?,
-            }
-            if !old_lives_on {
-                forget(conn, &old_key)?;
-            }
-            Ok(())
-        })
+        self.write(|conn| move_series_folder_owner_in(conn, old, new, old_lives_on, joins))
     }
 
     /// A folder with no record of its own (one moved up from deeper in the library)

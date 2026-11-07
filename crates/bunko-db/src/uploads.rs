@@ -342,15 +342,7 @@ impl Database {
         let Some(key) = normalize_volume_key(library_relative_path) else {
             return Ok(());
         };
-        self.write(|conn| {
-            conn.execute("DELETE FROM volume_uploads WHERE volume_key = ?", [&key])?;
-            for (stale, _) in fold_rows(conn, &key)? {
-                if leads_nowhere(&stale) {
-                    conn.execute("DELETE FROM volume_uploads WHERE volume_key = ?", [&stale])?;
-                }
-            }
-            Ok(())
-        })
+        self.write(|conn| forget_volume_upload_in(conn, &key, &leads_nowhere))
     }
 
     /// Delete the ownership rows of every volume under a folder (exact prefix); how many.
@@ -422,50 +414,72 @@ impl Database {
         if old_key == new_key {
             return Ok(());
         }
-        self.write(|conn| {
-            let stale: Vec<String> = fold_rows(conn, &old_key)?
-                .into_iter()
-                .map(|(k, _)| k)
-                .filter(|k| *k != new_key && leads_nowhere(k))
-                .collect();
-            let row_of = |key: &str| -> rusqlite::Result<Option<(String, String, Option<String>)>> {
-                conn.query_row(
-                    "SELECT uploader_username, uploaded_at, last_modified_by FROM volume_uploads \
-                     WHERE volume_key = ?",
-                    [key],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-                )
-                .optional()
-            };
-            let mut row = row_of(&old_key)?;
-            if row.is_none()
-                && let Some(first) = stale.first()
-            {
-                row = row_of(first)?;
-            }
-            for key in &stale {
-                conn.execute("DELETE FROM volume_uploads WHERE volume_key = ?", [key])?;
-            }
-            let Some((uploader, uploaded_at, last_by)) = row else {
-                return Ok(());
-            };
-            conn.execute(
-                "INSERT INTO volume_uploads (volume_key, uploader_username, uploaded_at, \
-                 last_modified_by, last_modified_at) VALUES (?, ?, ?, ?, datetime('now')) \
-                 ON CONFLICT(volume_key) DO UPDATE SET \
-                 uploader_username = excluded.uploader_username, \
-                 uploaded_at = excluded.uploaded_at, \
-                 last_modified_by = excluded.last_modified_by, \
-                 last_modified_at = datetime('now')",
-                params![new_key, uploader, uploaded_at, last_by],
-            )?;
-            conn.execute(
-                "DELETE FROM volume_uploads WHERE volume_key = ?",
-                [&old_key],
-            )?;
-            Ok(())
-        })
+        self.write(|conn| rename_volume_upload_in(conn, &old_key, &new_key, &leads_nowhere))
     }
+}
+
+/// [`Database::forget_volume_upload_where`] inside the caller's transaction, for the
+/// normalized key `key`.
+pub(crate) fn forget_volume_upload_in(
+    conn: &rusqlite::Connection,
+    key: &str,
+    leads_nowhere: &dyn Fn(&str) -> bool,
+) -> Result<()> {
+    conn.execute("DELETE FROM volume_uploads WHERE volume_key = ?", [key])?;
+    for (stale, _) in fold_rows(conn, key)? {
+        if leads_nowhere(&stale) {
+            conn.execute("DELETE FROM volume_uploads WHERE volume_key = ?", [&stale])?;
+        }
+    }
+    Ok(())
+}
+
+/// [`Database::rename_volume_upload_where`] inside the caller's transaction, for the
+/// normalized keys `old_key` and `new_key` (which differ).
+pub(crate) fn rename_volume_upload_in(
+    conn: &rusqlite::Connection,
+    old_key: &str,
+    new_key: &str,
+    leads_nowhere: &dyn Fn(&str) -> bool,
+) -> Result<()> {
+    let stale: Vec<String> = fold_rows(conn, old_key)?
+        .into_iter()
+        .map(|(k, _)| k)
+        .filter(|k| *k != new_key && leads_nowhere(k))
+        .collect();
+    let row_of = |key: &str| -> rusqlite::Result<Option<(String, String, Option<String>)>> {
+        conn.query_row(
+            "SELECT uploader_username, uploaded_at, last_modified_by FROM volume_uploads \
+             WHERE volume_key = ?",
+            [key],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()
+    };
+    let mut row = row_of(old_key)?;
+    if row.is_none()
+        && let Some(first) = stale.first()
+    {
+        row = row_of(first)?;
+    }
+    for key in &stale {
+        conn.execute("DELETE FROM volume_uploads WHERE volume_key = ?", [key])?;
+    }
+    let Some((uploader, uploaded_at, last_by)) = row else {
+        return Ok(());
+    };
+    conn.execute(
+        "INSERT INTO volume_uploads (volume_key, uploader_username, uploaded_at, \
+         last_modified_by, last_modified_at) VALUES (?, ?, ?, ?, datetime('now')) \
+         ON CONFLICT(volume_key) DO UPDATE SET \
+         uploader_username = excluded.uploader_username, \
+         uploaded_at = excluded.uploaded_at, \
+         last_modified_by = excluded.last_modified_by, \
+         last_modified_at = datetime('now')",
+        params![new_key, uploader, uploaded_at, last_by],
+    )?;
+    conn.execute("DELETE FROM volume_uploads WHERE volume_key = ?", [old_key])?;
+    Ok(())
 }
 
 #[cfg(test)]

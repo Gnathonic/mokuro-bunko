@@ -36,7 +36,7 @@ fn copy_fixture(name: &str) -> (tempfile::TempDir, PathBuf) {
 fn is_v7_row(row: &Value) -> bool {
     row[2]
         .as_str()
-        .is_some_and(|t| t.starts_with("series_folder_"))
+        .is_some_and(|t| t.starts_with("series_folder_") || t.starts_with("case_merge_"))
         || row[1].as_str() == Some("idx_volume_uploads_uploader_nocase")
 }
 
@@ -143,10 +143,11 @@ fn version_of(path: &Path) -> i64 {
         .unwrap()
 }
 
-/// Version 7 (0.8) adds the series folder owners and the NOCASE uploader index, after
-/// everything 0.5.3 has. A new database is adopted at once (it tracks no volume); a
-/// Python one that tracks volumes waits for the server's adoption, and opening it again
-/// changes nothing.
+/// Version 7 (0.8) adds the series folder owners and the NOCASE uploader index, then the
+/// local case merge's journal and the deferred adoptions, after everything 0.5.3 has. A
+/// new database is adopted at once (it tracks no volume); a Python one that tracks
+/// volumes waits for the server's adoption, and opening it again changes nothing. Every
+/// golden database (legacy, 0.5.2, 0.5.3) gains the same tables.
 #[test]
 fn series_folder_owner_tables() {
     let names = |path: &Path| -> Vec<String> {
@@ -163,6 +164,15 @@ fn series_folder_owner_tables() {
         "sqlite_autoindex_series_folder_owners_1",
         "series_folder_adoption",
         "idx_volume_uploads_uploader_nocase",
+        "case_merge_groups",
+        "sqlite_autoindex_case_merge_groups_1",
+        "case_merge_steps",
+        "sqlite_autoindex_case_merge_steps_1",
+        "case_merge_blocks",
+        "case_merge_owner_snapshots",
+        "sqlite_autoindex_case_merge_owner_snapshots_1",
+        "series_folder_adoption_deferred",
+        "sqlite_autoindex_series_folder_adoption_deferred_1",
     ];
     let dir = tempfile::tempdir().unwrap();
     let fresh = dir.path().join("mokuro.db");
@@ -189,7 +199,14 @@ fn series_folder_owner_tables() {
         assert!(db.series_folder_adoption_pending().unwrap(), "{tag} again");
         drop(db);
         assert_eq!(all_schema_rows(&path), before, "{tag}: idempotent");
+        assert_eq!(names(&path), want, "{tag}");
     }
+    let (_dir, path) = copy_fixture("legacy.db");
+    drop(open(&path));
+    assert_eq!(names(&path), want, "legacy");
+    let before = all_schema_rows(&path);
+    drop(open(&path));
+    assert_eq!(all_schema_rows(&path), before, "legacy: idempotent");
     // A newer build's marker is left alone.
     let (_dir, path) = copy_fixture("py053.db");
     rusqlite::Connection::open(&path)

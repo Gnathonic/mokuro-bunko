@@ -17,8 +17,12 @@
 //!
 //! Version 7 (0.8) adds the series folder owners (`series_folder_owners`, and the
 //! one-row `series_folder_adoption` that says the existing folders were given theirs),
-//! and `idx_volume_uploads_uploader_nocase`. Additive: a 0.7 build opens a version 7
-//! file and ignores both tables and the index.
+//! and `idx_volume_uploads_uploader_nocase`; then the local case merge's journal
+//! (`case_merge_groups`, `case_merge_steps`, `case_merge_blocks`,
+//! `case_merge_owner_snapshots`, see [`crate::case_merge`]) and
+//! `series_folder_adoption_deferred`, inside the same version (no bump: every 0.7 and
+//! earlier 0.8 file gains them at its next open, with nothing to migrate). Additive: a 0.7
+//! build opens a version 7 file and ignores the tables and the index.
 
 use crate::database::column_exists;
 use crate::error::Result;
@@ -217,6 +221,105 @@ const SERIES_FOLDER_ADOPTION_DDL: &str = "
                 )
             ";
 
+/// One local case merge (spec §5.9, Track A): a set of spellings merged into `winner`,
+/// journaled whole (with every step) before the first filesystem change. `scope` is
+/// the core `Scope` as JSON; `losers` a JSON array of library paths; `origin` is `auto`
+/// or `admin`; `state` is `open`, `paused` (`pause_reason` says why) or `done`; times
+/// are Unix ms. `moved`, `kept` and `blocked` count steps; `audited` is set once the
+/// close's owner reconciliation ran.
+const CASE_MERGE_GROUPS_DDL: &str = "
+                CREATE TABLE IF NOT EXISTS case_merge_groups (
+                    id TEXT PRIMARY KEY,
+                    scope TEXT NOT NULL,
+                    parent TEXT NOT NULL,
+                    winner TEXT NOT NULL,
+                    losers TEXT NOT NULL DEFAULT '[]',
+                    origin TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    pause_reason TEXT,
+                    fingerprint TEXT NOT NULL DEFAULT '',
+                    created_at INTEGER NOT NULL,
+                    finished_at INTEGER,
+                    moved INTEGER NOT NULL DEFAULT 0,
+                    kept INTEGER NOT NULL DEFAULT 0,
+                    blocked INTEGER NOT NULL DEFAULT 0,
+                    audited INTEGER NOT NULL DEFAULT 0
+                )
+            ";
+
+/// The steps of a [`CASE_MERGE_GROUPS_DDL`] group, in run order (`seq`). `src`,
+/// `dest` and `keep` are library-relative paths (`keep`: the copy's place in the keep
+/// folder); `src_*` is the identity and size the plan judged, `dest_*` the identity
+/// verified at the destination; `extra` the core step `Extra` as JSON; `state` is
+/// `planned`, `copying`, `copied`, `kept`, `done`, `skipped`, `diverged` or `blocked`;
+/// `mode` the move rung that ran.
+const CASE_MERGE_STEPS_DDL: &str = "
+                CREATE TABLE IF NOT EXISTS case_merge_steps (
+                    group_id TEXT NOT NULL,
+                    seq INTEGER NOT NULL,
+                    phase INTEGER NOT NULL DEFAULT 0,
+                    kind TEXT NOT NULL,
+                    vg TEXT NOT NULL DEFAULT '',
+                    src TEXT,
+                    dest TEXT,
+                    keep TEXT,
+                    is_dir INTEGER NOT NULL DEFAULT 0,
+                    src_dev INTEGER,
+                    src_ino INTEGER,
+                    src_size INTEGER,
+                    src_mtime_ns INTEGER,
+                    dest_dev INTEGER,
+                    dest_ino INTEGER,
+                    sha256 TEXT,
+                    extra TEXT,
+                    state TEXT NOT NULL,
+                    mode TEXT,
+                    detail TEXT,
+                    PRIMARY KEY (group_id, seq)
+                )
+            ";
+
+/// A set the merge will not decide alone (differing archives, a stamped layer, file
+/// against folder...): `this` and `that` are JSON arrays of library paths, resolved
+/// by an admin's Keep this / Keep that (`resolution`). Times are Unix ms.
+const CASE_MERGE_BLOCKS_DDL: &str = "
+                CREATE TABLE IF NOT EXISTS case_merge_blocks (
+                    id INTEGER PRIMARY KEY,
+                    group_id TEXT,
+                    scope TEXT NOT NULL,
+                    this TEXT NOT NULL,
+                    that TEXT NOT NULL,
+                    detail TEXT NOT NULL DEFAULT '',
+                    first_seen INTEGER NOT NULL,
+                    resolved_at INTEGER,
+                    resolution TEXT
+                )
+            ";
+
+/// The owner of a losing root folder as it was before any merge step moved its rows,
+/// taken by the first group that touches it (`loser_uploaders`: JSON array). Times are
+/// Unix ms.
+const CASE_MERGE_OWNER_SNAPSHOTS_DDL: &str = "
+                CREATE TABLE IF NOT EXISTS case_merge_owner_snapshots (
+                    loser TEXT PRIMARY KEY,
+                    winner TEXT NOT NULL,
+                    loser_owner TEXT,
+                    loser_uploaders TEXT NOT NULL DEFAULT '[]',
+                    taken_at INTEGER NOT NULL
+                )
+            ";
+
+/// A series the startup adoption skipped because two spellings of it were listed
+/// (`folders`: JSON array of those spellings), keyed as `series_folder_owners`; adopted
+/// when its case merge closes.
+const SERIES_FOLDER_ADOPTION_DEFERRED_DDL: &str = "
+                CREATE TABLE IF NOT EXISTS series_folder_adoption_deferred (
+                    series_key TEXT PRIMARY KEY,
+                    folders TEXT NOT NULL DEFAULT '[]',
+                    recorded_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+            ";
+
 /// An account's uploads matched as auth matches account names (`COLLATE NOCASE`, which
 /// 0.5.2's `idx_volume_uploads_uploader` cannot serve): `/login/api/me` asks on every
 /// call (`uploads::volume_uploads_by`).
@@ -358,6 +461,17 @@ pub(crate) fn init(conn: &Connection) -> Result<()> {
         )?;
     }
     conn.execute(VOLUME_UPLOADS_UPLOADER_NOCASE_INDEX, [])?;
+
+    // 8b. The local case merge's journal and the deferred adoptions (0.8, still version 7).
+    for ddl in [
+        CASE_MERGE_GROUPS_DDL,
+        CASE_MERGE_STEPS_DDL,
+        CASE_MERGE_BLOCKS_DDL,
+        CASE_MERGE_OWNER_SNAPSHOTS_DDL,
+        SERIES_FOLDER_ADOPTION_DEFERRED_DDL,
+    ] {
+        conn.execute(ddl, [])?;
+    }
 
     // 9. Version bookkeeping.
     let current: Option<i64> = conn

@@ -90,10 +90,7 @@ impl Database {
         let Some(key) = normalize_volume_key(library_relative_path) else {
             return Ok(());
         };
-        self.write(|conn| {
-            conn.execute("DELETE FROM volume_identities WHERE volume_key = ?", [key])?;
-            Ok(())
-        })
+        self.write(|conn| forget_volume_uuid_in(conn, &key).map(drop))
     }
 
     /// Every archive under a folder (exact prefix).
@@ -122,12 +119,7 @@ impl Database {
         if old == new {
             return Ok(0);
         }
-        self.write(|conn| {
-            Ok(conn.execute(
-                "UPDATE OR REPLACE volume_identities SET volume_key = ? WHERE volume_key = ?",
-                params![new, old],
-            )?)
-        })
+        self.write(|conn| rename_volume_uuid_in(conn, &old, &new))
     }
 
     /// A folder moved: what its archives were known by follows.
@@ -151,6 +143,21 @@ impl Database {
             )?)
         })
     }
+}
+
+/// [`Database::forget_volume_uuid`] inside the caller's transaction, for the normalized
+/// key `key`.
+pub(crate) fn forget_volume_uuid_in(conn: &Connection, key: &str) -> Result<usize> {
+    Ok(conn.execute("DELETE FROM volume_identities WHERE volume_key = ?", [key])?)
+}
+
+/// [`Database::rename_volume_uuid`] inside the caller's transaction, for the normalized
+/// keys `old` and `new` (which differ).
+pub(crate) fn rename_volume_uuid_in(conn: &Connection, old: &str, new: &str) -> Result<usize> {
+    Ok(conn.execute(
+        "UPDATE OR REPLACE volume_identities SET volume_key = ? WHERE volume_key = ?",
+        params![new, old],
+    )?)
 }
 
 #[cfg(test)]

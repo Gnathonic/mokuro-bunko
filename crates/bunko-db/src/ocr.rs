@@ -9,7 +9,7 @@
 
 use crate::database::Database;
 use crate::error::Result;
-use rusqlite::{OptionalExtension, Row, params};
+use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
 
 /// 0.5.2 `OcrSidecarRow`.
@@ -151,15 +151,13 @@ impl Database {
     /// The sidecar at this path is gone (or replaced); rows deleted.
     pub fn forget_ocr_sidecar(&self, sidecar_path: &str) -> Result<usize> {
         let path = sidecar_path.trim_matches('/');
-        self.write(|conn| {
-            Ok(conn.execute("DELETE FROM ocr_sidecars WHERE sidecar_path = ?", [path])?)
-        })
+        self.write(|conn| forget_ocr_sidecar_in(conn, path))
     }
 
     /// Every row of one archive (library-relative `.cbz` path).
     pub fn forget_ocr_sidecars_of_volume(&self, volume_key: &str) -> Result<usize> {
         let key = volume_key.trim_matches('/');
-        self.write(|conn| Ok(conn.execute("DELETE FROM ocr_sidecars WHERE volume_key = ?", [key])?))
+        self.write(|conn| forget_ocr_sidecars_of_volume_in(conn, key))
     }
 
     /// Every row under a folder (exact prefix).
@@ -185,26 +183,7 @@ impl Database {
         old_volume_key: &str,
         new_volume_key: &str,
     ) -> Result<usize> {
-        let (old_key, new_key) = (
-            old_volume_key.trim_matches('/'),
-            new_volume_key.trim_matches('/'),
-        );
-        let (Some(old_stem), Some(new_stem)) = (archive_stem(old_key), archive_stem(new_key))
-        else {
-            return Ok(0);
-        };
-        if old_key == new_key || old_key.is_empty() || new_key.is_empty() {
-            return Ok(0);
-        }
-        let n = old_stem.chars().count() as i64;
-        self.write(|conn| {
-            Ok(conn.execute(
-                "UPDATE OR REPLACE ocr_sidecars SET \
-                 sidecar_path = ? || substr(sidecar_path, ?), volume_key = ? \
-                 WHERE volume_key = ? AND substr(sidecar_path, 1, ?) = ?",
-                params![new_stem, n + 1, new_key, old_key, n, old_stem],
-            )?)
-        })
+        self.write(|conn| rename_ocr_sidecars_of_volume_in(conn, old_volume_key, new_volume_key))
     }
 
     /// One sidecar file moved (a case merge moving a layer in under the winner's
@@ -215,21 +194,7 @@ impl Database {
         new_path: &str,
         new_volume_key: &str,
     ) -> Result<usize> {
-        let (old, new, key) = (
-            old_path.trim_matches('/'),
-            new_path.trim_matches('/'),
-            new_volume_key.trim_matches('/'),
-        );
-        if old == new || old.is_empty() || new.is_empty() {
-            return Ok(0);
-        }
-        self.write(|conn| {
-            Ok(conn.execute(
-                "UPDATE OR REPLACE ocr_sidecars SET sidecar_path = ?, volume_key = ? \
-                 WHERE sidecar_path = ?",
-                params![new, key, old],
-            )?)
-        })
+        self.write(|conn| rename_ocr_sidecar_in(conn, old_path, new_path, new_volume_key))
     }
 
     /// A folder moved with its sidecars: the rows follow (colliding rows are replaced).
@@ -255,6 +220,93 @@ impl Database {
             )?)
         })
     }
+}
+
+/// [`Database::forget_ocr_sidecar`] inside the caller's transaction (`path` trimmed).
+pub(crate) fn forget_ocr_sidecar_in(conn: &Connection, path: &str) -> Result<usize> {
+    Ok(conn.execute("DELETE FROM ocr_sidecars WHERE sidecar_path = ?", [path])?)
+}
+
+/// [`Database::forget_ocr_sidecars_of_volume`] inside the caller's transaction (`key`
+/// trimmed).
+pub(crate) fn forget_ocr_sidecars_of_volume_in(conn: &Connection, key: &str) -> Result<usize> {
+    Ok(conn.execute("DELETE FROM ocr_sidecars WHERE volume_key = ?", [key])?)
+}
+
+/// The rows [`rename_ocr_sidecars_of_volume_in`] moves: `(old sidecar_path, new
+/// sidecar_path)`, by old path. Empty when it moves none.
+pub(crate) fn ocr_volume_moves(
+    conn: &Connection,
+    old_volume_key: &str,
+    new_volume_key: &str,
+) -> Result<Vec<(String, String)>> {
+    let (old_key, new_key) = (
+        old_volume_key.trim_matches('/'),
+        new_volume_key.trim_matches('/'),
+    );
+    let (Some(old_stem), Some(new_stem)) = (archive_stem(old_key), archive_stem(new_key)) else {
+        return Ok(Vec::new());
+    };
+    if old_key == new_key || old_key.is_empty() || new_key.is_empty() {
+        return Ok(Vec::new());
+    }
+    let n = old_stem.chars().count() as i64;
+    Ok(conn
+        .prepare_cached(
+            "SELECT sidecar_path, ? || substr(sidecar_path, ?) FROM ocr_sidecars \
+             WHERE volume_key = ? AND substr(sidecar_path, 1, ?) = ? ORDER BY sidecar_path",
+        )?
+        .query_map(params![new_stem, n + 1, old_key, n, old_stem], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })?
+        .collect::<rusqlite::Result<_>>()?)
+}
+
+/// [`Database::rename_ocr_sidecars_of_volume`] inside the caller's transaction.
+pub(crate) fn rename_ocr_sidecars_of_volume_in(
+    conn: &Connection,
+    old_volume_key: &str,
+    new_volume_key: &str,
+) -> Result<usize> {
+    let (old_key, new_key) = (
+        old_volume_key.trim_matches('/'),
+        new_volume_key.trim_matches('/'),
+    );
+    let (Some(old_stem), Some(new_stem)) = (archive_stem(old_key), archive_stem(new_key)) else {
+        return Ok(0);
+    };
+    if old_key == new_key || old_key.is_empty() || new_key.is_empty() {
+        return Ok(0);
+    }
+    let n = old_stem.chars().count() as i64;
+    Ok(conn.execute(
+        "UPDATE OR REPLACE ocr_sidecars SET \
+         sidecar_path = ? || substr(sidecar_path, ?), volume_key = ? \
+         WHERE volume_key = ? AND substr(sidecar_path, 1, ?) = ?",
+        params![new_stem, n + 1, new_key, old_key, n, old_stem],
+    )?)
+}
+
+/// [`Database::rename_ocr_sidecar`] inside the caller's transaction.
+pub(crate) fn rename_ocr_sidecar_in(
+    conn: &Connection,
+    old_path: &str,
+    new_path: &str,
+    new_volume_key: &str,
+) -> Result<usize> {
+    let (old, new, key) = (
+        old_path.trim_matches('/'),
+        new_path.trim_matches('/'),
+        new_volume_key.trim_matches('/'),
+    );
+    if old == new || old.is_empty() || new.is_empty() {
+        return Ok(0);
+    }
+    Ok(conn.execute(
+        "UPDATE OR REPLACE ocr_sidecars SET sidecar_path = ?, volume_key = ? \
+         WHERE sidecar_path = ?",
+        params![new, key, old],
+    )?)
 }
 
 #[cfg(test)]

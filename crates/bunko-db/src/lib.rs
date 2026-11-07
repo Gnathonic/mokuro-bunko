@@ -22,9 +22,11 @@
 //! | [`ocr`] | `ocr_sidecars` |
 //! | [`identities`] | `volume_identities` |
 //! | [`series`] | `series_facts`, `series_entry_cache`, `catalog_folders`, `community_details` |
+//! | [`case_merge`] | `case_merge_groups`, `case_merge_steps`, `case_merge_blocks`, `case_merge_owner_snapshots`, `series_folder_adoption_deferred` (the local case merge's journal, 0.8) |
 //! | [`schema`] | DDL, migrations, `schema_version` |
 
 pub mod audit;
+pub mod case_merge;
 pub mod database;
 pub mod error;
 pub mod folders;
@@ -44,6 +46,7 @@ pub use audit::{
     AUDIT_PAGE_MAX, AUDIT_PAGE_SIZE, AUDIT_PROGRESS_TYPE, AUDIT_RETENTION_DAYS, AuditDetails,
     AuditEvent, AuditFacets, AuditPage, AuditQuery, NewAuditEvent,
 };
+pub use case_merge::{Carry, CarryOutcome};
 pub use database::{Database, DbOptions};
 pub use error::{DbError, Result};
 pub use folders::SeriesFolderOwner;
