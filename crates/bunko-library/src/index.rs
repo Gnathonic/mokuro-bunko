@@ -404,6 +404,15 @@ impl LibraryIndexCache {
         scan_one_series(&self.0.library_path, name)
     }
 
+    /// Does the last walk list a series spelled exactly `name`? Never scans. The walk
+    /// leaves out every spelling another listed one shadows ([`fsutil::case_losers`],
+    /// the rule requests are resolved by), so a name it lists is the spelling a request
+    /// for it reaches, without listing its folder's parent again.
+    pub fn lists_series(&self, name: &str) -> bool {
+        let last = self.0.state.lock().last.clone();
+        last.is_some_and(|snapshot| snapshot.series_by_name(name).is_some())
+    }
+
     /// The last snapshot, however old, without ever scanning.
     pub fn cached_snapshot(&self) -> Option<Arc<LibrarySnapshot>> {
         self.0.state.lock().snapshot.clone()
