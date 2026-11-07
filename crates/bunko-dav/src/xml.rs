@@ -244,9 +244,9 @@ mod tests {
     /// 2 MiB stack, a tokio worker's.
     #[test]
     fn a_deeply_nested_body_is_refused_not_a_crash() {
-        let depth = 150_000;
+        let depth = 149_000;
         let body = format!("{}{}", "<a>".repeat(depth), "</a>".repeat(depth));
-        assert!(body.len() <= 1024 * 1024 + 64 * 1024);
+        assert!(body.len() <= 1024 * 1024);
         let refused = std::thread::Builder::new()
             .stack_size(2 * 1024 * 1024)
             .spawn(move || parse(body.as_bytes()).is_err())

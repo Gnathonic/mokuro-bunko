@@ -76,6 +76,18 @@ async fn deeply_nested_bodies_are_400_not_a_crash() {
         .await;
     assert_eq!(r.code(), 207);
     assert!(r.text().contains("HTTP/1.1 200 OK"), "{}", r.text());
+    let named =
+        br#"<D:propfind xmlns:D="DAV:" xmlns:Z="urn:z"><D:prop><Z:a/></D:prop></D:propfind>"#;
+    let r = env
+        .req(Some("admin"), "PROPFIND", path, &[("depth", "0")], named)
+        .await;
+    assert_eq!(r.code(), 207);
+    assert_eq!(
+        r.text().matches("<a xmlns=\"\"").count(),
+        200,
+        "{}",
+        r.text()
+    );
 
     let r = env
         .req(None, "PROPFIND", "/", &[("depth", "0")], PROPFIND_ALLPROP)
