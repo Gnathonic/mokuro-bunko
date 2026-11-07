@@ -209,12 +209,6 @@ mod tests {
         assert_eq!(casefold("ﬁ"), "fi");
     }
 
-    /// The filename fold (`bunko_core::names`) carries a copy of this table.
-    #[test]
-    fn the_filename_folds_table_is_this_one() {
-        assert_eq!(tables::CASEFOLD, bunko_core::casefold_table::CASEFOLD);
-    }
-
     #[test]
     fn whitespace_matches_python_isspace() {
         assert!(is_space('\u{1c}'));

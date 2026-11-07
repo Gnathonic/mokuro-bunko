@@ -26,6 +26,18 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo fmt --check --manifest-path packaging/docker-init/Cargo.toml
 
+  # Fold v2's generated tables (bunko-core and interop/contract) match their generator
+  # and the pinned UCD 17.0.0 files.
+  fold-tables:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/bunko/ucd
+          key: ucd-17.0.0
+      - run: python3 -I crates/bunko-core/scripts/gen_fold.py --check
+
   clippy:
     runs-on: ubuntu-latest
     steps:

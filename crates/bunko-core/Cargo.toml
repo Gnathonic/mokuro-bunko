@@ -12,7 +12,10 @@ serde_yaml_ng.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 ipnet = "2"
-unicode-normalization = "0.1"
+# Pinned: its NFD/NFC is fold v2's UCD (17.0.0, `names` tests); a bump is a new rule.
+unicode-normalization = "=0.1.25"
 
 [dev-dependencies]
+hex.workspace = true
+sha2.workspace = true
 tempfile.workspace = true

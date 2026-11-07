@@ -3,12 +3,11 @@
 //!
 //! Nothing here touches the network or a database; every other crate builds on it.
 
-pub mod casefold_table;
 pub mod config;
 pub mod engines;
 pub mod fold_groups;
+pub mod fold_table;
 pub mod generations;
-pub mod ignorable_table;
 pub mod names;
 pub mod reader_tree;
 pub mod roles;
