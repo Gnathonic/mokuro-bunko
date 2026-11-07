@@ -323,10 +323,11 @@ fn get_series(deps: &LibraryDeps, name: &str) -> Response {
     if under_per_user_name(name) {
         return json_error(404, "Series not found");
     }
-    // The spelling the library lists. A name the last walk lists as spelled is that
-    // already (the walk leaves out every spelling another shadows); only another
-    // spelling, or a request before the first walk, reads the library root's listing,
-    // which grows with the library.
+    // The spelling the library lists. A name the index lists as spelled is that already
+    // (the walk leaves out every spelling another shadows; before the first walk, one
+    // listing of the root taken for every request); only another spelling, or a nested
+    // series before the first walk, reads the listings here, at a cost that grows with
+    // the library.
     let name = &if deps.runtime.index().lists_series(name) {
         name.to_owned()
     } else {

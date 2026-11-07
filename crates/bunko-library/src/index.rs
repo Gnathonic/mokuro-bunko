@@ -316,6 +316,9 @@ struct Inner {
     scanning: Mutex<()>,
     /// A background walk is queued or running (at most one at a time).
     refreshing: AtomicBool,
+    /// Before the first walk lands: the library root's names a request reaches, from one
+    /// listing taken by the first [`LibraryIndexCache::lists_series`] that needs it.
+    root_names: Mutex<Option<Arc<HashSet<String>>>>,
 }
 
 impl LibraryIndexCache {
@@ -338,6 +341,7 @@ impl LibraryIndexCache {
             }),
             scanning: Mutex::new(()),
             refreshing: AtomicBool::new(false),
+            root_names: Mutex::new(None),
         }))
     }
 
@@ -404,13 +408,20 @@ impl LibraryIndexCache {
         scan_one_series(&self.0.library_path, name)
     }
 
-    /// Does the last walk list a series spelled exactly `name`? Never scans. The walk
-    /// leaves out every spelling another listed one shadows ([`fsutil::case_losers`],
-    /// the rule requests are resolved by), so a name it lists is the spelling a request
-    /// for it reaches, without listing its folder's parent again.
+    /// Is `name` spelled as the series folder a request for it reaches? Never walks.
+    /// The walk leaves out every spelling another listed one shadows
+    /// ([`fsutil::case_losers`], the rule requests are resolved by), so a series the
+    /// last walk lists is spelled so. Before the first walk lands, a top-level name is
+    /// looked up in one listing of the library root ([`fsutil::listed_groups`], the
+    /// same rule), taken once and kept until the walk replaces it: a request right
+    /// after a start lists the root once, not once per request. False for anything
+    /// else: the caller resolves the spelling from the listings itself.
     pub fn lists_series(&self, name: &str) -> bool {
         let last = self.0.state.lock().last.clone();
-        last.is_some_and(|snapshot| snapshot.series_by_name(name).is_some())
+        if let Some(snapshot) = last {
+            return snapshot.series_by_name(name).is_some();
+        }
+        !name.contains('/') && self.0.root_names().contains(name)
     }
 
     /// The last snapshot, however old, without ever scanning.
@@ -443,6 +454,29 @@ impl LibraryIndexCache {
 }
 
 impl Inner {
+    /// The library root's names a request reaches (folders and files alike: what is
+    /// asked for is a spelling): every listed name no other spelling shadows. Taken on
+    /// first use and kept until a walk lands; empty when the root cannot be listed.
+    fn root_names(&self) -> Arc<HashSet<String>> {
+        let mut cached = self.root_names.lock();
+        if let Some(names) = cached.as_ref() {
+            return Arc::clone(names);
+        }
+        let names = Arc::new(
+            fsutil::listed_groups(&self.library_path, true)
+                .map(|(entries, groups)| {
+                    entries
+                        .into_iter()
+                        .map(|(name, _)| name)
+                        .filter(|name| !groups.is_hidden(name))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        );
+        *cached = Some(Arc::clone(&names));
+        names
+    }
+
     /// Walk the library (one walk at a time) and keep the result. A walk that finished
     /// while this one waited for the lock serves it instead: one that may be served
     /// (`fresh_only` false) or one with every change seen (`fresh_only` true).
@@ -477,6 +511,8 @@ impl Inner {
         state.snapshot = (!state.stale || duration >= SLOW_SCAN).then(|| Arc::clone(&snapshot));
         state.last = Some(Arc::clone(&snapshot));
         state.scans += 1;
+        // The walk answers from now on.
+        *self.root_names.lock() = None;
         (snapshot, state.scans)
     }
 

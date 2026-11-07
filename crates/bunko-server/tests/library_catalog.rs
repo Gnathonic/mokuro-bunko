@@ -547,7 +547,8 @@ async fn a_hidden_archives_cover_is_never_served() {
 /// Two folders that fold alike (only a case-sensitive disk holds both): the series view
 /// answers the winner, the byte-smallest, for either spelling, once the walk has listed
 /// the library as well as before. The exact spelling of the shadowed folder is never its
-/// own series: the walk does not list it, so it is resolved from the root's listing.
+/// own series: neither the walk nor, before it, the index's listing of the root names it
+/// as reachable, so it is resolved from the listings.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_shadowed_spelling_of_a_series_answers_its_winner() {
     let env = Env::new(|_| {});
@@ -570,6 +571,11 @@ async fn a_shadowed_spelling_of_a_series_answers_its_winner() {
         )
     };
     let want = ("Saga".to_string(), vec!["Saga 01".to_string()]);
+    // Before any walk: one listing of the root says which spelling a request reaches.
+    assert_eq!(env.runtime.index().scans(), 0);
+    assert!(env.runtime.index().lists_series("Saga"));
+    assert!(!env.runtime.index().lists_series("saga"));
+    assert!(!env.runtime.index().lists_series("SAGA"));
     for walked in [false, true] {
         if walked {
             env.runtime.index().get_snapshot_fresh();
