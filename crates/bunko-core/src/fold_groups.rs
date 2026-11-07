@@ -7,25 +7,24 @@
 //! Bunko or by a release before 0.5.3: Bunko itself never makes a second spelling.
 //!
 //! Requests reach one member of a group (the winner: the store's case winner, else the
-//! byte-smallest); the others, and the files rule v1 gives a hidden archive, are hidden
+//! byte-smallest); the others, and the files rule 2 gives a hidden archive, are hidden
 //! ([`FoldGroups::is_hidden`]). Until an admin merges the group by hand, it is FROZEN:
 //! nothing Bunko does on its own, and no client write, creates, changes, moves, deletes
 //! or re-keys anything in it ([`FoldGroups::freezing`]):
 //!
 //! * every member, the winner included (and everything inside a member folder);
-//! * every file rule v1 gives, or would give once it is written, to an archive of the
+//! * every file rule 2 gives, or would give once it is written, to an archive of the
 //!   group (`v.mokuro`, `V.hayai.mokuro`, `V.webp`, `v.nocover` beside `V.cbz` and
-//!   `v.cbz`), and, the same way, to an archive whose own files hold a group
-//!   (`Vol.cbz` beside `VOL.mokuro` and `vol.mokuro`): deleting or moving that archive
-//!   would take a member with it. A file tied to such an archive only by the wider
-//!   filename fold (`STRASSE.mokuro` beside `Straße.cbz` in a group) is frozen too.
+//!   `v.cbz`; `STRASSE.mokuro` beside `Straße.cbz` and `STRASSE.cbz`), and, the same
+//!   way, to an archive whose own files hold a group (`Vol.cbz` beside `VOL.mokuro` and
+//!   `vol.mokuro`): deleting or moving that archive would take a member with it.
+//!
+//! Group membership and the files of an archive both come from the one fold (rule 2,
+//! [`crate::sidecar_names`]): there is no second fold to freeze by.
 //!
 //! Reads still serve the winner. Every check (WebDAV, OCR, covers, the sweeps, the
 //! hooks) asks this one type, built from a folder listing, so the answer is the same on
 //! every host and a new code path gets it by asking.
-
-// Rule v1's stem fold is a deprecated rule-2 shim (`fold`) until B2 removes it here.
-#![allow(deprecated)]
 
 use std::collections::{HashMap, HashSet};
 
@@ -41,7 +40,7 @@ pub struct Group {
     pub winner: String,
     /// Every member, the winner included, sorted.
     pub members: Vec<String>,
-    /// The other listed files the group freezes (the files rule v1 gives its archives),
+    /// The other listed files the group freezes (the files rule 2 gives its archives),
     /// sorted.
     pub files: Vec<String>,
 }
@@ -65,19 +64,17 @@ pub struct FoldGroups {
     by_fold: HashMap<String, usize>,
     /// The listed name of every fold that is no group (one entry).
     single: HashMap<String, String>,
-    /// The listed file names (what rule v1 reads), sorted.
+    /// The listed file names (what rule 2 reads), sorted.
     files: Vec<String>,
     /// Every listed name the freeze holds or hides (members, group files, hidden
     /// files) -> index into `groups`: an archive whose arrival would take one of them
     /// as its own file (rule 4) is frozen too.
     held: HashMap<String, usize>,
-    /// Stems of the archives a group freezes, by rule v1's stem fold and by the
-    /// filename fold, -> index into `groups`.
-    stem_folds: HashMap<String, usize>,
-    name_folds: HashMap<String, usize>,
-    /// Rule v1's folded stems of every listed `.cbz` (rule 4: a primary of another
-    /// listed volume is never read as a frozen archive's layer).
-    cbz_stem_folds: HashSet<String>,
+    /// Folded stems of the archives a group freezes -> index into `groups`.
+    frozen_stems: HashMap<String, usize>,
+    /// The folded stems of every listed `.cbz` (R4: a primary of another listed volume
+    /// is never read as a frozen archive's layer).
+    cbz_stems: HashSet<String>,
     hidden: HashSet<String>,
 }
 
@@ -125,9 +122,9 @@ impl FoldGroups {
             .collect();
         files.sort_unstable();
         out.files = files.iter().map(|n| n.to_string()).collect();
-        out.cbz_stem_folds = sidecar_names::volume_stems(files.iter().copied());
         let folder = Folder::new(&files);
-        // Hidden: every member but the winner, and the files rule v1 gives a hidden
+        out.cbz_stems = folder.volume_stems();
+        // Hidden: every member but the winner, and the files rule 2 gives a hidden
         // archive.
         for group in &out.groups {
             out.hidden.extend(
@@ -150,7 +147,7 @@ impl FoldGroups {
                 }
             }
         }
-        // Frozen archives: an archive member, and an archive whose own files (rule v1)
+        // Frozen archives: an archive member, and an archive whose own files (rule 2)
         // hold a member.
         let mut frozen_stems: Vec<(&str, usize)> = Vec::new();
         for &archive in files
@@ -171,10 +168,7 @@ impl FoldGroups {
             }
         }
         for (stem, g) in frozen_stems {
-            out.stem_folds
-                .entry(sidecar_names::stem_fold(stem))
-                .or_insert(g);
-            out.name_folds.entry(fold_name(stem)).or_insert(g);
+            out.frozen_stems.entry(fold_name(stem)).or_insert(g);
         }
         let mut group_files: Vec<Vec<String>> = vec![Vec::new(); out.groups.len()];
         for (name, _) in &entries {
@@ -215,7 +209,7 @@ impl FoldGroups {
     }
 
     /// The listed names no request reaches: every member of a group but its winner,
-    /// and every file rule v1 gives a hidden archive.
+    /// and every file rule 2 gives a hidden archive.
     pub fn hidden(&self) -> &HashSet<String> {
         &self.hidden
     }
@@ -225,7 +219,7 @@ impl FoldGroups {
     }
 
     /// The group that freezes `name`, listed or not (a name a write would create
-    /// included): `name` folds like a group, or is a file rule v1 gives, or would
+    /// included): `name` folds like a group, or is a file rule 2 gives, or would
     /// give, to an archive the group freezes. `None` when nothing here freezes it.
     pub fn freezing(&self, name: &str) -> Option<&Group> {
         if self.groups.is_empty() {
@@ -241,7 +235,7 @@ impl FoldGroups {
     }
 
     /// The group an archive `name` that is not listed yet would take a file from: once
-    /// written, rule v1 (rule 4: an exact stem is the archive's own primary) would give
+    /// written, rule 2 (R4: an exact stem is the archive's own primary) would give
     /// it a member, a file the freeze holds or a hidden file (`V.edit.cbz` takes
     /// `V.edit.mokuro`, a frozen `V.cbz`'s correction, as its primary; `v.hayai.cbz`
     /// takes the hidden `v.cbz`'s `v.hayai.mokuro`). Writing it would move that file out
@@ -277,31 +271,23 @@ impl FoldGroups {
 
     /// The group a file `name` (not a member) is frozen by as a frozen archive's file.
     fn frozen_file(&self, name: &str) -> Option<usize> {
-        if self.stem_folds.is_empty() {
+        if self.frozen_stems.is_empty() {
             return None;
         }
-        let of_stem = |stem: &str| {
-            self.stem_folds
-                .get(&sidecar_names::stem_fold(stem))
-                .or_else(|| self.name_folds.get(&fold_name(stem)))
-                .copied()
-        };
+        let of_stem = |stem: &str| self.frozen_stems.get(&fold_name(stem)).copied();
         if let Some((base, _)) = sidecar_names::split_mokuro(name) {
             if let Some(g) = of_stem(base) {
                 return Some(g);
             }
-            // Rule 4: the primary of another listed volume is that volume's.
-            if self
-                .cbz_stem_folds
-                .contains(&sidecar_names::stem_fold(base))
-            {
+            // R4: the primary of another listed volume is that volume's.
+            if self.cbz_stems.contains(&fold_name(base)) {
                 return None;
             }
             return sidecar_names::split_layer(name).and_then(|(stem, _, _)| of_stem(stem));
         }
         [".cbz", ".webp", ".nocover"]
             .iter()
-            .find_map(|suffix| sidecar_names::strip_suffix_ci(name, suffix))
+            .find_map(|suffix| sidecar_names::strip_suffix_folded(name, suffix))
             .and_then(of_stem)
     }
 }
@@ -418,7 +404,7 @@ mod tests {
     }
 
     #[test]
-    fn archive_variants_freeze_every_file_rule_v1_gives_either() {
+    fn archive_variants_freeze_every_file_rule_2_gives_either() {
         let g = FoldGroups::new(
             files(&[
                 "V.cbz",
@@ -469,7 +455,7 @@ mod tests {
         assert_eq!(hidden, ["v.cbz", "v.hayai.mokuro.gz"]);
     }
 
-    /// Variants of a sidecar freeze the archive rule v1 gives them to, and so all of
+    /// Variants of a sidecar freeze the archive rule 2 gives them to, and so all of
     /// that archive's files: deleting it would delete a hidden one.
     #[test]
     fn sidecar_variants_freeze_their_archive() {
@@ -486,7 +472,7 @@ mod tests {
         assert_eq!(g.groups()[0].files, ["Vol.cbz"]);
     }
 
-    /// Rule 4: a decimal volume's primary stays its own beside a frozen whole volume.
+    /// R4: a decimal volume's primary stays its own beside a frozen whole volume.
     #[test]
     fn another_volumes_primary_is_not_a_frozen_archives_layer() {
         let g = FoldGroups::new(
@@ -498,7 +484,7 @@ mod tests {
         assert!(g.is_frozen("Vol 1.6.mokuro"), "a layer `6` of Vol 1");
     }
 
-    /// A new archive whose own files (rule 4) would include a member, a file the freeze
+    /// A new archive whose own files (R4) would include a member, a file the freeze
     /// holds or a hidden file is frozen: writing it would take that file from the group.
     #[test]
     fn an_archive_that_would_take_a_frozen_file_is_frozen() {
@@ -523,20 +509,32 @@ mod tests {
         }
     }
 
+    /// One fold makes the group and gives it its files: every spelling the fold joins
+    /// with the group's archives is frozen, whichever way it is spelled.
     #[test]
-    fn the_wider_fold_freezes_too() {
-        let g = FoldGroups::new(files(&["Straße.cbz", "STRASSE.cbz"]), none);
+    fn a_fold_group_freezes_every_spelling_of_its_files() {
+        let g = FoldGroups::new(
+            files(&["Straße.cbz", "STRASSE.cbz", "strasse.mokuro", "W.cbz"]),
+            none,
+        );
+        assert_eq!(g.groups().len(), 1);
+        assert_eq!(g.groups()[0].files, ["strasse.mokuro"]);
         for name in [
             "strasse.mokuro",
             "Straße.webp",
             "STRASSE.fast.mokuro",
+            "STRASSE.FAST.mokuro",
             "Strasse.cbz",
+            "Stra\u{17F}\u{17F}e.nocover",
+            "Straße.cb\u{200B}z",
         ] {
             assert!(g.is_frozen(name), "{name}");
         }
+        assert!(!g.is_frozen("W.mokuro"));
         let g = FoldGroups::new(files(&["Vol\u{200B}1.cbz", "Vol1.cbz"]), none);
         assert_eq!(g.groups().len(), 1);
         assert!(g.is_frozen("vol1.mokuro"));
+        assert!(g.is_frozen("VOL\u{200D}1.EDIT.mokuro"));
     }
 
     #[test]
