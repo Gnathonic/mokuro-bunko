@@ -1,21 +1,25 @@
 # Changelog
 
-## [0.7.9] - 2026-11-07
+## [0.7.10] - 2026-11-07
 
-A volume uploaded again under its name gets a new cover, and the catalog shows a
-changed cover at once.
+Covers uploaded with a volume are kept again; the catalog shows a changed cover at once.
 
 ### Fixed
-- **Covers of replaced volumes.** A cover (or a `.nocover` marker) was made once per
-  archive name, so a volume uploaded again over an old one kept the old one's cover,
-  and a volume that once had no cover image never got one. A cover or marker older than
-  its archive is now made again, and a stale marker is removed. A cover written after
-  the archive (a reader's own upload) is kept and never overwritten.
-- **Catalog covers are revalidated.** The catalog served covers as fresh for an hour with
-  nothing to check them against, so a changed cover stayed old for up to an hour and
-  was then downloaded again in full. Covers now carry an `ETag` and `Last-Modified` with
-  `Cache-Control: no-cache`: a changed cover shows at once, and an unchanged one costs
-  a `304`.
+- **Uploaded covers are kept.** 0.7.9 made a cover again whenever it was older than its
+  archive. A client uploads a volume's cover before the archive, so every uploaded cover
+  is older than its archive, and 0.7.9 would have replaced them all with made ones. The
+  rule is gone: as in 0.7.8, an archive with a cover or a `.nocover` marker beside it is
+  not covered again. Replacing a volume means deleting it, which deletes its cover and
+  marker too, so the new archive is covered as any new one.
+- **Catalog covers are revalidated** (from 0.7.9). The catalog served covers as fresh for
+  an hour with nothing to check them against, so a changed cover stayed old for up to an
+  hour and was then downloaded again in full. Covers now carry an `ETag` and
+  `Last-Modified` with `Cache-Control: no-cache`: a changed cover shows at once, and an
+  unchanged one costs a `304`.
+
+## [0.7.9] - 2026-11-07
+
+Withdrawn before publishing: it would have replaced uploaded covers (see 0.7.10).
 
 ## [0.7.8] - 2026-11-05
 
