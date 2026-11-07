@@ -88,17 +88,6 @@ pub(crate) fn is_catalog_json(rel: &RelPath) -> bool {
     matches!(rel.segments(), [name] if fold(name) == CATALOG_JSON)
 }
 
-/// A `series.json` without its index data (`volumes`, `spine_offset`): `None` when it
-/// has none to drop, or is no JSON object (the server's merge refuses it as it is).
-fn facts_only(bytes: &[u8]) -> Option<Vec<u8>> {
-    let text = bytes.strip_prefix("\u{feff}".as_bytes()).unwrap_or(bytes);
-    let serde_json::Value::Object(mut map) = serde_json::from_slice(text).ok()? else {
-        return None;
-    };
-    let dropped = map.remove("volumes").is_some() | map.remove("spine_offset").is_some();
-    dropped.then(|| serde_json::to_vec(&map).expect("a JSON map serialises"))
-}
-
 /// The facts-only `series.json` body for one `catalog.json` entry (module docs).
 pub fn synthesize_series_json(entry: &serde_json::Value) -> Option<Vec<u8>> {
     let e = entry.as_object()?;
@@ -354,7 +343,7 @@ impl<B: Backend> Core<B> {
         // after a rebuild the rows resume before the full sync fills the new index.
         let facts;
         let bytes = if row.facts_only {
-            facts = facts_only(bytes);
+            facts = bunko_core::series_json::facts_only(bytes);
             facts.as_deref().unwrap_or(bytes)
         } else {
             bytes

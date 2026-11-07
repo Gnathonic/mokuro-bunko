@@ -12,55 +12,11 @@ pub fn nfc(raw: &[u8]) -> String {
     String::from_utf8_lossy(raw).nfc().collect()
 }
 
-/// A provider name that can be one library path segment. Provider names are
-/// untrusted (Drive and MEGA allow `..`, `a/b` or control characters), so the empty
-/// name, `.`, `..`, anything holding `/`, `\`, `:` (Windows drive prefixes and NTFS
-/// streams) or NUL, any other ASCII control character, and anything that does not parse
-/// as exactly one normal path component are refused. Lossy-UTF-8 replacement characters are allowed: the raw
-/// bytes stay in `node.name_raw` for addressing.
-pub fn is_safe_segment(name: &str) -> bool {
-    use std::path::{Component, Path};
-    if name.is_empty()
-        || name == "."
-        || name == ".."
-        || name
-            .chars()
-            .any(|c| c == '/' || c == '\\' || c == ':' || c.is_ascii_control())
-    {
-        return false;
-    }
-    if cfg!(windows) && is_windows_device_name(name) {
-        return false;
-    }
-    // Exactly one normal component on this platform: no drive or UNC prefix (Windows
-    // `C:x` would replace the base on `join`), no root, nothing that parses as more.
-    let mut parts = Path::new(name).components();
-    matches!(
-        (parts.next(), parts.next()),
-        (Some(Component::Normal(part)), None) if part == std::ffi::OsStr::new(name)
-    )
-}
-
-/// `CON`, `PRN`, `AUX`, `NUL`, `COM0`-`COM9`, `LPT0`-`LPT9`, `CONIN$`, `CONOUT$`, with
-/// or without an extension and trailing dots or spaces, in any case. On Windows a path
-/// ending in one of these opens a device, so a remote entry with such a name is
-/// refused there. Names NTFS merely forbids (`<>"|?*`, a trailing dot) are allowed:
-/// they cannot alias another path, the remote store never writes a file to the local
-/// disk under its cloud name, and `?` is common in real titles.
-pub fn is_windows_device_name(name: &str) -> bool {
-    let stem = name
-        .split('.')
-        .next()
-        .unwrap_or(name)
-        .trim_end_matches([' ', '.']);
-    let upper = stem.to_ascii_uppercase();
-    matches!(
-        upper.as_str(),
-        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
-    ) || (upper.len() == 4
-        && (upper.starts_with("COM") || upper.starts_with("LPT"))
-        && upper.as_bytes()[3].is_ascii_digit())
-}
+/// Library path segments ([`bunko_core::relpath`]: the [`RelPath`] rule lives with
+/// it).
+///
+/// [`RelPath`]: bunko_core::relpath::RelPath
+pub use bunko_core::relpath::{is_safe_segment, is_windows_device_name};
 
 /// The spelling-insensitive form two names collide under: the one filename fold (full
 /// Unicode case folding and canonical normalization, [`bunko_core::names::fold_name`],

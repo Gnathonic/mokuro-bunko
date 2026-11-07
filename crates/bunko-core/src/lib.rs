@@ -11,7 +11,9 @@ pub mod generations;
 pub mod ignorable_table;
 pub mod names;
 pub mod reader_tree;
+pub mod relpath;
 pub mod roles;
+pub mod series_json;
 pub mod sidecar_names;
 pub mod storage;
 

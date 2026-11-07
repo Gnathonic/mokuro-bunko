@@ -19,7 +19,6 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
-use std::fmt;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -27,6 +26,10 @@ use rusqlite::{Connection, OptionalExtension, Row, Transaction, TransactionBehav
 
 use crate::backend::{HashKind, Pid, RNode};
 use crate::names::{CONTROL_FILES, effective_mtime_ns, fold, is_safe_segment, nfc};
+
+/// A library path ([`bunko_core::relpath::RelPath`]; it lives in the core so the
+/// shared case-merge planner, [`bunko_core::case_merge`], plans in it).
+pub use bunko_core::relpath::RelPath;
 
 /// The merged root's entry id.
 pub const ROOT_EID: i64 = 1;
@@ -77,80 +80,6 @@ CREATE TABLE IF NOT EXISTS spool(pid TEXT, cver TEXT, file TEXT, size INTEGER, f
 CREATE TABLE IF NOT EXISTS api_log(at INTEGER, class TEXT, status INTEGER, ms INTEGER, units INTEGER, bytes INTEGER);
 INSERT OR IGNORE INTO entry(eid, parent_eid, name, fold, kind, mtime_ns, members) VALUES(1, NULL, '', '', 1, 0, 0);
 ";
-
-/// A library path under the merged root: NFC segments, `[]` for the root itself.
-///
-/// Every segment passes [`is_safe_segment`] (no `..`, `.`, separators or control
-/// characters): the constructors refuse anything else, so a `RelPath` can always be
-/// joined under the store root without aliasing or escaping it.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct RelPath(Vec<String>);
-
-impl RelPath {
-    /// The merged root.
-    pub fn root() -> RelPath {
-        RelPath(Vec::new())
-    }
-
-    /// Split a `/`-separated path; empty segments (doubled or edge slashes) are
-    /// dropped. `None` when any segment is unsafe (`..`, `.`, `\`, control chars).
-    pub fn parse(s: &str) -> Option<RelPath> {
-        let mut p = RelPath::root();
-        for seg in s.split('/').filter(|x| !x.is_empty()) {
-            p.push_checked(seg).ok()?;
-        }
-        Some(p)
-    }
-
-    /// A path from segments; `None` when any segment is unsafe.
-    pub fn from_segments<I, S>(segs: I) -> Option<RelPath>
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        let mut p = RelPath::root();
-        for seg in segs {
-            p.push_checked(seg).ok()?;
-        }
-        Some(p)
-    }
-
-    /// Append one segment if it is safe; otherwise hand it back unchanged.
-    pub fn push_checked(&mut self, seg: impl Into<String>) -> Result<(), String> {
-        let seg = seg.into();
-        if is_safe_segment(&seg) {
-            self.0.push(seg);
-            Ok(())
-        } else {
-            Err(seg)
-        }
-    }
-
-    /// This path with one more segment, if it is safe.
-    pub fn join(&self, seg: impl Into<String>) -> Option<RelPath> {
-        let mut p = self.clone();
-        p.push_checked(seg).ok()?;
-        Some(p)
-    }
-
-    pub fn segments(&self) -> &[String] {
-        &self.0
-    }
-
-    pub fn into_segments(self) -> Vec<String> {
-        self.0
-    }
-
-    pub fn is_root(&self) -> bool {
-        self.0.is_empty()
-    }
-}
-
-impl fmt::Display for RelPath {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0.join("/"))
-    }
-}
 
 /// One library path as the index answers it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -634,7 +563,7 @@ impl Index {
     /// The entry at `rel`, matching each segment byte-exactly.
     pub fn lookup(&self, rel: &RelPath) -> Option<Entry> {
         let mut eid = ROOT_EID;
-        for seg in &rel.0 {
+        for seg in rel.segments() {
             // RelPath constructors refuse unsafe segments; stay strict regardless.
             if !is_safe_segment(seg) {
                 return None;
@@ -1002,10 +931,10 @@ impl Index {
     /// entry (no node) and is reported `Added`. `Ok(None)` and nothing changes when
     /// the parent folder is not indexed or `rel` is a folder.
     pub fn set_pending(&self, rel: &RelPath, op: &str) -> rusqlite::Result<Option<IndexChange>> {
-        let Some((name, parent)) = rel.0.split_last() else {
+        let Some((name, parent)) = rel.segments().split_last() else {
             return Ok(None);
         };
-        let parent = RelPath(parent.to_vec());
+        let parent = RelPath::from_segments(parent.iter().cloned()).unwrap_or_default();
         let Some(pe) = self.lookup(&parent).filter(|e| e.is_dir) else {
             return Ok(None);
         };
