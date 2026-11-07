@@ -2,8 +2,8 @@
 
 ## [0.7.11] - 2026-11-07
 
-A crafted WebDAV request can no longer stop the server, and processors no longer trust
-distrusted certificate authorities.
+A crafted WebDAV request or uploaded OCR file can no longer stop the server, and
+processors no longer trust distrusted certificate authorities.
 
 ### Security
 - **Deeply nested DAV request bodies are refused.** A PROPFIND, PROPPATCH or LOCK body
@@ -11,6 +11,12 @@ distrusted certificate authorities.
   limit) overflowed the stack and stopped the whole server. With anonymous browsing on (the
   default), one request from anyone could do it. Bodies nested deeper than 256 elements
   are now a `400 Bad Request`. Real DAV clients nest a few levels.
+- **A deeply nested `.mokuro` file no longer stops the server at startup.** The startup
+  sweep of damaged OCR files reads a file serde cannot (one holding `NaN`, which Python
+  allows) with a second parser that recursed once per level. An account that can upload
+  could put a file there that overflowed the stack and stopped the server at every start
+  until it was removed by hand. That parser now refuses nesting deeper than 512, as the
+  library's own reader does, and the sweep removes such a file as damaged.
 - **Distrusted emSign certificate authorities are no longer trusted.** The bundled root
   store (webpki-roots 1.0.11) drops the emSign root whose intermediate keys were
   compromised, and rustls-webpki 0.103.16 stops accepting distrusted intermediates.

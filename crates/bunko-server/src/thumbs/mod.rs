@@ -628,6 +628,31 @@ mod tests {
         );
     }
 
+    /// An uploaded sidecar of 100k nested `[` holding a `NaN` (which serde refuses and
+    /// Python allows) went on to the layout parser, which recursed per level: the sweep
+    /// at every start overflowed the stack and aborted the server, until the file was
+    /// removed by hand. Now it is removed as corrupt; a moderately nested one with a
+    /// `NaN` is kept. Run on a 2 MiB stack, a tokio blocking thread's.
+    #[test]
+    fn deeply_nested_sidecars_are_removed_not_a_crash() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lib = tmp.path().join("library");
+        std::fs::create_dir_all(lib.join("S")).unwrap();
+        let nest = |depth: usize| format!("{}NaN{}", "[".repeat(depth), "]".repeat(depth));
+        std::fs::write(lib.join("S/deep.mokuro"), nest(100_000)).unwrap();
+        std::fs::write(lib.join("S/nested.mokuro"), nest(200)).unwrap();
+        let lib2 = lib.clone();
+        let removed = std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(move || remove_corrupt_sidecars(&lib2, None))
+            .unwrap()
+            .join()
+            .unwrap();
+        assert_eq!(removed, 1);
+        assert!(!lib.join("S/deep.mokuro").exists());
+        assert!(lib.join("S/nested.mokuro").is_file());
+    }
+
     /// Regression (review finding): a 1.5 MB gzip of whitespace inflated to 1.5 GiB in
     /// memory here. Inflation stops at the cap, and an over-cap sidecar is left in place
     /// (it is not provably damaged), while small damaged ones are still removed.
