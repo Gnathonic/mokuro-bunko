@@ -62,8 +62,8 @@ pub fn sort_roots_canonical(v: &mut Vec<RNode>, top: Option<&str>) {
 pub const KEEP_BOTH_FOLDED: [&str; 3] = ["volume-data.json", "goals.json", "positions.json"];
 
 /// Bunko's status files: kept by a merge like [`KEEP_BOTH_FOLDED`], but by exact name
-/// (Bunko writes only this spelling).
-pub const CONTROL_FILES: [&str; 2] = [".mokuro-bunko.json", ".mokuro-queue.json"];
+/// (Bunko writes only this spelling; [`bunko_core::names::CONTROL_FILES`]).
+pub use bunko_core::names::CONTROL_FILES;
 
 /// A merge moves every copy of `name` in, never trashing one (same-name collision
 /// rule). History `.events` files and `profiles.json` are not kept twice: the newer

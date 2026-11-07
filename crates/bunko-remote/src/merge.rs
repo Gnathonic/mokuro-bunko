@@ -28,7 +28,10 @@
 //!   whole group in the loser as a `case-merge-blocked` conflict. A loser
 //!   `series.json` is ingested as a submission into the winner's series key, as its
 //!   facts only ([`crate::submissions`]), then trashed. A loser recreated too often
-//!   stops being merged ([`RECREATE_LIMIT`]).
+//!   stops being merged ([`RECREATE_LIMIT`]). These rules are the shared planner,
+//!   [`bunko_core::case_merge`], which every store plans with; this store answers it
+//!   through `RemoteHost` (direct listings, §5.9 Identical, the bytes a replace
+//!   uploads) and keeps finding the sets, the journal and the executor.
 //! - **Durability:** each merge is one journal group: a `merge_group` row in
 //!   `state.sqlite` and its steps as outbox ops (origin `Admin`, `Deferred`,
 //!   `group_id`), which the outbox worker never runs. A group resumes after a crash,
@@ -88,233 +91,46 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
-use bunko_core::sidecar_names::{self, LayerClass, SidecarClass, strip_suffix_ci as strip_ci};
+use bunko_core::case_merge::{
+    self as core_merge, Block, Defer, EVENT_RETAIN, Extra, Host, Memo, Node, Plan, Planned, Scope,
+    SetSpec, StepKind, archive_stems, defer, file_key, folded, last_name, order_stem_members,
+    pair_key, parent_of, split_name,
+};
 use bunko_store::{Durability, Health, LibraryStore, Mode, Origin, WatchEvent};
 use parking_lot::{Condvar, Mutex};
 use rusqlite::{OptionalExtension, params};
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use tokio::sync::OwnedRwLockReadGuard;
 
 use crate::backend::{BErr, Backend, OpCtx, Pid, RNode, UploadSource, UploadTarget};
 use crate::cache::{SMALL_MAX, now_ms};
 use crate::governor::{self, ApiClass};
 use crate::index::{ROOT_EID, RelPath};
-use crate::names::{CONTROL_FILES, dedup_keeps_both, fold, nfc};
+use crate::names::{dedup_keeps_both, nfc};
 use crate::outbox::{Crash, Op, OpKind, OpState, Proof};
 use crate::state::{ConflictRow, random_id};
 use crate::store::{RemoteStore, Ver};
 
-/// After this many finished merges of one losing spelling within [`RECREATE_WINDOW`]
-/// (the first and three recreations), a further recreation is not merged: the reader
-/// keeps making the folder again, and a `case-merge-blocked` conflict says so.
-pub const RECREATE_LIMIT: u64 = 4;
-/// The recreate-loop guard's window (24 h).
-pub const RECREATE_WINDOW: Duration = Duration::from_secs(24 * 3600);
-/// How long store events are remembered for the quiet check and the re-plan memo.
-const EVENT_RETAIN: Duration = Duration::from_secs(3600);
+// The planner and the server's side of it are shared with every store
+// ([`bunko_core::case_merge`]); they keep their names here.
+pub use bunko_core::case_merge::{
+    CaseMergePolicy, MergeChoice, MergeRecord, RECREATE_LIMIT, RECREATE_WINDOW, RECREATING,
+    ResolveChoice, is_unstamped_layer_id,
+};
+
+#[cfg(feature = "testing")]
+#[path = "merge_legacy.rs"]
+mod legacy;
+#[cfg(feature = "testing")]
+pub use legacy::{DualPlanReport, dual_plan_report};
+
 const EVENT_CAP: usize = 100_000;
-/// The detail of the recreate-loop guard's conflict.
-pub const RECREATING: &str = "Mokuro Reader keeps recreating this folder";
 /// After this many finished duplicate merges of one folder within [`RECREATE_WINDOW`],
 /// its duplicates are left alone (a `dup-recreated` conflict says so).
 pub const DEDUP_RECREATE_LIMIT: u64 = 10;
 /// The detail of the duplicate merge's recreate-loop conflict.
 pub const DUP_RECREATING: &str = "duplicate folders keep reappearing";
 
-// ---- the server's side ------------------------------------------------------------
-
-/// Which of two differing main sidecars a merge keeps ([`CaseMergePolicy::prefer_main`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MergeChoice {
-    /// The first (the winner's).
-    A,
-    /// The second (the loser's).
-    B,
-    /// Neither, or both, match the primary recipe, or upgrades are off: the volume
-    /// group stays in the losing spelling (`case-merge-blocked`).
-    Block,
-}
-
-/// The admin's answer to a `case-merge-blocked` conflict.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ResolveChoice {
-    /// Keep the losing spelling's copy (`this`): the winner's goes to the trash, and
-    /// the next merge pass moves this one in.
-    KeepThis,
-    /// Keep the winner's copy (`that`): the losing spelling's goes to the trash.
-    KeepThat,
-}
-
-impl ResolveChoice {
-    /// `this` / `that` (the admin API's words).
-    pub fn parse(s: &str) -> Option<ResolveChoice> {
-        match s {
-            "this" => Some(ResolveChoice::KeepThis),
-            "that" => Some(ResolveChoice::KeepThat),
-            _ => None,
-        }
-    }
-}
-
-/// What a case merge needs from the server (installed with
-/// [`RemoteStore::set_case_merge_policy`]; no merge runs before).
-pub trait CaseMergePolicy: Send + Sync {
-    /// Two differing main sidecars beside identical archives (`a` the winner's, `b`
-    /// the loser's, both store paths): the one whose recipe matches the primary
-    /// row's output-affecting recipe (`Recipe::matches`, not `Verdict::Current`).
-    /// `Block` when `ocr.upgrade.enabled` is off, or neither or both match.
-    fn prefer_main(&self, a: &Path, b: &Path) -> MergeChoice;
-    /// A layer id Bunko never stamps (`edit*`, `curated*`): on a collision with
-    /// different content it moves in under the next free id (`-2`, `-3`).
-    fn is_unstamped_layer(&self, id: &str) -> bool {
-        is_unstamped_layer_id(id)
-    }
-    /// A variant set the merge leaves alone: `dir` is its parent folder as spelled
-    /// (store segments), `key` the folded name the variants share. The server keeps
-    /// its per-user tree (a cloud root owner's `history/`) out of case merges.
-    fn excluded(&self, _dir: &[String], _key: &str) -> bool {
-        false
-    }
-    /// An OCR claim is running or spooling, or an upgrade is being judged or
-    /// swapped, for the volume at `path` or any volume under it.
-    fn busy(&self, _path: &Path) -> bool {
-        false
-    }
-    /// A merge group finished (the audit record, as it reads once `done`). Called
-    /// before the group shows `done`; a crash in between calls it again on resume.
-    fn audit(&self, _merge: &MergeRecord) {}
-}
-
-/// `edit`, `curated` and their `-<n>` copies: layers whose content shows a human,
-/// never Bunko's model output (D4, D27). Exact-case, like every layer id (sidecar
-/// names rule v1).
-pub fn is_unstamped_layer_id(id: &str) -> bool {
-    matches!(
-        sidecar_names::layer_class(strip_counter(id)),
-        LayerClass::Personal | LayerClass::Curated
-    )
-}
-
-/// `curated` of `curated-3`; `id` itself when it has no `-<n>` counter.
-fn strip_counter(id: &str) -> &str {
-    match id.rsplit_once('-') {
-        Some((b, n)) if !b.is_empty() && !n.is_empty() && n.bytes().all(|c| c.is_ascii_digit()) => {
-            b
-        }
-        _ => id,
-    }
-}
-
-/// One merge group, as the admin panel's "Recent merges" lists it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct MergeRecord {
-    pub id: String,
-    /// The folder the variants are in (library path; empty: the root).
-    pub parent: String,
-    /// The winning spelling (library path).
-    pub winner: String,
-    pub losers: Vec<String>,
-    /// `auto`, or `admin` (Keep this / that copy).
-    pub origin: String,
-    /// `open` (running or paused) or `done`.
-    pub state: String,
-    /// Unix ms.
-    pub created_at: i64,
-    pub finished_at: Option<i64>,
-    pub moved: u64,
-    pub trashed: u64,
-    pub blocked: u64,
-}
-
 // ---- scopes, events ---------------------------------------------------------------
-
-/// The paths one variant set covers, folded: a folder's subtree, or (same-folder file
-/// variants) the files of one folded stem, or (a duplicate set, `shallow`) the direct
-/// children of one folder, whose nodes are all a duplicate merge moves.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-struct Scope {
-    dir: Vec<String>,
-    key: String,
-    stem: bool,
-    #[serde(default)]
-    shallow: bool,
-}
-
-impl Scope {
-    /// A duplicate set's scope: the direct children of the folder at `path` (the
-    /// root: `dir` and `key` empty).
-    fn dup(path: &RelPath) -> Scope {
-        Scope {
-            dir: folded(&parent_of(path)),
-            key: path.segments().last().map(|s| fold(s)).unwrap_or_default(),
-            stem: false,
-            shallow: true,
-        }
-    }
-
-    fn covers(&self, segs: &[String]) -> bool {
-        if self.shallow {
-            if self.key.is_empty() {
-                // Bunko's own status files are written into the canonical root, never
-                // moved by a merge: their writes leave the root's set quiet.
-                return segs.len() == 1 && !CONTROL_FILES.contains(&segs[0].as_str());
-            }
-            return segs.len() == self.dir.len() + 2
-                && segs[..self.dir.len()] == self.dir[..]
-                && segs[self.dir.len()] == self.key;
-        }
-        if segs.len() <= self.dir.len() || segs[..self.dir.len()] != self.dir[..] {
-            return false;
-        }
-        let name = &segs[self.dir.len()];
-        if self.stem {
-            segs.len() == self.dir.len() + 1
-                && (*name == self.key || name.starts_with(&format!("{}.", self.key)))
-        } else {
-            *name == self.key
-        }
-    }
-
-    fn json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_default()
-    }
-}
-
-fn folded(rel: &RelPath) -> Vec<String> {
-    rel.segments().iter().map(|s| fold(s)).collect()
-}
-
-fn parent_of(rel: &RelPath) -> RelPath {
-    let s = rel.segments();
-    RelPath::from_segments(s[..s.len().saturating_sub(1)].iter().cloned()).unwrap_or_default()
-}
-
-fn last_name(rel: &RelPath) -> &str {
-    rel.segments().last().map_or("", String::as_str)
-}
-
-/// Why a scope is not planned again yet.
-#[derive(Debug, Clone)]
-struct Memo {
-    /// As of when: a store event in the scope after this plans it again.
-    at: Instant,
-    /// Until when (`at` + [`EVENT_RETAIN`]: events are only remembered that long).
-    until: Instant,
-    /// The plan ([`Plan::fingerprint`]) of a group that made no progress. Planned the
-    /// same again, it would make none again: it journals nothing, and is memoized anew.
-    idle: Option<String>,
-}
-
-impl Memo {
-    fn new(at: Instant, idle: Option<String>) -> Memo {
-        Memo {
-            at,
-            until: at + EVENT_RETAIN,
-            idle,
-        }
-    }
-}
 
 /// The merge's shared state: the policy, open scopes, recent events, the thread.
 pub(crate) struct MergeState {
@@ -368,7 +184,7 @@ impl MergeState {
         };
         let segs: Vec<String> = rest
             .components()
-            .filter_map(|c| c.as_os_str().to_str().map(fold))
+            .filter_map(|c| c.as_os_str().to_str().map(pair_key))
             .collect();
         let now = Instant::now();
         let mut q = self.events.lock();
@@ -484,288 +300,79 @@ pub(crate) fn spawn<B: Backend>(store: Weak<RemoteStore<B>>, state: Arc<MergeSta
     }
 }
 
-// ---- journal steps ----------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-enum StepKind {
-    /// Move a loser node into the winner's target node.
-    Move,
-    /// Trash a file the merge superseded (identical, kept, ingested, a superseded
-    /// main sidecar).
-    Trash,
-    /// Replace the winner's main sidecar in place with the loser's bytes (a new
-    /// version based on the judged one); a provider whose replace makes a new node
-    /// has the old one trashed after the commit.
-    Replace,
-    /// Ingest a loser `series.json` as a submission, then trash it once applied.
-    Submit,
-    /// Trash an emptied losing member folder (after a direct listing shows it empty).
-    Finish,
-}
-
-/// A step's own fields, in the outbox row's `resume` column.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Extra {
-    step: StepKind,
-    /// The volume group (a block skips the rest of it).
-    vg: String,
-    #[serde(default)]
-    is_dir: bool,
-    /// The version the plan judged (a trash of another version is skipped).
-    #[serde(default)]
-    cver: Option<String>,
-    /// Run the DB hooks for this step.
-    #[serde(default)]
-    hooks: bool,
-    /// `Submit`: the winner's `series.json` path the submission is for.
-    #[serde(default)]
-    series: Option<String>,
-    /// A duplicate merge's move beside a node of the same name (a folder, a keep-both
-    /// file): the name is meant to be there twice afterwards.
-    #[serde(default)]
-    expect_dup: bool,
-}
-
 fn extra_of(op: &Op) -> Option<Extra> {
     op.extra
         .as_deref()
         .and_then(|j| serde_json::from_str(j).ok())
 }
 
-/// One planned step.
-#[derive(Debug, Clone)]
-struct Planned {
-    kind: StepKind,
-    vg: String,
-    pid: Pid,
-    cver: Option<String>,
-    src: Option<RelPath>,
-    dest: RelPath,
-    parent_pid: Option<Pid>,
-    is_dir: bool,
-    hooks: bool,
-    bytes: Option<Vec<u8>>,
-    series: Option<RelPath>,
-    expect_dup: bool,
+/// A provider node as the planner sees it ([`Node`]): its pid, NFC name, content
+/// version; the node itself rides along.
+fn node_of(n: &RNode) -> Node<RNode> {
+    Node {
+        id: n.pid.clone(),
+        name: nfc(&n.name_raw),
+        is_dir: n.is_dir,
+        created_ms: n.created_ms,
+        ver: n.cver.clone(),
+        size: n.size,
+        x: n.clone(),
+    }
 }
 
-impl Planned {
-    fn mv(vg: &str, n: &RNode, src: RelPath, dest: RelPath, target: &str) -> Planned {
-        Planned {
-            kind: StepKind::Move,
-            vg: vg.to_string(),
-            pid: n.pid.clone(),
-            cver: Some(n.cver.clone()),
-            src: Some(src),
-            dest,
-            parent_pid: Some(target.to_string()),
-            is_dir: n.is_dir,
-            hooks: true,
-            bytes: None,
-            series: None,
-            expect_dup: false,
-        }
-    }
+/// The planner's [`Host`] over a remote store: direct provider listings, §5.9
+/// Identical, store paths, and the bytes a replace uploads (read whole, at most
+/// `SMALL_MAX`, deferred above).
+pub(crate) struct RemoteHost<'a, B: Backend> {
+    store: &'a RemoteStore<B>,
+    /// Test builds: what the planner was answered, replayed to the planner as it was
+    /// before the extraction (the fingerprint-equality check, `merge_legacy.rs`).
+    #[cfg(feature = "testing")]
+    tape: Option<&'a legacy::Tape>,
+}
 
-    fn trash(vg: &str, n: &RNode, path: RelPath) -> Planned {
-        Planned {
-            kind: StepKind::Trash,
-            vg: vg.to_string(),
-            pid: n.pid.clone(),
-            cver: Some(n.cver.clone()),
-            src: None,
-            dest: path,
-            parent_pid: None,
-            is_dir: n.is_dir,
-            hooks: true,
-            bytes: None,
-            series: None,
-            expect_dup: false,
+impl<'a, B: Backend> RemoteHost<'a, B> {
+    fn new(store: &'a RemoteStore<B>) -> Self {
+        RemoteHost {
+            store,
+            #[cfg(feature = "testing")]
+            tape: None,
         }
     }
 }
 
-/// A group or folder the merge leaves in the losing spelling.
-#[derive(Debug, Clone)]
-struct Block {
-    this: Vec<RelPath>,
-    that: Vec<RelPath>,
-    detail: String,
-}
+impl<B: Backend> Host for RemoteHost<'_, B> {
+    type X = RNode;
 
-/// A merge's steps, in the order they run: the older copies a duplicate merge
-/// replaces first; moves and in-place replaces next; loser files are trashed only
-/// after every move (a duplicate a move meets stops all trashing); emptied folders
-/// last, deepest first.
-#[derive(Default)]
-struct Plan {
-    /// Duplicate merge: the canonical folder's copy a newer one replaces, trashed
-    /// before that one moves in.
-    pre_trash: Vec<Planned>,
-    steps: Vec<Planned>,
-    submits: Vec<Planned>,
-    l_trash: Vec<Planned>,
-    finishes: Vec<Planned>,
-    blocks: Vec<Block>,
-    /// Folded names planned into each target node (moves and layers).
-    taken: HashMap<Pid, HashSet<String>>,
-    /// A losing member listed empty: its finish is work of its own.
-    empty_loser: bool,
-}
-
-impl Plan {
-    fn work(&self) -> bool {
-        !(self.pre_trash.is_empty()
-            && self.steps.is_empty()
-            && self.submits.is_empty()
-            && self.l_trash.is_empty()
-            && !self.empty_loser)
-    }
-
-    /// What the plan would do, as one string: the same steps on the same versions, and
-    /// the same blocks, give the same fingerprint, in whatever order the listings that
-    /// planned them came back (Drive's `files.list` order is unspecified). Each step
-    /// counts with its phase, so a trash before the moves is not one after them.
-    fn fingerprint(&self) -> String {
-        let phases: [(&str, &[Planned]); 5] = [
-            ("pre_trash", &self.pre_trash),
-            ("step", &self.steps),
-            ("submit", &self.submits),
-            ("l_trash", &self.l_trash),
-            ("finish", &self.finishes),
-        ];
-        let mut lines: Vec<String> = phases
-            .iter()
-            .flat_map(|(phase, steps)| {
-                steps.iter().map(move |p| {
-                    format!(
-                        "{phase}\0{:?}\0{}\0{:?}\0{:?}\0{}\0{:?}",
-                        p.kind,
-                        p.pid,
-                        p.cver,
-                        p.src.as_ref().map(ToString::to_string),
-                        p.dest,
-                        p.parent_pid
-                    )
-                })
-            })
-            .chain(self.blocks.iter().map(|b| {
-                let sorted = |v: &[RelPath]| {
-                    let mut v: Vec<String> = v.iter().map(ToString::to_string).collect();
-                    v.sort_unstable();
-                    v
-                };
-                format!(
-                    "block\0{:?}\0{:?}\0{}",
-                    sorted(&b.this),
-                    sorted(&b.that),
-                    b.detail
-                )
-            }))
-            .collect();
-        lines.sort_unstable();
-        let mut h = Sha256::new();
-        for l in &lines {
-            h.update(l.as_bytes());
-            h.update(b"\n");
+    fn list(&self, id: &str) -> Result<Vec<Node<RNode>>, Defer> {
+        let r = self.store.list(id).map_err(defer);
+        #[cfg(feature = "testing")]
+        if let Some(t) = self.tape {
+            t.listed(id, &r);
         }
-        h.update([u8::from(self.empty_loser)]);
-        hex::encode(h.finalize())
+        r.map(|v| v.iter().map(node_of).collect())
     }
 
-    fn ordered(&self) -> impl Iterator<Item = &Planned> {
-        self.pre_trash
-            .iter()
-            .chain(&self.steps)
-            .chain(&self.submits)
-            .chain(&self.l_trash)
-            .chain(&self.finishes)
-    }
-}
-
-/// A plan cannot be made now (a read failed, a transfer quota): try again later.
-type Defer = String;
-
-fn defer(e: impl std::fmt::Display) -> Defer {
-    e.to_string()
-}
-
-// ---- names ------------------------------------------------------------------------
-
-/// What one file of a volume group is.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Part {
-    Archive,
-    Main,
-    Layer(String),
-    Cover,
-    Other,
-}
-
-/// A listed file: its NFC name split into stem and suffix.
-#[derive(Debug, Clone)]
-struct Named {
-    node: RNode,
-    name: String,
-    stem: String,
-    suffix: String,
-    part: Part,
-    key: String,
-}
-
-/// The folded stems of the `.cbz` archives among `names`: only they anchor sidecars
-/// (rule v1). A `.zip` is still an [`Part::Archive`] for grouping moves.
-fn archive_stems<'a>(names: impl Iterator<Item = &'a str>) -> HashSet<String> {
-    sidecar_names::volume_stems(names)
-}
-
-/// `(stem, suffix, part)` of a file name, given the folder's archive stems.
-fn split_name(name: &str, stems: &HashSet<String>) -> (String, String, Part) {
-    if let Some(s) = strip_ci(name, ".cbz").or_else(|| strip_ci(name, ".zip")) {
-        return (s.to_string(), name[s.len()..].to_string(), Part::Archive);
-    }
-    if let Some((base, _)) = sidecar_names::split_mokuro(name) {
-        // The listing is at hand, so rule v1 decides: all-digit ids are layers.
-        if let SidecarClass::Layer { stem, id, .. } = sidecar_names::classify(name, stems) {
-            return (
-                stem.to_string(),
-                name[stem.len()..].to_string(),
-                Part::Layer(id.to_string()),
-            );
+    fn identical(&self, a: &Node<RNode>, b: &Node<RNode>) -> Result<bool, Defer> {
+        let r = self.store.identical(&a.x, &b.x);
+        #[cfg(feature = "testing")]
+        if let Some(t) = self.tape {
+            t.compared(&a.x, &b.x, &r);
         }
-        return (base.to_string(), name[base.len()..].to_string(), Part::Main);
+        r
     }
-    if let Some(s) = strip_ci(name, ".webp") {
-        return (s.to_string(), name[s.len()..].to_string(), Part::Cover);
-    }
-    (name.to_string(), String::new(), Part::Other)
-}
 
-fn named(n: RNode, stems: &HashSet<String>) -> Named {
-    let name = nfc(&n.name_raw);
-    let (stem, suffix, part) = split_name(&name, stems);
-    let key = match part {
-        Part::Other => format!("\u{0}{}", fold(&name)),
-        _ => fold(&stem),
-    };
-    Named {
-        node: n,
-        name,
-        stem,
-        suffix,
-        part,
-        key,
+    fn path_of(&self, _n: &Node<RNode>, rel: &RelPath) -> PathBuf {
+        self.store.core.abs(rel)
     }
-}
 
-/// `(scope key, group key)` of a file variant set: the folded stem (a file that is
-/// no volume part: its folded name), and the [`Named::key`] its files share.
-fn file_key(name: &str, stems: &HashSet<String>) -> (String, String) {
-    let (stem, _, part) = split_name(name, stems);
-    match part {
-        Part::Other => (fold(name), format!("\u{0}{}", fold(name))),
-        _ => (fold(&stem), fold(&stem)),
+    fn replace_bytes(&self, n: &Node<RNode>) -> Result<Option<Vec<u8>>, Defer> {
+        let r = self.store.bytes_of(&n.x);
+        #[cfg(feature = "testing")]
+        if let Some(t) = self.tape {
+            t.read(&n.x, &r);
+        }
+        r.map(Some)
     }
 }
 
@@ -844,6 +451,41 @@ fn shown(path: &RelPath) -> String {
         "the library root".into()
     } else {
         path.to_string()
+    }
+}
+
+/// The winner and losers of a set (library paths of the variant entries), from the
+/// index: a stem set's files in [`order_stem_members`] order, one per exact stem (the
+/// first is the winner's spelling); a folder set's folders, oldest first.
+fn set_paths_in(idx: &crate::index::Index, set: &VariantSet) -> (RelPath, Vec<RelPath>) {
+    let kids = idx.children(set.parent_eid);
+    let stems = archive_stems(kids.iter().map(|k| k.name.as_str()));
+    let vars: Vec<crate::index::Entry> = if set.scope.stem {
+        let mut v: Vec<crate::index::Entry> = kids
+            .into_iter()
+            .filter(|k| !k.is_dir && file_key(&k.name, &stems).1 == set.group)
+            .collect();
+        order_stem_members(
+            &mut v,
+            &stems,
+            |e| e.name.as_str(),
+            |e| (e.created_ms, e.winner_pid.clone()),
+        );
+        v
+    } else {
+        // Files folding like the folders are blocked in the plan, never merged.
+        idx.variants(set.parent_eid, &set.scope.key)
+            .into_iter()
+            .filter(|e| e.is_dir)
+            .collect()
+    };
+    let paths: Vec<RelPath> = vars
+        .iter()
+        .filter_map(|e| set.parent.join(e.name.clone()))
+        .collect();
+    match paths.split_first() {
+        Some((w, l)) => (w.clone(), l.to_vec()),
+        None => (RelPath::root(), Vec::new()),
     }
 }
 
@@ -943,7 +585,7 @@ impl<B: Backend> RemoteStore<B> {
                         .collect()
                 };
                 for n in nodes {
-                    steps.push(Planned::trash("admin", &n, rel.clone()));
+                    steps.push(Planned::trash("admin", &node_of(&n), rel.clone()));
                 }
             }
         }
@@ -964,7 +606,7 @@ impl<B: Backend> RemoteStore<B> {
             .lookup(&first)
             .is_some_and(|e| e.is_dir);
         let (key, stem) = if is_dir {
-            (fold(&name), false)
+            (pair_key(&name), false)
         } else {
             (file_key(&name, &stems).0, true)
         };
@@ -1403,7 +1045,7 @@ impl<B: Backend> RemoteStore<B> {
         let canon = &set.members[0];
         let series_dir = set.path.segments().len() == 1;
         let trash = |vg: &str, n: &RNode, rel: RelPath| {
-            let mut p = Planned::trash(vg, n, rel.clone());
+            let mut p = Planned::trash(vg, &node_of(n), rel.clone());
             p.hooks = false;
             if series_dir
                 && !n.is_dir
@@ -1432,7 +1074,8 @@ impl<B: Backend> RemoteStore<B> {
                 };
                 let vg = rel.to_string();
                 let mv = |expect_dup: bool| {
-                    let mut p = Planned::mv(&vg, &item, rel.clone(), rel.clone(), &canon.pid);
+                    let mut p =
+                        Planned::mv(&vg, &node_of(&item), rel.clone(), rel.clone(), &canon.pid);
                     p.hooks = false;
                     p.expect_dup = expect_dup;
                     p
@@ -1452,7 +1095,7 @@ impl<B: Backend> RemoteStore<B> {
                         // The older copy may itself be a move planned from an earlier
                         // member: it is trashed where it is instead.
                         let ex = ex.clone();
-                        plan.steps.retain(|p| p.pid != ex.pid);
+                        plan.steps.retain(|p| p.id != ex.pid);
                         plan.pre_trash.push(trash(&vg, &ex, rel.clone()));
                         plan.steps.push(mv(false));
                         planned.insert(name.clone(), item.clone());
@@ -1464,13 +1107,13 @@ impl<B: Backend> RemoteStore<B> {
             plan.finishes.push(Planned {
                 kind: StepKind::Finish,
                 vg: format!("{}/", set.path),
-                pid: d.pid.clone(),
-                cver: None,
+                id: d.pid.clone(),
+                ver: None,
                 // Nothing queued follows: the path stays, and writes go to the
                 // entry's winner, never to a member that is not canonical.
                 src: None,
                 dest: set.path.clone(),
-                parent_pid: None,
+                parent_id: None,
                 is_dir: true,
                 hooks: false,
                 bytes: None,
@@ -1478,47 +1121,18 @@ impl<B: Backend> RemoteStore<B> {
                 expect_dup: false,
             });
         }
+        #[cfg(feature = "testing")]
+        legacy::check_dup(&plan);
         Ok(plan)
     }
 
     /// The winner and losers of a set (library paths of the variant entries).
     fn set_paths(&self, set: &VariantSet) -> (RelPath, Vec<RelPath>) {
         let idx = self.core.index.lock();
-        let kids = idx.children(set.parent_eid);
-        let stems = archive_stems(kids.iter().map(|k| k.name.as_str()));
-        let vars: Vec<crate::index::Entry> = if set.scope.stem {
-            // The entries of the stem's files, the archives' first, oldest first; one
-            // per exact stem (the first is the winner's spelling).
-            let mut v: Vec<crate::index::Entry> = kids
-                .into_iter()
-                .filter(|k| !k.is_dir && file_key(&k.name, &stems).1 == set.group)
-                .collect();
-            let archive = |e: &crate::index::Entry| split_name(&e.name, &stems).2 == Part::Archive;
-            v.sort_by(|a, b| {
-                (!archive(a), a.created_ms, &a.winner_pid).cmp(&(
-                    !archive(b),
-                    b.created_ms,
-                    &b.winner_pid,
-                ))
-            });
-            let mut stems_seen = HashSet::new();
-            v.retain(|e| stems_seen.insert(split_name(&e.name, &stems).0));
-            v
-        } else {
-            // Files folding like the folders are blocked in the plan, never merged.
-            idx.variants(set.parent_eid, &set.scope.key)
-                .into_iter()
-                .filter(|e| e.is_dir)
-                .collect()
-        };
-        let paths: Vec<RelPath> = vars
-            .iter()
-            .filter_map(|e| set.parent.join(e.name.clone()))
-            .collect();
-        match paths.split_first() {
-            Some((w, l)) => (w.clone(), l.to_vec()),
-            None => (RelPath::root(), Vec::new()),
-        }
+        let paths = set_paths_in(&idx, set);
+        #[cfg(feature = "testing")]
+        legacy::check_set_paths(&idx, set, &paths);
+        paths
     }
 
     /// The paths the policy's busy check covers: each variant, and each stem's
@@ -1685,417 +1299,93 @@ impl<B: Backend> RemoteStore<B> {
         Ok(sa == sb)
     }
 
-    fn plan_set(&self, set: &VariantSet, policy: &dyn CaseMergePolicy) -> Result<Plan, Defer> {
-        let mut plan = Plan::default();
+    /// The set as the planner takes it ([`SetSpec`]): its spellings, and the nodes
+    /// behind them, from the index.
+    fn set_spec(&self, set: &VariantSet) -> SetSpec {
         let (winner, losers) = self.set_paths(set);
-        if set.scope.stem {
-            // Same-folder file variants: one folder, renames.
-            let (members, target) = {
-                let idx = self.core.index.lock();
-                let members: Vec<Pid> = idx
-                    .members(set.parent_eid)
-                    .into_iter()
-                    .map(|n| n.pid)
-                    .collect();
-                let target = if set.parent_eid == ROOT_EID {
-                    idx.roots().first().cloned()
-                } else {
-                    idx.entry(set.parent_eid).and_then(|e| e.winner_pid)
-                };
-                (members, target)
-            };
-            let target = target.ok_or_else(|| defer("the folder has no node"))?;
-            let mut files = Vec::new();
-            for m in &members {
-                files.extend(
-                    self.list(m)
-                        .map_err(defer)?
-                        .into_iter()
-                        .filter(|n| !n.is_dir),
-                );
-            }
-            let names: Vec<String> = files.iter().map(|n| nfc(&n.name_raw)).collect();
-            let stems = archive_stems(names.iter().map(String::as_str));
-            let all: Vec<Named> = files.into_iter().map(|n| named(n, &stems)).collect();
-            let wstem = split_name(last_name(&winner), &stems).0;
-            let group: Vec<Named> = all.iter().filter(|n| n.key == set.group).cloned().collect();
-            let (wg, lg): (Vec<Named>, Vec<Named>) =
-                group.into_iter().partition(|n| n.stem == wstem);
-            let taken: HashSet<String> = all.iter().map(|n| fold(&n.name)).collect();
-            plan.taken.insert(target.clone(), taken);
-            if !lg.is_empty() {
-                self.pair(
-                    policy,
-                    &set.group,
-                    &wg,
-                    &lg,
-                    &target,
-                    &set.parent,
-                    &set.parent,
-                    &mut plan,
-                )?;
-            }
-            return Ok(plan);
-        }
-        // Folders. A file that folds like them stays (file vs folder).
-        let (w_members, files_vs) = {
-            let idx = self.core.index.lock();
-            let w_members: Vec<Pid> = idx
-                .lookup(&winner)
+        let idx = self.core.index.lock();
+        let members_of = |rel: &RelPath| -> Vec<Pid> {
+            idx.lookup(rel)
                 .map(|e| idx.members(e.eid).into_iter().map(|n| n.pid).collect())
-                .unwrap_or_default();
-            let files: Vec<RelPath> = idx
-                .variants(set.parent_eid, &set.scope.key)
+                .unwrap_or_default()
+        };
+        if set.scope.stem {
+            let parent_ids: Vec<Pid> = idx
+                .members(set.parent_eid)
                 .into_iter()
-                .filter(|e| !e.is_dir)
-                .filter_map(|e| set.parent.join(e.name))
+                .map(|n| n.pid)
                 .collect();
-            (w_members, files)
-        };
-        for f in files_vs {
-            plan.blocks.push(Block {
-                this: vec![f],
-                that: vec![winner.clone()],
-                detail: "a file and a folder whose names differ only in case".into(),
-            });
-        }
-        if w_members.is_empty() {
-            return Err(defer("the winning folder has no node"));
-        }
-        for l in &losers {
-            let l_members: Vec<Pid> = {
-                let idx = self.core.index.lock();
-                idx.lookup(l)
-                    .map(|e| idx.members(e.eid).into_iter().map(|n| n.pid).collect())
-                    .unwrap_or_default()
-            };
-            if l_members.is_empty() {
-                continue;
-            }
-            self.plan_dirs(policy, &winner, &w_members, l, &l_members, &mut plan)?;
-        }
-        Ok(plan)
-    }
-
-    /// Merge the folder `l` (members `l_members`) into `w` (members `w_members`,
-    /// the first is the target), recursively.
-    fn plan_dirs(
-        &self,
-        policy: &dyn CaseMergePolicy,
-        w: &RelPath,
-        w_members: &[Pid],
-        l: &RelPath,
-        l_members: &[Pid],
-        plan: &mut Plan,
-    ) -> Result<(), Defer> {
-        let target = w_members[0].clone();
-        let mut w_kids = Vec::new();
-        for m in w_members {
-            w_kids.extend(self.list(m).map_err(defer)?);
-        }
-        let mut l_kids = Vec::new();
-        for m in l_members {
-            let kids = self.list(m).map_err(defer)?;
-            plan.empty_loser |= kids.is_empty();
-            l_kids.extend(kids);
-        }
-        let taken: HashSet<String> = w_kids.iter().map(|n| fold(&nfc(&n.name_raw))).collect();
-        plan.taken.entry(target.clone()).or_default().extend(taken);
-        // Folders: same fold → recursive; else move in whole.
-        let mut w_dirs: HashMap<String, Vec<RNode>> = HashMap::new();
-        for n in w_kids.iter().filter(|n| n.is_dir) {
-            w_dirs
-                .entry(fold(&nfc(&n.name_raw)))
-                .or_default()
-                .push(n.clone());
-        }
-        for v in w_dirs.values_mut() {
-            v.sort_by(|a, b| (a.created_ms, &a.pid).cmp(&(b.created_ms, &b.pid)));
-        }
-        let w_file_folds: HashMap<String, String> = w_kids
-            .iter()
-            .filter(|n| !n.is_dir)
-            .map(|n| (fold(&nfc(&n.name_raw)), nfc(&n.name_raw)))
-            .collect();
-        let mut l_dirs: Vec<(String, Vec<RNode>)> = Vec::new();
-        for n in l_kids.iter().filter(|n| n.is_dir) {
-            let name = nfc(&n.name_raw);
-            match l_dirs.iter_mut().find(|(k, _)| *k == name) {
-                Some((_, v)) => v.push(n.clone()),
-                None => l_dirs.push((name, vec![n.clone()])),
-            }
-        }
-        for (name, nodes) in l_dirs {
-            let f = fold(&name);
-            let Some(lsub) = l.join(name.clone()) else {
-                continue;
-            };
-            if let Some(wds) = w_dirs.get(&f) {
-                let wname = wds
-                    .iter()
-                    .find(|n| nfc(&n.name_raw) == name)
-                    .map_or_else(|| nfc(&wds[0].name_raw), |n| nfc(&n.name_raw));
-                let mut sub: Vec<&RNode> =
-                    wds.iter().filter(|n| nfc(&n.name_raw) == wname).collect();
-                sub.sort_by(|a, b| (a.created_ms, &a.pid).cmp(&(b.created_ms, &b.pid)));
-                let sub_members: Vec<Pid> = sub.iter().map(|n| n.pid.clone()).collect();
-                let Some(wsub) = w.join(wname) else { continue };
-                let mut lsorted = nodes.clone();
-                lsorted.sort_by(|a, b| (a.created_ms, &a.pid).cmp(&(b.created_ms, &b.pid)));
-                let l_sub: Vec<Pid> = lsorted.iter().map(|n| n.pid.clone()).collect();
-                self.plan_dirs(policy, &wsub, &sub_members, &lsub, &l_sub, plan)?;
-            } else if let Some(wf) = w_file_folds.get(&f) {
-                plan.blocks.push(Block {
-                    this: vec![lsub],
-                    that: w.join(wf.clone()).into_iter().collect(),
-                    detail: "a file and a folder whose names differ only in case".into(),
-                });
+            let target = if set.parent_eid == ROOT_EID {
+                idx.roots().first().cloned()
             } else {
-                let Some(dest) = w.join(name.clone()) else {
-                    continue;
-                };
-                for n in &nodes {
-                    plan.steps.push(Planned::mv(
-                        &format!("{l}/{f}"),
-                        n,
-                        lsub.clone(),
-                        dest.clone(),
-                        &target,
-                    ));
-                }
-                plan.taken.entry(target.clone()).or_default().insert(f);
-            }
+                idx.entry(set.parent_eid).and_then(|e| e.winner_pid)
+            };
+            let spec = SetSpec {
+                parent: set.parent.clone(),
+                stem: true,
+                group: set.group.clone(),
+                winner: (winner, Vec::new()),
+                losers: losers.into_iter().map(|l| (l, Vec::new())).collect(),
+                parent_ids,
+                target,
+                files_vs: Vec::new(),
+            };
+            #[cfg(feature = "testing")]
+            legacy::check_spec(&idx, set, &spec);
+            return spec;
         }
-        // Files, as volume groups by folded stem.
-        let w_files: Vec<RNode> = w_kids.iter().filter(|n| !n.is_dir).cloned().collect();
-        let l_files: Vec<RNode> = l_kids.iter().filter(|n| !n.is_dir).cloned().collect();
-        let names: Vec<String> = w_files
-            .iter()
-            .chain(&l_files)
-            .map(|n| nfc(&n.name_raw))
+        let w_members = members_of(&winner);
+        let files_vs: Vec<RelPath> = idx
+            .variants(set.parent_eid, &set.scope.key)
+            .into_iter()
+            .filter(|e| !e.is_dir)
+            .filter_map(|e| set.parent.join(e.name))
             .collect();
-        let stems = archive_stems(names.iter().map(String::as_str));
-        let wn: Vec<Named> = w_files.into_iter().map(|n| named(n, &stems)).collect();
-        let ln: Vec<Named> = l_files.into_iter().map(|n| named(n, &stems)).collect();
-        let w_dir_folds: HashSet<&String> = w_dirs.keys().collect();
-        let mut keys: Vec<String> = Vec::new();
-        for n in &ln {
-            if !keys.contains(&n.key) {
-                keys.push(n.key.clone());
-            }
-        }
-        for key in keys {
-            let lg: Vec<Named> = ln.iter().filter(|n| n.key == key).cloned().collect();
-            if let Some(f) = lg.iter().find(|n| w_dir_folds.contains(&fold(&n.name))) {
-                plan.blocks.push(Block {
-                    this: lg.iter().filter_map(|n| l.join(n.name.clone())).collect(),
-                    that: w.join(f.name.clone()).into_iter().collect(),
-                    detail: "a file and a folder whose names differ only in case".into(),
-                });
-                continue;
-            }
-            let wg: Vec<Named> = wn.iter().filter(|n| n.key == key).cloned().collect();
-            self.pair(policy, &key, &wg, &lg, &target, w, l, plan)?;
-        }
-        for m in l_members {
-            plan.finishes.push(Planned {
-                kind: StepKind::Finish,
-                vg: format!("{l}/"),
-                pid: m.clone(),
-                cver: None,
-                // Where Bunko's own writes still queued for the loser go instead.
-                src: Some(w.clone()),
-                dest: l.clone(),
-                parent_pid: None,
-                is_dir: true,
-                hooks: false,
-                bytes: None,
-                series: None,
-                expect_dup: false,
-            });
-        }
-        Ok(())
+        let losers = losers
+            .into_iter()
+            .map(|l| {
+                let m = members_of(&l);
+                (l, m)
+            })
+            .collect();
+        let spec = SetSpec {
+            parent: set.parent.clone(),
+            stem: false,
+            group: set.group.clone(),
+            winner: (winner, w_members),
+            losers,
+            parent_ids: Vec::new(),
+            target: None,
+            files_vs,
+        };
+        #[cfg(feature = "testing")]
+        legacy::check_spec(&idx, set, &spec);
+        spec
     }
 
-    /// The next free `<stem>.<id>.mokuro` in `target` starting from `base` (`base`
-    /// itself first, then `-2`, `-3`, …).
-    fn free_layer(plan: &mut Plan, target: &str, stem: &str, base: &str, ext: &str) -> String {
-        let taken = plan.taken.entry(target.to_string()).or_default();
-        let base = strip_counter(base).to_string();
-        let mut n = 1u32;
-        loop {
-            let id = if n == 1 {
-                base.clone()
-            } else {
-                format!("{base}-{n}")
+    /// Plan one variant set with the shared planner ([`core_merge::plan_set`]) over
+    /// this store's listings. Test builds also plan it as the code before the
+    /// extraction did, from the same answers, and stop the process on any difference
+    /// (`merge_legacy.rs`).
+    fn plan_set(&self, set: &VariantSet, policy: &dyn CaseMergePolicy) -> Result<Plan, Defer> {
+        let spec = self.set_spec(set);
+        #[cfg(feature = "testing")]
+        {
+            let tape = legacy::Tape::default();
+            let host = RemoteHost {
+                tape: Some(&tape),
+                ..RemoteHost::new(self)
             };
-            let name = format!("{stem}.{id}{ext}");
-            if !taken.contains(&fold(&name)) {
-                taken.insert(fold(&name));
-                return name;
-            }
-            n += 1;
-        }
-    }
-
-    /// Pair one loser volume group with the winner's of the same folded stem
-    /// (§5.9 Volume groups).
-    #[allow(clippy::too_many_arguments)]
-    fn pair(
-        &self,
-        policy: &dyn CaseMergePolicy,
-        key: &str,
-        wg: &[Named],
-        lg: &[Named],
-        target: &str,
-        w: &RelPath,
-        l: &RelPath,
-        plan: &mut Plan,
-    ) -> Result<(), Defer> {
-        let vg = format!("{l}/{key}");
-        let lpath = |n: &Named| l.join(n.name.clone());
-        let wpath = |n: &Named| w.join(n.name.clone());
-        let block = |plan: &mut Plan, detail: String| {
-            plan.blocks.push(Block {
-                this: lg.iter().filter_map(lpath).collect(),
-                that: wg.iter().filter_map(wpath).collect(),
-                detail,
-            });
-        };
-        let series_dir = w.segments().len() == 1;
-        let is_series = |n: &Named| {
-            series_dir
-                && n.part == Part::Other
-                && bunko_core::names::is_fixed_name(&n.name, "series.json")
-        };
-        let wstem = wg
-            .iter()
-            .find(|n| n.part == Part::Archive)
-            .or_else(|| wg.first())
-            .map(|n| n.stem.clone());
-        let mut lsorted: Vec<&Named> = lg.iter().collect();
-        lsorted.sort_by_key(|n| n.part != Part::Archive);
-        let (mut moves, mut l_trash, mut submits) = (Vec::new(), Vec::new(), Vec::new());
-        let mut archives_identical = false;
-        for lf in lsorted {
-            let Some(lrel) = lpath(lf) else { continue };
-            if is_series(lf) {
-                let Some(series) = w.join("series.json") else {
-                    continue;
-                };
-                submits.push(Planned {
-                    kind: StepKind::Submit,
-                    vg: vg.clone(),
-                    pid: lf.node.pid.clone(),
-                    cver: Some(lf.node.cver.clone()),
-                    src: None,
-                    dest: lrel,
-                    parent_pid: None,
-                    is_dir: false,
-                    hooks: true,
-                    bytes: None,
-                    series: Some(series),
-                    expect_dup: false,
-                });
-                continue;
-            }
-            let counterpart = wg
-                .iter()
-                .find(|wf| fold(&wf.suffix) == fold(&lf.suffix) && wf.part == lf.part);
-            let Some(wf) = counterpart else {
-                // Only the loser has it: in it goes, under the winner's stem.
-                let name = match &wstem {
-                    Some(s) => format!("{s}{}", lf.suffix),
-                    None => lf.name.clone(),
-                };
-                let Some(dest) = w.join(name.clone()) else {
-                    continue;
-                };
-                plan.taken
-                    .entry(target.to_string())
-                    .or_default()
-                    .insert(fold(&name));
-                moves.push(Planned::mv(&vg, &lf.node, lrel, dest, target));
-                continue;
+            let recording = legacy::Recording {
+                inner: policy,
+                tape: &tape,
             };
-            let Some(wrel) = wpath(wf) else { continue };
-            if self.identical(&wf.node, &lf.node)? {
-                if lf.part == Part::Archive {
-                    archives_identical = true;
-                }
-                l_trash.push(Planned::trash(&vg, &lf.node, lrel));
-                continue;
-            }
-            match &lf.part {
-                Part::Archive => {
-                    block(plan, format!("{lrel} and {wrel} are different archives"));
-                    return Ok(());
-                }
-                Part::Cover => l_trash.push(Planned::trash(&vg, &lf.node, lrel)),
-                Part::Main => {
-                    if !archives_identical || fold(&lf.suffix).ends_with(".gz") {
-                        block(
-                            plan,
-                            format!("{lrel} and {wrel} hold different OCR for this volume"),
-                        );
-                        return Ok(());
-                    }
-                    let choice = policy.prefer_main(&self.core.abs(&wrel), &self.core.abs(&lrel));
-                    if choice == MergeChoice::Block {
-                        block(
-                            plan,
-                            format!(
-                                "{lrel} and {wrel} hold different OCR, and neither (or both) \
-                                 matches the primary OCR setting"
-                            ),
-                        );
-                        return Ok(());
-                    }
-                    // No copy is kept (owner decision, 2026-11-01). A: the loser's main
-                    // is trashed below, like any other superseded file. B: its bytes
-                    // replace the winner's in place and the loser's node is trashed;
-                    // where the provider's replace makes a new node, the winner's old
-                    // node goes to the trash too ([`Self::replaced`]).
-                    if choice == MergeChoice::B {
-                        // The loser's main replaces the winner's in place: a new version
-                        // of the winner's node, based on the version judged here. The
-                        // winner's stays untouched until that replace has committed; a
-                        // 412 or any failure blocks the group instead.
-                        let new_bytes = self.bytes_of(&lf.node)?;
-                        moves.push(Planned {
-                            kind: StepKind::Replace,
-                            vg: vg.clone(),
-                            pid: wf.node.pid.clone(),
-                            cver: Some(wf.node.cver.clone()),
-                            src: Some(lrel.clone()),
-                            dest: wrel.clone(),
-                            parent_pid: Some(target.to_string()),
-                            is_dir: false,
-                            hooks: true,
-                            bytes: Some(new_bytes),
-                            series: None,
-                            expect_dup: false,
-                        });
-                    }
-                    l_trash.push(Planned::trash(&vg, &lf.node, lrel));
-                }
-                Part::Layer(id) if policy.is_unstamped_layer(id) => {
-                    let stem = wstem.clone().unwrap_or_else(|| wf.stem.clone());
-                    let ext = &lf.suffix[1 + id.len()..];
-                    let name = Self::free_layer(plan, target, &stem, id, ext);
-                    let Some(dest) = w.join(name) else { continue };
-                    moves.push(Planned::mv(&vg, &lf.node, lrel, dest, target));
-                }
-                Part::Layer(_) | Part::Other => {
-                    block(plan, format!("{lrel} and {wrel} differ"));
-                    return Ok(());
-                }
-            }
+            let plan = core_merge::plan_set(&host, &recording, &spec);
+            legacy::check_set(self, set, &spec, &tape, policy, &plan);
+            plan
         }
-        plan.steps.extend(moves);
-        plan.submits.extend(submits);
-        plan.l_trash.extend(l_trash);
-        Ok(())
+        #[cfg(not(feature = "testing"))]
+        core_merge::plan_set(&RemoteHost::new(self), policy, &spec)
     }
 
     // ---- the journal ------------------------------------------------------------
@@ -2151,14 +1441,14 @@ impl<B: Backend> RemoteStore<B> {
                 Durability::Deferred,
             );
             op.src = p.src.clone();
-            op.target_pid = Some(p.pid.clone());
-            op.parent_pid = p.parent_pid.clone();
+            op.target_pid = Some(p.id.clone());
+            op.parent_pid = p.parent_id.clone();
             op.group = Some(gid.clone());
             op.extra = serde_json::to_string(&Extra {
                 step: p.kind,
                 vg: p.vg.clone(),
                 is_dir: p.is_dir,
-                cver: p.cver.clone(),
+                cver: p.ver.clone(),
                 hooks: p.hooks,
                 series: p.series.as_ref().map(ToString::to_string),
                 expect_dup: p.expect_dup,
@@ -2177,7 +1467,7 @@ impl<B: Backend> RemoteStore<B> {
                 op.sha256 = Some(sha);
                 op.mode = match p.kind {
                     StepKind::Replace => Mode::Replace {
-                        base: p.cver.clone().map(bunko_store::Version::new),
+                        base: p.ver.clone().map(bunko_store::Version::new),
                     },
                     _ => Mode::CreateNew,
                 };
