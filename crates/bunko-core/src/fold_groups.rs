@@ -24,6 +24,9 @@
 //! hooks) asks this one type, built from a folder listing, so the answer is the same on
 //! every host and a new code path gets it by asking.
 
+// Rule v1's stem fold is a deprecated rule-2 shim (`fold`) until B2 removes it here.
+#![allow(deprecated)]
+
 use std::collections::{HashMap, HashSet};
 
 use crate::names::fold_name;

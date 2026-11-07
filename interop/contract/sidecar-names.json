@@ -1,5 +1,5 @@
 {
-  "rule": 1,
+  "rule": 2,
   "classify": [
     {
       "name": "Vol 1.mokuro",
@@ -23,7 +23,7 @@
         "stem": "Vol 1",
         "gz": false
       },
-      "why": "rule 1: suffix in any ASCII case"
+      "why": "R2: the suffix is read on the fold"
     },
     {
       "name": "Vol 1.mokuro.gz",
@@ -47,7 +47,7 @@
         "stem": "Vol 1",
         "gz": true
       },
-      "why": "rule 1"
+      "why": "R2"
     },
     {
       "name": "Vol 1.mokuro",
@@ -59,7 +59,7 @@
         "stem": "Vol 1",
         "gz": false
       },
-      "why": "rule 1: the archive suffix too"
+      "why": "R2: the archive suffix too"
     },
     {
       "name": "vol 1.mokuro",
@@ -71,7 +71,7 @@
         "stem": "vol 1",
         "gz": false
       },
-      "why": "rule 3: stems fold; the stem is reported as written"
+      "why": "R3: stems fold; the stem is reported as written"
     },
     {
       "name": "VOL 1.gcv.mokuro",
@@ -84,7 +84,7 @@
         "layer": "gcv",
         "gz": false
       },
-      "why": "rule 3 for a layer's stem"
+      "why": "R5: a layer's stem folds too"
     },
     {
       "name": "Vol 1.Upper.mokuro",
@@ -92,9 +92,12 @@
         "Vol 1.cbz"
       ],
       "expect": {
-        "kind": "orphan"
+        "kind": "layer",
+        "stem": "Vol 1",
+        "layer": "upper",
+        "gz": false
       },
-      "why": "rule 5: an id is never folded"
+      "why": "R5: the id is the folded last segment"
     },
     {
       "name": "Vol 1.EDIT.mokuro",
@@ -102,9 +105,12 @@
         "Vol 1.cbz"
       ],
       "expect": {
-        "kind": "orphan"
+        "kind": "layer",
+        "stem": "Vol 1",
+        "layer": "edit",
+        "gz": false
       },
-      "why": "rule 5: not the edit layer"
+      "why": "R5: a miscased id is the edit layer"
     },
     {
       "name": "Vol 1.edit.MOKURO",
@@ -117,7 +123,7 @@
         "layer": "edit",
         "gz": false
       },
-      "why": "rules 1 + 5"
+      "why": "R2 + R5"
     },
     {
       "name": "vol 1.gcv.mokuro",
@@ -130,7 +136,7 @@
         "layer": "gcv",
         "gz": false
       },
-      "why": "rule 3"
+      "why": "R3"
     },
     {
       "name": "Vol 1.gcv.mokuro.gz",
@@ -166,7 +172,7 @@
       "expect": {
         "kind": "orphan"
       },
-      "why": "rule 5: underscore is outside the grammar"
+      "why": "R5: underscore is outside the grammar"
     },
     {
       "name": "Vol 1.5.mokuro",
@@ -179,7 +185,7 @@
         "stem": "Vol 1.5",
         "gz": false
       },
-      "why": "rule 4: a primary beats a layer reading"
+      "why": "R4: a primary beats a layer reading"
     },
     {
       "name": "Vol 1.5.mokuro",
@@ -192,7 +198,7 @@
         "layer": "5",
         "gz": false
       },
-      "why": "rule 5: all-digit ids are layers"
+      "why": "R5: all-digit ids are layers"
     },
     {
       "name": "Vol 01.5.mokuro",
@@ -205,7 +211,7 @@
         "layer": "5",
         "gz": false
       },
-      "why": "rule 5"
+      "why": "R5"
     },
     {
       "name": "Vol 1.5.mokuro",
@@ -219,7 +225,7 @@
         "layer": "5",
         "gz": false
       },
-      "why": "rule 2: a .zip defines no stem"
+      "why": "R2: a .zip defines no stem"
     },
     {
       "name": "Vol 1.mokuro",
@@ -229,7 +235,7 @@
       "expect": {
         "kind": "orphan"
       },
-      "why": "rule 2: a .cbr defines no stem"
+      "why": "R2: a .cbr defines no stem"
     },
     {
       "name": "Vol 1.2024.mokuro",
@@ -242,7 +248,7 @@
         "layer": "2024",
         "gz": false
       },
-      "why": "rule 5"
+      "why": "R5"
     },
     {
       "name": "Vol 1.gcv.mokuro",
@@ -255,7 +261,7 @@
         "stem": "Vol 1.gcv",
         "gz": false
       },
-      "why": "rule 4"
+      "why": "R4"
     },
     {
       "name": "Vo\u0301l 1.mokuro",
@@ -267,7 +273,7 @@
         "stem": "Vo\u0301l 1",
         "gz": false
       },
-      "why": "rule 3: NFD stem, NFC archive"
+      "why": "R3: NFD stem, NFC archive"
     },
     {
       "name": "V\u00f3l 1.gcv.mokuro",
@@ -280,7 +286,7 @@
         "layer": "gcv",
         "gz": false
       },
-      "why": "rule 3: NFC stem, NFD archive"
+      "why": "R5: NFC stem, NFD archive"
     },
     {
       "name": "Vol 1.xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.mokuro",
@@ -293,7 +299,7 @@
         "layer": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
         "gz": false
       },
-      "why": "rule 5: 32 characters"
+      "why": "R5: 32 characters"
     },
     {
       "name": "Vol 1.xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.mokuro",
@@ -303,7 +309,7 @@
       "expect": {
         "kind": "orphan"
       },
-      "why": "rule 5: 33 characters"
+      "why": "R5: 33 characters"
     },
     {
       "name": "Vol 1..mokuro",
@@ -375,6 +381,227 @@
         "kind": "orphan"
       },
       "why": "covers are not OCR sidecars"
+    },
+    {
+      "name": "STRASSE.mokuro",
+      "folder": [
+        "Stra\u00dfe.cbz"
+      ],
+      "expect": {
+        "kind": "primary",
+        "stem": "STRASSE",
+        "gz": false
+      },
+      "why": "R3: full case folding joins the stems"
+    },
+    {
+      "name": "Stra\u00dfe.edit.mokuro",
+      "folder": [
+        "STRASSE.cbz"
+      ],
+      "expect": {
+        "kind": "layer",
+        "stem": "Stra\u00dfe",
+        "layer": "edit",
+        "gz": false
+      },
+      "why": "R5 on folded stems"
+    },
+    {
+      "name": "V.ed\u200bit.mokuro",
+      "folder": [
+        "V.cbz"
+      ],
+      "expect": {
+        "kind": "layer",
+        "stem": "V",
+        "layer": "edit",
+        "gz": false
+      },
+      "why": "R5: a zero width space is no part of the id"
+    },
+    {
+      "name": "V.ed\u0131t.mokuro",
+      "folder": [
+        "V.cbz"
+      ],
+      "expect": {
+        "kind": "layer",
+        "stem": "V",
+        "layer": "edit",
+        "gz": false
+      },
+      "why": "R5: dotless i folds to i"
+    },
+    {
+      "name": "V.ED\u0130T.mokuro",
+      "folder": [
+        "V.cbz"
+      ],
+      "expect": {
+        "kind": "orphan"
+      },
+      "why": "R5: I with dot above folds to i + U+0307, outside the grammar"
+    },
+    {
+      "name": "V.GCV.mokuro",
+      "folder": [
+        "V.cbz"
+      ],
+      "expect": {
+        "kind": "layer",
+        "stem": "V",
+        "layer": "gcv",
+        "gz": false
+      },
+      "why": "R5: as Mokuro Reader 1.10.0 lowercases it"
+    },
+    {
+      "name": "V.\u212aanji.mokuro.gz",
+      "folder": [
+        "V.cbz"
+      ],
+      "expect": {
+        "kind": "layer",
+        "stem": "V",
+        "layer": "kanji",
+        "gz": true
+      },
+      "why": "R5: a Kelvin sign is a k"
+    },
+    {
+      "name": "\u039f\u0394\u039f\u03c2.gcv.mokuro",
+      "folder": [
+        "\u039f\u0394\u039f\u03a3.cbz"
+      ],
+      "expect": {
+        "kind": "layer",
+        "stem": "\u039f\u0394\u039f\u03c2",
+        "layer": "gcv",
+        "gz": false
+      },
+      "why": "R5: every sigma folds alike, with no context"
+    },
+    {
+      "name": "\u039f\u0394\u039f\u03a3.mokuro",
+      "folder": [
+        "\u03bf\u03b4\u03bf\u03c3.cbz"
+      ],
+      "expect": {
+        "kind": "primary",
+        "stem": "\u039f\u0394\u039f\u03a3",
+        "gz": false
+      },
+      "why": "R3: a final capital sigma"
+    },
+    {
+      "name": "V.mo\u212auro",
+      "folder": [
+        "V.cbz"
+      ],
+      "expect": {
+        "kind": "primary",
+        "stem": "V",
+        "gz": false
+      },
+      "why": "R2: a suffix spelled with a Kelvin sign"
+    },
+    {
+      "name": "V.mokuro",
+      "folder": [
+        "V.cb\u200bz"
+      ],
+      "expect": {
+        "kind": "primary",
+        "stem": "V",
+        "gz": false
+      },
+      "why": "R2: an archive whose suffix only the fold shows"
+    },
+    {
+      "name": "V.cb\u200bz",
+      "folder": [
+        "V.cb\u200bz"
+      ],
+      "expect": {
+        "kind": "orphan"
+      },
+      "why": "not a sidecar"
+    },
+    {
+      "name": "V.mokuro.g\u200dz",
+      "folder": [
+        "V.cbz"
+      ],
+      "expect": {
+        "kind": "primary",
+        "stem": "V",
+        "gz": true
+      },
+      "why": "R2: a zero width joiner in the gzip suffix"
+    },
+    {
+      "name": "X.5.mokuro",
+      "folder": [
+        "X\u200b.cbz",
+        "X.5.cbz"
+      ],
+      "expect": {
+        "kind": "primary",
+        "stem": "X.5",
+        "gz": false
+      },
+      "why": "R4 beside a crafted archive"
+    },
+    {
+      "name": "X\u200b.5.mokuro",
+      "folder": [
+        "X.cbz",
+        "X.5.cbz"
+      ],
+      "expect": {
+        "kind": "primary",
+        "stem": "X\u200b.5",
+        "gz": false
+      },
+      "why": "R4: the fold of the whole base"
+    },
+    {
+      "name": "\u0131.mokuro",
+      "folder": [
+        "I.cbz"
+      ],
+      "expect": {
+        "kind": "primary",
+        "stem": "\u0131",
+        "gz": false
+      },
+      "why": "R3: an uppercase table joins dotless i with I"
+    },
+    {
+      "name": "Vol\u200b 1.mokuro",
+      "folder": [
+        "Vol 1.cbz"
+      ],
+      "expect": {
+        "kind": "primary",
+        "stem": "Vol\u200b 1",
+        "gz": false
+      },
+      "why": "R3: default-ignorable code points are dropped"
+    },
+    {
+      "name": "Cafe\u0301.gcv.mokuro",
+      "folder": [
+        "Caf\u00e9.cbz",
+        "Caf\u00e9.gcv.cbz"
+      ],
+      "expect": {
+        "kind": "primary",
+        "stem": "Cafe\u0301.gcv",
+        "gz": false
+      },
+      "why": "R4 on folded stems"
     }
   ],
   "layer_class": [
@@ -396,7 +623,7 @@
     },
     {
       "id": "EDIT",
-      "class": "other"
+      "class": "personal"
     },
     {
       "id": "edit-",
@@ -461,6 +688,38 @@
     {
       "id": "5",
       "class": "other"
+    },
+    {
+      "id": "Edit-2",
+      "class": "personal"
+    },
+    {
+      "id": "ed\u200bit",
+      "class": "personal"
+    },
+    {
+      "id": "ed\u0131t",
+      "class": "personal"
+    },
+    {
+      "id": "CURATED",
+      "class": "curated"
+    },
+    {
+      "id": "Curated-3",
+      "class": "reserved"
+    },
+    {
+      "id": "cura\u200dted",
+      "class": "curated"
+    },
+    {
+      "id": "Gcv",
+      "class": "other"
+    },
+    {
+      "id": "ED\u0130T",
+      "class": "other"
     }
   ],
   "sweep": [
@@ -480,12 +739,13 @@
         "Vol 01.5.gcv.mokuro"
       ],
       "expect": [
+        "Vol 01.Upper.mokuro",
         "Vol 01.hayai-nova.mokuro.gz",
         "Vol 01.mokuro",
         "Vol 01.nocover",
         "Vol 01.webp"
       ],
-      "why": "a decimal volume's primary and layers, other stems' layers and orphans stay"
+      "why": "a decimal volume's primary and layers, other stems' layers and orphans stay; a miscased id is a layer (R5)"
     },
     {
       "archive": "Vol 01.cbz",
@@ -501,7 +761,7 @@
         "Vol 01.gcv.mokuro",
         "Vol 01.mokuro"
       ],
-      "why": "rule 6: the exact stem wins over a folded one"
+      "why": "R6: in a fold group only exact spellings go"
     },
     {
       "archive": "vol 01.cbz",
@@ -517,7 +777,7 @@
         "vol 01.hayai.mokuro",
         "vol 01.mokuro"
       ],
-      "why": "rule 6, the other spelling"
+      "why": "R6, the other spelling"
     },
     {
       "archive": "Vol 01.cbz",
@@ -605,7 +865,328 @@
         "Vo\u0301l 1.gcv.mokuro",
         "Vo\u0301l 1.mokuro"
       ],
-      "why": "rule 3"
+      "why": "R3"
+    },
+    {
+      "archive": "Stra\u00dfe.cbz",
+      "folder": [
+        "Stra\u00dfe.cbz",
+        "STRASSE.mokuro",
+        "strasse.EDIT.mokuro",
+        "STRASSE.webp",
+        "Strasse.nocover"
+      ],
+      "expect": [
+        "STRASSE.mokuro",
+        "STRASSE.webp",
+        "Strasse.nocover",
+        "strasse.EDIT.mokuro"
+      ],
+      "why": "R1: alone, every spelling the fold joins with the stem goes"
+    },
+    {
+      "archive": "Stra\u00dfe.cbz",
+      "folder": [
+        "Stra\u00dfe.cbz",
+        "STRASSE.cbz",
+        "strasse.mokuro",
+        "Stra\u00dfe.mokuro",
+        "STRASSE.gcv.mokuro"
+      ],
+      "expect": [
+        "Stra\u00dfe.mokuro"
+      ],
+      "why": "R6: a fold group sweeps exact spellings only"
+    },
+    {
+      "archive": "STRASSE.cbz",
+      "folder": [
+        "Stra\u00dfe.cbz",
+        "STRASSE.cbz",
+        "strasse.mokuro",
+        "Stra\u00dfe.mokuro",
+        "STRASSE.gcv.mokuro"
+      ],
+      "expect": [
+        "STRASSE.gcv.mokuro"
+      ],
+      "why": "R6, the other spelling"
+    },
+    {
+      "archive": "X\u200b.cbz",
+      "folder": [
+        "X\u200b.cbz",
+        "X.5.cbz",
+        "X.mokuro",
+        "X.5.mokuro",
+        "x.gcv.mokuro"
+      ],
+      "expect": [
+        "X.mokuro",
+        "x.gcv.mokuro"
+      ],
+      "why": "R4: another archive's primary stays"
+    },
+    {
+      "archive": "V.cbz",
+      "folder": [
+        "V.cbz",
+        "V.ED\u200bIT.mokuro",
+        "V.mo\u212auro",
+        "V.cbz.mokuro"
+      ],
+      "expect": [
+        "V.ED\u200bIT.mokuro",
+        "V.cbz.mokuro",
+        "V.mo\u212auro"
+      ],
+      "why": "R2 + R5 on the fold (cbz is a layer id too)"
+    }
+  ],
+  "owner": [
+    {
+      "name": "V.mokuro",
+      "folder": [
+        "V.cbz",
+        "W.cbz"
+      ],
+      "display": "V.cbz",
+      "sweep": "V.cbz",
+      "why": "the exact spelling"
+    },
+    {
+      "name": "STRASSE.mokuro",
+      "folder": [
+        "Stra\u00dfe.cbz"
+      ],
+      "display": "Stra\u00dfe.cbz",
+      "sweep": "Stra\u00dfe.cbz",
+      "why": "the only archive of the folded stem"
+    },
+    {
+      "name": "VOL 01.mokuro",
+      "folder": [
+        "Vol 01.cbz",
+        "VOL 01.cbz"
+      ],
+      "display": "VOL 01.cbz",
+      "sweep": "VOL 01.cbz",
+      "why": "the exact spelling, in a fold group"
+    },
+    {
+      "name": "vol 01.mokuro",
+      "folder": [
+        "Vol 01.cbz",
+        "VOL 01.cbz"
+      ],
+      "display": "VOL 01.cbz",
+      "sweep": null,
+      "why": "a fold group: shown with the code-point-smallest spelling, swept by none"
+    },
+    {
+      "name": "v.webp",
+      "folder": [
+        "V.cbz",
+        "v.cbz"
+      ],
+      "display": "v.cbz",
+      "sweep": "v.cbz",
+      "why": "a cover, the exact spelling"
+    },
+    {
+      "name": "V.WEBP",
+      "folder": [
+        "v.cbz",
+        "v\u200d.cbz"
+      ],
+      "display": "v.cbz",
+      "sweep": null,
+      "why": "a cover in a fold group"
+    },
+    {
+      "name": "x.mokuro",
+      "folder": [
+        "X\ufe0f.cbz",
+        "X\udb40\udd00.cbz"
+      ],
+      "display": "X\ufe0f.cbz",
+      "sweep": null,
+      "why": "code-point order (U+FE0F before U+E0100); UTF-16 order would pick the other"
+    },
+    {
+      "name": "y.gcv.mokuro",
+      "folder": [
+        "Y\ud82f\udca0.cbz",
+        "Y\uffa0.cbz"
+      ],
+      "display": "Y\uffa0.cbz",
+      "sweep": null,
+      "why": "code-point order (U+FFA0 before U+1BCA0); UTF-16 order would pick the other"
+    },
+    {
+      "name": "\uff21.mokuro",
+      "folder": [
+        "\uff41.cbz",
+        "\ud83d\ude00.cbz"
+      ],
+      "display": "\uff41.cbz",
+      "sweep": "\uff41.cbz",
+      "why": "fullwidth A folds to fullwidth a; U+1F600 is another stem"
+    },
+    {
+      "name": "v.gcv.mokuro",
+      "folder": [
+        "V.cbz",
+        "W.cbz"
+      ],
+      "display": "V.cbz",
+      "sweep": "V.cbz",
+      "why": "a layer"
+    },
+    {
+      "name": "Vol 01.5.mokuro",
+      "folder": [
+        "Vol 01.cbz",
+        "Vol 01.5.zip"
+      ],
+      "display": "Vol 01.cbz",
+      "sweep": null,
+      "why": "layer 5 by classify; every archive extension keeps a sweep off its primary"
+    },
+    {
+      "name": "Z.mokuro",
+      "folder": [
+        "V.cbz"
+      ],
+      "display": null,
+      "sweep": null,
+      "why": "an orphan"
+    }
+  ],
+  "equivalent": [
+    {
+      "crafted": [
+        "Q.ed\u200bit.edit.cbz",
+        "Q.edit.cbz",
+        "Q.ed\u200bit.edit.mokuro",
+        "Q.edit.edit.mokuro"
+      ],
+      "canonical": [
+        "q.edit.edit.cbz",
+        "Q.edit.cbz",
+        "q.edit.edit.mokuro",
+        "Q.edit.edit.mokuro"
+      ],
+      "why": "a reserved-layer hider"
+    },
+    {
+      "crafted": [
+        "V.ed\u0131t.curated.cbz",
+        "V.edit.cbz",
+        "V.edit.curated.mokuro",
+        "V.ed\u0131t.curated.mokuro"
+      ],
+      "canonical": [
+        "V.edit.curated.cbz",
+        "V.edit.cbz",
+        "V.edit.curated.mokuro",
+        "V.edit.curated.mokuro"
+      ],
+      "why": "dotless i"
+    },
+    {
+      "crafted": [
+        "X\u200b.curated.cbz",
+        "X.cbz",
+        "X.curated.mokuro",
+        "X.curated.curated.mokuro"
+      ],
+      "canonical": [
+        "X.curated.cbz",
+        "X.cbz",
+        "X.curated.mokuro",
+        "X.curated.curated.mokuro"
+      ],
+      "why": "a zero width space in the stem"
+    },
+    {
+      "crafted": [
+        "X\u200b.cbz",
+        "X.5.cbz",
+        "X.5.mokuro",
+        "X\u200b.5.mokuro",
+        "X\u200b.mokuro"
+      ],
+      "canonical": [
+        "X.cbz",
+        "X.5.cbz",
+        "X.5.mokuro",
+        "X.5.mokuro",
+        "X.mokuro"
+      ],
+      "why": "a decimal volume beside a crafted archive"
+    },
+    {
+      "crafted": [
+        "Cafe\u0301.gcv.cbz",
+        "Caf\u00e9.cbz",
+        "Caf\u00e9.gcv.mokuro",
+        "Cafe\u0301.mokuro"
+      ],
+      "canonical": [
+        "caf\u00e9.gcv.cbz",
+        "caf\u00e9.cbz",
+        "caf\u00e9.gcv.mokuro",
+        "caf\u00e9.mokuro"
+      ],
+      "why": "NFD and NFC"
+    },
+    {
+      "crafted": [
+        "\u039f\u0394\u039f\u03c2.gcv.cbz",
+        "\u039f\u0394\u039f\u03a3.cbz",
+        "\u039f\u0394\u039f\u03a3.gcv.mokuro",
+        "\u03bf\u03b4\u03bf\u03c2.mokuro"
+      ],
+      "canonical": [
+        "\u03bf\u03b4\u03bf\u03c3.gcv.cbz",
+        "\u03bf\u03b4\u03bf\u03c3.cbz",
+        "\u03bf\u03b4\u03bf\u03c3.gcv.mokuro",
+        "\u03bf\u03b4\u03bf\u03c3.mokuro"
+      ],
+      "why": "final sigma"
+    },
+    {
+      "crafted": [
+        "Stra\u00dfe.cbz",
+        "STRASSE.mokuro",
+        "STRASSE.EDIT.mokuro",
+        "Stra\u017f\u017fe.gcv.mokuro.gz"
+      ],
+      "canonical": [
+        "strasse.cbz",
+        "strasse.mokuro",
+        "strasse.edit.mokuro",
+        "strasse.gcv.mokuro.gz"
+      ],
+      "why": "sharp s and long s"
+    },
+    {
+      "crafted": [
+        "V.cbz",
+        "V.EDIT.mokuro",
+        "V.ed\u200bit.mokuro",
+        "V.mo\u212auro",
+        "V.Cura\u200dted.mokuro"
+      ],
+      "canonical": [
+        "v.cbz",
+        "v.edit.mokuro",
+        "v.edit.mokuro",
+        "v.mokuro",
+        "v.curated.mokuro"
+      ],
+      "why": "miscased and padded ids, a Kelvin suffix"
     }
   ]
 }

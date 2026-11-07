@@ -296,7 +296,7 @@ pub(crate) fn listed_entry(library: &Path, relative: &str) -> Option<String> {
 /// [`sidecar_names::reserved_layer_of`]: bunko_core::sidecar_names::reserved_layer_of
 fn layer_spelled_otherwise(parent: &Path, requested: &str, listed: &str) -> bool {
     use bunko_core::sidecar_names::{LayerClass, layer_class, reserved_layer_of, split_layer};
-    if !split_layer(requested).is_some_and(|(_, id, _)| layer_class(id) != LayerClass::Other) {
+    if !split_layer(requested).is_some_and(|(_, id, _)| layer_class(&id) != LayerClass::Other) {
         return false;
     }
     let files = crate::personal::names_in(parent);

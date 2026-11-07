@@ -133,6 +133,18 @@ pub fn series_key(name: &str) -> String {
     out
 }
 
+/// Does `name` end in a volume-file suffix (`.cbz`, `.mokuro`, `.mokuro.gz`, `.webp`,
+/// `.nocover`) only once folded: `V.cb\u{200B}z`, `V.mo\u{212A}uro` (a Kelvin sign),
+/// `V.cbz\u{200B}`? Bunko creates no such name: a reader that lowercases names
+/// (Mokuro Reader 1.10.0 and earlier) would miss the volume or sidecar entirely.
+/// Stateless and listing-free; a listed name is never refused for it, and rule 2 reads
+/// it by its fold.
+pub fn hides_suffix(name: &str) -> bool {
+    crate::sidecar_names::suffix_of(name).is_some_and(|suffix| {
+        crate::sidecar_names::strip_suffix_ci(name, suffix.as_str()).is_none()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{fold_name, series_key};
@@ -387,5 +399,30 @@ mod tests {
         assert_eq!(series_key("  Dr\u{3000}Stone\t"), "dr stone");
         assert_eq!(series_key("Dr\u{200B} Stone"), "dr stone");
         assert_ne!(series_key("Dr Stone"), series_key("DrStone"));
+    }
+
+    #[test]
+    fn a_suffix_only_the_fold_shows_is_hidden() {
+        for name in [
+            "V.cb\u{200B}z",
+            "V.mo\u{212A}uro",
+            "V.cbz\u{200B}",
+            "V.mokuro.g\u{200D}z",
+            "V.WEB\u{AD}P",
+        ] {
+            assert!(super::hides_suffix(name), "{name:?}");
+        }
+        for name in [
+            "V.cbz",
+            "V.CBZ",
+            "V\u{200B}.cbz",
+            "Stra\u{df}e.mokuro",
+            "V.edit.MOKURO.gz",
+            "notes.txt",
+            "V.zip",
+            "V",
+        ] {
+            assert!(!super::hides_suffix(name), "{name:?}");
+        }
     }
 }

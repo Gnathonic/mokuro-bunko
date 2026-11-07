@@ -398,6 +398,9 @@ fn series_folders(
 /// `owned` and `closed` are the series keys of its own and other accounts' records,
 /// `live` those listed at the root. Archives directly in a series folder only; a folder
 /// or record that cannot be read adds nothing. Blocking.
+// Sidecar names rule 2: the either-fold names are deprecated rule-2 shims until Track B3
+// removes this path.
+#[allow(deprecated)]
 fn curated_volumes(
     db: &bunko_db::Database,
     library: &std::path::Path,

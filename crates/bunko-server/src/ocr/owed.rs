@@ -572,14 +572,16 @@ mod tests {
         assert!(still_owed(lib, "S/X.cbz", &rows()[0], false));
     }
 
-    /// A layer file whose id is spelled in another case (`Vol.FAST.mokuro.gz`) is no
-    /// layer of the volume by rule v1 (the id exact), and it is the layer's name by the
-    /// filename fold: the walk owes nothing a write could not fill (it would be a second
-    /// spelling of that file), so the row is neither done nor owed again and again, and
-    /// the same on every host (decided from the listing, never by opening a built name).
+    /// A layer file whose id is spelled in another case (`Vol.FAST.mokuro.gz`) is that
+    /// layer: sidecar names rule 2 reads ids folded. The row is done, nothing is owed,
+    /// and a result would go to the listed spelling (never a second one), the same on
+    /// every host (decided from the listing, never by opening a built name).
     #[test]
-    fn a_layer_id_in_another_case_is_never_owed() {
-        for other in ["Vol.FAST.mokuro.gz", "Vol.Fast.mokuro"] {
+    fn a_layer_id_in_another_case_is_that_layer() {
+        for (other, plain) in [
+            ("Vol.FAST.mokuro.gz", "Vol.FAST.mokuro"),
+            ("Vol.Fast.mokuro", "Vol.Fast.mokuro"),
+        ] {
             let dir = tempfile::tempdir().unwrap();
             let lib = dir.path();
             let s = lib.join("S");
@@ -589,8 +591,12 @@ mod tests {
             }
             let cbz = s.join("Vol.cbz");
             let layer = &rows()[1];
-            assert!(!row_done(&cbz, layer, None), "{other}");
-            assert_eq!(listed_sidecar_paths(&cbz, ".fast.mokuro"), None, "{other}");
+            assert!(row_done(&cbz, layer, None), "{other}");
+            assert_eq!(
+                listed_sidecar_paths(&cbz, ".fast.mokuro"),
+                Some((s.join(plain), s.join(format!("{plain}.gz")))),
+                "{other}"
+            );
             let index = walk(lib, &rows(), &FileFacts, None, &KnownPages::new());
             assert!(index.volumes.is_empty(), "{other}: {:?}", index.volumes);
             assert!(!still_owed(lib, "S/Vol.cbz", layer, false), "{other}");

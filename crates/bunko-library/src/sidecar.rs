@@ -617,10 +617,10 @@ mod tests {
         assert_eq!(cover_path(&d.join("W.cbz")), None);
     }
 
-    /// A cover or marker is read only from a name the folder lists for the archive:
-    /// `STRASSE 1.webp` beside `Straße 1.cbz`, `Vol2\u{FE0F}.webp` beside `Vol2.cbz`
-    /// (one name by the filename fold, another archive's stem by rule v1) are no
-    /// covers, on a host that would open them for the built name too.
+    /// A cover or marker is read from the name the folder lists for the archive, in the
+    /// listed spelling: `STRASSE 1.webp` beside `Straße 1.cbz`, `Vol2\u{FE0F}.webp`
+    /// beside `Vol2.cbz` are one name with the archive's own by the fold, and rule 2
+    /// gives them to it. Nothing is written beside them in another spelling.
     #[test]
     fn covers_and_markers_are_listed_names_only() {
         let dir = tempfile::tempdir().unwrap();
@@ -636,14 +636,17 @@ mod tests {
                 "Vol1\u{200B}.nocover",
             ],
         );
-        for (cbz, suffix) in [
-            ("Straße 1.cbz", ".webp"),
-            ("Vol2.cbz", ".webp"),
-            ("Vol1.cbz", ".nocover"),
+        for (cbz, suffix, listed) in [
+            ("Straße 1.cbz", ".webp", "STRASSE 1.webp"),
+            ("Vol2.cbz", ".webp", "Vol2\u{FE0F}.webp"),
+            ("Vol1.cbz", ".nocover", "Vol1\u{200B}.nocover"),
         ] {
-            assert_eq!(listed_own_file(&d.join(cbz), suffix), None, "{cbz}");
-            // Nothing is written beside them either: the name is taken.
-            assert_eq!(sibling(&d.join(cbz), suffix), None, "{cbz}");
+            assert_eq!(
+                listed_own_file(&d.join(cbz), suffix),
+                Some(d.join(listed)),
+                "{cbz}"
+            );
+            assert_eq!(sibling(&d.join(cbz), suffix), Some(d.join(listed)), "{cbz}");
         }
     }
 
@@ -714,12 +717,16 @@ mod tests {
             layer_sidecar_in(&d.join("V.cbz"), "gcv", &folder),
             Some(d.join("v.gcv.mokuro.gz"))
         );
-        assert_eq!(layer_sidecar_in(&d.join("V.cbz"), "GCV", &folder), None);
+        // Rule 2 compares ids folded.
+        assert_eq!(
+            layer_sidecar_in(&d.join("V.cbz"), "GCV", &folder),
+            Some(d.join("v.gcv.mokuro.gz"))
+        );
         assert_eq!(layer_sidecar_in(&d.join("W.cbz"), "gcv", &folder), None);
     }
 
     #[test]
-    fn siblings_follow_rule_v1() {
+    fn siblings_follow_rule_2() {
         let dir = tempfile::tempdir().unwrap();
         let d = dir.path();
         touch(
@@ -742,15 +749,17 @@ mod tests {
                 "Vol 1.webp",
                 "Vol 1.nocover",
                 "Vol 1.2024.mokuro",
+                // Rule 2 reads ids folded: layer `upper`.
+                "Vol 1.Upper.mokuro",
                 "vol 1.gcv.MOKURO",
             ]
         );
-        // Rule v1 reads `Vol 1.5.mokuro` as layer `5` here (a .zip defines no stem),
+        // Rule 2 reads `Vol 1.5.mokuro` as layer `5` here (a .zip defines no stem),
         // but a sweep never takes a file whose base is any archive's stem.
         let stems = bunko_core::sidecar_names::volume_stems(["Vol 1.cbz", "Vol 1.5.zip"]);
         assert!(matches!(
             bunko_core::sidecar_names::classify("Vol 1.5.mokuro", &stems),
-            bunko_core::sidecar_names::SidecarClass::Layer { id: "5", .. }
+            bunko_core::sidecar_names::SidecarClass::Layer { id, .. } if id == "5"
         ));
     }
 

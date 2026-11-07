@@ -271,44 +271,43 @@ async fn a_folder_spelled_like_a_sidecar_takes_its_name() {
 }
 
 /// `STRASSE 1.nocover` beside `Straße 1.cbz`, and `Vol1\u{200B}.nocover` beside
-/// `Vol1.cbz`, are one name with the volume's marker by the filename fold but not the
-/// volume's own by rule v1: no marker for it, on every host, so its cover is made (a
-/// casefold disk used to open them for the built marker name and make none).
+/// `Vol1.cbz`, are one name with the volume's marker by the fold, and sidecar names
+/// rule 2 gives them to the volume: its marker, on every host, so no cover is made.
+/// A marker another stem's is no marker of this volume's.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_marker_is_the_volumes_only_when_listed_as_its_own() {
+async fn a_marker_is_the_volumes_in_any_spelling_of_its_fold() {
     let env = Env::new();
     env.write("S/Straße 1.cbz", cbz(3, "a"));
     env.write("S/STRASSE 1.nocover", b"");
     env.write("S/Vol1.cbz", cbz(3, "b"));
     env.write("S/Vol1\u{200B}.nocover", b"");
+    env.write("S/Vol2.cbz", cbz(3, "c"));
+    env.write("S/Vol2.5.nocover", b"");
     let library = env.lib("");
     let candidates = bunko_server::thumbs::thumbnail_candidates(&library);
-    assert_eq!(
-        candidates,
-        [env.lib("S/Straße 1.cbz"), env.lib("S/Vol1.cbz")],
-        "{candidates:?}"
-    );
+    assert_eq!(candidates, [env.lib("S/Vol2.cbz")], "{candidates:?}");
     let thumbs = bunko_server::thumbs::Thumbnails::default();
-    assert_eq!(thumbs.scan_once(&library, &CancellationToken::new()), 2);
+    assert_eq!(thumbs.scan_once(&library, &CancellationToken::new()), 1);
     assert_eq!(
         names(&env.lib("S")),
         [
             "STRASSE 1.nocover",
             "Straße 1.cbz",
-            "Straße 1.webp",
             "Vol1.cbz",
-            "Vol1.webp",
             "Vol1\u{200B}.nocover",
+            "Vol2.5.nocover",
+            "Vol2.cbz",
+            "Vol2.webp",
         ]
     );
 }
 
-/// The compile reads a cover's size and time only from a cover the folder lists for
-/// the volume: `STRASSE 1.webp` beside `Straße 1.cbz`, `Vol2\u{FE0F}.webp` beside
-/// `Vol2.cbz`, and `Vol3.webp` once `Vol3.cbz` is renamed `Vol\u{200B}3.cbz` are no
-/// covers of theirs, on every host (a casefold disk opened them for the built name).
+/// The compile reads a cover's size and time from the cover the folder lists for the
+/// volume, in any spelling of its fold (sidecar names rule 2): `STRASSE 1.webp` beside
+/// `Straße 1.cbz`, `Vol2\u{FE0F}.webp` beside `Vol2.cbz`, and `Vol3.webp` once
+/// `Vol3.cbz` is renamed `Vol\u{200B}3.cbz` are their covers, on every host.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_compile_reads_only_a_listed_cover() {
+async fn the_compile_reads_the_listed_cover() {
     let env = Env::new();
     env.write("S/Straße 1.cbz", cbz(1, "a"));
     env.write("S/STRASSE 1.webp", b"client cover a");
@@ -347,9 +346,10 @@ async fn the_compile_reads_only_a_listed_cover() {
             .map(|(_, s)| *s)
             .unwrap_or_else(|| panic!("{title}: {covers:?}"))
     };
-    assert_eq!(size("Straße 1"), None, "{covers:?}");
-    assert_eq!(size("Vol2"), None, "{covers:?}");
-    assert_eq!(size("Vol\u{200B}3"), None, "{covers:?}");
+    let client = Some(b"client cover a".len() as i64);
+    assert_eq!(size("Straße 1"), client, "{covers:?}");
+    assert_eq!(size("Vol2"), client, "{covers:?}");
+    assert_eq!(size("Vol\u{200B}3"), client, "{covers:?}");
     assert_eq!(size("Vol4"), Some(b"its own cover".len() as i64));
 }
 

@@ -478,6 +478,8 @@ impl Listing {
     /// by the filename fold alike
     /// ([`sidecar_names::governing_archives_by_either_fold`]): `S/STRASSE.mokuro` is
     /// governed by a listed `S/Straße.cbz`, as every host makes them one name.
+    // Sidecar names rule 2: a deprecated rule-2 shim until Track B3 removes it.
+    #[allow(deprecated)]
     fn governors(&self) -> Vec<String> {
         sidecar_names::governing_archives_by_either_fold(&self.name, &self.refs())
             .into_iter()
@@ -2490,10 +2492,10 @@ mod tests {
                 "Permission denied: corrections are saved as plain .mokuro".into()
             ))
         );
-        // Exact-case ids (rule v1): `EDIT` is a shared library file, as before.
+        // Ids are read folded (sidecar names rule 2): `EDIT` is the correction.
         assert_eq!(
             ask("PUT", "/mokuro-reader/S/W.EDIT.mokuro", None, reg),
-            Err((403, "Permission denied: cannot add files".into()))
+            Ok(())
         );
         // `V.edit.mokuro` beside `V.edit.cbz` is that volume's primary (rule 4).
         assert_eq!(

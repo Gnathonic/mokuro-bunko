@@ -639,12 +639,12 @@ impl Upgrade {
 
     /// A layer file's id (`<stem>.<id>.mokuro`, the suffix in any case).
     fn layer_id(layer: &Path) -> Option<String> {
+        // Folded, as sidecar names rule 2 reads it (`Vol.Upper.mokuro` is `upper`).
         layer
             .file_name()
             .and_then(|f| f.to_str())
-            .and_then(|f| sidecar_names::strip_suffix_ci(f, ".mokuro"))
-            .and_then(|s| s.rsplit_once('.'))
-            .map(|(_, g)| g.to_string())
+            .and_then(sidecar_names::split_layer)
+            .map(|(_, id, _)| id.into_owned())
     }
 
     /// The layers the upgrade may read (D4): those that carry an `ocr_engine` stamp or
@@ -1559,10 +1559,10 @@ mod tests {
         assert_eq!(classify(&nothing_else, None).family, UNKNOWN);
     }
 
-    /// Rule v1: suffixes in any case, folded stems, all-digit ids; a file another
+    /// Rule 2: suffixes, stems and ids read on the fold, all-digit ids; a file another
     /// archive (any extension) owns is never this volume's layer.
     #[test]
-    fn layer_files_follow_rule_v1() {
+    fn layer_files_follow_rule_2() {
         let dir = tempfile::tempdir().unwrap();
         let d = dir.path();
         for n in [
@@ -1579,9 +1579,20 @@ mod tests {
         let layers = Upgrade::layer_files(&d.join("Vol 1.cbz"));
         assert_eq!(
             layers,
-            [d.join("Vol 1.2024.mokuro"), d.join("vol 1.gcv.MOKURO")]
+            [
+                d.join("Vol 1.2024.mokuro"),
+                d.join("Vol 1.Upper.mokuro"),
+                d.join("vol 1.gcv.MOKURO")
+            ]
         );
         let ids: Vec<Option<String>> = layers.iter().map(|l| Upgrade::layer_id(l)).collect();
-        assert_eq!(ids, [Some("2024".into()), Some("gcv".into())]);
+        assert_eq!(
+            ids,
+            [
+                Some("2024".into()),
+                Some("upper".into()),
+                Some("gcv".into())
+            ]
+        );
     }
 }

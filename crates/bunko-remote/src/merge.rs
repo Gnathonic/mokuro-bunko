@@ -187,8 +187,8 @@ pub trait CaseMergePolicy: Send + Sync {
 }
 
 /// `edit`, `curated` and their `-<n>` copies: layers whose content shows a human,
-/// never Bunko's model output (D4, D27). Exact-case, like every layer id (sidecar
-/// names rule v1).
+/// never Bunko's model output (D4, D27). Read on the folded id, like every layer id
+/// (sidecar names rule 2).
 pub fn is_unstamped_layer_id(id: &str) -> bool {
     matches!(
         sidecar_names::layer_class(strip_counter(id)),

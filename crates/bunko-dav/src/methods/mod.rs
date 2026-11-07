@@ -530,6 +530,9 @@ async fn frozen_refusal(inner: &Arc<Inner>, r: &Req) -> Option<Resp> {
 /// volume name the fold joins with a listed archive's spelled otherwise
 /// (`S/STRASSE.curated.cbz` beside `S/Straße.cbz`, either way round), and where two
 /// such archives are listed already, no file of either volume is written.
+// Sidecar names rule 2: the either-fold names are deprecated rule-2 shims until Track B3
+// removes this path.
+#[allow(deprecated)]
 async fn disputed_refusal(inner: &Arc<Inner>, r: &Req) -> Option<Resp> {
     let target = match r.method.as_str() {
         "PUT" | "MKCOL" | "PROPPATCH" | "LOCK" => r.path.clone(),
@@ -703,6 +706,9 @@ async fn disputed_refusal(inner: &Arc<Inner>, r: &Req) -> Option<Resp> {
 /// a pair is cleared up. Reads are never refused. Asked at dispatch, from the listing
 /// before the body is read, and again right before an archive lands
 /// ([`archive_name_check`]).
+// Sidecar names rule 2: the either-fold names are deprecated rule-2 shims until Track B3
+// removes this path.
+#[allow(deprecated)]
 fn volume_name_refusal(name: &str, files: &[&str], source: Option<&str>) -> Option<String> {
     use bunko_core::sidecar_names::{
         cbz_stem, governing_archives_by_either_fold, volume_name_ties,

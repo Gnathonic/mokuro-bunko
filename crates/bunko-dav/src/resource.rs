@@ -1049,7 +1049,11 @@ mod tests {
             rel("S/Nope.edit.mokuro").as_deref(),
             Some("S/Nope.edit.mokuro")
         );
-        assert_eq!(rel("S/Vol.EDIT.mokuro"), None);
+        // Rule 2 reads ids folded: `Vol.EDIT.mokuro` is the caller's correction too.
+        assert_eq!(
+            rel("S/Vol.EDIT.mokuro").as_deref(),
+            Some("S/Vol.EDIT.mokuro")
+        );
         assert_eq!(rel("S/Vol.edited.mokuro"), None);
         assert_eq!(rel("S/D.edit.mokuro"), None);
         assert_eq!(

@@ -213,6 +213,9 @@ pub fn reserved_series_rows(library: &Path, cloud_folder: Option<&str>) -> Vec<R
 /// it otherwise (`Stra\u{df}e.cbz` beside `STRASSE.curated.cbz`,
 /// [`bunko_core::sidecar_names::volume_name_tie_pairs`]). Walks
 /// folders only (no file is read). A remote store merges its own case variants (spec §5.9): not for it.
+// Sidecar names rule 2: the either-fold names are deprecated rule-2 shims until Track B3
+// removes this path.
+#[allow(deprecated)]
 pub fn case_variant_rows(library: &Path) -> Vec<Row> {
     let mut out = Vec::new();
     let mut todo = vec![String::new()];
@@ -750,10 +753,13 @@ mod tests {
         );
     }
 
-    /// A file the filename fold ties to a volume's files without rule v1 doing so (made
-    /// before the volume, by hand, or by 0.7) is named, with the volume; nothing else is.
+    /// Sidecar names rule 2 decides on the one fold: a name the old filename fold tied
+    /// to a volume's files without rule v1 (`STRASSE.mokuro` beside `Straße.cbz`,
+    /// `V.EDIT.mokuro`, `X.ed\u{200B}it.mokuro`) is now that volume's file or layer, and
+    /// a listed name with a suffix only the fold shows (`W.mo\u{212A}uro`) is read by its
+    /// fold. Nothing is ambiguous, so nothing is reported (the section goes in Track B3).
     #[test]
-    fn ambiguous_names_are_reported() {
+    fn rule_2_leaves_no_ambiguous_names() {
         let dir = tempfile::tempdir().unwrap();
         let library = dir.path().join("library");
         bunko_store::fs::create_dir_all(library.join("S")).unwrap();
@@ -771,54 +777,17 @@ mod tests {
         ] {
             bunko_store::fs::write(library.join("S").join(name), "x").unwrap();
         }
-        let mut rows: Vec<Row> = case_variant_rows(&library)
+        let rows: Vec<Row> = case_variant_rows(&library)
             .into_iter()
             .filter(|r| r.label == "Ambiguous name")
             .collect();
-        rows.sort_by(|a, b| a.detail.cmp(&b.detail));
-        let details: Vec<&str> = rows.iter().map(|r| r.detail.as_str()).collect();
-        assert_eq!(rows.len(), 5, "{details:?}");
-        // An archive whose OCR file could only stand in for `Y`'s curated layer.
-        assert!(
-            details.iter().any(|d| d.starts_with(
-                "S/Y.cura\u{200B}ted.cbz is one name on every host (Bunko joins names as case-insensitive filesystems do) with an archive"
-            )),
-            "{details:?}"
-        );
-        // One name with an account's correction of a volume `X`, listed or not.
-        assert!(
-            details
-                .iter()
-                .any(|d| d.starts_with("S/X.ed\u{200B}it.mokuro is one name on every host")),
-            "{details:?}"
-        );
-        assert!(
-            details
-                .iter()
-                .any(|d| d.starts_with("S/V.EDIT.mokuro is one name with a file of S/V.cbz")),
-            "{details:?}"
-        );
-        assert!(
-            details
-                .iter()
-                .any(|d| d
-                    .starts_with("S/STRASSE.mokuro is one name with a file of S/Stra\u{df}e.cbz")),
-            "{details:?}"
-        );
-        assert!(
-            details
-                .iter()
-                .any(|d| d.starts_with("S/W.mo\u{212A}uro ends in")),
-            "{details:?}"
-        );
-        assert!(rows.iter().all(|r| r.verdict == Verdict::Warn));
+        assert!(rows.is_empty(), "{rows:?}");
     }
 
-    /// Two archives the fold makes one volume name, spelled otherwise (made before this
-    /// release, or by hand), are named together, once per pair; archives of one volume
-    /// name as spelled are not.
+    /// Two archives are one volume name only when they fold alike (a fold group, which
+    /// its own section reports): the either-fold "volume name tie" is gone with rule v1.
     #[test]
-    fn archives_of_one_volume_name_spelled_otherwise_are_reported() {
+    fn rule_2_leaves_no_volume_name_ties() {
         let dir = tempfile::tempdir().unwrap();
         let library = dir.path().join("library");
         bunko_store::fs::create_dir_all(library.join("S")).unwrap();
@@ -833,23 +802,11 @@ mod tests {
         ] {
             bunko_store::fs::write(library.join("S").join(name), "x").unwrap();
         }
-        let mut details: Vec<String> = case_variant_rows(&library)
+        let rows: Vec<Row> = case_variant_rows(&library)
             .into_iter()
             .filter(|r| r.label == "Ambiguous volume names")
-            .inspect(|r| assert_eq!(r.verdict, Verdict::Warn))
-            .map(|r| r.detail)
             .collect();
-        details.sort();
-        assert_eq!(details.len(), 2, "{details:?}");
-        assert!(
-            details[0]
-                .starts_with("S/STRASSE.curated.cbz and S/Stra\u{df}e.cbz are one volume name"),
-            "{details:?}"
-        );
-        assert!(
-            details[1].starts_with("S/X.cbz and S/X\u{200B}.edit.cbz are one volume name"),
-            "{details:?}"
-        );
+        assert!(rows.is_empty(), "{rows:?}");
     }
 
     /// A cloud folder can hold a `history/` series too (uploaded under 0.7, or by a

@@ -439,12 +439,13 @@ async fn per_user_files_exist_by_the_listing() {
     );
 }
 
-/// An account sees its own corrections beside the library files, so a library file
-/// spelled like one of them (`v.EDIT.mokuro` beside alice's `V.edit.mokuro`, a name rule
-/// v1 does not read as a correction) would be a second spelling in its listings: the
-/// write is refused (409), the same on every host, and nothing is made.
+/// An account sees its own corrections beside the library files. A name spelled
+/// otherwise than one of them (`v.EDIT.mokuro` beside alice's `V.edit.mokuro`) is, by
+/// sidecar names rule 2 (ids folded), that very correction: the write replaces it in
+/// alice's copy, in its listed spelling, the same on every host, and nothing is made in
+/// the library.
 #[tokio::test]
-async fn a_library_name_an_accounts_correction_spells_otherwise_is_refused() {
+async fn a_correction_spelled_otherwise_is_that_correction() {
     let env = Env::new();
     std::fs::create_dir_all(env.lib("S")).unwrap();
     std::fs::write(env.lib("S/V.cbz"), b"v").unwrap();
@@ -467,8 +468,14 @@ async fn a_library_name_an_accounts_correction_spells_otherwise_is_refused() {
         &layer("again"),
     )
     .await;
-    assert_eq!(put.code(), 409, "{}", put.text());
+    assert_eq!(put.code(), 204, "{}", put.text());
     assert_eq!(names(&env.lib("S")), ["V.cbz"]);
+    let overlay = env.base.join("users/alice/edits/S");
+    assert_eq!(names(&overlay), ["V.edit.mokuro"]);
+    assert_eq!(
+        std::fs::read(overlay.join("V.edit.mokuro")).unwrap(),
+        layer("again")
+    );
     let listing = req(
         &env,
         Some("alice"),

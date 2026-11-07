@@ -11,6 +11,7 @@
 //! free `edit-<n>`; a deleted archive or folder takes them with it. An archive renamed
 //! over DAV also takes the cloud-root owner's physical correction along.
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -27,8 +28,9 @@ pub const EDITS_DIR: &str = "edits";
 /// A correction (or curated) layer PUT is at most this big.
 pub const MAX_LAYER_BYTES: u64 = 32 << 20;
 
-/// `(stem, id, gz)` when `name` reads as a personal layer, listing-free.
-pub(crate) fn personal_name(name: &str) -> Option<(&str, &str, bool)> {
+/// `(stem, id, gz)` when `name` reads as a personal layer, listing-free; the id folded
+/// (rule 2: `V.EDIT.mokuro` is layer `edit`).
+pub(crate) fn personal_name(name: &str) -> Option<(&str, Cow<'_, str>, bool)> {
     sidecar_names::split_layer(name)
         .filter(|(_, id, _)| sidecar_names::layer_class(id) == LayerClass::Personal)
 }
@@ -214,7 +216,7 @@ pub(crate) struct PersonalFile {
 pub(crate) fn layer_put_rule(name: &str, names: &[String]) -> Option<Result<(), LayerRefusal>> {
     let (_, id, gz) = sidecar_names::split_layer(name)?;
     if !matches!(
-        sidecar_names::layer_class(id),
+        sidecar_names::layer_class(&id),
         LayerClass::Personal | LayerClass::Curated
     ) {
         return None;
@@ -509,7 +511,7 @@ impl PersonalOverlays {
                 None => return false,
             }
         };
-        self.move_one(&self.library.join(rel), &to_dir, stem, id)
+        self.move_one(&self.library.join(rel), &to_dir, stem, &id)
             .is_some()
     }
 
@@ -729,7 +731,7 @@ impl PersonalOverlays {
                 let into = crate::path_case::on_disk_name(to, &name, false).unwrap_or(name);
                 self.merge_dir(&path, &to.join(into));
             } else if let Some((stem, id, _)) = personal_name(&name) {
-                self.move_one(&path, to, stem, id);
+                self.move_one(&path, to, stem, &id);
             }
         }
         let _ = fs::remove_dir(from);
@@ -853,9 +855,10 @@ mod tests {
             layer_put_rule("Z.edit.mokuro", &here),
             Some(Err(LayerRefusal::NoVolume))
         );
-        // Not a correction: a dotted volume's primary, another id, the exact-case rule.
+        // Not a correction: a dotted volume's primary, another id.
         assert_eq!(layer_put_rule("D.edit.mokuro", &here), None);
         assert_eq!(layer_put_rule("V.hayai.mokuro", &here), None);
-        assert_eq!(layer_put_rule("V.EDIT.mokuro", &here), None);
+        // Sidecar names rule 2 reads ids folded: `V.EDIT.mokuro` is the correction.
+        assert_eq!(layer_put_rule("V.EDIT.mokuro", &here), Some(Ok(())));
     }
 }

@@ -1126,21 +1126,14 @@ fn a_differing_curated_layer_moves_in_as_curated_2() {
 }
 
 #[test]
-fn unstamped_layer_ids_are_exact() {
+fn unstamped_layer_ids_are_read_folded() {
     use bunko_remote::merge::is_unstamped_layer_id;
-    for id in ["edit", "edit-2", "curated", "curated-3"] {
+    // Ids are read folded (sidecar names rule 2): `EDIT` is `edit`.
+    for id in ["edit", "edit-2", "curated", "curated-3", "EDIT", "Curated"] {
         assert!(is_unstamped_layer_id(id), "{id}");
     }
-    // Ids match as written (rule v1): `EDIT` is no layer at all. `pre-upgrade` and
-    // `previous-ocr` are hand-made ids like any other.
-    for id in [
-        "EDIT",
-        "Curated",
-        "hayai-nova",
-        "editor",
-        "pre-upgrade",
-        "previous-ocr",
-    ] {
+    // `pre-upgrade` and `previous-ocr` are hand-made ids like any other.
+    for id in ["hayai-nova", "editor", "pre-upgrade", "previous-ocr"] {
         assert!(!is_unstamped_layer_id(id), "{id}");
     }
 }

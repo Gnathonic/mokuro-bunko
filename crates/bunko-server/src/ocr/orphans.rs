@@ -55,7 +55,7 @@ impl<'a> OrphanStems<'a> {
                 .iter()
                 .find_map(|ext| sidecar_names::strip_suffix_ci(name, ext))
             {
-                stems.archives.insert(sidecar_names::stem_fold(stem));
+                stems.archives.insert(sidecar_names::fold(stem));
             }
         }
         stems
@@ -75,7 +75,7 @@ fn orphan_of<'n>(name: &'n str, stems: &OrphanStems<'_>) -> Option<(String, &'n 
     let (base, n) = numbered.rsplit_once('_')?;
     // `unique_path` counted from 1, never with a leading zero.
     let counted = n.bytes().all(|b| b.is_ascii_digit()) && !n.is_empty() && !n.starts_with('0');
-    if base.is_empty() || !counted || stems.archives.contains(&sidecar_names::stem_fold(numbered)) {
+    if base.is_empty() || !counted || stems.archives.contains(&sidecar_names::fold(numbered)) {
         return None;
     }
     let canonical = format!("{base}{}", &name[numbered.len()..]);
@@ -431,11 +431,10 @@ mod tests {
     }
 
     /// Whether the canonical name is free is read from the listing, the same on every
-    /// host: `Vol.FAST.mokuro` is listed (not the volume's `fast` layer by rule v1, which
-    /// matches ids exactly), so the sealed `Vol.fast_1.mokuro` neither moves to
-    /// `Vol.fast.mokuro` (a second spelling, on a case-sensitive disk) nor goes (its OCR
-    /// lost, where a case-insensitive disk opened `Vol.FAST.mokuro` for that name): it
-    /// is left. And nothing moves in a frozen case-variant group.
+    /// host: `Vol.FAST.mokuro` is listed, and sidecar names rule 2 (ids folded) makes it
+    /// the volume's `fast` layer, so the canonical name is taken and the sealed
+    /// `Vol.fast_1.mokuro` is a stale second copy that goes, exactly as beside a listed
+    /// `Vol.fast.mokuro`. And nothing moves in a frozen case-variant group.
     #[test]
     fn a_canonical_name_listed_in_another_spelling_leaves_the_orphan() {
         // unmounted: a plain temp library.
@@ -456,7 +455,7 @@ mod tests {
         let report = sweep(lib, None, &locks, &orphans, Duration::ZERO);
         assert_eq!(
             (report.moved, report.removed, report.left),
-            (0, 0, 1),
+            (0, 1, 0),
             "{report:?}"
         );
         let mut names: Vec<String> = std::fs::read_dir(lib.join("A"))
@@ -464,11 +463,12 @@ mod tests {
             .map(|e| e.unwrap().file_name().into_string().unwrap())
             .collect();
         names.sort();
-        assert_eq!(names, ["Vol.FAST.mokuro", "Vol.cbz", "Vol.fast_1.mokuro"]);
+        assert_eq!(names, ["Vol.FAST.mokuro", "Vol.cbz"]);
         assert_eq!(
-            std::fs::read_to_string(lib.join("A/Vol.fast_1.mokuro")).unwrap(),
-            sealed
+            std::fs::read_to_string(lib.join("A/Vol.FAST.mokuro")).unwrap(),
+            "{\"pages\":[]}"
         );
+        std::fs::write(lib.join("A/Vol.fast_1.mokuro"), &sealed).unwrap();
 
         // A frozen group: `Vol.cbz` beside `vol.cbz` (where the disk lists both).
         std::fs::remove_file(lib.join("A/Vol.FAST.mokuro")).unwrap();

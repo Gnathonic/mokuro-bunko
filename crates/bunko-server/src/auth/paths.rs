@@ -230,8 +230,11 @@ mod tests {
             class("/mokuro-reader/S/V.hayai.mokuro"),
             Some(LayerClass::Other)
         );
-        // Exact ids: `EDIT` is no layer id.
-        assert_eq!(class("/mokuro-reader/S/V.EDIT.mokuro"), None);
+        // Ids are read folded (sidecar names rule 2): `EDIT` is `edit`.
+        assert_eq!(
+            class("/mokuro-reader/S/V.EDIT.mokuro"),
+            Some(LayerClass::Personal)
+        );
         for p in [
             "/mokuro-reader/S/V.mokuro",
             "/mokuro-reader/S/V.edit.cbz",

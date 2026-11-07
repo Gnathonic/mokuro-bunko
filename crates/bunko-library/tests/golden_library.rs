@@ -514,7 +514,7 @@ fn archive_listings_and_pages_match_python() {
                 parts.join("/")
             })
             .collect();
-        let expected_siblings: Vec<String> = case
+        let mut expected_siblings: Vec<String> = case
             .get("siblings")
             .unwrap()
             .as_array()
@@ -522,6 +522,16 @@ fn archive_listings_and_pages_match_python() {
             .iter()
             .map(|s| s.as_str().unwrap().to_owned())
             .collect();
+        // A departure on purpose: sidecar names rule 2 reads layer ids folded, so
+        // `v.1.Upper.mokuro`, an orphan to 0.5.3 (and rule v1), is layer `upper` of
+        // `v.1.cbz`, as Mokuro Reader 1.10.0 reads it too.
+        if rel == "Odd.Name. With.Dots/v.1.cbz" {
+            let at = expected_siblings
+                .iter()
+                .position(|s| s.ends_with("v.1.hayai-nova.mokuro"))
+                .unwrap();
+            expected_siblings.insert(at, "Odd.Name. With.Dots/v.1.Upper.mokuro".to_owned());
+        }
         assert_eq!(siblings, expected_siblings, "sidecar siblings of {rel}");
 
         let expected_pages = case.get("pages").unwrap().as_array();

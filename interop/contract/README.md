@@ -25,10 +25,15 @@ to the contract shows up as a fixture diff in the pull request that makes it.
 - `seal/<name>.json`: the content seal on an installed `.mokuro` (`ocr_engine.seal`),
   written by `crates/bunko-layout/tests/seal_vectors.rs`. See "Seal vectors" below.
 
-- `sidecar-names.json`: sidecar names rule v1, what a `.mokuro` listed beside volume
+- `sidecar-names.json`: sidecar names rule 2, what a name listed beside volume
   archives is. Written by hand (it is a rule, not a recording); Bunko's
   `bunko_core::sidecar_names` tests and the reader's `classifyMokuroSidecar` run it.
   See below.
+- `fold.json` and `fold-table.json`: fold v2, the one name fold rule 2 decides on, and
+  its tables. Generated, never edited: `python3 -I crates/bunko-core/scripts/gen_fold.py`
+  writes them with `crates/bunko-core/src/fold_table.rs` (`--check` fails on any
+  difference; `--ucd-dir` caches the pinned UCD files). The reader vendors both
+  verbatim. See below.
 
 ## Fixture format
 
@@ -133,28 +138,102 @@ reader change, whose CI reads this repository at `BUNKO_REF` and would otherwise
 against the old records. `BUNKO_CONTRACT_DIR=<copy of this folder>` points Bunko's
 contract tests at a scratch copy (to check that a deliberate change fails).
 
-## Sidecar names (`sidecar-names.json`)
+## Fold v2 and sidecar names rule 2
 
-Rule v1: the suffixes `.cbz`, `.mokuro` and `.mokuro.gz` match in any ASCII case; only
-`.cbz` archives define volume stems; stems compare folded (NFC, then Unicode lowercase);
-a primary wins over a layer reading of the same name; a layer id matches
-`^[a-z0-9-]{1,32}$` exactly as written, all-digit ids included; when sweeping, an
-exact-case stem wins over a folded one, and a folded-only match is no archive's when two
-archives' stems fold alike; a leading UTF-8 BOM is tolerated on read, never
-written, and hashes cover the raw bytes. New reader ids always contain a letter.
+### The fold (`fold.json`, `fold-table.json`)
 
-- `rule`: the rule version, `1`.
+F, fold v2, pinned to UCD 17.0.0, decides every name question on both sides: which
+names are one entry, and (rule 2) which files are a volume's.
+
+- An ASCII name folds to its ASCII lowercase.
+- Any other name: drop every Default_Ignorable_Code_Point, NFD, map each code point `c`
+  to `M(c) = casefold(full_upper(casefold(c)))`, NFC, drop the Default_Ignorable code
+  points again. `casefold` is CaseFolding.txt status C and F; `full_upper` is
+  UnicodeData's simple uppercase overridden by SpecialCasing.txt's unconditional
+  entries (context-free, as Rust's `str::to_uppercase`).
+
+F is idempotent and context-free, and no code point folds to or from `.` or `/`, so the
+k-th dot of a name is the k-th dot of its fold: every slice of a name (stem, suffix,
+layer id) is cut at the same dot as its fold's.
+
+`fold-table.json` is normative for the reader, which bundles its own NFD/NFC from it
+(never `String.prototype.normalize`, whose Unicode version is the engine's):
+
+```json
+{"fold": 2, "ucd": "17.0.0", "map": "...", "ignorable": "...", "decomp": "...",
+ "ccc": "...", "exclusions": "..."}
+```
+
+Every field is a `;`-separated list of entries in lowercase hex, delta-encoded:
+
+| Field | Entry | Meaning |
+|---|---|---|
+| `map` | `<d>:<o1>[,<o2>...]` | `M(c)` for every scalar `c` it changes. `c` = previous `c` (0 at first) + `d`; each output code point is `c` + `o`, `o` signed (`-20`). |
+| `ignorable` | `<g>:<n>` | Default_Ignorable_Code_Point ranges: the range starts `g` after the previous range's end (+1; 0 at first) and is `n` code points long. |
+| `decomp` | `<d>:<t1>[,<t2>]` | Canonical decompositions as UnicodeData lists them (one level; apply recursively), Hangul syllables excluded (algorithmic). `c` delta-encoded as in `map`; targets absolute. |
+| `ccc` | `<g>:<n>:<k>` | Runs of `n` code points with the non-zero canonical combining class `k`, gaps as in `ignorable`. Every other code point is class 0. |
+| `exclusions` | `<g>:<n>` | Full_Composition_Exclusion (CompositionExclusions.txt, singletons and non-starter decompositions), as ranges. The composition pairs are the two-code-point `decomp` entries whose source is not excluded, plus Hangul. |
+
+`fold.json`:
+
+- `fold`, `ucd`; `table_sha256`, the SHA-256 of `fold-table.json`'s bytes.
+- `digest`: for every Unicode scalar value `c` in order (U+0000 to U+10FFFF, surrogates
+  skipped), F(c), F(`a` + c) and F(c + U+0301), each UTF-8 and LF-terminated, hashed
+  together with SHA-256 (`sha256`). Both sides reproduce it.
+- `vectors` (`{in, out, why}`), `same` and `different` (`{a, b, why}`: one entry or two),
+  and `series_key` (`{in, out, why}`): F, then trimmed, then every run of whitespace one
+  space, the whitespace being U+0009-000D, U+001C-001F, U+0020, U+0085, U+00A0,
+  U+1680, U+2000-200A, U+2028, U+2029, U+202F, U+205F and U+3000 (Python's
+  `str.isspace()` united with JavaScript's `\s`).
+
+A change of the fold or of its UCD is a new rule (rule 3), landed in both repositories
+at once.
+
+### Sidecar names (`sidecar-names.json`)
+
+Rule 2 is the old rule v1 asked of F of every listed name. Let f = F(name):
+
+- R1: two names are one entry iff they fold alike.
+- R2: the suffix is the first of `.cbz`, `.mokuro.gz`, `.mokuro`, `.webp`, `.nocover`
+  that f ends with. Only `.cbz` archives define volume stems (the folds of the listed
+  `.cbz` stems); `.cbr`, `.zip` and `.rar` still keep a sweep off their files.
+- R3: a `.mokuro[.gz]` whose folded base is a volume stem is that stem's primary.
+- R4: a primary reading wins over a layer reading.
+- R5: otherwise, when the folded base is `<s>.<id>` (split on its last dot), `<s>` a
+  volume stem and `<id>` matching `^[a-z0-9-]{1,32}$`, it is layer `<id>` of `<s>`. The id
+  is the folded segment and is reported folded (`V.EDIT.mokuro` is layer `edit`, as
+  Mokuro Reader 1.10.0 already reads it); all-digit ids are layers. Otherwise it is an
+  orphan. Layer classes are read on folded ids.
+- R6: of the listed archives whose folded stem is `<s>`, the one spelled exactly like the
+  file's stem, else the only one. In a fold group (two spellings of one fold listed):
+  to read or show, the code-point-smallest spelling (never UTF-16 order); to sweep,
+  delete or rename, exact spellings only.
+- R7: a leading UTF-8 BOM is tolerated on read, never written; hashes cover the raw
+  bytes.
+- R8: fixed names (`series.json`, `catalog.json`, `volume-data.json`,
+  `.mokuro-queue.json`, `.mokuro-bunko.json`, per-user root names) match by F.
+- R9: a writer writes `<listed archive stem>.<id>.mokuro`, minted ids lowercase ASCII
+  with a letter, onto the listed entry of the same fold instead of a new spelling.
+
+The file:
+
+- `rule`: the rule version, `2`.
 - `classify`: `{name, folder, expect, why}`. `folder` is every name listed beside it;
   `expect` is `{"kind": "primary", "stem", "gz"}`, `{"kind": "layer", "stem", "layer",
-  "gz"}` or `{"kind": "orphan"}`. `stem` is spelled as in `name` (compare it folded if
-  your stems are folded).
-- `layer_class`: `{id, class}`, exact-case: `personal` (`edit`, `edit-<n>`), `curated`
-  (`curated`), `reserved` (no client writes it on Bunko: `curated-<n>`), `other`
-  (everything else).
+  "gz"}` or `{"kind": "orphan"}`. `stem` is spelled as in `name`, cut at the same dot as
+  its fold; `layer` is folded.
+- `layer_class`: `{id, class}`, read on the folded id: `personal` (`edit`, `edit-<n>`),
+  `curated` (`curated`), `reserved` (no client writes it on Bunko: `curated-<n>`),
+  `other` (everything else).
 - `sweep`: `{archive, folder, expect, why}`: the names that go when `archive` is deleted
-  (sorted; compare as a set). Besides rule v1, a sweep never takes a name whose base is
-  the stem of any archive of `.cbz`, `.cbr`, `.zip` or `.rar`, so it can leave a file
+  (sorted; compare as a set). Besides R6, a sweep never takes a name whose base is the
+  stem of any archive of `.cbz`, `.cbr`, `.zip` or `.rar`, so it can leave a file
   `classify` calls a layer.
+- `owner`: `{name, folder, display, sweep, why}`: R6 for one volume file. `display` is
+  the archive it is read and shown with, `sweep` the archive whose sweep takes it
+  (`null`: none).
+- `equivalent`: `{crafted, canonical, why}`: two listings whose names are pairwise one
+  entry. Each name classifies alike in its own listing (stems compared folded).
 
 ## Beyond the fixtures: the rig
 

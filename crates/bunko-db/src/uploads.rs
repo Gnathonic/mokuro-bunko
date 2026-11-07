@@ -62,9 +62,9 @@ pub fn normalize_volume_key(path: &str) -> Option<String> {
 
 /// `S/Vol 1.cbz` for the OCR layer file `S/Vol 1.hayai-nova.mokuro[.gz]`, else `None`.
 ///
-/// A heuristic: with no folder listing it cannot apply sidecar names rule v1
-/// (`bunko_core::sidecar_names::classify`), so on top of the rule's grammar (suffixes in
-/// any ASCII case, the id exact) the id needs a letter. A decimal volume number
+/// A heuristic: with no folder listing it cannot apply sidecar names rule 2
+/// (`bunko_core::sidecar_names::classify`), so on top of the rule's grammar (suffixes
+/// and the id read on the fold) the folded id needs a letter. A decimal volume number
 /// (`Vol 01.5.mokuro`) is then never a layer here, while a listing may read it as layer
 /// `5`; readers never mint an all-digit id.
 pub fn layer_sidecar_volume_path(path: &str) -> Option<String> {
@@ -544,10 +544,14 @@ mod tests {
         );
         assert_eq!(layer_sidecar_volume_path("S/Vol 01.5.mokuro"), None);
         assert_eq!(layer_sidecar_volume_path("S/Vol 1.mokuro"), None);
-        assert_eq!(layer_sidecar_volume_path("S/Vol 1.Hayai.mokuro"), None);
+        // Rule 2 reads the id folded: `Hayai` is layer `hayai`.
+        assert_eq!(
+            layer_sidecar_volume_path("S/Vol 1.Hayai.mokuro").as_deref(),
+            Some("S/Vol 1.cbz")
+        );
         assert_eq!(layer_sidecar_volume_path(".x.mokuro"), None);
         assert_eq!(layer_sidecar_volume_path("a.b/c.mokuro"), None);
-        // Rule v1's suffixes match in any ASCII case; the id stays exact.
+        // Suffixes and ids are read on the fold (rule 2).
         assert_eq!(
             layer_sidecar_volume_path("S/Vol 1.gcv.MOKURO").as_deref(),
             Some("S/Vol 1.cbz")

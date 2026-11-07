@@ -87,7 +87,8 @@ mod tests {
         assert!(got.contains(&"Vol 01.hayai-nova.mokuro.gz".to_string()));
         assert!(!got.contains(&"Vol 01.5.mokuro".to_string()));
         assert!(!got.contains(&"Vol 01.backup.2024.mokuro".to_string()));
-        assert!(!got.contains(&"Vol 01.Upper.mokuro".to_string()));
+        // Rule 2 reads ids folded: layer `upper`.
+        assert!(got.contains(&"Vol 01.Upper.mokuro".to_string()));
         assert!(!got.contains(&"Vol 02.hayai.mokuro".to_string()));
         assert!(!got.contains(&"Vol 01.cbz".to_string()));
         assert_eq!(primary_sidecar_stem("V.MOKURO"), Some("V"));
@@ -177,9 +178,8 @@ mod tests {
     }
 
     /// Only listed names go with an archive: `Straße.mokuro` is not built and deleted
-    /// on the chance it exists (Linux casefold would open, and delete, the
-    /// `STRASSE.mokuro` beside it, which rule v1 does not give `Straße.cbz`; a
-    /// case-sensitive disk would not).
+    /// on the chance it exists. The listed `STRASSE.mokuro` beside it is one entry with
+    /// it on every host, and rule 2 gives it to `Straße.cbz`.
     #[test]
     fn only_listed_names_go_with_an_archive() {
         let dir = tempfile::tempdir().unwrap();
@@ -191,8 +191,12 @@ mod tests {
             .unwrap()
             .map(|e| e.unwrap().file_name().into_string().unwrap())
             .collect();
-        let straße = siblings(&d.join("Stra\u{df}e.cbz"));
-        assert!(straße.is_empty(), "{straße:?}");
+        let straße: Vec<String> = siblings(&d.join("Stra\u{df}e.cbz"))
+            .iter()
+            .map(|p| paths::file_name(p))
+            .collect();
+        assert_eq!(straße, ["STRASSE.mokuro"]);
+        assert!(straße.iter().all(|n| listed.contains(n)));
         let v: Vec<String> = siblings(&d.join("V.cbz"))
             .iter()
             .map(|p| paths::file_name(p))
