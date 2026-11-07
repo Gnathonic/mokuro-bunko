@@ -543,3 +543,45 @@ async fn a_hidden_archives_cover_is_never_served() {
         }
     }
 }
+
+/// Two folders that fold alike (only a case-sensitive disk holds both): the series view
+/// answers the winner, the byte-smallest, for either spelling, once the walk has listed
+/// the library as well as before. The exact spelling of the shadowed folder is never its
+/// own series: the walk does not list it, so it is resolved from the root's listing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_shadowed_spelling_of_a_series_answers_its_winner() {
+    let env = Env::new(|_| {});
+    let winner = env.series_dir("Saga");
+    write_cbz(&winner.join("Saga 01.cbz"), 1);
+    let shadowed = env.library.join("saga");
+    if std::fs::create_dir(&shadowed).is_err() || shadowed.join("Saga 01.cbz").exists() {
+        return; // a case-insensitive disk: one folder.
+    }
+    write_cbz(&shadowed.join("saga 09.cbz"), 1);
+    let names = |r: &Value| -> (String, Vec<String>) {
+        (
+            r["name"].as_str().unwrap().to_string(),
+            r["volumes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v["name"].as_str().unwrap().to_string())
+                .collect(),
+        )
+    };
+    let want = ("Saga".to_string(), vec!["Saga 01".to_string()]);
+    for walked in [false, true] {
+        if walked {
+            env.runtime.index().get_snapshot_fresh();
+            assert!(env.runtime.index().lists_series("Saga"));
+            assert!(!env.runtime.index().lists_series("saga"));
+        }
+        for spelled in ["Saga", "saga", "SAGA"] {
+            let r = env
+                .send(get(&format!("/catalog/api/series?name={spelled}")))
+                .await;
+            assert_eq!(r.status, 200, "{spelled} walked={walked}");
+            assert_eq!(names(&r.json()), want, "{spelled} walked={walked}");
+        }
+    }
+}
