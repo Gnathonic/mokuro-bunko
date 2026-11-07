@@ -8,8 +8,8 @@ license.workspace = true
 [features]
 default = []
 # The in-memory `FakeBackend` as a library store (`storage::testing`), for tests of a
-# cloud library without a provider.
-testing = ["bunko-remote/testing"]
+# cloud library without a provider; and the move faults of `bunko_store::durable::testing`.
+testing = ["bunko-remote/testing", "bunko-store/testing"]
 
 [dependencies]
 bunko-core.workspace = true

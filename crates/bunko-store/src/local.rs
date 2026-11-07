@@ -2,17 +2,25 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use parking_lot::RwLock;
 
 use crate::file::{File, OpenOptions, ReadDir};
 use crate::meta::{Meta, Version};
 use crate::store::{Caps, LibraryStore, LocalPath, Published, WatchGuard, WatchSink, WriteIntent};
 use crate::watch::Translate;
 
+/// Answers [`LibraryStore::merge_busy`] for a [`LocalStore`]: is a case merge open on
+/// this path or a folder above it?
+pub type MergeBusy = Arc<dyn Fn(&Path) -> bool + Send + Sync>;
+
 /// The local library (spec §4). No behaviour of its own: each method is the std call
 /// the code made before the seam existed.
 pub struct LocalStore {
     root: PathBuf,
     translate: Option<Translate>,
+    merge_busy: RwLock<Option<MergeBusy>>,
 }
 
 impl LocalStore {
@@ -20,6 +28,7 @@ impl LocalStore {
         LocalStore {
             root: root.into(),
             translate: None,
+            merge_busy: RwLock::new(None),
         }
     }
 
@@ -29,7 +38,15 @@ impl LocalStore {
         LocalStore {
             root: root.into(),
             translate: Some(translate),
+            merge_busy: RwLock::new(None),
         }
+    }
+
+    /// Answer [`LibraryStore::merge_busy`] with `busy` from now on (the local case
+    /// merge's open groups); before the first call, and for a store never given one,
+    /// nothing is busy. A later call replaces the earlier answer.
+    pub fn set_merge_busy(&self, busy: MergeBusy) {
+        *self.merge_busy.write() = Some(busy);
     }
 }
 
@@ -115,5 +132,11 @@ impl LibraryStore for LocalStore {
 
     fn watch(&self, sink: WatchSink) -> io::Result<WatchGuard> {
         crate::watch::watch_local(&self.root, self.translate.as_ref(), sink)
+    }
+
+    fn merge_busy(&self, p: &Path) -> bool {
+        // Cloned out so the answer runs without the lock held.
+        let busy = self.merge_busy.read().clone();
+        busy.is_some_and(|f| f(p))
     }
 }

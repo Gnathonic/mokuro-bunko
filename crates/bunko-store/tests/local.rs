@@ -269,3 +269,24 @@ fn a_rename_between_two_hard_links_leaves_one_name() {
     assert_eq!(names(d.path()), ["b.cbz"]);
     assert_eq!(std::fs::read(&b).unwrap(), b"zip");
 }
+
+/// `merge_busy` of a local store is false until the case merge installs its answer,
+/// then that answer (through `store_for`, as OCR, covers and the sweeps ask), and a
+/// later answer replaces it.
+#[test]
+fn a_local_store_answers_merge_busy_from_its_hook() {
+    let d = tmp();
+    let root = d.path().join("lib");
+    std::fs::create_dir_all(root.join("Kingdom")).unwrap();
+    let store = Arc::new(LocalStore::new(&root));
+    let _g = mount(store.clone());
+    let vol = root.join("Kingdom/Vol 1.cbz");
+    let other = root.join("Other/Vol 1.cbz");
+    assert!(!store_for(&vol).unwrap().merge_busy(&vol));
+    let scope = root.join("Kingdom");
+    store.set_merge_busy(Arc::new(move |p: &std::path::Path| p.starts_with(&scope)));
+    assert!(store_for(&vol).unwrap().merge_busy(&vol));
+    assert!(!store_for(&other).unwrap().merge_busy(&other));
+    store.set_merge_busy(Arc::new(|_: &std::path::Path| false));
+    assert!(!store_for(&vol).unwrap().merge_busy(&vol));
+}

@@ -7,6 +7,7 @@
 
 #[cfg(feature = "tokio")]
 pub mod afs;
+pub mod durable;
 pub mod file;
 pub mod fs;
 pub mod latency;
@@ -16,9 +17,10 @@ pub mod mount;
 pub mod store;
 pub mod watch;
 
+pub use durable::{FileId, MoveMode};
 pub use file::{DirEntry, File, OpenOptions, ReadDir, RemoteEntry, RemoteFile};
 pub use latency::{interactive, is_interactive};
-pub use local::LocalStore;
+pub use local::{LocalStore, MergeBusy};
 pub use meta::{FileType, Meta, RemoteMeta, Version};
 pub use mount::{MountGuard, mount, same_store, store_for};
 pub use store::{

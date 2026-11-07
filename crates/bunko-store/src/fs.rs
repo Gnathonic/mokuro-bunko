@@ -4,6 +4,10 @@
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
+pub use crate::durable::{
+    FileId, MoveMode, copy_exclusive_verified, file_identity, fsync_dir, identity, is_taken,
+    last_move_mode, move_noreplace, sha256_file,
+};
 pub use crate::file::{DirEntry, File, OpenOptions, ReadDir};
 use crate::meta::Meta;
 use crate::mount::{route, same_store, store_for};

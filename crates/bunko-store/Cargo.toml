@@ -10,6 +10,8 @@ rust-version.workspace = true
 default = []
 tokio = ["dep:tokio", "dep:bytes", "dep:futures-util"]
 watch = ["dep:notify"]
+# Fault and crash injection for `move_noreplace` (`durable::testing`), for tests.
+testing = []
 
 [dependencies]
 parking_lot.workspace = true
@@ -19,8 +21,20 @@ tokio = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
 notify = { workspace = true, optional = true }
+# durable: the sha256 a cross-device copy is verified by.
+sha2.workspace = true
+
+# durable: the no-replace rename (renameat2, renamex_np), fsync of a folder.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# durable: MoveFileExW without MOVEFILE_REPLACE_EXISTING, file ids.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.60", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
+# Turns on `testing` for this crate's own integration tests.
+bunko-store = { path = ".", features = ["testing"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 futures-util.workspace = true

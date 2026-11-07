@@ -867,13 +867,17 @@ dependencies = [
 name = "bunko-store"
 version = "0.8.0-beta.1"
 dependencies = [
+ "bunko-store",
  "bytes",
  "futures-util",
+ "libc",
  "notify",
  "parking_lot",
+ "sha2 0.10.9",
  "tempfile",
  "tokio",
  "tracing",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
