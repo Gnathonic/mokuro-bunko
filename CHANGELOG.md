@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.7.8] - 2026-11-05
+## [0.7.9] - 2026-11-07
 
 A volume uploaded again under its name gets a new cover, and the catalog shows a
 changed cover at once.
@@ -16,6 +16,33 @@ changed cover at once.
   was then downloaded again in full. Covers now carry an `ETag` and `Last-Modified` with
   `Cache-Control: no-cache`: a changed cover shows at once, and an unchanged one costs
   a `304`.
+
+## [0.7.8] - 2026-11-05
+
+Reading history and positions.json are kept per account, as in 0.8: Mokuro Reader
+syncs its reading history and opens volumes where another device stopped.
+
+### Added
+- **positions.json is kept per account.** Mokuro Reader's position index (the newest
+  page per volume) joins volume-data.json, profiles.json and goals.json, so it syncs
+  per account instead of into the shared library. `/login/api/me` lists these files as
+  `per_user_files`, signed in or not, and a reader uses a per-account file only once the
+  server lists it.
+- **Reading history is kept per account.** Mokuro Reader's history files
+  (`/mokuro-reader/history/<device>/<file>`) are each account's own, stored under
+  `users/<name>/history/` and never shown to anyone else. Any account that can save
+  progress, `registered` included, creates its `history` and device folders and writes
+  its files there; a file is limited to 16 MiB and an account's history to 256 MiB.
+  History files are never moved, copied or locked, and saving progress or history no
+  longer drops the cached library listing. `/login/api/me` lists `history/` among the
+  `per_user_files`.
+- **`history` is a reserved series name.** `/mokuro-reader/history` is each account's
+  reading history now, so a series folder named exactly `history` at the library root
+  can no longer be reached; the server logs a warning at startup with the rename to
+  make, and the library scan skips it (`History/` stays an ordinary series).
+- **`/login/api/me` reports the server's `version`** (signed in or not), and lists
+  `history/` in `per_user_files`. Mokuro Reader turns reading-history sync on for
+  mokuro-bunko from this release.
 
 ## [0.7.7] - 2026-11-05
 

@@ -9,9 +9,7 @@ use crate::pyunicode;
 pub const SERIES_FILE_NAME: &str = "series.json";
 pub const CATALOG_FILE_NAME: &str = "catalog.json";
 /// The WebDAV reader root (`PathMapper.READER_ROOT`).
-pub const READER_ROOT: &str = "mokuro-reader";
-/// Per-user files mapped into a user's private directory: never metadata.
-pub const PER_USER_FILES: &[&str] = &["volume-data.json", "profiles.json", "goals.json"];
+pub use bunko_core::reader_tree::READER_ROOT;
 
 /// `posixpath.normpath("/" + path.strip("/"))`: lexical, no filesystem access.
 pub fn normalize_virtual_path(path: &str) -> String {
@@ -33,7 +31,8 @@ pub fn normalize_virtual_path(path: &str) -> String {
 pub fn library_relative(virtual_path: &str) -> Option<String> {
     let normalized = normalize_virtual_path(virtual_path);
     let relative = normalized.strip_prefix(&format!("/{READER_ROOT}/"))?;
-    if relative.is_empty() || PER_USER_FILES.contains(&relative) {
+    // The account's own files and history tree are never library metadata.
+    if relative.is_empty() || bunko_core::reader_tree::is_per_user_rel(relative) {
         return None;
     }
     Some(relative.to_owned())
@@ -80,12 +79,21 @@ pub enum LibraryChange {
     Ignore,
 }
 
-/// `classify_change(library_root, path)`.
+/// `classify_change(library_root, path)`, plus 0.8's per-user names at the root.
 pub fn classify_change(library_root: &Path, path: &Path) -> LibraryChange {
     let Ok(relative) = path.strip_prefix(library_root) else {
         return LibraryChange::Library;
     };
     let parts: Vec<Component<'_>> = relative.components().collect();
+    // The cloud-root owner's reading history (and root files) live beside the series:
+    // never a series, and their MKCOLs are not top-level library changes either.
+    if parts
+        .first()
+        .and_then(|p| p.as_os_str().to_str())
+        .is_some_and(bunko_core::reader_tree::is_per_user_root_name)
+    {
+        return LibraryChange::Ignore;
+    }
     if parts.len() < 2 {
         return LibraryChange::Library;
     }
@@ -128,6 +136,14 @@ mod tests {
         assert!(!is_series_file_path("/mokuro-reader/series.json"));
         assert!(!is_catalog_file_path("/mokuro-reader/A/catalog.json"));
         assert_eq!(library_relative("/mokuro-reader/volume-data.json"), None);
+        assert_eq!(library_relative("/mokuro-reader/positions.json"), None);
+        // An account's reading history is never a series: no series.json under it.
+        assert_eq!(library_relative("/mokuro-reader/history"), None);
+        assert!(!is_series_file_path("/mokuro-reader/history/series.json"));
+        assert_eq!(
+            library_relative("/mokuro-reader/History/series.json").as_deref(),
+            Some("History/series.json")
+        );
         assert_eq!(
             library_relative("/../mokuro-reader/x"),
             Some("x".to_owned())
@@ -152,6 +168,20 @@ mod tests {
         assert_eq!(
             classify_change(root, Path::new("/elsewhere/x")),
             LibraryChange::Library
+        );
+        // The cloud-root owner's reading history is not a series (0.8): neither a file
+        // in it nor the MKCOL of the folder itself feeds the compiler.
+        assert_eq!(
+            classify_change(root, Path::new("/lib/history/dev/x.events")),
+            LibraryChange::Ignore
+        );
+        assert_eq!(
+            classify_change(root, Path::new("/lib/history")),
+            LibraryChange::Ignore
+        );
+        assert_eq!(
+            classify_change(root, Path::new("/lib/History/v.cbz")),
+            LibraryChange::Series("History".into())
         );
     }
 }

@@ -273,6 +273,8 @@ fn identity_body(db: &bunko_db::Database, user: &User) -> bunko_db::Result<Value
         "role": user.role.as_str(),
         "created_at": user.created_at,
         "permissions": permissions(user.role, owned),
+        "per_user_files": bunko_core::reader_tree::advertised(),
+        "version": bunko_core::VERSION,
     }))
 }
 
@@ -303,7 +305,17 @@ async fn me(State(d): State<AccountsDeps>, client: Client, headers: HeaderMap) -
         AuthHeader::Malformed => unauthenticated(401, "Invalid credentials"),
         AuthHeader::None => json_response(
             200,
-            json!({"authenticated": false, "role": "anonymous", "permissions": permissions(Role::Anonymous, None)}),
+            json!({
+                "authenticated": false,
+                "role": "anonymous",
+                "permissions": permissions(Role::Anonymous, None),
+                // What this server keeps per account (`history/`: a directory tree): a
+                // reader uses a name (positions.json, history/) only once it is listed.
+                "per_user_files": bunko_core::reader_tree::advertised(),
+                // Reported only by builds that keep history per account (0.7.8 on): a
+                // reader turns history sync on from the numeric core.
+                "version": bunko_core::VERSION,
+            }),
         ),
         AuthHeader::Basic(username, password) => {
             let key = client.limiter_key(&username);

@@ -19,6 +19,7 @@ use crate::propfind::resource_key;
 use crate::resource::{FileKind, Resource};
 use crate::response::{self, DavError, DavResult, Resp};
 use crate::{Inner, sidecars};
+use bunko_core::reader_tree::{self, HistoryShape};
 
 pub(crate) async fn delete(inner: &Arc<Inner>, req: &Req) -> DavResult<Resp> {
     if is_virtual_root(&req.path) {
@@ -27,7 +28,7 @@ pub(crate) async fn delete(inner: &Arc<Inner>, req: &Req) -> DavResult<Resp> {
             "The library root cannot be deleted.",
         ));
     }
-    let res = lookup(inner, &req.path, req.username())
+    let res = lookup(inner, &req.path, req)
         .await?
         .ok_or_else(|| DavError::new(StatusCode::NOT_FOUND, &req.path))?;
     if req.content_length() != 0 {
@@ -113,7 +114,8 @@ fn delete_file(
     };
     let rel = inner.roots.library_rel(phys);
     primary_leaving(inner, req, phys);
-    let cbz = is_cbz(phys);
+    // Only a library archive is a volume with sidecars and records.
+    let cbz = rel.is_some() && is_cbz(phys);
     if cbz {
         for sidecar in sidecars::siblings(phys) {
             let _ = std::fs::remove_file(&sidecar);
@@ -147,14 +149,14 @@ pub(crate) async fn mkcol(inner: &Arc<Inner>, req: &Req) -> DavResult<Resp> {
     if req.header("depth").is_some_and(|d| d != "0") {
         return Err(DavError::new(StatusCode::BAD_REQUEST, "Depth must be '0'."));
     }
-    if lookup(inner, &req.path, req.username()).await?.is_some() {
+    if lookup(inner, &req.path, req).await?.is_some() {
         return Err(DavError::new(
             StatusCode::METHOD_NOT_ALLOWED,
             "MKCOL can only be executed on an unmapped URL.",
         ));
     }
     let parent = match paths::uri_parent(&req.path) {
-        Some(p) => lookup(inner, &p, req.username()).await?,
+        Some(p) => lookup(inner, &p, req).await?,
         None => None,
     };
     let Some(parent) = parent.filter(Resource::is_collection) else {
@@ -165,26 +167,27 @@ pub(crate) async fn mkcol(inner: &Arc<Inner>, req: &Req) -> DavResult<Resp> {
     };
     check_dav_locks(inner, req, &resource_key(&parent, req.username()), false)?;
     let name = paths::uri_name(&req.path).to_string();
-    if paths::is_per_user_name(&name)
-        && matches!(paths::classify(&req.path), paths::Target::Progress(_))
+    // In the caller's own tree only the history collections can be created: `history`
+    // and one level of device folders below it.
+    if let paths::Target::Progress(rel) = paths::classify(&req.path)
+        && reader_tree::history_shape_of_rel(&rel) != Some(HistoryShape::Collection)
     {
         return Err(DavError::new(StatusCode::FORBIDDEN, "Forbidden"));
     }
     let (inner2, req2) = (inner.clone(), req.clone());
     blocking(move || {
-        let Some((dir, FileKind::Library)) =
-            inner2.roots.member_path(&parent, &name, req2.username())
-        else {
+        let Some((dir, kind)) = inner2.roots.member_path(&parent, &name, req2.caller()) else {
             return Err(DavError::new(StatusCode::FORBIDDEN, "Forbidden"));
         };
+        // Also creates `users/<u>/` on an account's first use; a concurrent MKCOL of the
+        // same collection is not an error.
         std::fs::create_dir_all(&dir)?;
         let member = paths::join_uri(parent.path(), &name);
-        audit(
-            &req2,
-            "mkdir",
-            folder_audit_target(&inner2, parent.path(), parent.phys()),
-            Some(json!({ "path": member })),
-        );
+        let target = match kind {
+            FileKind::Progress => ("progress", paths::normalize(&member)),
+            FileKind::Library => folder_audit_target(&inner2, parent.path(), parent.phys()),
+        };
+        audit(&req2, "mkdir", target, Some(json!({ "path": member })));
         let mut effects = Effects::default();
         effects.touch(&member, Some(&dir));
         effects.fire(&inner2, &req2);
@@ -248,7 +251,7 @@ pub(crate) async fn copy_move(inner: &Arc<Inner>, req: &Req, is_move: bool) -> D
             "The library root cannot be moved or copied.",
         ));
     }
-    let src = lookup(inner, &req.path, user)
+    let src = lookup(inner, &req.path, req)
         .await?
         .ok_or_else(|| DavError::new(StatusCode::NOT_FOUND, &req.path))?;
     let mut dest_path = destination_path(req)?;
@@ -298,6 +301,14 @@ pub(crate) async fn copy_move(inner: &Arc<Inner>, req: &Req, is_move: bool) -> D
         dest_path = format!("{}/", dest_path.trim_end_matches('/'));
     }
 
+    // The reading history is written file by file and never rearranged: nothing moves
+    // or copies into, out of or inside it.
+    if paths::is_history_path(&req.path) || paths::is_history_path(&dest_path) {
+        return Err(DavError::new(
+            StatusCode::FORBIDDEN,
+            "Reading history cannot be moved or copied.",
+        ));
+    }
     // 14.1 / 14.3: both ends in the same class (library or progress), never a virtual root.
     let src_class = paths::class_of(&req.path);
     let dest_class = paths::class_of(&dest_path);
@@ -317,7 +328,7 @@ pub(crate) async fn copy_move(inner: &Arc<Inner>, req: &Req, is_move: bool) -> D
     let renames_source = is_move
         && src_norm != dest_norm
         && crate::fold_name(&src_norm) == crate::fold_name(&dest_norm);
-    let mut dest = lookup(inner, &dest_path, user).await?;
+    let mut dest = lookup(inner, &dest_path, req).await?;
     if renames_source
         && let (Some(s), Some(d)) = (src.phys(), dest.as_ref().and_then(Resource::phys))
     {
@@ -327,7 +338,7 @@ pub(crate) async fn copy_move(inner: &Arc<Inner>, req: &Req, is_move: bool) -> D
         }
     }
     let dest_parent = match paths::uri_parent(&dest_path) {
-        Some(p) => lookup(inner, &p, user).await?,
+        Some(p) => lookup(inner, &p, req).await?,
         None => None,
     };
     let Some(dest_parent) = dest_parent.filter(Resource::is_collection) else {
@@ -385,7 +396,7 @@ pub(crate) async fn copy_move(inner: &Arc<Inner>, req: &Req, is_move: bool) -> D
         let Some((dest_phys, _)) =
             inner2
                 .roots
-                .destination_path(&dest_parent, &dest_name, req2.username())
+                .destination_path(&dest_parent, &dest_name, req2.caller())
         else {
             return Err(DavError::new(StatusCode::FORBIDDEN, "Forbidden"));
         };
@@ -795,6 +806,7 @@ fn prune_unmatched(
                                 path: vp,
                                 phys: dp,
                                 stat,
+                                kind: FileKind::Library,
                             }
                         } else {
                             Resource::File {
