@@ -61,7 +61,13 @@ impl Element {
 #[derive(Debug, PartialEq, Eq)]
 pub struct XmlError;
 
-/// Parse a whole document into its root element.
+/// The deepest an element may nest in a request body (the root is depth 1). DAV bodies
+/// nest a few levels (`propertyupdate/set/prop/<property>/<value>`); 256 is libxml2's
+/// default limit. The tree is dropped and written out recursively, so without a limit a
+/// 1 MiB body of `<a>` (~150k deep) overflows the stack and aborts the whole server.
+pub const MAX_DEPTH: usize = 256;
+
+/// Parse a whole document into its root element. Deeper than [`MAX_DEPTH`] is an error.
 pub fn parse(body: &[u8]) -> Result<Element, XmlError> {
     let mut reader = NsReader::from_reader(body);
     reader.config_mut().trim_text(true);
@@ -73,6 +79,9 @@ pub fn parse(body: &[u8]) -> Result<Element, XmlError> {
             .read_resolved_event_into(&mut buf)
             .map_err(|_| XmlError)?;
         match event {
+            Event::Start(_) | Event::Empty(_) if stack.len() >= MAX_DEPTH => {
+                return Err(XmlError);
+            }
             Event::Start(start) => {
                 let el = element_of(&resolved, start.local_name().as_ref())?;
                 stack.push(el);
@@ -216,5 +225,34 @@ mod tests {
     fn entities_are_not_expanded() {
         let doc = br#"<!DOCTYPE a [<!ENTITY x "boom">]><a>&x;</a>"#;
         assert!(parse(doc).is_err());
+    }
+
+    #[test]
+    fn nesting_is_limited_to_max_depth() {
+        let nest = |depth: usize, leaf: &str| {
+            format!("{}{leaf}{}", "<a>".repeat(depth), "</a>".repeat(depth))
+        };
+        assert!(parse(nest(MAX_DEPTH, "").as_bytes()).is_ok());
+        assert!(parse(nest(MAX_DEPTH + 1, "").as_bytes()).is_err());
+        // An empty element counts as a level too.
+        assert!(parse(nest(MAX_DEPTH - 1, "<b/>").as_bytes()).is_ok());
+        assert!(parse(nest(MAX_DEPTH, "<b/>").as_bytes()).is_err());
+    }
+
+    /// A 1 MiB body of `<a>` nests ~150k deep. Built whole and then dropped, that tree
+    /// overflowed the stack, which aborts the whole server, not just the request. Run on a
+    /// 2 MiB stack, a tokio worker's.
+    #[test]
+    fn a_deeply_nested_body_is_refused_not_a_crash() {
+        let depth = 150_000;
+        let body = format!("{}{}", "<a>".repeat(depth), "</a>".repeat(depth));
+        assert!(body.len() <= 1024 * 1024 + 64 * 1024);
+        let refused = std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(move || parse(body.as_bytes()).is_err())
+            .unwrap()
+            .join()
+            .unwrap();
+        assert!(refused);
     }
 }
