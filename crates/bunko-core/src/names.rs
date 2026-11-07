@@ -52,6 +52,10 @@ fn casefold(text: &str) -> String {
     out
 }
 
+/// Bunko's status files on a remote library (`.mokuro-bunko.json`, the cloud queue
+/// document), by exact name (Bunko writes only this spelling).
+pub const CONTROL_FILES: [&str; 2] = [".mokuro-bunko.json", ".mokuro-queue.json"];
+
 /// The form two names that are one entry share: the default-ignorable code points
 /// dropped, canonical decomposition, full Unicode case folding, then the case folding
 /// of its uppercase (so a letter an uppercase table joins with another, `ı` with `i`,

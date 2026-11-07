@@ -3,6 +3,7 @@
 //!
 //! Nothing here touches the network or a database; every other crate builds on it.
 
+pub mod case_merge;
 pub mod casefold_table;
 pub mod config;
 pub mod engines;
