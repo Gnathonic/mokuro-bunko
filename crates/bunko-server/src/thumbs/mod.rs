@@ -4,7 +4,9 @@
 //!
 //! * **Cover thumbnails.** Every poll interval (`ocr.poll_interval`, shared with the
 //!   OCR scan) every `*.cbz` under the library that has neither `<stem>.webp` nor
-//!   `<stem>.nocover` gets a cover: the first name of the archive's plain sorted
+//!   `<stem>.nocover` written since the archive (a volume uploaded again under its
+//!   name is newer than what was made from the one it replaced, and a cover written
+//!   after it, a reader's own, is kept) gets a cover: the first name of the archive's plain sorted
 //!   namelist with an image suffix, `ImageOps.contain(250×350, LANCZOS)`, lossy WebP
 //!   q85 m6 (`bunko-thumb`). No image, an unreadable archive or a missing member writes
 //!   the `<stem>.nocover` marker. One cover at a time, on a blocking thread; the decode
@@ -60,8 +62,27 @@ pub fn needs_thumbnail(cbz: &Path) -> bool {
         && cbz
             .extension()
             .is_some_and(|e| e.to_string_lossy().eq_ignore_ascii_case("cbz"))
-        && !cover_path(cbz).exists()
-        && !nocover_path(cbz).exists()
+        && !written_for(&cover_path(cbz), cbz)
+        && !written_for(&nocover_path(cbz), cbz)
+}
+
+/// `side` (a cover or a `.nocover` marker) is there and was written for the archive as
+/// it is now.
+fn written_for(side: &Path, cbz: &Path) -> bool {
+    std::fs::metadata(side).is_ok_and(|m| describes(&m, cbz))
+}
+
+/// A cover or marker describes `cbz` unless it is older than the archive: a volume
+/// uploaded again under its name is newer than what was made from the one it
+/// replaced. A time either side does not know counts as current, and so does an
+/// archive dated in the future (a fast clock, a copied mtime): every cover made now
+/// would be older than it, and remade on every scan.
+fn describes(side: &std::fs::Metadata, cbz: &Path) -> bool {
+    let archive = std::fs::metadata(cbz).ok().and_then(|m| m.modified().ok());
+    match (side.modified().ok(), archive) {
+        (Some(side), Some(archive)) => side >= archive || archive > std::time::SystemTime::now(),
+        _ => true,
+    }
 }
 
 fn suffix_lower(name: &str) -> String {
@@ -141,22 +162,47 @@ pub fn ensure_thumbnail(cbz: &Path) -> Result<bool, String> {
     let webp = bunko_thumb::make_thumbnail_limited(&bytes, MAX_DECODE_BYTES, MAX_SIDE)
         .map_err(|e| format!("Failed to generate thumbnail for {name}: {e}"))?;
     drop(bytes);
+    if !publish_cover(cbz, &webp)? {
+        return Ok(false);
+    }
+    // A marker left from the archive this one replaced.
+    let marker = nocover_path(cbz);
+    if marker.exists()
+        && let Err(e) = std::fs::remove_file(&marker)
+    {
+        warn!("could not remove the stale {}: {e}", marker.display());
+    }
+    info!(
+        "Created thumbnail: {}",
+        cover_path(cbz)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    );
+    Ok(true)
+}
+
+/// Writes `webp` as the cover of `cbz` (staged, then renamed): false when a cover
+/// written for this archive is there already (a client's, landed meanwhile), which
+/// stays. A stale one is replaced.
+fn publish_cover(cbz: &Path, webp: &[u8]) -> Result<bool, String> {
+    let name = cbz
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let out = cover_path(cbz);
+    if written_for(&out, cbz) {
+        return Ok(false);
+    }
     let mut tmp = out.as_os_str().to_owned();
     tmp.push(".tmp");
     let tmp = PathBuf::from(tmp);
-    std::fs::write(&tmp, &webp)
+    std::fs::write(&tmp, webp)
         .and_then(|()| std::fs::rename(&tmp, &out))
         .map_err(|e| {
             let _ = std::fs::remove_file(&tmp);
             format!("Failed to generate thumbnail for {name}: {e}")
         })?;
-    info!(
-        "Created thumbnail: {}",
-        out.file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default()
-    );
     Ok(true)
 }
 
@@ -649,5 +695,136 @@ mod tests {
             SidecarCheck::TooLarge
         );
         assert_eq!(check_sidecar_capped(&plain, 4 << 20), SidecarCheck::Invalid);
+    }
+
+    fn mtime(p: &Path) -> std::time::SystemTime {
+        std::fs::metadata(p).unwrap().modified().unwrap()
+    }
+
+    fn set_mtime(p: &Path, t: std::time::SystemTime) {
+        std::fs::File::options()
+            .write(true)
+            .open(p)
+            .unwrap()
+            .set_modified(t)
+            .unwrap();
+    }
+
+    /// A volume uploaded again under its name gets a new cover: the one beside it was
+    /// made from the archive it replaced.
+    #[test]
+    fn a_replaced_archive_gets_a_new_cover() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lib = tmp.path().join("library");
+        let series = lib.join("Series");
+        std::fs::create_dir_all(&series).unwrap();
+        let vol = series.join("Vol 1.cbz");
+        cbz(&vol, &[("p.png", &png(500, 700))]);
+        let thumbs = Thumbnails::default();
+        let stop = CancellationToken::new();
+        assert_eq!(thumbs.scan_once(&lib, &stop), 1);
+        let old = std::fs::read(cover_path(&vol)).unwrap();
+
+        cbz(&vol, &[("p.png", &png(300, 200))]);
+        set_mtime(&cover_path(&vol), mtime(&vol) - Duration::from_secs(5));
+        assert_eq!(thumbnail_candidates(&lib), std::slice::from_ref(&vol));
+        assert_eq!(thumbs.scan_once(&lib, &stop), 1);
+        let new = std::fs::read(cover_path(&vol)).unwrap();
+        assert_ne!(new, old);
+        let img = image::load_from_memory(&new).unwrap();
+        assert_eq!(img.width(), 250, "the 300x200 page of the new archive");
+        assert!(img.height() < 350);
+        assert!(!series.join("Vol 1.webp.tmp").exists());
+        assert_eq!(thumbs.scan_once(&lib, &stop), 0, "made once");
+    }
+
+    /// A cover written after the archive (a reader's own upload) describes it: kept.
+    #[test]
+    fn a_cover_newer_than_its_archive_is_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lib = tmp.path().join("library");
+        let series = lib.join("Series");
+        std::fs::create_dir_all(&series).unwrap();
+        let vol = series.join("Vol 1.cbz");
+        cbz(&vol, &[("p.png", &png(500, 700))]);
+        std::fs::write(cover_path(&vol), b"a client's cover").unwrap();
+        set_mtime(&cover_path(&vol), mtime(&vol) + Duration::from_secs(5));
+        assert!(thumbnail_candidates(&lib).is_empty());
+        assert_eq!(
+            Thumbnails::default().scan_once(&lib, &CancellationToken::new()),
+            0
+        );
+        assert_eq!(
+            std::fs::read(cover_path(&vol)).unwrap(),
+            b"a client's cover"
+        );
+    }
+
+    /// `.nocover` describes the archive it was written for: a good archive uploaded
+    /// over it gets its cover, and the marker goes.
+    #[test]
+    fn a_nocover_marker_older_than_its_archive_is_looked_at_again() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lib = tmp.path().join("library");
+        let series = lib.join("Series");
+        std::fs::create_dir_all(&series).unwrap();
+        let vol = series.join("Vol 1.cbz");
+        cbz(&vol, &[("notes.txt", b"x")]);
+        let thumbs = Thumbnails::default();
+        let stop = CancellationToken::new();
+        assert_eq!(thumbs.scan_once(&lib, &stop), 0);
+        assert!(nocover_path(&vol).is_file());
+
+        cbz(&vol, &[("p.png", &png(500, 700))]);
+        set_mtime(&nocover_path(&vol), mtime(&vol) - Duration::from_secs(5));
+        assert_eq!(thumbs.scan_once(&lib, &stop), 1);
+        assert!(cover_path(&vol).is_file());
+        assert!(!nocover_path(&vol).exists(), "the stale marker goes");
+    }
+
+    /// An archive dated in the future: a cover made now is older than it, so the age
+    /// rule would remake it on every scan. Present counts as current instead.
+    #[test]
+    fn an_archive_dated_in_the_future_is_not_covered_again_and_again() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lib = tmp.path().join("library");
+        let series = lib.join("Series");
+        std::fs::create_dir_all(&series).unwrap();
+        let vol = series.join("Vol 1.cbz");
+        cbz(&vol, &[("p.png", &png(500, 700))]);
+        set_mtime(
+            &vol,
+            std::time::SystemTime::now() + Duration::from_secs(3600),
+        );
+        let thumbs = Thumbnails::default();
+        let stop = CancellationToken::new();
+        assert_eq!(thumbs.scan_once(&lib, &stop), 1);
+        assert_eq!(thumbs.scan_once(&lib, &stop), 0);
+        assert!(thumbnail_candidates(&lib).is_empty());
+    }
+
+    /// A client wrote a fresh cover after the stale one was judged: publishing never
+    /// overwrites it.
+    #[test]
+    fn a_fresh_cover_written_meanwhile_is_not_overwritten() {
+        let tmp = tempfile::tempdir().unwrap();
+        let series = tmp.path().join("Series");
+        std::fs::create_dir_all(&series).unwrap();
+        let vol = series.join("Vol 1.cbz");
+        cbz(&vol, &[("p.png", &png(10, 10))]);
+        std::fs::write(cover_path(&vol), b"a client's cover").unwrap();
+        set_mtime(&cover_path(&vol), mtime(&vol) + Duration::from_secs(5));
+        let webp =
+            bunko_thumb::make_thumbnail_limited(&png(10, 10), MAX_DECODE_BYTES, MAX_SIDE).unwrap();
+        assert!(!publish_cover(&vol, &webp).unwrap());
+        assert_eq!(
+            std::fs::read(cover_path(&vol)).unwrap(),
+            b"a client's cover"
+        );
+
+        // Stale (older than the archive): replaced.
+        set_mtime(&cover_path(&vol), mtime(&vol) - Duration::from_secs(5));
+        assert!(publish_cover(&vol, &webp).unwrap());
+        assert_eq!(std::fs::read(cover_path(&vol)).unwrap(), webp);
     }
 }

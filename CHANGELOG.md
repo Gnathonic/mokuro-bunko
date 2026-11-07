@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.7.9] - 2026-11-07
+
+A volume uploaded again under its name gets a new cover, and the catalog shows a
+changed cover at once.
+
+### Fixed
+- **Covers of replaced volumes.** A cover (or a `.nocover` marker) was made once per
+  archive name, so a volume uploaded again over an old one kept the old one's cover,
+  and a volume that once had no cover image never got one. A cover or marker older than
+  its archive is now made again, and a stale marker is removed. A cover written after
+  the archive (a reader's own upload) is kept and never overwritten.
+- **Catalog covers are revalidated.** The catalog served covers as fresh for an hour with
+  nothing to check them against, so a changed cover stayed old for up to an hour and
+  was then downloaded again in full. Covers now carry an `ETag` and `Last-Modified` with
+  `Cache-Control: no-cache`: a changed cover shows at once, and an unchanged one costs
+  a `304`.
+
 ## [0.7.8] - 2026-11-05
 
 Reading history and positions.json are kept per account, as in 0.8: Mokuro Reader
