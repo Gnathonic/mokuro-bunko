@@ -28,7 +28,8 @@ pub struct AnalyticsConfig {
 /// Days each kind of row is kept. Daily aggregates are kept forever.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AnalyticsRetention {
-    /// Raw client IPs (`ip_daily`, `anon_ips`, `auth_failures`, slow requests).
+    /// Raw client IPs (`ip_daily`, `anon_ips`, `auth_failures`, slow requests, a crawl
+    /// episode's address).
     pub ip_days: u32,
     /// Hourly traffic and latency rows.
     pub hourly_days: u32,

@@ -43,6 +43,45 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+/// What an anonymous id is keyed by: an IPv4 address, the `/64` of an IPv6 one, or a
+/// trusted proxy's other text as-is.
+pub fn anon_network(ip: &str) -> std::borrow::Cow<'_, str> {
+    match ip.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V6(v6)) if v6.to_ipv4_mapped().is_none() => {
+            let net = std::net::Ipv6Addr::from(v6.to_bits() & !u128::from(u64::MAX));
+            format!("{net}/64").into()
+        }
+        _ => ip.into(),
+    }
+}
+
+/// `a:` + the first 12 hex digits of `sha256(salt || network)` (`ip` canonical; see
+/// [`anon_network`]): an anonymous visitor's id (design §3), and what a crawl episode
+/// keeps of its address once `retention.ip_days` is over.
+pub fn anon_id(salt: &[u8; 32], ip: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(salt);
+    h.update(anon_network(ip).as_bytes());
+    let digest = h.finalize();
+    let mut out = String::with_capacity(14);
+    out.push_str("a:");
+    out.push_str(&hex::encode(&digest[..6]));
+    out
+}
+
+/// Is `s` what [`anon_id`] makes (`a:` and 12 lowercase hex digits)?
+pub fn is_anon_id(s: &str) -> bool {
+    s.len() == 14
+        && s.starts_with("a:")
+        && s.bytes()
+            .skip(2)
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// SQLite `GLOB` matching exactly what [`anon_id`] makes.
+pub(crate) const ANON_ID_GLOB: &str = "a:[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]";
+
 /// The analytics database's file name, beside `mokuro.db`.
 pub const FILE_NAME: &str = "analytics.sqlite";
 

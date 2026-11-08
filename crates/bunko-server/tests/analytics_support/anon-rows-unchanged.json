@@ -693,6 +693,7 @@
     "episodes": [
       {
         "id": 1,
+        "ip_hashed": false,
         "ip": "203.0.113.11",
         "country": null,
         "principals": [
@@ -713,6 +714,7 @@
     ],
     "by_ip": [
       {
+        "ip_hashed": false,
         "ip": "203.0.113.11",
         "country": null,
         "episodes": 1,

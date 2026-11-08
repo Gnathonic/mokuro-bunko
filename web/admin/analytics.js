@@ -1774,6 +1774,12 @@
     // Crawlers
     // ------------------------------------------------------------------
 
+    // Past the IP retention an episode keeps only a salted id of its address.
+    function crawlIp(r) {
+        if (!r.ip_hashed) return mono(r.ip);
+        return h('span', { class: 'an-muted', text: 'Address removed (' + String(r.ip).slice(2, 8) + '\u2026)', title: 'Kept for the IP retention period only; this is a salted id of its network.' });
+    }
+
     async function renderCrawlers() {
         const data = await get('crawlers');
         if (data.available === false) return notCollected('crawl episodes');
@@ -1811,7 +1817,7 @@
                 sub: 'Newest first. Admins are not exempt; the visitor column shows who it was.',
                 body: C.table([
                     { key: 'status', label: 'State', render: (r) => badge(r.status === 'open' ? 'Open' : 'Ended', r.status === 'open' ? 'warning' : 'muted') },
-                    { key: 'ip', label: 'IP', className: 'an-col-ip', render: (r) => h('span', { class: 'an-title' }, [mono(r.ip), r.country ? h('span', { class: 'an-muted', text: countryName(r.country) }) : null]) },
+                    { key: 'ip', label: 'IP', className: 'an-col-ip', render: (r) => h('span', { class: 'an-title' }, [crawlIp(r), r.country ? h('span', { class: 'an-muted', text: countryName(r.country) }) : null]) },
                     { key: 'principals', label: 'Visitor', sortable: false, render: (r) => ((r.principals || []).length ? h('span', { class: 'an-tags' }, r.principals.slice(0, 3).map((p) => principalCell({ principal: p, label: String(p).startsWith('u:') ? String(p).slice(2) : p }))) : '-') },
                     { key: 'client', label: 'Client', render: (r) => h('span', { text: named(CLIENT, r.client), title: r.user_agent || '' }) },
                     { key: 'kind', label: 'Kind', render: (r) => ({ download: 'Downloads', metadata: 'Metadata', mixed: 'Mixed' }[r.kind] || r.kind || '-') },
@@ -1828,7 +1834,7 @@
             card('By IP', {
                 sub: 'How often each IP crawled',
                 body: C.table([
-                    { key: 'ip', label: 'IP', className: 'an-col-ip', render: (r) => mono(r.ip) },
+                    { key: 'ip', label: 'IP', className: 'an-col-ip', render: crawlIp },
                     { key: 'country', label: 'Country', render: (r) => (r.country ? countryName(r.country) : '-') },
                     { key: 'episodes', label: 'Episodes', kind: 'int' },
                     { key: 'last_at', label: 'Last', num: true, render: (r) => h('span', { text: C.fmtAgo(r.last_at), title: C.fmtDateTime(r.last_at) }) },
@@ -1890,7 +1896,7 @@
             field('flush_seconds', 'Write to disk every', numInput(v.flush_seconds, 5, 3600), 'Seconds. A crash loses at most this much.'),
         ]));
         form.appendChild(section('Retention', 'Daily totals are kept forever; these say how long the detail stays.', [
-            field('retention.ip_days', 'Client IPs', numInput(v.retention.ip_days, 1, 3650), 'Days. Rows naming a raw IP (per-IP traffic, anonymous visitor IPs, failed sign-ins, slow requests); after that only pseudonymous ids remain.'),
+            field('retention.ip_days', 'Client IPs', numInput(v.retention.ip_days, 1, 3650), 'Days. Rows naming a raw IP (per-IP traffic, anonymous visitor IPs, failed sign-ins, slow requests, crawl episodes); after that only pseudonymous ids remain.'),
             field('retention.hourly_days', 'Hourly detail', numInput(v.retention.hourly_days, 1, 3650), 'Days of hourly traffic and latency.'),
             field('retention.host_minute_days', 'Per-minute server readings', numInput(v.retention.host_minute_days, 1, 365), 'Days.'),
             field('retention.crawl_days', 'Crawl episodes', numInput(v.retention.crawl_days, 1, 3650), 'Days.'),

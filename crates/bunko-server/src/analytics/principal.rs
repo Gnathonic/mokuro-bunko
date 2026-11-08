@@ -8,9 +8,10 @@
 //! be traced back to them.
 
 use bunko_core::Role;
-use sha2::{Digest, Sha256};
 use std::net::IpAddr;
 use std::sync::Arc;
+
+pub use bunko_db::analytics::{anon_id, anon_network};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PrincipalKind {
@@ -70,31 +71,6 @@ pub const USERNAME_TEXT_MAX: usize = 64;
 /// characters.
 pub fn attempted_username_text(name: &str) -> String {
     name.chars().take(USERNAME_TEXT_MAX).collect()
-}
-
-/// What an anonymous id is keyed by: an IPv4 address, the `/64` of an IPv6 one, or a
-/// trusted proxy's other text as-is.
-pub fn anon_network(ip: &str) -> std::borrow::Cow<'_, str> {
-    match ip.parse::<IpAddr>() {
-        Ok(IpAddr::V6(v6)) if v6.to_ipv4_mapped().is_none() => {
-            let net = std::net::Ipv6Addr::from(v6.to_bits() & !u128::from(u64::MAX));
-            format!("{net}/64").into()
-        }
-        _ => ip.into(),
-    }
-}
-
-/// `a:` + the first 12 hex digits of `sha256(salt || network)` (`ip` canonical; see
-/// [`anon_network`]).
-pub fn anon_id(salt: &[u8; 32], ip: &str) -> String {
-    let mut h = Sha256::new();
-    h.update(salt);
-    h.update(anon_network(ip).as_bytes());
-    let digest = h.finalize();
-    let mut out = String::with_capacity(14);
-    out.push_str("a:");
-    out.push_str(&hex::encode(&digest[..6]));
-    out
 }
 
 /// The principal of a request: its account when it had one, else its address.

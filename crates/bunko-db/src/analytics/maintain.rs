@@ -12,7 +12,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 pub struct Retention {
     /// Rows with a raw client IP: `ip_daily`, `anon_ips`, `auth_failures`,
     /// `client_principals`, `client_mix_principals`, and `slow_requests` (at most
-    /// [`SLOW_DAYS`]).
+    /// [`SLOW_DAYS`]); a crawl episode's address (then its salted id).
     pub ip_days: u32,
     /// Hourly traffic, latency, errors and host rows.
     pub hourly_days: u32,
@@ -50,9 +50,10 @@ const DAY: i64 = 86400;
 impl AnalyticsDb {
     /// Roll up, then prune, as of `now_s` (epoch seconds), in one transaction.
     pub fn maintain(&self, now_s: i64, retention: &Retention) -> Result<MaintainStats> {
+        let current = self.salt();
         let (stats, salt) = self.write(|tx| {
             let days_rolled = rollup(tx.conn, now_s)?;
-            let pruned = prune(tx.conn, now_s, retention)?;
+            let pruned = prune(tx.conn, now_s, retention, &current)?;
             let salt = rotate_salt(tx.conn, now_s, retention.ip_days)?;
             let stats = MaintainStats {
                 days_rolled,
@@ -225,7 +226,7 @@ fn json(h: &[u64; LATENCY_BUCKETS]) -> String {
     serde_json::to_string(&h[..]).unwrap_or_else(|_| "[]".into())
 }
 
-fn prune(conn: &Connection, now_s: i64, r: &Retention) -> Result<u64> {
+fn prune(conn: &Connection, now_s: i64, r: &Retention, salt: &[u8; 32]) -> Result<u64> {
     let today = now_s.div_euclid(DAY);
     let now_hour = now_s.div_euclid(3600);
     let rolled: i64 = super::traffic::rolled_through(conn)?;
@@ -257,12 +258,31 @@ fn prune(conn: &Connection, now_s: i64, r: &Retention) -> Result<u64> {
     del("DELETE FROM auth_failures WHERE hour < ?1", ip_day_cut * 24)?;
     del("DELETE FROM slow_requests WHERE at < ?1", slow_cut)?;
     del("DELETE FROM crawl_episodes WHERE last_at < ?1", crawl_cut)?;
+    // An episode outlives its address: past `ip_days` it keeps the salted id of the
+    // address's network (as an anonymous visitor's), never the address itself.
+    anonymize_crawl_ips(conn, ip_day_cut * DAY, salt)?;
     del("DELETE FROM host_minute WHERE minute < ?1", minute_cut)?;
     // The pages a reading pass credited: kept while its volume may still see views of
     // that pass (a device syncing late), not with the reading rows (kept forever).
     let pass_cut = (now_s - super::reading::PASS_KEEP_DAYS * DAY).saturating_mul(1000);
     del("DELETE FROM reading_pages WHERE last_ms < ?1", pass_cut)?;
     Ok(n)
+}
+
+/// Replace the raw IP of every crawl episode last active before `cut` (epoch seconds)
+/// by [`super::anon_id`] of it. Returns how many.
+fn anonymize_crawl_ips(conn: &Connection, cut: i64, salt: &[u8; 32]) -> Result<u64> {
+    let raw: Vec<(i64, String)> = conn
+        .prepare_cached("SELECT id, ip FROM crawl_episodes WHERE last_at < ?1 AND ip NOT GLOB ?2")?
+        .query_map(params![cut, super::ANON_ID_GLOB], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut set = conn.prepare_cached("UPDATE crawl_episodes SET ip = ?1 WHERE id = ?2")?;
+    for (id, ip) in &raw {
+        set.execute(params![super::anon_id(salt, ip), id])?;
+    }
+    Ok(raw.len() as u64)
 }
 
 #[cfg(test)]
@@ -510,6 +530,99 @@ mod tests {
             db.meta_i64(keys::SALT_EPOCH).unwrap(),
             Some((day + 30) / 30)
         );
+    }
+
+    /// A crawl episode is kept `crawl_days`, its raw IP only `ip_days`: afterwards the
+    /// salted id of the address's network stands in for it, and the detector's later
+    /// writes of that episode update it without bringing the address back.
+    #[test]
+    fn a_crawl_episode_outlives_its_address() {
+        use crate::analytics::crawl::{EpisodeRow, STATUS_CLOSED, STATUS_OPEN};
+        let (_d, db) = temp_db();
+        let r = Retention::default();
+        let day = 20_000i64;
+        let episode = |ip: &str, last_day: i64| EpisodeRow {
+            ip: ip.into(),
+            principals: vec!["u:alice".into()],
+            kind: "download".into(),
+            started_at: last_day * DAY,
+            last_at: last_day * DAY + 60,
+            status: STATUS_OPEN.into(),
+            ..EpisodeRow::default()
+        };
+        let old_v4 = episode("192.0.2.7", day);
+        let old_v6 = episode("2001:db8:1:2:3:4:5:6", day);
+        let recent = episode("198.51.100.9", day + 25);
+        let ids: Vec<i64> = db
+            .write(|tx| {
+                [&old_v4, &old_v6, &recent]
+                    .iter()
+                    .map(|e| tx.put_crawl_episode(e))
+                    .collect()
+            })
+            .unwrap();
+        let (v4_id, v6_id, recent_id) = (ids[0], ids[1], ids[2]);
+        let salt = db.salt();
+        let ip_of = |db: &AnalyticsDb, id: i64| -> String {
+            db.read(|c| {
+                Ok(
+                    c.query_row("SELECT ip FROM crawl_episodes WHERE id = ?1", [id], |r| {
+                        r.get(0)
+                    })?,
+                )
+            })
+            .unwrap()
+        };
+        let hashed = super::super::anon_id(&salt, "192.0.2.7");
+        // ip_days (30) after day + 1: the two old ones lose their address.
+        db.maintain((day + 31) * DAY + 3600, &r).unwrap();
+        assert_eq!(ip_of(&db, v4_id), hashed);
+        assert_eq!(
+            ip_of(&db, v6_id),
+            super::super::anon_id(&salt, "2001:db8:1:2::1"),
+            "an IPv6 address stands for its /64"
+        );
+        assert_eq!(ip_of(&db, recent_id), "198.51.100.9");
+        let raw: i64 = db
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT COUNT(*) FROM crawl_episodes \
+                     WHERE ip IN ('192.0.2.7', '2001:db8:1:2:3:4:5:6')",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(raw, 0, "the raw addresses are gone");
+        // The episodes themselves are still there, listed per (hashed) address.
+        assert_eq!(db.crawl_episodes(0, i64::MAX, 10).unwrap().len(), 3);
+        assert_eq!(db.crawl_episodes_by_ip(0, i64::MAX).unwrap().len(), 3);
+        // The detector closes the old episode under its id, naming its address: the
+        // row is updated, not written again, and keeps the salted id.
+        let mut closing = old_v4.clone();
+        closing.id = v4_id;
+        closing.status = STATUS_CLOSED.into();
+        closing.series = 99;
+        assert_eq!(
+            db.write(|tx| tx.put_crawl_episode(&closing)).unwrap(),
+            v4_id
+        );
+        let rows = db.crawl_episodes(0, i64::MAX, 10).unwrap();
+        assert_eq!(rows.len(), 3);
+        let row = rows.iter().find(|e| e.id == v4_id).unwrap();
+        assert_eq!(
+            (row.ip.as_str(), row.series, row.status.as_str()),
+            (hashed.as_str(), 99, STATUS_CLOSED)
+        );
+        // crawl_days (90) after its last request the episode goes.
+        db.maintain((day + 91) * DAY, &r).unwrap();
+        let left: Vec<i64> = db
+            .crawl_episodes(0, i64::MAX, 10)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.id)
+            .collect();
+        assert_eq!(left, vec![recent_id]);
     }
 
     /// A download counts once most of the file went out (resumes add up); a

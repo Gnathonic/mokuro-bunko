@@ -1,6 +1,7 @@
 //! Crawl episodes (design §8): one row per episode of a client IP touching a large part
 //! of the catalog. The foundation creates the table (pruned by `retention.crawl_days`
-//! on `last_at`); the detector (bunko-server `analytics::crawl`) writes it through the
+//! on `last_at`; past `retention.ip_days` an episode's `ip` is the salted id of its
+//! network, [`super::anon_id`], never the address); the detector (bunko-server `analytics::crawl`) writes it through the
 //! statements here, inside the collector's flush transaction (`Detector::begin_flush`).
 
 use super::{AnalyticsDb, AnalyticsTx, int, uint};
@@ -91,7 +92,8 @@ fn episode_row(r: &Row<'_>) -> rusqlite::Result<EpisodeRow> {
 }
 
 impl AnalyticsTx<'_> {
-    /// Write `e`: replace the values of row `e.id` when it is there and of the same IP,
+    /// Write `e`: replace the values of row `e.id` when it is there and of the same IP
+    /// (or of an address the upkeep already replaced by its salted id, which stays),
     /// else (`e.id` 0, the row pruned, or not that IP's) insert a new row. Returns the
     /// row's id.
     pub fn put_crawl_episode(&self, e: &EpisodeRow) -> Result<i64> {
@@ -123,13 +125,15 @@ impl AnalyticsTx<'_> {
         if e.id > 0 {
             let mut with_id: Vec<&dyn rusqlite::ToSql> = values.to_vec();
             with_id.push(&e.id);
+            with_id.push(&super::ANON_ID_GLOB);
             let changed = self
                 .conn
                 .prepare_cached(
-                    "UPDATE crawl_episodes SET ip = ?1, country = ?2, principals = ?3, \
+                    "UPDATE crawl_episodes SET country = ?2, principals = ?3, \
                      client = ?4, user_agent = ?5, kind = ?6, started_at = ?7, last_at = ?8, \
                      series = ?9, volumes = ?10, catalog_series = ?11, coverage = ?12, \
-                     bytes_out = ?13, requests = ?14, status = ?15 WHERE id = ?16 AND ip = ?1",
+                     bytes_out = ?13, requests = ?14, status = ?15 \
+                     WHERE id = ?16 AND (ip = ?1 OR ip GLOB ?17)",
                 )?
                 .execute(with_id.as_slice())?;
             if changed > 0 {

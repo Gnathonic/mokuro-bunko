@@ -994,6 +994,7 @@ pub mod api {
             .map(|e| {
                 json!({
                     "id": e.id,
+                    "ip_hashed": bunko_db::analytics::is_anon_id(&e.ip),
                     "ip": e.ip,
                     "country": e.country,
                     "principals": e.principals,
@@ -1017,6 +1018,7 @@ pub mod api {
             .into_iter()
             .map(|r| {
                 json!({
+                    "ip_hashed": bunko_db::analytics::is_anon_id(&r.ip),
                     "ip": r.ip,
                     "country": r.country,
                     "episodes": r.episodes,

@@ -436,6 +436,35 @@ async fn an_rclone_mirror_over_webdav_is_a_download_episode() {
         )
         .unwrap();
     assert_eq!(ips, 0);
+    assert_eq!(eps[0]["ip_hashed"], false);
+
+    // Past `retention.ip_days` (30) the episode is still listed, under the salted id
+    // of its address: the address itself is nowhere in the file.
+    let db = env.services.analytics.db().clone();
+    let salt = db.salt();
+    let later = bunko_server::analytics::now_s() + 31 * 86400;
+    db.maintain(later, &bunko_db::analytics::Retention::default())
+        .unwrap();
+    let v = env.crawlers("24h").await;
+    let eps = v["episodes"].as_array().unwrap();
+    assert_eq!(eps.len(), 1, "{v:#}");
+    let hashed = bunko_server::analytics::principal::anon_id(&salt, RCLONE_IP);
+    assert_eq!(eps[0]["ip"], hashed.as_str());
+    assert_eq!(eps[0]["ip_hashed"], true);
+    assert_eq!(eps[0]["kind"], "download");
+    let by_ip = v["by_ip"].as_array().unwrap();
+    assert_eq!(by_ip.len(), 1);
+    assert_eq!(by_ip[0]["ip"], hashed.as_str());
+    assert_eq!(by_ip[0]["ip_hashed"], true);
+    let raw: i64 = rusqlite::Connection::open(env.storage.join("analytics.sqlite"))
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM crawl_episodes WHERE ip = ?1",
+            [RCLONE_IP],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(raw, 0);
 }
 
 #[tokio::test]

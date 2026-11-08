@@ -105,9 +105,12 @@ any change to what the reader sends.
     the address stays in `ip_daily`). The daily tables are kept forever and anyone can
     make up addresses, so this bounds what a flood adds per day.
 - **Raw client IPs** are kept only in rows with an IP retention (`retention.ip_days`,
-  default 30): `ip_daily`, `anon_ips`, `auth_failures`, `slow_requests`; and in
-  `crawl_episodes` (`retention.crawl_days`, default 90). After that only principals
-  remain.
+  default 30): `ip_daily`, `anon_ips`, `auth_failures`, `slow_requests`. After that
+  only principals remain. **Built:** a `crawl_episodes` row is kept
+  `retention.crawl_days` (default 90), but its `ip` only `ip_days` after its last
+  request: the hourly upkeep then replaces it by the anonymous id of that address
+  (`a:<12 hex>`, the salt of the time), so an older episode is still listed, per
+  hashed address, and the detector's later writes of it keep the hash.
 - **A CORS preflight** (an `OPTIONS` carrying `Access-Control-Request-Method`) is
   attributed to **no principal**. **Built:** a browser sends it on its own before a
   cross-origin request and never with credentials, so a signed-in hosted reader's
@@ -350,8 +353,8 @@ stored path is decoded, cut to 256 characters and has no query.
   - rolls `traffic_hourly` and `latency_hourly` into `traffic_daily` / `latency_daily`
     for days that are complete, before pruning;
   - prunes hourly rows older than `retention.hourly_days` (90); IP-bearing rows older
-    than `retention.ip_days` (30); `crawl_episodes` older than `retention.crawl_days`
-    (90); `host_minute` older than `retention.host_minute_days` (7); `slow_requests`
+    than `retention.ip_days` (30), and a crawl episode's address (replaced by its
+    salted id); `crawl_episodes` older than `retention.crawl_days` (90); `host_minute` older than `retention.host_minute_days` (7); `slow_requests`
     older than 7 days. Daily aggregates are kept forever. **Built:** the last two
     complete days keep their hourly rows whatever `hourly_days` says (the rollup still
     rebuilds them), so a short retention never erodes a day's total.
@@ -719,7 +722,7 @@ about 48 h), and those answers add `series_granularity: "day"`.
 | `POST library/rescan` | `{ok:true, scanning:true}`; 409 while analytics are off |
 | `GET health` | time series `status` (keys `2xx`..`5xx`); `errors[]{status,protocol,method,category,count}`; `auth_failures{t,values,top_ips[]{ip,country,count,usernames[]},top_usernames[]{username,count},ip_days}` (the counts and `errors[]` cover the whole range, from the daily rollups past the hourly and IP retention; `top_ips` and `top_usernames` only the last `ip_days`); `latency[]{protocol,method,category,requests,p50_ms,p95_ms,p99_ms,ttfb_p50_ms,ttfb_p95_ms}`; `slow[]{at,method,path,status,ms,principal}` (no protocol: the UI reads it off the method and path as the classifier does); `efficiency{not_modified,saved_bytes,gzip_raw_bytes,gzip_sent_bytes,aborted,aborted_bytes,resumed,est_bytes_out}` |
 | `GET host?range=24h\|7d\|30d` (another range: 400) | `resolution` (`minute` for 24h, `hour` beyond; `range.granularity` says `hour` for both, the browser's local time), `step` (60 or 3600); time series `rss`, `rss_max`, `cpu_pct`, `cpu_max`, `connections_max`, `inflight_max`, whose values are **null** where there is no reading (the server was down), never 0; `now{rss,peak_rss,cpu_pct (null before the second sample),connections,inflight,host_total,host_available (null on macOS),reading_queue (synced-file events waiting for the reading worker now),reading_queued_total (since start),reading_dropped,collector_dropped}`; `platform_supported{rss,cpu}` |
-| `GET crawlers` | `thresholds{window_hours,min_series,min_coverage}`, `catalog_series`, `episodes[]{id,ip,country,principals[],client,user_agent,kind,started_at,last_at,series,volumes,catalog_series,coverage,bytes_out,requests,status,active}` (newest first, at most 500), `by_ip[]{ip,country,episodes,last_at,bytes_out}`, `episodes_per_day{t,granularity:"day",series[episodes]}`, `tracking{ips,max_ips,entries,max_entries,approx_bytes}` |
+| `GET crawlers` | `thresholds{window_hours,min_series,min_coverage}`, `catalog_series`, `episodes[]{id,ip,ip_hashed,country,principals[],client,user_agent,kind,started_at,last_at,series,volumes,catalog_series,coverage,bytes_out,requests,status,active}` (newest first, at most 500), `by_ip[]{ip,ip_hashed,country,episodes,last_at,bytes_out}` (`ip_hashed`: past `ip_days` `ip` is the salted id of the address), `episodes_per_day{t,granularity:"day",series[episodes]}`, `tracking{ips,max_ips,entries,max_entries,approx_bytes}` |
 | `GET clients` | `apps[]`, `clients[]`, `browsers[]`, `os[]`, `protocols[]`, `dav_clients[]`, `dav_apps[]` each `{key,label,requests,bytes_out,principals}` (distinct visitors within `principals_days`, the IP retention); `origins[]{origin,requests,hosted_reader}`; `by_app{t,series}` (daily); `totals{requests,bytes_out}` |
 | `GET geo` | `geo_enabled` (analytics and geography both on; `enabled` stays the common analytics flag), `status(off\|downloading\|ready\|error)`, `error`, `db{version,downloaded_at,built_at,database_type,size,attribution,attribution_url,license}`, `attribution{text,url,license}`, `checked_at`, `next_check_at`, `countries[]{country (ISO, LAN or ZZ),requests,bytes_out}` |
 | `POST geo/refresh` | `{ok:true, started}`; `started: false, reason: "off"` when geography is off |
@@ -775,7 +778,7 @@ analytics:
   enabled: true
   flush_seconds: 60
   retention:
-    ip_days: 30          # raw client IPs (ip_daily, anon_ips, auth_failures, slow requests)
+    ip_days: 30          # raw client IPs (ip_daily, anon_ips, auth_failures, slow requests, crawl episodes)
     hourly_days: 90      # hourly traffic and latency rows (daily rows are kept forever)
     host_minute_days: 7
     crawl_days: 90
