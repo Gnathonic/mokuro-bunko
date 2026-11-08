@@ -476,7 +476,11 @@ fn safe_relative(p: &Path) -> bool {
 fn unpack_zip(archive: &Path, binary: &str, un: &mut Unpacked) -> Result<(), UpdateError> {
     let mut zip = zip::ZipArchive::new(std::fs::File::open(archive)?)
         .map_err(|e| UpdateError::Unpack(e.to_string()))?;
-    let names: Vec<String> = zip.file_names().map(str::to_string).collect();
+    let names: Vec<String> = zip
+        .file_names()
+        .map(|n| n.map(|n| n.into_owned()))
+        .collect::<Result<_, _>>()
+        .map_err(|e| UpdateError::Unpack(e.to_string()))?;
     let find = |file: &str| {
         names
             .iter()

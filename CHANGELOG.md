@@ -589,6 +589,19 @@
   them, uploading each leg's results and logs. It also runs on pushes to
   `0.8/remote-storage`. A PR that bumps `interop/reader.ref` is how a new reader is
   taken in.
+- **Archives made on macOS keep their real member names.** Archive Utility writes UTF-8
+  names without marking them as UTF-8. Damage reports from upload and processor
+  verification now show those names as written instead of as mojibake, and on a local
+  library a new cover for such an archive is the first image by its real names (covers
+  already made are kept). A cloud library still picks by the names as Python's zipfile
+  reads them.
+- **A member that inflates past its declared size is damaged.** Processor verification
+  passed such a member when its checksum matched; it now reports it as damaged, as the
+  upload check already did.
+- **An upload whose zip directory has a malformed extra field is refused as damaged.**
+  An extra field that runs past its directory entry used to be ignored at upload. The
+  library's own archive reader already refused nearly every such archive.
+- **Dependency updates**: zip 9, rcgen 0.14, windows 0.62, windows-sys 0.61.
 
 ### Fixed
 - **The numbered-OCR clean-up decides from the folder listing whether a name is free.**
@@ -806,6 +819,11 @@
   one Bunko had never seen, Bunko restarted as if its folder had been removed and held
   the library for the admin. It now checks the folder the reader kept, and when
   everything its own held is there, drops its emptied folder quietly.
+- **Uploads with a stale Unicode name field are accepted.** Some zip tools store a
+  second, UTF-8 copy of each member's name (the Info-ZIP Unicode Path field). When that
+  copy no longer matched the name, upload verification refused the whole archive as "not
+  a readable zip", although the library reads it. A copy that does not match is now
+  ignored, as the library's own reader does.
 
 ### Known limits
 - **Merging duplicate folders on Google Drive can trash files Bunko cannot see.**

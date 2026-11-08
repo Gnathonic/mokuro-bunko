@@ -620,7 +620,8 @@ async fn run_connection(
     });
     // The install's end re-registers (done, or a failure that cleared) or says the
     // processor is available after all (failed). It may have changed since the
-    // registration.
+    // registration. A watch keeps only the latest value, so a failure that cleared
+    // quickly can look like running straight to none: that is an end too.
     let failed_view = |v: Option<&bunko_proto::OcrInstall>| {
         v.is_some_and(|i| i.failed() || i.state == bunko_proto::OcrInstall::MISSING)
     };
@@ -635,7 +636,7 @@ async fn run_connection(
         let done = now
             .as_ref()
             .is_some_and(|i| i.state == bunko_proto::OcrInstall::DONE);
-        if done || (install_failed && now.is_none()) {
+        if done || ((install_failed || install_running) && now.is_none()) {
             installed_already = true;
         } else if install_running && !now.as_ref().is_some_and(|i| i.running()) {
             install_running = false;
@@ -760,8 +761,9 @@ async fn run_connection(
                 let running = now.as_ref().is_some_and(|i| i.running());
                 let done = now.as_ref().is_some_and(|i| i.state == bunko_proto::OcrInstall::DONE);
                 // Installed (whether or not the registration said "installing"), or a
-                // failure cleared: register again with what this processor runs now.
-                if done || (install_failed && now.is_none()) {
+                // failure cleared (seen, or skipped over: running straight to none):
+                // register again with what this processor runs now.
+                if done || ((install_failed || install_running) && now.is_none()) {
                     break Ended::Installed;
                 }
                 if install_running && !running {

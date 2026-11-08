@@ -37,8 +37,8 @@ fn real_pages(src: &Path, n: usize) -> Vec<(String, Vec<u8>)> {
     let mut z = zip::ZipArchive::new(std::fs::File::open(src).unwrap()).unwrap();
     let mut names: Vec<String> = z
         .file_names()
+        .map(|n| n.unwrap().into_owned())
         .filter(|n| n.ends_with(".webp") || n.ends_with(".jpg") || n.ends_with(".png"))
-        .map(str::to_string)
         .collect();
     names.sort();
     names
