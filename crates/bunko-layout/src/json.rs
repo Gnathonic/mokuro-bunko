@@ -199,6 +199,7 @@ impl Value {
             s: text.as_bytes(),
             text,
             i: 0,
+            depth: 0,
         };
         p.ws();
         let v = p.value()?;
@@ -278,10 +279,16 @@ pub(crate) fn write_string(out: &mut String, s: &str) {
     out.push('"');
 }
 
+/// Objects and arrays nested deeper than this are refused, as by bunko-library's pyjson
+/// (Python raises `RecursionError` near 1000). The parser recurses once per level, so
+/// without a limit an uploaded sidecar of nested `[` overflows the stack and aborts.
+const MAX_DEPTH: usize = 512;
+
 struct Parser<'a> {
     s: &'a [u8],
     text: &'a str,
     i: usize,
+    depth: usize,
 }
 
 impl Parser<'_> {
@@ -313,8 +320,19 @@ impl Parser<'_> {
             return Err(self.err("expecting value"));
         };
         match b {
-            b'{' => self.object(),
-            b'[' => self.array(),
+            b'{' | b'[' => {
+                if self.depth >= MAX_DEPTH {
+                    return Err(self.err("nesting too deep"));
+                }
+                self.depth += 1;
+                let v = if b == b'{' {
+                    self.object()
+                } else {
+                    self.array()
+                };
+                self.depth -= 1;
+                v
+            }
             b'"' => Ok(Value::Str(self.string()?)),
             b'n' if self.eat("null") => Ok(Value::Null),
             b't' if self.eat("true") => Ok(Value::Bool(true)),
@@ -642,5 +660,34 @@ mod tests {
         assert!(Value::parse("{} x").is_err());
         assert!(Value::parse("\"a\u{1}\"").is_err());
         assert!(Value::parse("01").is_err());
+    }
+
+    #[test]
+    fn nesting_is_limited_like_pyjson() {
+        let nest = |depth: usize| format!("{}{}", "[".repeat(depth), "]".repeat(depth));
+        assert!(Value::parse(&nest(MAX_DEPTH)).is_ok());
+        let err = Value::parse(&nest(MAX_DEPTH + 1)).unwrap_err();
+        assert!(err.message.contains("nesting too deep"), "{}", err.message);
+        // Siblings do not add up: depth is per path, not per document.
+        let wide = format!("[{}]", vec![nest(MAX_DEPTH - 1); 3].join(","));
+        assert!(Value::parse(&wide).is_ok());
+        let objects = format!("{}1{}", r#"{"a":"#.repeat(MAX_DEPTH), "}".repeat(MAX_DEPTH));
+        assert!(Value::parse(&objects).is_ok());
+    }
+
+    /// An uploaded sidecar of 100k nested `[` recursed once per level and overflowed the
+    /// stack, which aborts the process. Run on a 2 MiB stack, a tokio blocking thread's.
+    #[test]
+    fn a_deeply_nested_document_is_refused_not_a_crash() {
+        let depth = 100_000;
+        let text = format!("{}{}", "[".repeat(depth), "]".repeat(depth));
+        let mixed = format!("{}{}", r#"{"a":["#.repeat(depth), "]}".repeat(depth));
+        let refused = std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(move || Value::parse(&text).is_err() && Value::parse(&mixed).is_err())
+            .unwrap()
+            .join()
+            .unwrap();
+        assert!(refused);
     }
 }

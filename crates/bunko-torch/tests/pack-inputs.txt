@@ -22,7 +22,7 @@ afec91406ad9352c231b1a9a5b7e5a68122d30e1261a987c5583aeb6ea765772  crates/bunko-o
 eda6cc04a0779dbaabd24722164b20b22c85a8cd2e3112dcead90652f6bf1112  crates/bunko-ocr/src/models_release.rs
 981c0ba33381d0fe88bb89a5c389a31a824825021b35a463e3b2c65fb592a420  crates/bunko-ocr/src/natsort.rs
 6553af4fe782d27f828625eade191cbf2f4278f112f6d998bfef0ea8bf9016c2  crates/bunko-ocr/src/natsort_tables.rs
-088f8e26e413cb6da11d5a72d2e5f664edf8f5653e6e4fce62ca0607007595e6  crates/bunko-ocr/src/pages.rs
+0e89060afb2d8cdbceae57ce346209481e29404c9f9687aa97434abb2a554eea  crates/bunko-ocr/src/pages.rs
 634aee745667ac11b1c7deca921b7927ab51233a1badcda0d56a276dac406b3e  crates/bunko-ocr/src/ppocr/contours.rs
 7026f5701231439f714c6ba52c6658c89f644801a8a61224eae11e87e6d0f1e6  crates/bunko-ocr/src/ppocr/ctc.rs
 195f73558cfaa5d0a7c40f44b5435e14908b9acc4779a05d3b684358be2bc21a  crates/bunko-ocr/src/ppocr/cv_golden.rs
