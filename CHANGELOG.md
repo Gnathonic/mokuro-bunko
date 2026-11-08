@@ -1,5 +1,41 @@
 # Changelog
 
+## [0.7.11] - 2026-11-07
+
+A crafted WebDAV request, OCR file or archive can no longer stop the server, and
+processors no longer trust distrusted certificate authorities.
+
+### Security
+- **Deeply nested DAV request bodies are refused.** A PROPFIND, PROPPATCH or LOCK body
+  nested tens of thousands of elements deep (a few hundred KiB, within the 1 MiB body
+  limit) overflowed the stack and stopped the whole server. With anonymous browsing on (the
+  default), one request from anyone could do it. Bodies nested deeper than 256 elements
+  are now a `400 Bad Request`. Real DAV clients nest a few levels.
+- **A deeply nested `.mokuro` file no longer stops the server at startup.** The startup
+  sweep of damaged OCR files reads a file serde cannot (one holding `NaN`, which Python
+  allows) with a second parser that recursed once per level. An account that can upload
+  could put a file there that overflowed the stack and stopped the server at every start
+  until it was removed by hand. That parser now refuses nesting deeper than 512, as the
+  library's own reader does, and the sweep removes such a file as damaged.
+- **A damaged or crafted archive no longer stops OCR.** The OCR page reader trusted an
+  archive's own zip64 entry count and record offsets. An archive claiming billions of
+  entries, or placing its zip64 records where none can be, made a memory allocation fail,
+  which ends the process. The full build runs OCR inside the server, so an account that
+  can upload could stop the server whenever OCR reached that volume, and a remote
+  processor the same way. Such archives are now refused as damaged, and a page declaring
+  more than 256 MiB is skipped like any other unreadable page.
+- **Distrusted emSign certificate authorities are no longer trusted.** The bundled root
+  store (webpki-roots 1.0.11) drops the emSign root whose intermediate keys were
+  compromised, and rustls-webpki 0.103.16 stops accepting distrusted intermediates.
+  Processors check the library's certificate against these roots by
+  default and sign in with their account password, so before this release someone on the
+  network path could have posed as the library. If your processors connect over networks
+  you don't trust, change their account passwords after updating.
+- **Dependency updates**: rustls 0.23.46, tokio 1.54.1, zstd 0.13.4 (zstd-safe 7.4.0,
+  zstd-sys 2.1.2).
+- **Docker image**: the runtime image installs Debian's security updates (it had a zlib
+  with two fixed CVEs).
+
 ## [0.7.10] - 2026-11-07
 
 Covers uploaded with a volume are kept again; the catalog shows a changed cover at once.
