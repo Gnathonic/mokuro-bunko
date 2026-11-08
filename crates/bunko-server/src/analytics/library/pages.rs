@@ -422,7 +422,7 @@ mod tests {
         let mut buf = Cursor::new(Vec::new());
         {
             let mut zw = zip::ZipWriter::new(&mut buf);
-            zw.set_comment("x".repeat(4000));
+            zw.set_comment("x".repeat(4000)).unwrap();
             zw.start_file("a.webp", SimpleFileOptions::default())
                 .unwrap();
             zw.write_all(WEBP).unwrap();

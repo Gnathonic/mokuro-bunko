@@ -641,7 +641,9 @@ pub enum Cover {
 
 /// `_extract_cover_image_data`: the first name in code-point order whose suffix is
 /// an image suffix (directories, `__MACOSX` and the embedded `<stem>.webp` included,
-/// as in 0.5.2).
+/// as in 0.5.2). Names are the zip crate's: UTF-8 when the bytes are UTF-8, CP437
+/// otherwise (0.5.2 took flag-less names as CP437 even when they were UTF-8); a
+/// name it cannot decode is not a candidate.
 ///
 /// On a cloud library the archive is read with `bunko_library`'s central-directory
 /// reader: the directory at the tail plus the one member, a few ranged reads. The
@@ -659,16 +661,17 @@ pub fn cover_image(cbz: &Path) -> Cover {
         Ok(z) => z,
         Err(e) => return Cover::None(e.to_string()),
     };
-    let mut names: Vec<String> = zip
+    let mut names: Vec<(String, usize)> = zip
         .file_names()
-        .filter(|n| COVER_EXTENSIONS.contains(&suffix_lower(n).as_str()))
-        .map(str::to_string)
+        .enumerate()
+        .filter_map(|(index, name)| Some((name.ok()?.into_owned(), index)))
+        .filter(|(n, _)| COVER_EXTENSIONS.contains(&suffix_lower(n).as_str()))
         .collect();
     names.sort();
-    let Some(first) = names.into_iter().next() else {
+    let Some((_, first)) = names.into_iter().next() else {
         return Cover::None("no image".into());
     };
-    let mut member = match zip.by_name(&first) {
+    let mut member = match zip.by_index(first) {
         Ok(m) => m,
         Err(e) => return Cover::None(e.to_string()),
     };
@@ -685,9 +688,12 @@ pub fn cover_image(cbz: &Path) -> Cover {
     }
 }
 
-/// [`cover_image`] through the central directory only: the same member (the first
-/// sorted image name; of duplicate names the last entry, as the `zip` crate keeps)
-/// and the same size cap.
+/// [`cover_image`] through the central directory only: the first sorted image name (of
+/// duplicate names the last entry, as the `zip` crate keeps) and the same size cap.
+/// Names decode as everywhere this reader is used, as CPython's `zipfile` does: a name
+/// without the UTF-8 flag is CP437 even when its bytes are UTF-8 (macOS Archive
+/// Utility's), which the `zip` crate reads as UTF-8, so the non-ASCII image names of
+/// such an archive can sort differently here.
 fn cover_image_zipdir(cbz: &Path) -> Cover {
     use bunko_library::archive::zipdir;
     let entries = match zipdir::list_entries(cbz) {
@@ -2740,5 +2746,86 @@ mod tests {
             SidecarCheck::TooLarge
         );
         assert_eq!(check_sidecar_capped(&plain, 4 << 20), SidecarCheck::Invalid);
+    }
+
+    /// `data` with member `from` renamed to the raw bytes `to` (same length) in its local
+    /// and central headers, and the UTF-8 flag (bit 11) set to `utf8`: the names real
+    /// archives carry that the zip writer cannot write.
+    fn renamed(mut data: Vec<u8>, from: &str, to: &[u8], utf8: bool) -> Vec<u8> {
+        assert_eq!(from.len(), to.len());
+        let (mut i, mut hits) = (0, 0);
+        while i + 46 <= data.len() {
+            let (flags, len, name) = match &data[i..i + 4] {
+                b"PK\x03\x04" => (i + 6, i + 26, i + 30),
+                b"PK\x01\x02" => (i + 8, i + 28, i + 46),
+                _ => {
+                    i += 1;
+                    continue;
+                }
+            };
+            let n = u16::from_le_bytes([data[len], data[len + 1]]) as usize;
+            if &data[name..name + n] == from.as_bytes() {
+                data[name..name + n].copy_from_slice(to);
+                let f = u16::from_le_bytes([data[flags], data[flags + 1]]);
+                let f = if utf8 { f | 0x800 } else { f & !0x800 };
+                data[flags..flags + 2].copy_from_slice(&f.to_le_bytes());
+                hits += 1;
+            }
+            i += 4;
+        }
+        assert_eq!(hits, 2, "{from}: one local and one central header");
+        data
+    }
+
+    /// Member names in every encoding real archives use, none of them a valid flagged
+    /// UTF-8 name: Shift-JIS and CP437 without the flag, UTF-8 without the flag (macOS
+    /// Archive Utility), and bytes that are not UTF-8 under the flag.
+    fn odd_names() -> [(&'static str, &'static [u8], bool); 4] {
+        [
+            ("sj.jpg", b"\x83\x41.jpg", false),
+            ("cp.jpg", b"\x80\x81.jpg", false),
+            ("mac.jpg", "\u{30a4}.jpg".as_bytes(), false),
+            ("bd.jpg", b"\xff\xfe.jpg", true),
+        ]
+    }
+
+    fn raw_named_cbz(path: &Path, members: &[(&str, &[u8], bool, &[u8])]) {
+        let plain: Vec<(&str, &[u8])> = members.iter().map(|m| (m.0, m.3)).collect();
+        cbz(path, &plain);
+        let mut bytes = std::fs::read(path).unwrap();
+        for (placeholder, raw, utf8, _) in members {
+            bytes = renamed(bytes, placeholder, raw, *utf8);
+        }
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    /// zip 9's `name()` is fallible and the cover pick passes over a name it cannot
+    /// decode; every real name encoding still decodes, so each is a cover candidate.
+    #[test]
+    fn covers_under_names_in_any_encoding() {
+        let tmp = tempfile::tempdir().unwrap();
+        for (placeholder, raw, utf8) in odd_names() {
+            let path = tmp.path().join(format!("{placeholder}.cbz"));
+            raw_named_cbz(&path, &[(placeholder, raw, utf8, b"the page")]);
+            match cover_image(&path) {
+                Cover::Image(bytes) => assert_eq!(bytes, b"the page", "{placeholder}"),
+                Cover::None(why) => panic!("{placeholder}: no cover ({why})"),
+            }
+        }
+        // UTF-8 names without the flag (macOS Archive Utility) are ordered by what they
+        // say: zip 2 read them as CP437, where "\u{30a2}" (E3 82 A2) sorts after
+        // "\u{30a4}" (E3 82 A4), and took the second page for the cover.
+        let path = tmp.path().join("mac.cbz");
+        raw_named_cbz(
+            &path,
+            &[
+                ("aaa.jpg", "\u{30a4}.jpg".as_bytes(), false, b"second"),
+                ("bbb.jpg", "\u{30a2}.jpg".as_bytes(), false, b"first"),
+            ],
+        );
+        match cover_image(&path) {
+            Cover::Image(bytes) => assert_eq!(bytes, b"first"),
+            Cover::None(why) => panic!("no cover ({why})"),
+        }
     }
 }
