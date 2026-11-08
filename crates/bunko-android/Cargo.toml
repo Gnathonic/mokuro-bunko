@@ -21,7 +21,7 @@ tracing-subscriber.workspace = true
 parking_lot.workspace = true
 # JNI glue (MIT OR Apache-2.0). 0.21 rather than 0.22: the 0.22 API rework is not
 # needed for four static functions.
-jni = { version = "0.21", default-features = false }
+jni = { version = "0.22", default-features = false }
 
 [dev-dependencies]
 tempfile.workspace = true
