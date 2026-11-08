@@ -44,7 +44,7 @@ semver.workspace = true
 # LXQt, Cinnamon, ... and by GNOME with the AppIndicator extension.
 ksni = { version = "0.3.6", default-features = false, features = ["tokio"] }
 # `mokuro-bunko doctor`: is there a session bus and a StatusNotifier host (session.rs).
-zbus = { version = "5", default-features = false, features = ["tokio"] }
+zbus = { version = "6", default-features = false, features = ["tokio"] }
 tokio = { workspace = true }
 
 [target.'cfg(any(windows, target_os = "macos"))'.dependencies]
