@@ -354,10 +354,13 @@ stored path is decoded, cut to 256 characters and has no query.
     for days that are complete, before pruning;
   - prunes hourly rows older than `retention.hourly_days` (90); IP-bearing rows older
     than `retention.ip_days` (30), and a crawl episode's address (replaced by its
-    salted id); `crawl_episodes` older than `retention.crawl_days` (90); `host_minute` older than `retention.host_minute_days` (7); `slow_requests`
-    older than 7 days. Daily aggregates are kept forever. **Built:** the last two
+    salted id); `crawl_episodes` older than `retention.crawl_days` (90); `host_minute`
+    older than `retention.host_minute_days` (7); `slow_requests` older than 7 days. Daily aggregates are kept forever. **Built:** the last two
     complete days keep their hourly rows whatever `hourly_days` says (the rollup still
     rebuilds them), so a short retention never erodes a day's total.
+  - **Built:** deletes the damaged files an open moved aside
+    (`analytics.sqlite.broken-<epoch s>[-<n>]` with their `-wal`/`-shm`) once they were
+    moved `retention.ip_days` ago: they hold raw IPs and the salt like the live file.
 - A crash loses at most one flush window.
 
 ## 5. Tables (`analytics.sqlite`)

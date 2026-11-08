@@ -1671,6 +1671,62 @@ async fn a_damaged_file_is_moved_aside_and_a_new_one_made() {
     );
 }
 
+/// A damaged file moved aside holds raw IPs and the salt: the upkeep deletes it (and
+/// its `-wal` and `-shm`) once it was moved aside `retention.ip_days` (30) ago, and
+/// touches nothing else.
+#[tokio::test]
+async fn moved_aside_files_go_after_the_ip_retention() {
+    let now = bunko_server::analytics::now_s();
+    let (old, young) = (now - 31 * 86400, now - 29 * 86400);
+    let gone = [
+        format!("analytics.sqlite.broken-{old}"),
+        format!("analytics.sqlite.broken-{old}-wal"),
+        format!("analytics.sqlite.broken-{old}-shm"),
+        format!("analytics.sqlite.broken-{old}-1"),
+        format!("analytics.sqlite.broken-{old}-1-wal"),
+    ];
+    let kept = [
+        format!("analytics.sqlite.broken-{young}"),
+        format!("analytics.sqlite.broken-{young}-shm"),
+        format!("analytics.sqlite.broken-{old}.txt"),
+        format!("analytics.sqlite.broken-{old}-x"),
+        format!("mokuro.db.broken-{old}"),
+    ];
+    let env = Env::prepared(
+        |_| {},
+        |storage| {
+            for n in gone.iter().chain(&kept) {
+                std::fs::write(storage.join(n), b"raw IPs").unwrap();
+            }
+        },
+    );
+    env.services.analytics.maintain_at(now).await.unwrap();
+    for n in &gone {
+        assert!(!env.storage.join(n).exists(), "{n} is deleted");
+    }
+    for n in &kept {
+        assert!(env.storage.join(n).exists(), "{n} is kept");
+    }
+    assert!(env.storage.join("analytics.sqlite").exists());
+    // The younger one goes once it is as old.
+    env.services
+        .analytics
+        .maintain_at(now + 2 * 86400)
+        .await
+        .unwrap();
+    assert!(
+        !env.storage
+            .join(format!("analytics.sqlite.broken-{young}"))
+            .exists()
+    );
+    assert!(
+        !env.storage
+            .join(format!("analytics.sqlite.broken-{young}-shm"))
+            .exists()
+    );
+    assert!(env.storage.join("analytics.sqlite").exists());
+}
+
 /// A settings change whose save fails changes nothing: the config, the settings view
 /// and what the layer does agree (it used to say off while still counting).
 /// Unix only: a read-only directory (mode bits) is how the test makes the save fail;

@@ -680,7 +680,9 @@ address (a visitor is one id within such a period only); a day keeps at most 10,
 anonymous visitors apart, the rest count together as `a:other`. A download counts
 toward popularity once most of the file (95 %) was sent that day, so a one-byte range
 probe is no download. If `analytics.sqlite` is damaged (SQLite or its `quick_check`
-says so) it is moved aside as `analytics.sqlite.broken-<time>` and a new one is made;
+says so) it is moved aside as `analytics.sqlite.broken-<time>` and a new one is made
+(the moved file holds raw IPs too, so the hourly upkeep deletes it once it is
+`retention.ip_days` old);
 if it is healthy but cannot be opened (locked by another process, read-only) it is
 left as it is and the analytics are kept in memory for that run. The client
 IP is the one the server resolves, so `server.trusted_proxies` applies. Byte counts

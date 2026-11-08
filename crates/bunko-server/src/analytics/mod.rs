@@ -175,6 +175,53 @@ fn move_aside(path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
     Ok(aside)
 }
 
+/// When `name` is one of the files [`move_aside`] makes of `file` (the main file, its
+/// `-wal` or its `-shm`): the epoch seconds it was moved aside.
+fn moved_aside_at(file: &str, name: &str) -> Option<i64> {
+    let rest = name.strip_prefix(file)?.strip_prefix(".broken-")?;
+    let rest = rest
+        .strip_suffix("-wal")
+        .or_else(|| rest.strip_suffix("-shm"))
+        .unwrap_or(rest);
+    let (ts, n) = rest.split_once('-').unwrap_or((rest, "0"));
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    (digits(ts) && digits(n)).then(|| ts.parse().ok()).flatten()
+}
+
+/// Delete what [`move_aside`] kept beside `path` once it was moved aside `ip_days` or
+/// more ago: a damaged file holds raw IPs and the salt like the live one, so it is kept
+/// no longer than the live file keeps its raw IPs. Returns how many files went.
+fn remove_old_moved_aside(path: &std::path::Path, now_s: i64, ip_days: u32) -> usize {
+    let (Some(dir), Some(file)) = (path.parent(), path.file_name()) else {
+        return 0;
+    };
+    let file = file.to_string_lossy();
+    let Ok(entries) = bunko_store::fs::read_dir(dir) else {
+        return 0;
+    };
+    let cut = now_s - i64::from(ip_days) * 86_400;
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !moved_aside_at(&file, &name).is_some_and(|at| at <= cut) {
+            continue;
+        }
+        match bunko_store::fs::remove_file(entry.path()) {
+            Ok(()) => removed += 1,
+            Err(e) => tracing::warn!(
+                "[ANALYTICS] cannot delete {} (a damaged analytics file older than the IP retention): {e}",
+                entry.path().display()
+            ),
+        }
+    }
+    if removed > 0 {
+        tracing::info!(
+            "[ANALYTICS] deleted {removed} damaged analytics file(s) moved aside more than {ip_days} days ago (they held raw IPs)"
+        );
+    }
+    removed
+}
+
 /// Epoch seconds now.
 pub fn now_s() -> i64 {
     SystemTime::now()
@@ -410,11 +457,20 @@ impl Analytics {
         .map_err(anyhow::Error::from)
     }
 
-    /// Roll up and prune as of `now_s` (the hourly upkeep; tests pass a future time).
+    /// Roll up and prune as of `now_s` (the hourly upkeep; tests pass a future time),
+    /// and delete the damaged files moved aside `retention.ip_days` ago.
     pub async fn maintain_at(&self, now_s: i64) -> anyhow::Result<MaintainStats> {
         let db = self.0.db.clone();
         let retention = retention_of(&self.config());
+        let path = self
+            .0
+            .deps
+            .core
+            .layout
+            .database()
+            .with_file_name(bunko_db::analytics::FILE_NAME);
         Ok(tokio::task::spawn_blocking(move || {
+            remove_old_moved_aside(&path, now_s, retention.ip_days);
             let stats = db.maintain(now_s, &retention)?;
             // The prune may have been the biggest write of the day: cut the WAL.
             db.checkpoint()?;
