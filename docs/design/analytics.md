@@ -446,7 +446,8 @@ per-user path resolution and `bunko_store::fs`) on a `spawn_blocking` thread, on
 at a time. **Built:** size caps per kind instead of one 32 MiB cap, so a crafted file
 stays bounded in the 1 GB lite build: `positions.json` 4 MiB, a history file 16 MiB
 (also its inflated JSON), `volume-data.json` 32 MiB, `device.json` 64 KiB; at most
-20 000 positions, 100 000 volume-data records, 250 000 segment rows and 64 devices per
+20 000 positions, 100 000 volume-data records, 250 000 segment rows (and as many
+entries in each of a segment's `volumes` and `targets` dictionaries) and 64 devices per
 account. Skipped and refused files are counted (`reading.worker` in the API).
 
 - **`positions.json`** `{"version":1,"positions":{"<volume_uuid>":[t_ms, page, chars,

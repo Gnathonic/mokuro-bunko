@@ -26,8 +26,9 @@
 //! too large for a double in a cell nobody reads (`1e400`, which `JSON.parse` turns into
 //! `Infinity`); the reader's encoder writes neither.
 //!
-//! Bounded: at most [`MAX_INFLATED`] bytes of JSON (a small upload can inflate to a lot)
-//! and [`MAX_EVENTS`] rows, so one file costs a few tens of MiB at worst.
+//! Bounded: at most [`MAX_INFLATED`] bytes of JSON (a small upload can inflate to a lot),
+//! [`MAX_EVENTS`] rows and as many entries in each dictionary (the reader's encoder
+//! names only what its rows read), so one file costs a few tens of MiB at worst.
 
 use serde::Deserializer as _;
 use serde::de::{self, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
@@ -54,7 +55,8 @@ const CELLS: usize = 13;
 pub enum SegmentError {
     /// Not raw deflate, or not JSON (`unreadable segment`).
     Unreadable(String),
-    /// More than [`MAX_INFLATED`] bytes, or [`MAX_EVENTS`] rows (this port's bound).
+    /// More than [`MAX_INFLATED`] bytes, or [`MAX_EVENTS`] rows or dictionary entries
+    /// (this port's bound).
     TooLarge,
     /// `format` is not 1 (a newer reader's file).
     UnsupportedFormat,
@@ -232,6 +234,7 @@ impl Segment {
 pub struct Options {
     /// Keep every `page_chars` value (the sums are always kept).
     pub keep_page_chars: bool,
+    /// Most rows, and most entries in each of `volumes` and `targets`.
     pub max_events: usize,
     pub max_inflated: usize,
 }
@@ -333,6 +336,8 @@ enum List {
     #[default]
     Absent,
     Items(Vec<Scalar>),
+    /// An array of more entries than the bound: none were kept.
+    TooLong,
     NotArray,
 }
 
@@ -561,7 +566,7 @@ impl Parsed {
         if self.format != Scalar::Num(FORMAT) {
             return Err(SegmentError::UnsupportedFormat);
         }
-        if self.too_many {
+        if self.too_many || self.volumes == List::TooLong || self.targets == List::TooLong {
             return Err(SegmentError::TooLarge);
         }
         let header_error = Malformed("malformed segment header");
@@ -582,7 +587,7 @@ impl Parsed {
         };
         let targets: Vec<String> = match self.targets {
             List::Absent => Vec::new(),
-            List::NotArray => return Err(header_error),
+            List::NotArray | List::TooLong => return Err(header_error),
             List::Items(items) => items
                 .into_iter()
                 .map(|t| match t {
@@ -700,8 +705,8 @@ impl<'de> Visitor<'de> for TopVisitor<'_> {
                 "last_seq" => p.last_seq = map.next_value_seed(ScalarSeed)?,
                 "count" => p.count = map.next_value_seed(ScalarSeed)?,
                 "legacy" => p.legacy = map.next_value_seed(ScalarSeed)?,
-                "volumes" => p.volumes = map.next_value_seed(ListSeed)?,
-                "targets" => p.targets = map.next_value_seed(ListSeed)?,
+                "volumes" => p.volumes = map.next_value_seed(ListSeed(p.max_events))?,
+                "targets" => p.targets = map.next_value_seed(ListSeed(p.max_events))?,
                 "rows" => {
                     // A later "rows" wins, as JSON.parse keeps the last duplicate.
                     p.rows.clear();
@@ -799,16 +804,17 @@ impl<'de> Visitor<'de> for ScalarVisitor {
     }
 }
 
-struct ListSeed;
+/// A dictionary of at most `.0` entries: past it, the rest are only skipped.
+struct ListSeed(usize);
 
 impl<'de> DeserializeSeed<'de> for ListSeed {
     type Value = List;
     fn deserialize<D: de::Deserializer<'de>>(self, d: D) -> Result<List, D::Error> {
-        d.deserialize_any(ListVisitor)
+        d.deserialize_any(ListVisitor(self.0))
     }
 }
 
-struct ListVisitor;
+struct ListVisitor(usize);
 
 impl<'de> Visitor<'de> for ListVisitor {
     type Value = List;
@@ -817,10 +823,18 @@ impl<'de> Visitor<'de> for ListVisitor {
     }
     fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<List, A::Error> {
         let mut items = Vec::new();
-        while let Some(s) = seq.next_element_seed(ScalarSeed)? {
-            items.push(s);
+        while items.len() < self.0 {
+            match seq.next_element_seed(ScalarSeed)? {
+                Some(s) => items.push(s),
+                None => return Ok(List::Items(items)),
+            }
         }
-        Ok(List::Items(items))
+        if seq.next_element::<IgnoredAny>()?.is_none() {
+            return Ok(List::Items(items));
+        }
+        drop(items);
+        while seq.next_element::<IgnoredAny>()?.is_some() {}
+        Ok(List::TooLong)
     }
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<List, A::Error> {
         while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
@@ -1383,6 +1397,57 @@ mod tests {
             Err(SegmentError::TooLarge)
         );
         assert!(decode(&deflate(&text.to_string())).is_ok());
+    }
+
+    #[test]
+    fn dictionaries_are_bounded_like_rows() {
+        // A few KiB of `0,0,0,...` inflate to millions of dictionary entries: each
+        // would cost a whole `Scalar`, hundreds of MiB for one small upload. No
+        // reader writes more entries than rows; past the bound the file is refused.
+        for key in ["volumes", "targets"] {
+            let mut text = String::from("{\"format\":1,\"device\":\"d\",\"month\":\"2026-10\",");
+            text.push_str("\"first_seq\":1,\"last_seq\":1,\"count\":0,\"rows\":[],");
+            if key == "targets" {
+                text.push_str("\"volumes\":[\"v\"],");
+            }
+            text.push_str(&format!("\"{key}\":["));
+            text.push_str(&"0,".repeat(MAX_EVENTS * 4));
+            text.push_str("0]}");
+            let bytes = deflate(&text);
+            assert!(bytes.len() < 64 << 10, "{}", bytes.len());
+            assert_eq!(decode(&bytes).err(), Some(SegmentError::TooLarge), "{key}");
+        }
+        // At the bound a dictionary is read; one more entry is refused, whatever the
+        // entries are, and a later duplicate key still wins.
+        let opts = Options {
+            max_events: 3,
+            ..Options::default()
+        };
+        let segment = |volumes: Value| {
+            let text = json!({"format": 1, "device": "d", "month": "2026-10",
+                "first_seq": 1, "last_seq": 1, "count": 1, "volumes": volumes,
+                "rows": [[2, 1, T, 0]]});
+            deflate(&text.to_string())
+        };
+        let s = decode_with(&segment(json!(["v", 1, [2]])), opts).unwrap();
+        assert_eq!(s.volumes, vec![Some("v".into()), None, None]);
+        assert_eq!(
+            decode_with(&segment(json!(["v", 1, [2], "w"])), opts),
+            Err(SegmentError::TooLarge)
+        );
+        let text = format!(
+            "{{\"format\":1,\"device\":\"d\",\"month\":\"2026-10\",\"first_seq\":1,\
+             \"last_seq\":1,\"count\":1,\"volumes\":[0,0,0,0],\"volumes\":[\"v\"],\
+             \"rows\":[[2,1,{T},0]]}}"
+        );
+        assert!(decode_with(&deflate(&text), opts).is_ok());
+        let targets = json!({"format": 1, "device": "d", "month": "2026-10",
+            "first_seq": 1, "last_seq": 1, "count": 0, "volumes": [],
+            "targets": ["a", "b", "c", "d"], "rows": []});
+        assert_eq!(
+            decode_with(&deflate(&targets.to_string()), opts),
+            Err(SegmentError::TooLarge)
+        );
     }
 
     #[test]
