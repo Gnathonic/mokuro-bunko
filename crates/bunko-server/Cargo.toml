@@ -39,7 +39,7 @@ x509-parser = "0.16"
 base64.workspace = true
 percent-encoding.workspace = true
 reqwest.workspace = true
-which = "7"
+which = "8"
 # accounts: one-time setup token generation
 rand.workspace = true
 # admin module: update checks/apply, disk usage for /_admin/api/status
