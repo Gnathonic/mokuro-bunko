@@ -423,14 +423,15 @@
     // Rendering frame
     // ------------------------------------------------------------------
 
-    // The current view's function in a table of views (CONTROLS, RENDER), taken only
-    // as the table's own function: state.view comes from the URL hash (checked
-    // against VIEWS on the way in), and an inherited name such as `constructor`
-    // must never be called.
+    // The current view's function in a table of views (CONTROLS, RENDER). state.view
+    // comes from the URL hash (checked against VIEWS on the way in); the table is
+    // indexed only by the id of the VIEWS entry it equals, never by that text, and
+    // only an own function counts, so an inherited name such as `constructor` can
+    // never be called.
     function viewEntry(table) {
-        const name = state.view;
-        if (!Object.prototype.hasOwnProperty.call(table, name)) return null;
-        const fn = table[name];
+        const view = VIEWS.find((v) => v.id === state.view);
+        if (!view || !Object.prototype.hasOwnProperty.call(table, view.id)) return null;
+        const fn = table[view.id];
         return typeof fn === 'function' ? fn : null;
     }
 
