@@ -18,6 +18,9 @@
 - **A member that inflates past its declared size is damaged.** Processor verification
   passed such a member when its checksum matched; it now reports it as damaged, as the
   upload check already did.
+- **An upload whose zip directory has a malformed extra field is refused as damaged.**
+  An extra field that runs past its directory entry used to be ignored at upload. The
+  library's own archive reader already refused nearly every such archive.
 - **Dependency updates**: zip 9, rcgen 0.14, windows 0.62, windows-sys 0.61.
 
 ## [0.7.11] - 2026-11-07
