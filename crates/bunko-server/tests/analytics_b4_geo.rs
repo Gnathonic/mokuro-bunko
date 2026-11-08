@@ -736,4 +736,28 @@ async fn the_database_is_downloaded_over_https_only() {
     a.geo().update_now(a, true).await.unwrap();
     assert!(env.mmdb().exists());
     assert_eq!(env.country("203.0.113.10").as_deref(), Some("JP"));
+
+    // The settings accept an HTTPS URL with whitespace around it (their check trims
+    // it), and so does the download.
+    let spaced = format!("  {base}/mirror/db-{{year}}-{{month}}.mmdb.gz \n");
+    let body = json!({"geo": {"url": spaced}}).to_string();
+    let (status, answer) = env
+        .call(
+            Some("boss"),
+            "PUT",
+            "/_admin/api/settings/analytics",
+            FIREFOX,
+            body.as_bytes(),
+            "127.0.0.1",
+        )
+        .await;
+    assert!(
+        status.is_success(),
+        "{status} {}",
+        String::from_utf8_lossy(&answer)
+    );
+    let env = Env::new(Some(&spaced));
+    let a = &env.services.analytics;
+    a.geo().update_now(a, true).await.unwrap();
+    assert!(env.mmdb().exists());
 }

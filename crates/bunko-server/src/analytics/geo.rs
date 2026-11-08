@@ -101,20 +101,43 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_REDIRECTS: usize = 10;
 
 /// Certificates the download trusts beside the usual roots: only ever a test's own
-/// local HTTPS server ([`trust_for_tests`]); empty in a real server.
+/// local HTTPS server ([`trust_for_tests`]). Built only with the `testing` feature
+/// (and in this crate's tests): a release server has no way to add a root.
+#[cfg(any(test, feature = "testing"))]
 static EXTRA_ROOTS: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
 
 /// Make the download client of every [`Geo`] made afterwards trust `der` (a DER
 /// certificate): integration tests serve the database over HTTPS from 127.0.0.1
-/// with a self-signed certificate, since nothing else is downloaded.
+/// with a self-signed certificate, since nothing else is downloaded. Only in a
+/// `testing` build.
+#[cfg(any(test, feature = "testing"))]
 #[doc(hidden)]
 pub fn trust_for_tests(der: Vec<u8>) {
     EXTRA_ROOTS.lock().push(der);
 }
 
+/// The download client with the test roots added ([`trust_for_tests`]).
+#[cfg(any(test, feature = "testing"))]
+fn with_test_roots(mut builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
+    for der in EXTRA_ROOTS.lock().iter() {
+        if let Ok(cert) = reqwest::Certificate::from_der(der) {
+            builder = builder.add_root_certificate(cert);
+        }
+    }
+    builder
+}
+
+/// A build without the `testing` feature trusts the usual roots only.
+#[cfg(not(any(test, feature = "testing")))]
+fn with_test_roots(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
+    builder
+}
+
 /// Is `url` an `https://` URL (the only kind the database is downloaded from)?
+/// Surrounding whitespace is ignored, as the settings' check ignores it.
 pub fn is_https(url: &str) -> bool {
-    url.get(..8)
+    url.trim()
+        .get(..8)
         .is_some_and(|p| p.eq_ignore_ascii_case("https://"))
 }
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(600);
@@ -236,7 +259,7 @@ impl Geo {
         };
         // HTTPS only, redirects included: the database decides every visitor's
         // country, so nobody on the path may swap it.
-        let mut builder = reqwest::Client::builder()
+        let builder = reqwest::Client::builder()
             .https_only(true)
             .redirect(reqwest::redirect::Policy::custom(|attempt| {
                 if attempt.url().scheme() != "https" {
@@ -254,11 +277,7 @@ impl Geo {
                 env!("CARGO_PKG_VERSION"),
                 " (+https://github.com/Gnathonic/mokuro-bunko)"
             ));
-        for der in EXTRA_ROOTS.lock().iter() {
-            if let Ok(cert) = reqwest::Certificate::from_der(der) {
-                builder = builder.add_root_certificate(cert);
-            }
-        }
+        let builder = with_test_roots(builder);
         // A client that cannot be built downloads nothing (every request fails),
         // rather than falling back to one without the HTTPS rule.
         let client = builder.build().unwrap_or_else(|e| {
@@ -531,6 +550,8 @@ fn with_causes(e: &dyn std::error::Error) -> String {
 
 /// GET `url` into memory, at most [`MAX_BYTES`].
 async fn fetch(client: &reqwest::Client, url: &str) -> Result<Fetch, String> {
+    // The settings accept the URL with whitespace around it (their check trims it).
+    let url = url.trim();
     if !is_https(url) {
         return Err("the download URL must be an https:// URL".into());
     }
