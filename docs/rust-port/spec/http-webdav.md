@@ -376,7 +376,8 @@ Predicates (`auth.py:114-165`), all on the path with `"/" + path.strip("/")` nor
   matched in any case (0.8: `History/` and `Goals.json` ARE the caller's `history/` and `goals.json`;
   PathCase rewrites the first segment to the canonical spelling before auth, and the physical path
   is built from the canonical name; a library folder spelled like one is hidden and named by
-  doctor). `is_progress_path` covers all of
+  doctor; 0.7.8 backported these names to the 0.7 line, where they match exactly and
+  case-sensitively and `History/` is a library series). `is_progress_path` covers all of
   them: PUT, MKCOL and DELETE there need `WRITE_PROGRESS` (so `registered` keeps its own history);
   MOVE, COPY, LOCK, UNLOCK and PROPPATCH on or into `history` are refused (403, 401 anonymous).
 * `is_inbox_path`, `is_admin_path` (`startswith("/_admin")`), `is_processor_path`

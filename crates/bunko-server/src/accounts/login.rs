@@ -531,7 +531,7 @@ async fn me(State(d): State<AccountsDeps>, client: Client, headers: HeaderMap) -
                 // The layer ids each account keeps its own copy of (D27): a reader
                 // pushes its corrections only when `edit` is listed.
                 "per_user_layers": bunko_core::sidecar_names::per_user_layers(),
-                // Reported only by builds that keep history per account (0.8.0 on): a
+                // Reported only by builds that keep history per account (0.7.8 on): a
                 // reader turns history sync on from the numeric core.
                 "version": bunko_core::VERSION,
             }),

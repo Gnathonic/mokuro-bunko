@@ -1,0 +1,78 @@
+# Dependabot version updates. Security updates are enabled separately in the
+# repo settings and still apply to every ecosystem below, including the ones
+# with `open-pull-requests-limit: 0` (that setting only turns off routine
+# version-bump PRs).
+#
+# `cooldown` holds back routine bumps until a release is a week old, which
+# gives time for a compromised or broken release to be yanked. Security
+# updates ignore the cooldown.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directories:
+      - "/"
+      - "/packaging/docker-init"
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    ignore:
+      # These are pinned exactly to the OCR pack ABI (onnxruntime / libtorch).
+      # Moving them means rebuilding and re-blessing the packs (PACKAGING.md),
+      # so they are bumped by hand, not by bot.
+      - dependency-name: ort
+      - dependency-name: tch
+      - dependency-name: torch-sys
+    groups:
+      cargo-minor-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: docker
+    directories:
+      - "/deploy/docker"
+      - "/tools/torch_export/docker"
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    groups:
+      docker:
+        patterns: ["*"]
+
+  - package-ecosystem: gradle
+    directory: "/packaging/android"
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7
+    groups:
+      android:
+        patterns: ["*"]
+
+  # The export toolchains are pinned to exact torch/CUDA builds that define the
+  # pack ABI, so routine bumps are off; security updates still apply.
+  - package-ecosystem: pip
+    directory: "/tools/torch_export"
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 0
+
+  - package-ecosystem: uv
+    directory: "/tools/onnx_export"
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 0
