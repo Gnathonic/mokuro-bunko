@@ -66,6 +66,15 @@ async fn deeply_nested_bodies_are_400_not_a_crash() {
         .await;
     assert_eq!(r.code(), 400);
 
+    let lock = format!(
+        "<D:lockinfo xmlns:D=\"DAV:\"><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype><D:owner>{}</D:owner></D:lockinfo>",
+        nest(149_000)
+    );
+    let r = env
+        .req(Some("admin"), "LOCK", path, &[], lock.as_bytes())
+        .await;
+    assert_eq!(r.code(), 400);
+
     // A dead property nested deeply, but within the limit, is still kept.
     let ok = format!(
         "<D:propertyupdate xmlns:D=\"DAV:\" xmlns:Z=\"urn:z\"><D:set><D:prop><Z:a>{}</Z:a></D:prop></D:set></D:propertyupdate>",
@@ -93,6 +102,16 @@ async fn deeply_nested_bodies_are_400_not_a_crash() {
         .req(None, "PROPFIND", "/", &[("depth", "0")], PROPFIND_ALLPROP)
         .await;
     assert_eq!(r.code(), 207);
+
+    // The same LOCK body nested a few levels is granted: the 400 above is the depth.
+    let lock = format!(
+        "<D:lockinfo xmlns:D=\"DAV:\"><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype><D:owner>{}</D:owner></D:lockinfo>",
+        nest(3)
+    );
+    let r = env
+        .req(Some("admin"), "LOCK", path, &[], lock.as_bytes())
+        .await;
+    assert_eq!(r.code(), 200, "{}", r.text());
 }
 
 #[tokio::test]
