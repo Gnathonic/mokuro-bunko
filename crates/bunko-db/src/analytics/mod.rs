@@ -244,6 +244,8 @@ impl AnalyticsDb {
     }
 
     /// Run the read-only `f` on a pooled reader (the writer when there is no pool).
+    /// The reader goes back to the pool however `f` ends, a panic included: a lost
+    /// reader would leave every later read waiting for it.
     pub(crate) fn read<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
         if self.reader_count == 0 {
             return f(&self.writer.lock());
@@ -257,10 +259,11 @@ impl AnalyticsDb {
                 self.reader_available.wait(&mut pool);
             }
         };
-        let out = f(&conn);
-        self.readers.lock().push(conn);
-        self.reader_available.notify_one();
-        out
+        let lent = Lent {
+            db: self,
+            conn: Some(conn),
+        };
+        f(lent.conn.as_ref().expect("lent until dropped"))
     }
 
     pub fn meta_get(&self, key: &str) -> Result<Option<String>> {
@@ -408,6 +411,28 @@ pub(crate) fn uint(v: i64) -> u64 {
     u64::try_from(v).unwrap_or(0)
 }
 
+/// A pooled reader out of [`AnalyticsDb::read`]'s pool, put back when dropped.
+struct Lent<'a> {
+    db: &'a AnalyticsDb,
+    conn: Option<Connection>,
+}
+
+impl Drop for Lent<'_> {
+    fn drop(&mut self) {
+        let Some(conn) = self.conn.take() else {
+            return;
+        };
+        // A closure that panicked mid-transaction must not leave its snapshot open.
+        if !conn.is_autocommit()
+            && let Err(e) = conn.execute_batch("ROLLBACK")
+        {
+            tracing::warn!(error = %e, "analytics: a reader's rollback failed");
+        }
+        self.db.readers.lock().push(conn);
+        self.db.reader_available.notify_one();
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod testutil {
     use super::AnalyticsDb;
@@ -422,6 +447,39 @@ pub(crate) mod testutil {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A read whose closure panics gives its reader back: as many panics as there are
+    /// readers used to leave every later read waiting forever.
+    #[test]
+    fn a_panicking_read_gives_its_reader_back() {
+        let (_dir, db) = testutil::temp_db();
+        assert!(db.reader_count > 0);
+        let db = std::sync::Arc::new(db);
+        for _ in 0..db.reader_count {
+            let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                db.read(|c| -> Result<()> {
+                    c.execute_batch("BEGIN")?;
+                    let _: i64 = c.query_row("SELECT COUNT(*) FROM meta", [], |r| r.get(0))?;
+                    panic!("a read closure panics");
+                })
+            }));
+            assert!(caught.is_err());
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let reader = db.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(reader.meta_get(keys::SCHEMA_VERSION).map(|v| v.is_some()));
+        });
+        let got = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("a read after the panics completes");
+        assert!(got.unwrap());
+        assert_eq!(db.readers.lock().len(), db.reader_count);
+        // The panicked closure's transaction did not stay open on its reader.
+        for c in db.readers.lock().iter() {
+            assert!(c.is_autocommit());
+        }
+    }
 
     #[test]
     fn opens_wal_normal_with_every_table_and_a_stable_salt() {
