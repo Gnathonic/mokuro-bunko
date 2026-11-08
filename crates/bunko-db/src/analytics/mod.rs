@@ -225,22 +225,19 @@ impl AnalyticsDb {
     }
 
     /// Run `f` in one write transaction (`BEGIN IMMEDIATE` ... `COMMIT`); an error rolls
-    /// everything back.
+    /// everything back, and so does a panic: a transaction left open on the writer
+    /// would fail every later `BEGIN IMMEDIATE` and hold the reads that share it.
     pub fn write<T>(&self, f: impl FnOnce(&AnalyticsTx<'_>) -> Result<T>) -> Result<T> {
         let conn = self.writer.lock();
         conn.execute_batch("BEGIN IMMEDIATE")?;
-        let outcome = f(&AnalyticsTx { conn: &conn }).and_then(|v| {
-            conn.execute_batch("COMMIT")
+        let open = OpenWrite { conn: &conn };
+        f(&AnalyticsTx { conn: open.conn }).and_then(|v| {
+            open.conn
+                .execute_batch("COMMIT")
                 .map(|()| v)
                 .map_err(DbError::from)
-        });
-        if outcome.is_err()
-            && !conn.is_autocommit()
-            && let Err(e) = conn.execute_batch("ROLLBACK")
-        {
-            tracing::warn!(error = %e, "analytics: rollback failed");
-        }
-        outcome
+        })
+        // `open` drops here (or on unwind) and rolls back whatever did not commit.
     }
 
     /// Run the read-only `f` on a pooled reader (the writer when there is no pool).
@@ -412,6 +409,22 @@ pub(crate) fn uint(v: i64) -> u64 {
 }
 
 /// A pooled reader out of [`AnalyticsDb::read`]'s pool, put back when dropped.
+/// The writer's open transaction: rolled back when dropped unless it committed, so an
+/// error and a panic in the closure end the same way.
+struct OpenWrite<'a> {
+    conn: &'a Connection,
+}
+
+impl Drop for OpenWrite<'_> {
+    fn drop(&mut self) {
+        if !self.conn.is_autocommit()
+            && let Err(e) = self.conn.execute_batch("ROLLBACK")
+        {
+            tracing::warn!(error = %e, "analytics: rollback failed");
+        }
+    }
+}
+
 struct Lent<'a> {
     db: &'a AnalyticsDb,
     conn: Option<Connection>,
@@ -478,6 +491,33 @@ mod tests {
         // The panicked closure's transaction did not stay open on its reader.
         for c in db.readers.lock().iter() {
             assert!(c.is_autocommit());
+        }
+    }
+
+    /// A write whose closure panics rolls its transaction back: it used to stay open on
+    /// the writer, and every later `BEGIN IMMEDIATE` failed ("cannot start a
+    /// transaction within a transaction").
+    #[test]
+    fn a_panicking_write_leaves_no_transaction_open() {
+        for (_dir, db) in [
+            {
+                let (d, db) = testutil::temp_db();
+                (Some(d), db)
+            },
+            (None, AnalyticsDb::open_in_memory().unwrap()),
+        ] {
+            let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                db.write(|tx| -> Result<()> {
+                    tx.meta_set("panicked", "yes")?;
+                    panic!("a write closure panics");
+                })
+            }));
+            assert!(caught.is_err());
+            assert!(db.writer.lock().is_autocommit());
+            db.meta_set("after", "ok").expect("a write after the panic");
+            assert_eq!(db.meta_get("after").unwrap().as_deref(), Some("ok"));
+            // The panicked write's change was rolled back, not committed by the next one.
+            assert_eq!(db.meta_get("panicked").unwrap(), None);
         }
     }
 
