@@ -680,7 +680,8 @@ account. Skipped and refused files are counted (`reading.worker` in the API).
   When enabled, download DB-IP "IP to Country Lite" (CC BY 4.0, mmdb), from
   `analytics.geo.url` (default
   `https://download.db-ip.com/free/dbip-country-lite-{year}-{month}.mmdb.gz`; current
-  month, falling back to the previous month), ≤ 64 MiB, gunzip, verify it opens with the
+  month, falling back to the previous month; **Built:** `https://` only, and a redirect
+  that leaves HTTPS is refused), ≤ 64 MiB, gunzip, verify it opens with the
   `maxminddb` crate (ISC), write atomically to `<storage base>/analytics/country.mmdb`,
   refresh monthly. Lookups are in memory with an LRU of 16 384. Loopback / private /
   link-local addresses map to `LAN`. **Built:** geography runs only while both

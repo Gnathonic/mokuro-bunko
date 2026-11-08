@@ -303,10 +303,14 @@ impl AnalyticsConfig {
             i64::from(self.library_scan.interval_hours),
             INTERVAL_HOURS,
         )?;
+        // HTTPS only: the database decides every visitor's country.
         let url = self.geo.url.trim();
-        if !(url.starts_with("https://") || url.starts_with("http://")) {
+        if !url
+            .get(..8)
+            .is_some_and(|p| p.eq_ignore_ascii_case("https://"))
+        {
             return Err(invalid(format!(
-                "analytics.geo.url: must be an http(s) URL, got '{url}'"
+                "analytics.geo.url: must be an https:// URL, got '{url}'"
             )));
         }
         Ok(())
@@ -449,6 +453,7 @@ mod tests {
             "analytics: {crawl: {window_hours: 500}}",
             "analytics: {library_scan: {interval_hours: 0}}",
             "analytics: {geo: {url: 'ftp://example.com/x'}}",
+            "analytics: {geo: {url: 'http://example.com/x'}}",
             "analytics: {enabled: maybe}",
             "analytics: 3",
         ] {

@@ -1912,7 +1912,7 @@
         ]));
         form.appendChild(section('Geography', 'Country per client IP, from the free DB-IP country database. Off by default.', [
             field('geo.enabled', 'Countries', check(v.geo.enabled), 'Download the DB-IP IP to Country Lite database (CC BY 4.0) and look up client IPs on this server'),
-            field('geo.url', 'Database URL', h('input', { type: 'url', class: 'form-input', value: v.geo.url || '', spellcheck: 'false' }), '{year} and {month} are filled in; the previous month is tried when this month\'s is not out yet.'),
+            field('geo.url', 'Database URL', h('input', { type: 'url', class: 'form-input', value: v.geo.url || '', spellcheck: 'false' }), 'An https:// URL; {year} and {month} are filled in; the previous month is tried when this month\'s is not out yet.'),
         ]));
         const status = h('p', { class: 'form-hint', role: 'status' });
         const save = h('button', { type: 'submit', class: 'btn btn--primary', text: 'Save analytics settings' });

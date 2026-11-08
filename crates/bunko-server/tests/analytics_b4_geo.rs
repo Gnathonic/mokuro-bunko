@@ -1,5 +1,6 @@
 //! Geography through the whole server (docs/design/analytics.md §9): the country
-//! database is downloaded from a local test server (never the real DB-IP host), with
+//! database is downloaded from a local HTTPS test server (never the real DB-IP host;
+//! a self-signed certificate the download is told to trust), with
 //! the previous-month fallback, size caps and verification; WebDAV and web requests
 //! get a country; `GET/POST /_admin/api/analytics/geo` answer. The test database is
 //! built in code (`bunko_server::analytics::geo::test_mmdb`), so no third-party file
@@ -39,6 +40,8 @@ enum Answer {
     Bytes(Vec<u8>),
     /// A chunked body of this many zero bytes (no Content-Length).
     Stream(usize),
+    /// A `302 Found` to this URL.
+    Redirect(String),
 }
 
 #[derive(Clone, Default)]
@@ -58,6 +61,11 @@ async fn serve_file(State(f): State<Files>, req: Request<Body>) -> http::Respons
                 (0..n.div_ceil(1 << 20)).map(move |_| Ok::<_, std::io::Error>(chunk.clone()));
             http::Response::new(Body::from_stream(futures_util::stream::iter(chunks)))
         }
+        Some(Answer::Redirect(to)) => http::Response::builder()
+            .status(StatusCode::FOUND)
+            .header(http::header::LOCATION, to)
+            .body(Body::empty())
+            .unwrap(),
         None => http::Response::builder()
             .status(StatusCode::NOT_FOUND)
             .body(Body::empty())
@@ -65,16 +73,52 @@ async fn serve_file(State(f): State<Files>, req: Request<Body>) -> http::Respons
     }
 }
 
-/// A download server on 127.0.0.1 (the only network the tests use).
-async fn file_server() -> (Files, String) {
+/// The test server's TLS settings: a self-signed certificate for 127.0.0.1, which
+/// every download client made afterwards trusts (made once per test binary).
+fn test_tls() -> Arc<rustls::ServerConfig> {
+    static TLS: std::sync::OnceLock<Arc<rustls::ServerConfig>> = std::sync::OnceLock::new();
+    TLS.get_or_init(|| {
+        let key = rcgen::KeyPair::generate().unwrap();
+        let cert = rcgen::CertificateParams::new(vec!["127.0.0.1".to_string()])
+            .unwrap()
+            .self_signed(&key)
+            .unwrap();
+        bunko_server::analytics::geo::trust_for_tests(cert.der().to_vec());
+        let key = rustls::pki_types::PrivateKeyDer::Pkcs8(key.serialize_der().into());
+        let cfg = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(vec![cert.der().clone()], key)
+        .unwrap();
+        Arc::new(cfg)
+    })
+    .clone()
+}
+
+/// A download server on 127.0.0.1 (the only network the tests use), over HTTPS
+/// unless `plain`.
+async fn serve_files(plain: bool) -> (Files, String) {
     let files = Files::default();
     let app = Router::new().fallback(serve_file).with_state(files.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
-    (files, format!("http://{addr}"))
+    let tls = (!plain).then(test_tls);
+    tokio::spawn(bunko_server::serve::serve(
+        listener,
+        app,
+        tls,
+        CancellationToken::new(),
+        Duration::from_secs(1),
+    ));
+    let scheme = if plain { "http" } else { "https" };
+    (files, format!("{scheme}://{addr}"))
+}
+
+async fn file_server() -> (Files, String) {
+    serve_files(false).await
 }
 
 fn ym(t: i64) -> (i32, u8) {
@@ -628,4 +672,68 @@ async fn wait_for(mut ok: impl FnMut() -> bool) {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     panic!("condition not met within 5 s");
+}
+
+/// The database comes over HTTPS only: a plain `http://` URL is never fetched, and a
+/// redirect away from HTTPS is refused before anything is sent there; a redirect that
+/// stays on HTTPS is followed.
+#[tokio::test]
+async fn the_database_is_downloaded_over_https_only() {
+    let (cur, _) = months();
+    let (plain, plain_base) = serve_files(true).await;
+    plain
+        .paths
+        .lock()
+        .insert(format!("/db-{cur}.mmdb.gz"), Answer::Bytes(db_v1()));
+    // Set directly (the settings refuse it; see the next step), still not fetched.
+    let env = Env::new(Some(&format!("{plain_base}/db-{{year}}-{{month}}.mmdb.gz")));
+    let a = &env.services.analytics;
+    let err = a.geo().update_now(a, true).await.unwrap_err();
+    assert!(err.contains("https"), "{err}");
+    assert_eq!(plain.hits.load(Ordering::SeqCst), 0);
+    assert!(!env.mmdb().exists());
+    // The settings refuse a plain URL.
+    let body = json!({"geo": {"url": format!("{plain_base}/db.mmdb.gz")}}).to_string();
+    let (status, answer) = env
+        .call(
+            Some("boss"),
+            "PUT",
+            "/_admin/api/settings/analytics",
+            FIREFOX,
+            body.as_bytes(),
+            "127.0.0.1",
+        )
+        .await;
+    assert!(
+        status.is_client_error(),
+        "{status} {}",
+        String::from_utf8_lossy(&answer)
+    );
+    assert!(String::from_utf8_lossy(&answer).contains("https"));
+
+    // An HTTPS URL redirecting to the plain server: refused, nothing sent there.
+    let (files, base) = file_server().await;
+    files.paths.lock().insert(
+        format!("/db-{cur}.mmdb.gz"),
+        Answer::Redirect(format!("{plain_base}/db-{cur}.mmdb.gz")),
+    );
+    let env = Env::new(Some(&format!("{base}/db-{{year}}-{{month}}.mmdb.gz")));
+    let a = &env.services.analytics;
+    let err = a.geo().update_now(a, true).await.unwrap_err();
+    assert!(err.contains("HTTPS"), "{err}");
+    assert_eq!(plain.hits.load(Ordering::SeqCst), 0);
+    assert!(!env.mmdb().exists());
+
+    // A redirect that stays on HTTPS is followed.
+    files.paths.lock().insert(
+        format!("/db-{cur}.mmdb.gz"),
+        Answer::Redirect(format!("{base}/mirror/db-{cur}.mmdb.gz")),
+    );
+    files
+        .paths
+        .lock()
+        .insert(format!("/mirror/db-{cur}.mmdb.gz"), Answer::Bytes(db_v1()));
+    a.geo().update_now(a, true).await.unwrap();
+    assert!(env.mmdb().exists());
+    assert_eq!(env.country("203.0.113.10").as_deref(), Some("JP"));
 }

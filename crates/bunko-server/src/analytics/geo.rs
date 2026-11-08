@@ -11,7 +11,8 @@
 //! - **The database** lives at `<storage base>/analytics/country.mmdb`. A background
 //!   task (never on the startup path) loads it, and downloads `analytics.geo.url` with
 //!   `{year}`/`{month}` filled in when it is missing or not this month's: the current
-//!   month first, the previous one when that is not out yet (404). The download is
+//!   month first, the previous one when that is not out yet (404). Over HTTPS only,
+//!   redirects included ([`is_https`]). The download is
 //!   capped at [`MAX_BYTES`] compressed and uncompressed, gunzipped, opened and fully
 //!   verified before it atomically replaces the file; a failed or corrupt download
 //!   keeps the database there was. It refreshes monthly, on `POST .../geo/refresh`, and
@@ -96,6 +97,26 @@ const MONTH_GRACE: i64 = 3600;
 /// A URL without `{year}`/`{month}` is fetched again after this long.
 const UNDATED_REFRESH: i64 = 30 * 86400;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+/// Most redirects one download follows (each must stay on HTTPS).
+const MAX_REDIRECTS: usize = 10;
+
+/// Certificates the download trusts beside the usual roots: only ever a test's own
+/// local HTTPS server ([`trust_for_tests`]); empty in a real server.
+static EXTRA_ROOTS: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
+
+/// Make the download client of every [`Geo`] made afterwards trust `der` (a DER
+/// certificate): integration tests serve the database over HTTPS from 127.0.0.1
+/// with a self-signed certificate, since nothing else is downloaded.
+#[doc(hidden)]
+pub fn trust_for_tests(der: Vec<u8>) {
+    EXTRA_ROOTS.lock().push(der);
+}
+
+/// Is `url` an `https://` URL (the only kind the database is downloaded from)?
+pub fn is_https(url: &str) -> bool {
+    url.get(..8)
+        .is_some_and(|p| p.eq_ignore_ascii_case("https://"))
+}
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// What the licence asks the UI to show.
@@ -213,16 +234,41 @@ impl Geo {
             let cfg = core.config.read();
             (geo_on(&cfg.analytics), cfg.analytics.geo.url.clone())
         };
-        let client = reqwest::Client::builder()
+        // HTTPS only, redirects included: the database decides every visitor's
+        // country, so nobody on the path may swap it.
+        let mut builder = reqwest::Client::builder()
+            .https_only(true)
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                if attempt.url().scheme() != "https" {
+                    attempt.error("the download redirected away from HTTPS")
+                } else if attempt.previous().len() > MAX_REDIRECTS {
+                    attempt.error("the download redirected too many times")
+                } else {
+                    attempt.follow()
+                }
+            }))
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(DOWNLOAD_TIMEOUT)
             .user_agent(concat!(
                 "mokuro-bunko/",
                 env!("CARGO_PKG_VERSION"),
                 " (+https://github.com/Gnathonic/mokuro-bunko)"
-            ))
-            .build()
-            .unwrap_or_default();
+            ));
+        for der in EXTRA_ROOTS.lock().iter() {
+            if let Ok(cert) = reqwest::Certificate::from_der(der) {
+                builder = builder.add_root_certificate(cert);
+            }
+        }
+        // A client that cannot be built downloads nothing (every request fails),
+        // rather than falling back to one without the HTTPS rule.
+        let client = builder.build().unwrap_or_else(|e| {
+            tracing::warn!("[ANALYTICS] the country database client cannot be made: {e}");
+            reqwest::Client::builder()
+                .https_only(true)
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .unwrap_or_default()
+        });
         Geo {
             core,
             shared: Arc::new(Shared {
@@ -468,13 +514,31 @@ enum Fetch {
     NotFound,
 }
 
+/// `e` and what caused it (reqwest names only the step: "error following redirect").
+fn with_causes(e: &dyn std::error::Error) -> String {
+    let mut out = e.to_string();
+    let mut cause = e.source();
+    while let Some(c) = cause {
+        let text = c.to_string();
+        if !out.contains(&text) {
+            out.push_str(": ");
+            out.push_str(&text);
+        }
+        cause = c.source();
+    }
+    out
+}
+
 /// GET `url` into memory, at most [`MAX_BYTES`].
 async fn fetch(client: &reqwest::Client, url: &str) -> Result<Fetch, String> {
+    if !is_https(url) {
+        return Err("the download URL must be an https:// URL".into());
+    }
     let mut resp = client
         .get(url)
         .send()
         .await
-        .map_err(|e| format!("could not reach the download ({e})"))?;
+        .map_err(|e| format!("could not reach the download ({})", with_causes(&e)))?;
     let status = resp.status();
     if status == reqwest::StatusCode::NOT_FOUND {
         return Ok(Fetch::NotFound);
