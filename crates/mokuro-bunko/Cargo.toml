@@ -80,7 +80,7 @@ libc = "0.2"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_System_ProcessStatus"] }
 # hwdetect: the AMD and Intel GPUs only the Vulkan pack drives (DXGI's adapter list; the
 # same `windows` release the tray's window library already builds).
-windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dxgi"] }
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Dxgi"] }
 # The tray's Startup-folder shortcut (the same `Mokuro Bunko.lnk` the tray and
 # install.ps1 -Startup write).
 mslnk = "0.1"
