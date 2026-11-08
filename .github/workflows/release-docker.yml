@@ -39,7 +39,7 @@ jobs:
       VERSION: ${{ inputs.version }}
       IMAGE: ${{ inputs.image }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref }}
       - uses: dtolnay/rust-toolchain@stable
@@ -50,13 +50,13 @@ jobs:
         with:
           tool: cargo-zigbuild
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           pattern: dist-linux-*
           path: dist
           merge-multiple: true
       # The static x86_64 server of the lite image (not a release file).
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           pattern: docker-linux-*
           path: dist

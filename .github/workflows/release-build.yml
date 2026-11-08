@@ -67,7 +67,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref }}
       - uses: dtolnay/rust-toolchain@stable
@@ -105,7 +105,7 @@ jobs:
       FLAVOR: ${{ matrix.flavor }}
       ZIG: ${{ matrix.zig }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref }}
       - uses: dtolnay/rust-toolchain@stable
@@ -188,7 +188,7 @@ jobs:
           if ($gui -ne 2 -or $cli -ne 3) { throw "expected GUI (2) and console (3)" }
           & (Join-Path $top.FullName "mokuro-bunko-cli.exe") --version
           if ($LASTEXITCODE -ne 0) { exit 1 }
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}-${{ matrix.name }}
           path: |
@@ -212,12 +212,12 @@ jobs:
       RUSTUP_HOME: /github/home/.rustup
       OUT: dist
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref }}
       - name: build (xtask dist, then show the glibc/GLIBCXX versions the binary needs)
         run: packaging/manylinux/build.sh full
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: dist-linux-x64
           path: dist/*.tar.gz
@@ -248,7 +248,7 @@ jobs:
     env:
       BUNKO_PACK_CACHE: ${{ github.workspace }}/pack-cache
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref }}
       - uses: dtolnay/rust-toolchain@stable
@@ -298,7 +298,7 @@ jobs:
           "$xtask" torch-pack --locked --variant "$VARIANT" --target "$TARGET" --sample-from-manifest --out dist
           rm -rf "$BUNKO_PACK_CACHE"
           ls -l dist
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: pack-${{ matrix.name }}
           path: dist/*.tar.zst*
@@ -323,7 +323,7 @@ jobs:
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           df -h .
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref }}
       - name: xtask torch-pack (manylinux_2_28)
@@ -334,7 +334,7 @@ jobs:
             quay.io/pypa/manylinux_2_28_x86_64 packaging/manylinux/build.sh "${{ matrix.variant }}"
           sudo rm -rf .mb
           ls -l dist
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: pack-linux-x64-${{ matrix.variant }}
           path: dist/*.tar.zst*
@@ -357,7 +357,7 @@ jobs:
           - { platform: windows, os: windows-latest }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref }}
       - name: xtask vulkan-pack (manylinux_2_28)
@@ -386,7 +386,7 @@ jobs:
           cargo run --release --locked -p xtask -- vulkan-pack --locked \
             --target x86_64-pc-windows-msvc --ncnn-dir "$RUNNER_TEMP/ncnn/install" --out dist
           ls -l dist
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: pack-${{ matrix.platform }}-vulkan
           path: dist/*.tar.zst*
@@ -411,7 +411,7 @@ jobs:
       CARGO_LOCKED: "1"
       NDK_VERSION: "29.0.14206865"
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref }}
       - uses: dtolnay/rust-toolchain@stable
@@ -420,7 +420,7 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-ndk
-      - uses: actions/setup-java@v5
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "21"
@@ -465,7 +465,7 @@ jobs:
           "$bt/zipalign" -c -P 16 4 "$apk"
           unzip -l "$apk" | grep -E 'lib/(arm64-v8a|x86_64)/libbunko_android.so'
           unzip -l "$apk" | grep -E 'assets/THIRD-PARTY-LICENSES.md'
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: android-apk
           path: dist-android/*

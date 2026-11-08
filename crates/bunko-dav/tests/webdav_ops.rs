@@ -37,6 +37,86 @@ async fn propfind_root_lists_only_the_reader_root() {
     assert!(t.contains("<D:propstat><D:prop><D:getetag /></D:prop><D:status>HTTP/1.1 404 Not Found</D:status></D:propstat>"));
 }
 
+/// A body nested ~150k deep (just under the 1 MiB body limit) is a 400, and the server is
+/// still there for the next request. It used to overflow the stack and abort the process.
+#[tokio::test]
+async fn deeply_nested_bodies_are_400_not_a_crash() {
+    let env = Env::new();
+    let nest = |depth: usize| format!("{}{}", "<a>".repeat(depth), "</a>".repeat(depth));
+    let propfind = format!(
+        "<D:propfind xmlns:D=\"DAV:\"><D:prop>{}</D:prop></D:propfind>",
+        nest(149_000)
+    );
+    assert!(propfind.len() < 1024 * 1024);
+    let r = env
+        .req(
+            None,
+            "PROPFIND",
+            "/",
+            &[("depth", "0")],
+            propfind.as_bytes(),
+        )
+        .await;
+    assert_eq!(r.code(), 400);
+
+    let proppatch = format!(
+        "<D:propertyupdate xmlns:D=\"DAV:\" xmlns:Z=\"urn:z\"><D:set><D:prop><Z:a>{}</Z:a></D:prop></D:set></D:propertyupdate>",
+        nest(149_000)
+    );
+    let path = "/mokuro-reader/manga1.cbz";
+    let r = env
+        .req(Some("admin"), "PROPPATCH", path, &[], proppatch.as_bytes())
+        .await;
+    assert_eq!(r.code(), 400);
+
+    let lock = format!(
+        "<D:lockinfo xmlns:D=\"DAV:\"><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype><D:owner>{}</D:owner></D:lockinfo>",
+        nest(149_000)
+    );
+    let r = env
+        .req(Some("admin"), "LOCK", path, &[], lock.as_bytes())
+        .await;
+    assert_eq!(r.code(), 400);
+
+    // A dead property nested deeply, but within the limit, is still kept.
+    let ok = format!(
+        "<D:propertyupdate xmlns:D=\"DAV:\" xmlns:Z=\"urn:z\"><D:set><D:prop><Z:a>{}</Z:a></D:prop></D:set></D:propertyupdate>",
+        nest(200)
+    );
+    let r = env
+        .req(Some("admin"), "PROPPATCH", path, &[], ok.as_bytes())
+        .await;
+    assert_eq!(r.code(), 207);
+    assert!(r.text().contains("HTTP/1.1 200 OK"), "{}", r.text());
+    let named =
+        br#"<D:propfind xmlns:D="DAV:" xmlns:Z="urn:z"><D:prop><Z:a/></D:prop></D:propfind>"#;
+    let r = env
+        .req(Some("admin"), "PROPFIND", path, &[("depth", "0")], named)
+        .await;
+    assert_eq!(r.code(), 207);
+    assert_eq!(
+        r.text().matches("<a xmlns=\"\"").count(),
+        200,
+        "{}",
+        r.text()
+    );
+
+    let r = env
+        .req(None, "PROPFIND", "/", &[("depth", "0")], PROPFIND_ALLPROP)
+        .await;
+    assert_eq!(r.code(), 207);
+
+    // The same LOCK body nested a few levels is granted: the 400 above is the depth.
+    let lock = format!(
+        "<D:lockinfo xmlns:D=\"DAV:\"><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype><D:owner>{}</D:owner></D:lockinfo>",
+        nest(3)
+    );
+    let r = env
+        .req(Some("admin"), "LOCK", path, &[], lock.as_bytes())
+        .await;
+    assert_eq!(r.code(), 200, "{}", r.text());
+}
+
 #[tokio::test]
 async fn propfind_reader_root_shows_own_progress_first() {
     let env = Env::new();
