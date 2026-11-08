@@ -278,19 +278,9 @@
   / **Keep that copy**; the tab also lists the **Recent merges**. Upload owners, OCR
   records and volume ids follow every moved volume. A folder Mokuro Reader keeps
   recreating is left alone after the fourth merge in a day.
-- **positions.json is kept per account.** Mokuro Reader's position index (the newest
-  page per volume) joins volume-data.json, profiles.json and goals.json, so it syncs
-  per account instead of into the shared library. `/login/api/me` lists these files as
-  `per_user_files`, signed in or not, and a reader uses a per-account file only once the
-  server lists it.
-- **Reading history is kept per account.** Mokuro Reader's history files
-  (`/mokuro-reader/history/<device>/<file>`) are each account's own, stored under
-  `users/<name>/history/` and never shown to anyone else. Any account that can save
-  progress, `registered` included, creates its `history` and device folders and writes
-  its files there; a file is limited to 16 MiB and an account's history to 256 MiB.
-  History files are never moved, copied or locked, and saving progress or history no
-  longer drops the cached library listing. `/login/api/me` lists `history/` among the
-  `per_user_files`.
+- **positions.json and reading history per account, and `/login/api/me`'s `version`,**
+  came early in 0.7.8 (see there). 0.8 carries them to cloud libraries (next entry) and
+  reserves the per-user names in any spelling (see Breaking).
 - **Per-account files on a cloud library's folder.** The account named as the readers'
   progress account (Storage tab) now really shares its files with a reader that reads
   the cloud folder directly: its volume-data, profiles, goals, positions and reading
@@ -299,9 +289,6 @@
   applies at once. The cloud folder's `.mokuro-bunko.json` lists the per-account files
   (`per_user_files`), so a reader reading the cloud directly can sync its reading
   history there too.
-- **`/login/api/me` reports the server version** (`version`), signed in or not. A reader
-  turns reading-history sync on from 0.7.8, the first version that keeps history per
-  account.
 - **`/login/api/me` says where a reader's OCR corrections go.** It lists
   `per_user_layers: ["edit"]` (each account keeps its own `edit` layer, so a reader
   may push it) and `permissions.curated.scope`: `all` (editors, inviters, admins),
