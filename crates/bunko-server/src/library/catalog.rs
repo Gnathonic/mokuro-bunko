@@ -320,14 +320,59 @@ fn volume_progress(job: &Map<String, Value>) -> Value {
     })
 }
 
+/// `relative` in the library's spelling, whatever case the request spells it in (the
+/// DAV paths are canonicalized the same way at the edge), so a catalog request answers
+/// the same on every host. Blocking.
+fn library_spelling(library: &std::path::Path, relative: &str) -> String {
+    bunko_dav::LibraryPathCanonicalizer::new(library).canonicalize(relative, None)
+}
+
+/// Is `relative` below a top-level name spelled like a per-user name (`history/`,
+/// `HISTORY/`)? Never the library's, in any spelling, on any host: the catalog
+/// answers 404 for it, as the DAV tree never resolves it into the library.
+fn under_per_user_name(relative: &str) -> bool {
+    let first = relative
+        .trim_start_matches(['/', '\\'])
+        .split(['/', '\\'])
+        .next()
+        .unwrap_or("");
+    bunko_core::reader_tree::is_per_user_root_name(first)
+}
+
+/// [`under_per_user_name`] for a resolved path below the resolved library `base`
+/// (`S/../history/x` included).
+fn resolves_under_per_user_name(path: &std::path::Path, base: &std::path::Path) -> bool {
+    path.strip_prefix(base)
+        .ok()
+        .and_then(|rel| rel.components().next())
+        .and_then(|first| first.as_os_str().to_str())
+        .is_some_and(bunko_core::reader_tree::is_per_user_root_name)
+}
+
 fn get_series(deps: &LibraryDeps, name: &str) -> Response {
     let library = deps.runtime.library_path();
+    if under_per_user_name(name) {
+        return json_error(404, "Series not found");
+    }
+    // The spelling the library lists. A name the index lists as spelled is that already
+    // (the walk leaves out every spelling another shadows; before the first walk, one
+    // listing of the root taken for every request); only another spelling, or a nested
+    // series before the first walk, reads the listings here, at a cost that grows with
+    // the library.
+    let name = &if deps.runtime.index().lists_series(name) {
+        name.to_owned()
+    } else {
+        library_spelling(library, name)
+    };
     let base = resolve(library).unwrap_or_else(|| library.to_path_buf());
     let Some(series_dir) = resolve(&library.join(name)) else {
         return json_error(403, "Forbidden");
     };
     if !is_within(&series_dir, &base) {
         return json_error(403, "Forbidden");
+    }
+    if resolves_under_per_user_name(&series_dir, &base) {
+        return json_error(404, "Series not found");
     }
     let Some(series) = deps.runtime.index().series(name) else {
         return json_error(404, "Series not found");
@@ -345,11 +390,23 @@ fn get_series(deps: &LibraryDeps, name: &str) -> Response {
         info.insert("name".into(), Value::String(volume.name.clone()));
         info.insert("cover".into(), cover);
         let active = active_job(progress.as_ref(), name, &volume.name);
-        info.insert(
-            "ocr_pending".into(),
-            Value::Bool(volume.has_cbz && !volume.has_mokuro && !volume.has_mokuro_gz),
-        );
+        let owed = volume.has_cbz && !volume.has_mokuro && !volume.has_mokuro_gz;
+        // Owed and failing (a live failure record): "OCR failed", with the failure's
+        // public text, instead of pending. The keys appear only then, so every other
+        // entry keeps the 0.5.2 shape.
+        let failure = (owed && active.is_none())
+            .then(|| {
+                deps.ocr_status
+                    .as_ref()
+                    .and_then(|s| s.volume_failure(name, &volume.name))
+            })
+            .flatten();
+        info.insert("ocr_pending".into(), Value::Bool(owed && failure.is_none()));
         info.insert("ocr_active".into(), Value::Bool(active.is_some()));
+        if let Some(text) = failure {
+            info.insert("ocr_failed".into(), Value::Bool(true));
+            info.insert("ocr_failure".into(), Value::String(text));
+        }
         if let Some(job) = active {
             info.insert("ocr_pending".into(), Value::Bool(false));
             info.insert("ocr_progress".into(), volume_progress(job));
@@ -444,10 +501,27 @@ async fn serve_cover(deps: &LibraryDeps, cover: &str, headers: &HeaderMap) -> Re
     let library = deps.runtime.library_path().to_path_buf();
     let cover = cover.to_owned();
     let checked = blocking(move || -> Result<CoverFile, Response> {
+        if under_per_user_name(&cover) {
+            return Err(util::text(404, "Not found"));
+        }
+        let cover = library_spelling(&library, &cover);
         let base = resolve(&library).unwrap_or_else(|| library.clone());
         let file = resolve(&library.join(&cover)).ok_or_else(|| util::text(400, "Invalid path"))?;
         if !is_within(&file, &base) {
             return Err(util::text(403, "Forbidden"));
+        }
+        if resolves_under_per_user_name(&file, &base) {
+            return Err(util::text(404, "Not found"));
+        }
+        // A name the listings do not reach as spelled (nothing, or a hidden case
+        // variant's own file) is not served, on any host.
+        let rel = file
+            .strip_prefix(&base)
+            .ok()
+            .map(|r| r.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_default();
+        if !bunko_dav::LibraryPathCanonicalizer::new(&base).reaches(&rel) {
+            return Err(util::text(404, "Not found"));
         }
         let meta = bunko_store::fs::metadata(&file)
             .ok()
@@ -619,9 +693,32 @@ async fn manifest(State(deps): State<LibraryDeps>, req: Request) -> Response {
 
 fn build_manifest(deps: &LibraryDeps, series: &str, volume: &str, headers: &HeaderMap) -> Response {
     let library = deps.runtime.library_path();
+    if under_per_user_name(series) {
+        return json_error(404, "Volume not found");
+    }
+    // The names as the library lists them, whatever case the request spells them in
+    // (the DAV paths are canonicalized the same way at the edge).
+    let canonical = (!series.contains(['/', '\\']) && !volume.contains(['/', '\\']))
+        .then(|| library_spelling(library, &format!("{series}/{volume}.cbz")));
+    let (series, volume, archive_file) = match canonical.as_deref().and_then(|c| c.split_once('/'))
+    {
+        Some((s, v)) => (
+            s.to_string(),
+            bunko_core::sidecar_names::cbz_stem(v)
+                .unwrap_or(volume)
+                .to_string(),
+            v.to_string(),
+        ),
+        None => (
+            series.to_string(),
+            volume.to_string(),
+            format!("{volume}.cbz"),
+        ),
+    };
+    let (series, volume) = (series.as_str(), volume.as_str());
     let base = resolve(library).unwrap_or_else(|| library.to_path_buf());
     let resolved = resolve(&library.join(series)).and_then(|dir| {
-        let archive = resolve(&dir.join(format!("{volume}.cbz")))?;
+        let archive = resolve(&dir.join(&archive_file))?;
         Some((dir, archive))
     });
     let Some((series_dir, archive)) = resolved else {
@@ -629,6 +726,9 @@ fn build_manifest(deps: &LibraryDeps, series: &str, volume: &str, headers: &Head
     };
     if !is_within(&series_dir, &base) || !is_within(&archive, &base) {
         return json_error(403, "Forbidden");
+    }
+    if resolves_under_per_user_name(&series_dir, &base) {
+        return json_error(404, "Volume not found");
     }
     if series_dir == base || volume.contains('/') || volume.contains('\\') {
         return json_error(404, "Volume not found");

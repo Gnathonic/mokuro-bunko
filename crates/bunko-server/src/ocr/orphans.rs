@@ -11,6 +11,15 @@
 //! Names follow sidecar names rule v1 ([`sidecar_names`]): only a `.cbz` anchors, and a
 //! numbered name that is itself any archive's stem (`Vol_1.cbz`) is a volume, never an
 //! orphan.
+//!
+//! Whether the canonical name is taken is read from the folder listing, never by
+//! opening the name, so every host does the same: taken when rule v1 already gives the
+//! volume that file (the orphan is a stale copy and goes); left in place, counted, when
+//! the folder lists the name only in another spelling rule v1 does not give the volume
+//! (`Vol.FAST.mokuro` for `Vol.fast.mokuro`: moving the orphan there would make a second
+//! spelling, removing it would lose the OCR), and when a case-variant group freezes the
+//! orphan, its canonical name, its volume or a folder above them
+//! ([`bunko_core::fold_groups`]).
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -46,7 +55,7 @@ impl<'a> OrphanStems<'a> {
                 .iter()
                 .find_map(|ext| sidecar_names::strip_suffix_ci(name, ext))
             {
-                stems.archives.insert(sidecar_names::fold(stem));
+                stems.archives.insert(sidecar_names::stem_fold(stem));
             }
         }
         stems
@@ -66,7 +75,7 @@ fn orphan_of<'n>(name: &'n str, stems: &OrphanStems<'_>) -> Option<(String, &'n 
     let (base, n) = numbered.rsplit_once('_')?;
     // `unique_path` counted from 1, never with a leading zero.
     let counted = n.bytes().all(|b| b.is_ascii_digit()) && !n.is_empty() && !n.starts_with('0');
-    if base.is_empty() || !counted || stems.archives.contains(&sidecar_names::fold(numbered)) {
+    if base.is_empty() || !counted || stems.archives.contains(&sidecar_names::stem_fold(numbered)) {
         return None;
     }
     let canonical = format!("{base}{}", &name[numbered.len()..]);
@@ -115,6 +124,9 @@ pub struct SweepReport {
     pub unproven: u64,
     /// Of `unproven`: unchanged since judged, so not read again ([`Unproven`]).
     pub remembered: u64,
+    /// Left in place: its canonical name is listed in another spelling that is not
+    /// the volume's file, or a case-variant group freezes it.
+    pub left: u64,
     /// Locked, or a write failed: tried again after the next walk.
     pub failed: u64,
 }
@@ -131,6 +143,8 @@ enum Swept {
     Moved,
     Removed,
     Unproven,
+    /// Its canonical name is another file's spelling, or it is frozen.
+    Left,
     /// No longer there, or no longer an orphan (the folder changed since the walk).
     Gone,
 }
@@ -185,6 +199,7 @@ pub fn sweep_with(
             Ok(Swept::Moved) => report.moved += 1,
             Ok(Swept::Removed) => report.removed += 1,
             Ok(Swept::Unproven) => report.unproven += 1,
+            Ok(Swept::Left) => report.left += 1,
             Ok(Swept::Gone) => {}
             Err(e) => {
                 report.failed += 1;
@@ -208,11 +223,26 @@ fn sweep_one(
     if !fs::is_file(&path) || super::owed::merge_busy(&path) {
         return Ok(Swept::Gone);
     }
-    let listed = sidecar::list_names(dir).unwrap_or_default();
+    let Some((entries, groups)) = bunko_library::fsutil::listed_groups(dir, false) else {
+        return Ok(Swept::Gone);
+    };
+    let listed: Vec<String> = entries
+        .iter()
+        .filter(|(_, is_dir)| !is_dir)
+        .map(|(n, _)| n.clone())
+        .collect();
     let names: Vec<&str> = listed.iter().map(String::as_str).collect();
     let Some((canonical, anchor)) = orphan_of(name, &OrphanStems::new(&names)) else {
         return Ok(Swept::Gone);
     };
+    // Never in a frozen case-variant group: the orphan, the name it would take (and
+    // with it its volume), or any folder above.
+    if groups.is_frozen(name)
+        || groups.is_frozen(&canonical)
+        || bunko_library::fsutil::frozen_path(library, dir).is_some()
+    {
+        return Ok(Swept::Left);
+    }
     // Bunko's own: the content seal, or (0.7, before the seal) its provenance row. And
     // the collector's numbering of THIS volume: a numbered name alone is not, since a
     // reader renaming `Vol (2)` to `Vol_2` uploads the new main (sealed again, C5) before
@@ -241,12 +271,42 @@ fn sweep_one(
     let locked = |p: &Path| format!("{} is locked by a WebDAV write", p.display());
     let _orphan_guard = locks.try_lock(&path).ok_or_else(|| locked(&path))?;
     let _target_guard = locks.try_lock(&target).ok_or_else(|| locked(&target))?;
-    let swept = if canonical_taken(&canonical, &names) || fs::exists(&target) {
+    // Decided again under both locks, from a fresh listing: a client's upload that
+    // reached either name, in any spelling, since the first listing is seen (no
+    // WebDAV write lands while the locks are held).
+    let Some((entries, groups)) = bunko_library::fsutil::listed_groups(dir, false) else {
+        return Ok(Swept::Gone);
+    };
+    let listed: Vec<String> = entries
+        .iter()
+        .filter(|(_, is_dir)| !is_dir)
+        .map(|(n, _)| n.clone())
+        .collect();
+    let names: Vec<&str> = listed.iter().map(String::as_str).collect();
+    if !names.contains(&name) {
+        return Ok(Swept::Gone);
+    }
+    if orphan_of(name, &OrphanStems::new(&names)).map(|(c, _)| c) != Some(canonical.clone())
+        || groups.is_frozen(name)
+        || groups.is_frozen(&canonical)
+    {
+        return Ok(Swept::Left);
+    }
+    // From the listing: rule v1 gives the volume that file already (a stale copy), or
+    // the name is listed in another spelling that is not the volume's, or a folder
+    // takes it (left: no second spelling, nothing lost). Never by opening `target`,
+    // which a host that folds names would answer with that other file.
+    let folded = bunko_core::names::fold_name(&canonical);
+    let swept = if canonical_taken(&canonical, &names) {
         Swept::Removed
+    } else if entries
+        .iter()
+        .any(|(n, _)| *n == canonical || bunko_core::names::fold_name(n) == folded)
+    {
+        return Ok(Swept::Left);
     } else {
-        // The orphan's exact bytes, under the name a reader matches. `CreateNew`: a file
-        // that reached the name meanwhile stays (the orphan is then left for the next
-        // walk, which removes it).
+        // The orphan's exact bytes, under the name a reader matches, free in the
+        // listing taken under the locks.
         let bytes = sidecar::read_capped(&path, sidecar::MAX_SIDECAR_BYTES)
             .map_err(|e| format!("could not read it: {e}"))?;
         let intent = WriteIntent::new(Mode::CreateNew, Origin::Upgrade, Durability::Sync);
@@ -368,6 +428,127 @@ mod tests {
             sealed
         );
         assert!(seen.0.lock().is_empty(), "forgotten once swept");
+    }
+
+    /// Whether the canonical name is free is read from the listing, the same on every
+    /// host: `Vol.FAST.mokuro` is listed (not the volume's `fast` layer by rule v1, which
+    /// matches ids exactly), so the sealed `Vol.fast_1.mokuro` neither moves to
+    /// `Vol.fast.mokuro` (a second spelling, on a case-sensitive disk) nor goes (its OCR
+    /// lost, where a case-insensitive disk opened `Vol.FAST.mokuro` for that name): it
+    /// is left. And nothing moves in a frozen case-variant group.
+    #[test]
+    fn a_canonical_name_listed_in_another_spelling_leaves_the_orphan() {
+        // unmounted: a plain temp library.
+        #![allow(clippy::disallowed_methods)]
+        let dir = tempfile::tempdir().unwrap();
+        let lib = dir.path();
+        std::fs::create_dir(lib.join("A")).unwrap();
+        std::fs::write(lib.join("A/Vol.cbz"), b"PK").unwrap();
+        std::fs::write(lib.join("A/Vol.FAST.mokuro"), b"{\"pages\":[]}").unwrap();
+        let mut v = bunko_layout::json::Value::parse(
+            r#"{"volume":"Vol","ocr_engine":{"id":"hayai"},"pages":[]}"#,
+        )
+        .unwrap();
+        let sealed = bunko_layout::seal::seal(&mut v).unwrap();
+        std::fs::write(lib.join("A/Vol.fast_1.mokuro"), &sealed).unwrap();
+        let locks: PathLocks = std::sync::Arc::new(bunko_library::service::NoPathLocks);
+        let orphans = ["A/Vol.fast_1.mokuro".to_string()];
+        let report = sweep(lib, None, &locks, &orphans, Duration::ZERO);
+        assert_eq!(
+            (report.moved, report.removed, report.left),
+            (0, 0, 1),
+            "{report:?}"
+        );
+        let mut names: Vec<String> = std::fs::read_dir(lib.join("A"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["Vol.FAST.mokuro", "Vol.cbz", "Vol.fast_1.mokuro"]);
+        assert_eq!(
+            std::fs::read_to_string(lib.join("A/Vol.fast_1.mokuro")).unwrap(),
+            sealed
+        );
+
+        // A frozen group: `Vol.cbz` beside `vol.cbz` (where the disk lists both).
+        std::fs::remove_file(lib.join("A/Vol.FAST.mokuro")).unwrap();
+        if std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(lib.join("A/vol.cbz"))
+            .is_ok()
+        {
+            let report = sweep(lib, None, &locks, &orphans, Duration::ZERO);
+            assert_eq!((report.moved, report.removed, report.left), (0, 0, 1));
+            assert!(lib.join("A/Vol.fast_1.mokuro").is_file());
+            assert!(
+                !std::fs::read_dir(lib.join("A"))
+                    .unwrap()
+                    .any(|e| e.unwrap().file_name() == "Vol.fast.mokuro")
+            );
+        }
+    }
+
+    /// A lock whose first `try_lock` lands a client's upload: a PUT that finished
+    /// between the sweep's first listing and its locks.
+    struct Racing {
+        upload: std::path::PathBuf,
+        landed: std::sync::atomic::AtomicBool,
+    }
+
+    impl bunko_library::service::PathWriteLocks for Racing {
+        fn try_lock(&self, _path: &Path) -> Option<Box<dyn Send>> {
+            #[allow(clippy::disallowed_methods)] // the client's upload, on the plain disk
+            if !self.landed.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                std::fs::write(&self.upload, b"the client's upload").unwrap();
+            }
+            Some(Box::new(()))
+        }
+    }
+
+    /// The sweep decides again under its locks, from a fresh listing: an upload that
+    /// reached the canonical name meanwhile (exactly, or in another spelling) stays,
+    /// byte for byte, and Bunko makes no second spelling beside it: the orphan, a
+    /// second copy now, goes. The same on every host.
+    #[test]
+    fn an_upload_landing_before_the_locks_is_kept() {
+        // unmounted: a plain temp library.
+        #![allow(clippy::disallowed_methods)]
+        for upload in ["Vol.mokuro", "vol.MOKURO"] {
+            let dir = tempfile::tempdir().unwrap();
+            let lib = dir.path();
+            std::fs::create_dir(lib.join("S")).unwrap();
+            std::fs::write(lib.join("S/Vol.cbz"), b"PK").unwrap();
+            let mut v = bunko_layout::json::Value::parse(
+                r#"{"volume":"Vol","ocr_engine":{"id":"hayai"},"pages":[]}"#,
+            )
+            .unwrap();
+            let sealed = bunko_layout::seal::seal(&mut v).unwrap();
+            std::fs::write(lib.join("S/Vol_1.mokuro"), &sealed).unwrap();
+            let locks: PathLocks = std::sync::Arc::new(Racing {
+                upload: lib.join("S").join(upload),
+                landed: Default::default(),
+            });
+            let orphans = ["S/Vol_1.mokuro".to_string()];
+            let report = sweep(lib, None, &locks, &orphans, Duration::ZERO);
+            assert_eq!(
+                (report.moved, report.removed),
+                (0, 1),
+                "{upload}: {report:?}"
+            );
+            let names: Vec<String> = std::fs::read_dir(lib.join("S"))
+                .unwrap()
+                .map(|e| e.unwrap().file_name().into_string().unwrap())
+                .collect();
+            let mut names = names;
+            names.sort();
+            assert_eq!(names, ["Vol.cbz", upload], "{upload}");
+            assert_eq!(
+                std::fs::read(lib.join("S").join(upload)).unwrap(),
+                b"the client's upload",
+                "{upload}"
+            );
+        }
     }
 
     #[test]

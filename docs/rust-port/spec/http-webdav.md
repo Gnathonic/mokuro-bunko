@@ -82,7 +82,12 @@ TLS details:
    `Startup validation failed: <msg>` to stdout, `SystemExit(2)` (`server.py:602-606`). **KEEP**.
    * `config.storage.ensure_directories()`: mkdir -p `library`, `inbox`, `users`, and `library/thumbnails`
      (`config.py:98-103`). `thumbnails/` therefore exists in the library and shows up in PROPFIND of
-     `/mokuro-reader/` (section 8.3) (QUIRK).
+     `/mokuro-reader/` (section 8.3) (QUIRK). **Rust 0.8: no `thumbnails/` is made** (on a case-sensitive
+     disk it was a second spelling of a series `Thumbnails/`, and it made `thumbnails` behave differently
+     on a local and a cloud library); the empty one an earlier release left, listed under exactly that
+     name, is removed by the first 0.8 start only (`<base>/.legacy-thumbnails-checked` records it).
+     `thumbnails` is an ordinary name in any spelling on every store: an empty `thumbnails/` series made
+     later stays across restarts.
    * `_assert_writable_dir` for `base_path`, `library`, `inbox`, `users` (`server.py:50-61`): must exist, be
      a directory, and accept creating+deleting `<dir>/.mokuro-write-test` (content `ok`). Messages:
      `Required directory does not exist (<label>): <path>`, `Required path is not a directory (<label>): <path>`,
@@ -368,7 +373,10 @@ Predicates (`auth.py:114-165`), all on the path with `"/" + path.strip("/")` nor
 * **0.8 (Rust, `bunko_core::reader_tree`):** the per-user names are `volume-data.json`,
   `profiles.json`, `goals.json`, `positions.json` and the `history` tree (`history`,
   `history/<device>`, `history/<device>/<file>`, each segment `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`),
-  still exact and case-sensitive (`History/` is a library series). `is_progress_path` covers all of
+  matched in any case (0.8: `History/` and `Goals.json` ARE the caller's `history/` and `goals.json`;
+  PathCase rewrites the first segment to the canonical spelling before auth, and the physical path
+  is built from the canonical name; a library folder spelled like one is hidden and named by
+  doctor). `is_progress_path` covers all of
   them: PUT, MKCOL and DELETE there need `WRITE_PROGRESS` (so `registered` keeps its own history);
   MOVE, COPY, LOCK, UNLOCK and PROPPATCH on or into `history` are refused (403, 401 anonymous).
 * `is_inbox_path`, `is_admin_path` (`startswith("/_admin")`), `is_processor_path`
@@ -540,7 +548,14 @@ In order:
 uploader); owner = `get_volume_owner(rel)` where the key is `rel` with the extension swapped to `.cbz`
 (`.cbz`, `.mokuro`, `.mokuro.gz`, `.webp`, `.nocover` all map to the archive; other files -> `None`);
 if none, an OCR layer file `<stem>.<layer>.mokuro[.gz]` (layer matches `^(?=[a-z0-9-]*[a-z])[a-z0-9-]{1,32}$`)
-borrows the owner of `<stem>.cbz`; allowed iff `owner == username`. Byte-exact (no case/NFC folding).
+borrows the owner of `<stem>.cbz`; allowed iff `owner == username`. 0.8: the key is the canonical
+spelling Bunko wrote; a lookup that misses falls back to the filename fold (full Unicode case
+folding and canonical normalization) over every row, taking a row only when its spelling leads, through the
+folder listings segment by segment, to the very entry the request reaches (`fsutil::ListedWalk`):
+a volume or series folder respelled outside Bunko keeps its uploader on every host. A row that
+spells a listed entry of its own (a case variant a case-sensitive disk or a cloud folder holds
+beside this one, shadowed) belongs to that entry, never to the one the request reaches. A DELETE
+or MOVE takes the matched row along (see db-auth-admin `get_volume_owner`).
 Consequently an uploader can delete **files** they uploaded (and their sidecars/layers) but never a folder.
 
 ### 4.7 `gate_read(environ, start_response, path)` (`auth.py:441-468`)
@@ -706,7 +721,7 @@ Physical layout: `<base>/library/` (shared), `<base>/inbox/` (never exposed), `<
 | `/mokuro-reader` | virtual **merged** collection | none |
 | `/mokuro-reader/volume-data.json`, `.../profiles.json`, `.../goals.json` | file; **only visible to an authenticated user**; maps to that user's own file | `users/<username>/<name>` |
 | 0.8: `/mokuro-reader/positions.json`, `/mokuro-reader/history/**` | the same per-user rule: `positions.json` a file, `history` and `history/<device>` collections the reader creates (MKCOL 201; 405 when it exists; 409 without its parent), `history/<device>/<file>` files (PUT ≤ 16 MiB, 413; ≤ 256 MiB an account, 507). Depth 1 on `/mokuro-reader` lists `history/` to its owner only; Depth infinity on `/` and `/mokuro-reader` adds the caller's own tree and nobody else's | `users/<username>/…`; for a cloud library's `progress_user`, the cloud root itself (0.8 design §10) |
-| 0.8: `/mokuro-reader/<folder>/<Vol>.edit[-<n>].mokuro` (D27: the id exactly as written, and no listed `.cbz`'s own primary, sidecar names rule v1) | a **personal correction**: each signed-in caller's own file at the same path, anonymous none (404). Listed (Depth 1 and infinity) only to its owner and only beside its `.cbz`. PUT: the `.cbz` must be listed (409 `no-volume`), plain lowercase `.mokuro` (`.gz` 403, other spellings 409), body a JSON object with a `pages` array and no `ocr_engine` (422 `not-a-layer`), ≤ 32 MiB (413); `curated` takes the same checks. MOVE/COPY only to another correction name (403 otherwise), with no archive check. No upload record, no OCR row, no provenance rewrite; audited as `personal`. Every account's overlays follow their volume (`PersonalOverlays`): an archive MOVE renames them to the new stem, a folder MOVE carries them, and so do the same changes made in a cloud folder and a case merge (a trashed byte-identical loser's go to the kept spelling); a duplicate-folder merge keeps the path, so they stay valid. One already at the destination is kept and the moving one takes the next free `edit-<n>`. A deleted archive or folder takes them along (rule 6 decides which stem is the archive's); a self-delete removes `users/<u>/` with them, an admin soft delete keeps them | `users/<username>/edits/<rel>`; for a cloud library's `progress_user`, the physical `library/<rel>` (hidden from everyone else) |
+| 0.8: `/mokuro-reader/<folder>/<Vol>.edit[-<n>].mokuro` (D27: the id exactly as written, and no listed `.cbz`'s own primary, sidecar names rule v1) | a **personal correction**: each signed-in caller's own file at the same path, anonymous none (404). Listed (Depth 1 and infinity) only to its owner and only beside its `.cbz`. PUT: the `.cbz` must be listed (409 `no-volume`), plain lowercase `.mokuro` (`.gz` 403, other spellings 409), body a JSON object with a `pages` array and no `ocr_engine` (422 `not-a-layer`), ≤ 32 MiB (413); `curated` takes the same checks. MOVE/COPY only to another correction name (403 otherwise), with no archive check. No upload record, no OCR row, no provenance rewrite; audited as `personal`. Every account's overlays follow their volume (`PersonalOverlays`): an archive MOVE renames them to the new stem, a folder MOVE carries them, and so do the same changes made in a cloud folder and a case merge (a trashed byte-identical loser's go to the kept spelling); a duplicate-folder merge keeps the path, so they stay valid. One already at the destination is kept and the moving one takes the next free `edit-<n>`. A deleted archive or folder takes them along (rule 6 decides which stem is the archive's); an overlay folder is matched to the library folder in any case, except one spelled like a library folder of its own (a shadowed case variant on a case-sensitive disk): that stays that folder's, untouched by anything done to the one that shadows it, and while it is the account's only overlay folder of that name the shadowing folder's corrections are not read (404 on GET; on a folding `users/` disk they would be one folder) and their writes answer 409 (the two library folders are a frozen case-variant group) and a hook moving a volume there leaves the correction in place (a case merge: the folder is the winner's once the loser is gone); a `Depth: infinity` listing shows each overlay under the library folder's listed spelling, as `Depth: 1` does; a self-delete removes `users/<u>/` with them, an admin soft delete keeps them | `users/<username>/edits/<rel>`; for a cloud library's `progress_user`, the physical `library/<rel>` (hidden from everyone else) |
 | `/mokuro-reader/<anything else>` | shared library file/collection | `library/<rel>` via `safe_resolve_under` |
 | `/inbox`, `/inbox/*` | **nothing**: `get_resource_inst` returns `None` => GET/PROPFIND/DELETE 404 (PathMapper maps it but the provider never serves it) | |
 | every other path | `None` => 404 | |
@@ -717,7 +732,17 @@ Physical layout: `<base>/library/` (shared), `<base>/inbox/` (never exposed), `<
 user dir containment failure -> `None`; **file exists** -> file resource, else `None` (so a GET before
 the first save is 404 and the file is created by PUT through the parent's `create_empty_resource`).
 Library path: `virtual_to_physical` -> `None` if it escapes the library (traversal and
-symlink-out), `is_dir()` -> folder resource, `exists()` -> file resource, else `None`.
+symlink-out), `is_dir()` -> folder resource, `exists()` -> file resource, else `None`. **Rust 0.8:**
+existence is decided from the listings: every segment must be listed exactly as requested, as the
+entry a request for it reaches (`path_case::reachable_as_spelled`), else `None`, never by opening the
+requested spelling (so `Vol 2.cbz` beside a listed `vol 2.cbz` is missing on APFS, NTFS and casefold
+too, and a hidden entry, below, is missing for everyone). A per-user path (`Target::Progress`) is
+found the same way: under `users/<u>/` its per-user name is the canonical one when that folder lists
+it so (a stray `Goals.json` made beside `goals.json` outside Bunko is left alone, never read or
+written), else the entry it lists in another spelling (a `Goals.json` alone is the account's
+`goals.json`, read and written under its own spelling), and each segment must be listed exactly so;
+in the cloud-root owner's
+folder the name is the canonical one, so a listed `Goals.json` is not found there on any host.
 
 Per-user isolation: two users PUT/GET the same URL and get different files. `users/<username>` is
 created lazily by the first PUT of a progress file (`create_empty_resource`, `resources.py:1313-1317`).
@@ -747,7 +772,31 @@ auth gate (4.3 step 5/6, 4.4 steps 2-3).
 * physical folder -> `os.scandir` order (unsorted, filesystem order). Nothing is filtered: hidden files,
   `thumbnails/`, `.nocover`, `.mokuro-write-test` and in-flight upload staging files
   (`.<name>.upload-*.tmp`, section 8.9) are all listed. (Rust: sorting is fine; hiding staging files
-  would be an improvement, Q3.)
+  would be an improvement, Q3.) **Rust 0.8:** in-flight staging files and the temporary
+  `.bunko-case-*` name of an interrupted case-only rename are never listed (nor copied, nor entered by
+  the OCR walk; doctor names the latter); a shadowed case variant is never listed, nor is a file sidecar
+  names rule v1 gives to a shadowed archive (`v.mokuro`, `v.webp`, `v.edit.mokuro` beside a hidden
+  `v.cbz`; `FoldGroups::hidden`). No request reads either: PathCase never resolves a spelling onto
+  one, a read answers 404. Writes: the freeze, below.
+* **The freeze (0.8, `bunko_core::fold_groups`).** A folder listing two or more names that fold alike
+  (the filename fold) holds a case-variant group. Until it is merged by hand it is frozen: every
+  member (the reachable winner included), every file rule v1 gives, or would give once written, to
+  an archive of the group or to an archive whose own files hold a member (`Vol.cbz` beside
+  `VOL.mokuro` and `vol.mokuro`), files tied to such an archive by the wider filename fold
+  (`STRASSE.mokuro` beside `Straße.cbz`), and everything inside a member folder. A PUT, DELETE,
+  MKCOL, COPY, MOVE, PROPPATCH or LOCK whose target, COPY/MOVE source or destination is frozen, in
+  any folder on the way, answers `409 Conflict` before anything else in DAV (after PathCase and the
+  auth gate), as spelled and where the handler would write it (the physical path the request
+  resolves to: a `.` segment, `%2E` included, stays in its folder, symlinks are followed, `\` is a
+  separator on Windows; a `..` segment is held, never "not frozen"), its body naming the folder and the members and pointing to doctor and MIGRATING-0.7's
+  manual merge (`methods::frozen_refusal`); so does a DELETE, COPY or MOVE of a folder holding a group
+  anywhere below it, and a COPY or MOVE onto one (checked again under the folder's write lock). A
+  new archive whose own files rule v1 (rule 4: an exact stem is the archive's primary) would take one
+  the group holds or hides is frozen too (`V.edit.cbz` beside a frozen `V.cbz`'s `V.edit.mokuro`,
+  `v.hayai.cbz` beside a hidden `v.cbz`'s `v.hayai.mokuro`): writing it would move that file out of
+  the group. A correction (overlay) of a frozen archive's name answers 409 too. Reads (GET, HEAD, PROPFIND) are unchanged: the winner is served, the losers stay
+  hidden. Decided from the folder listings alone, the same on every host; a case-insensitive disk can
+  hold no group, so nothing is frozen there.
 * `OSError` while listing -> empty list.
 Child kind comes from the DirEntry (`is_dir(follow_symlinks=True)`), with `stat` pre-populated
 (`follow_symlinks=True`). Listing therefore does **not** apply `safe_resolve_under`: a symlink pointing
@@ -887,7 +936,16 @@ Order of checks and effects:
    * physical folder parent: `safe_resolve_under(folder, name)`, `None` -> `403`. (No directories are created.)
    Existing file: DAV-lock check on it.
 5. `begin_write` (below): path write-lock; on conflict `423 Locked` ("Resource is locked by another write
-   operation") + audit `lock_conflict` (`operation: "write"`).
+   operation") + audit `lock_conflict` (`operation: "write"`). **0.8:** the lock is keyed by the folded path,
+   and a library file that is not there as spelled is checked again under it, from the folder listing: when
+   the folder lists the name in another spelling (an upload in that spelling took it after PathCase
+   resolved this request; a group is refused before, by the freeze), or the caller's own correction
+   in that folder does (`V.edit.mokuro` in its overlay, for a library file `v.EDIT.mokuro`: its listings
+   show both), the PUT answers `409`, reason `case-variant`, retry true,
+   nothing staged; sent again, it reaches that file and is judged as a write to it. The same answer on
+   every host (a case-insensitive disk no longer writes over the other spelling's file). A COPY or MOVE
+   destination is checked the same way under its write lock (409), and an MKCOL under the folder name's
+   write lock (405). Bunko never creates a second spelling.
 6. Body streamed (8192-byte reads) into the writer; `close()` runs the finalize/verify/commit sequence (8.9). Any
    exception: `end_write(with_errors=True)` aborts the writer (temp file discarded, path lock released) and the
    request fails with the exception's status (non-DAV exceptions -> `500`; `DAVError` keeps its code, e.g. `422`,
@@ -1002,7 +1060,12 @@ Bunko-specific handlers (authoritative semantics):
 
 * **File MOVE** (`handle_move`): destination resolved with `PathMapper.virtual_to_physical`; source and destination
   must be the same class (`library`->`library` or `progress`->`progress`, else `handle_move` returns False: QUIRK
-  14.1). Locks `[src, dst]` (sorted by casefolded resolved path; `423` + audit on conflict). Steps:
+  14.1). Locks `[src, dst]` (sorted by casefolded resolved path; `423` + audit on conflict). 0.8: a MOVE that
+  only changes the case of its source answers `409 Conflict` before anything is deleted while the destination
+  still exists as another entry, or (checked under the locks, from the listing) while the source's folder lists
+  any other spelling of the name besides the source (a case-variant group: the freeze refuses it first). A
+  file DELETE or MOVE takes only the sidecars the folder lists (rule v1), never a constructed
+  `<stem>.mokuro` opened on the chance it exists. Steps:
   `_remember_primary_uuid`; `mkdir -p dst.parent`; `os.replace(src, dst)` (atomic; overwrites); `archives_removed += [src]`
   if `.cbz`; `archive_written = dst` if `.cbz` in library; DB `rename_volume_upload(old, new)` (ownership follows
   the file; upsert); `_forget_ocr_records(old)` (archive => all sidecar rows of the old volume) and
@@ -1034,7 +1097,12 @@ Bunko-specific handlers (authoritative semantics):
   audit `move`. Pinned by `test_move_series_folder_as_admin_preserves_sidecars_and_owner`.
 * **Folder COPY** (generic): `Depth: infinity` copies the tree pre-order (folders `mkdir -p`, files as File COPY);
   when the destination exists and is a collection too, destination members absent from the source are deleted first
-  (RFC 9.8.4 no-merge); `Depth: 0` creates only the destination folder. Folder `copy_move_single` creates the
+  (RFC 9.8.4 no-merge); `Depth: 0` creates only the destination folder. **0.8:** members pair by name in any
+  case, as on a case-insensitive disk, on every host: a destination member is absent only when no source member
+  folds like it, a source member is copied onto the destination member spelled in any case (which keeps its
+  spelling), and the delete hooks get the paths really listed. A source or destination folder holding a
+  case-variant group anywhere below it answers 409 (the freeze), and a member whose name the
+  destination lists only in another spelling answers 409 rather than making a second one. Folder `copy_move_single` creates the
   destination directory only if it is a library path (`dest_type == "library"`).
 * The auth gate only requires `MODIFY_DELETE` (or progress write for per-user *source*) and checks the
   Destination only for compiled metadata paths (4.3 step 6).
@@ -1138,7 +1206,8 @@ exists (never in the PROPFIND cache's synthetic requests).
 
 Process-local registry `_PATH_WRITE_LOCKS` of held paths, **non-blocking**:
 
-* key = tuple of **casefolded** parts of `path.resolve()`.
+* key = tuple of **casefolded** parts of `path.resolve()` (Rust 0.8: the filename fold, full Unicode case folding
+  and canonical normalization, per part, so a decomposed spelling conflicts with the composed one).
 * `acquire(path)`: fails (False) if ANY held key conflicts, i.e. is equal to, an **ancestor** of, or a **descendant** of
   the candidate; else records and returns True. (A folder move blocks writes inside it and vice versa; `Series/Vol.CBZ`
   conflicts with `series/vol.cbz`.) `blocking=True` raises `ValueError`.
@@ -1261,7 +1330,7 @@ Tests: `tests/unit/test_nginx_accel.py`, `tests/integration/test_webdav_ops.py::
 
 | Path | When | Notes |
 |---|---|---|
-| `<base>/library/`, `inbox/`, `users/`, `library/thumbnails/` | startup (`ensure_directories`, also by `PathMapper.ensure_directories` and `create_app`) | mkdir -p; default permissions per umask |
+| `<base>/library/`, `inbox/`, `users/`, `library/thumbnails/` | startup (`ensure_directories`, also by `PathMapper.ensure_directories` and `create_app`) | mkdir -p; default permissions per umask. Rust 0.8: no `library/thumbnails/` (an empty one is removed) |
 | `<dir>/.mokuro-write-test` | startup validation, in `base`, `library`, `inbox`, `users` | write `ok` then unlink |
 | `<base>/mokuro.db` | `create_app` | SQLite (DB spec) |
 | `<base>/logs/<server log>` (+ rotated copies) | `run_server` | 2 MiB x 5 |
@@ -1471,6 +1540,8 @@ Tests: `tests/unit/test_queue_file.py`.
 * No debounce of its own (debouncing is the PROPFIND cache's timer and the metadata service's scheduler).
 * `classify_change(library_root, path)` (`:43-65`): path not under the root -> `("library", None)`; fewer than 2 relative parts
   (a top-level entry or the root) -> `("library", None)`; first part `thumbnails` -> `("ignore", None)`; else `("series", <first part>)`.
+  Rust 0.8: no `thumbnails` case (it is a series name like any); a first part spelled like a per-user name,
+  in any case, -> ignore.
   Pinned by `tests/unit/test_fs_watcher.py`.
 
 ### 12.2 Invalidation graph
@@ -1538,9 +1609,9 @@ Numbered for cross-reference. **[VERIFIED]** = reproduced against the real app/W
 | 14.10 | `OPTIONS` of any not-yet-existing path under an existing collection (incl. `/inbox`) is `200 Allow: OPTIONS, PUT, MKCOL`. `OPTIONS` on `/inbox/x`: `404`. Collections advertise no `PUT`/`MKCOL`. | replicate; 0.8 lists `PUT`/`MKCOL` on collections the account may write (§8.3.1, X9): Mokuro Reader reads `Allow`. |
 | 14.11 | 405 answers (`POST`, unknown methods) carry no `Allow`. | add `Allow` (harmless). |
 | 14.12 | `201`/`MKCOL` responses carry an HTML body; `204` has none. | any small body is fine. |
-| 14.13 | `library/thumbnails/` is created at startup and listed in PROPFIND of `/mokuro-reader/`; in-flight staging files (`.<n>.upload-*.tmp`) and dotfiles are listed. | Q3. |
+| 14.13 | `library/thumbnails/` is created at startup and listed in PROPFIND of `/mokuro-reader/`; in-flight staging files (`.<n>.upload-*.tmp`) and dotfiles are listed. | **changed in 0.8**: no `thumbnails/` is created; the first 0.8 start removes the empty one an earlier release left (once, `.legacy-thumbnails-checked`); after that `thumbnails` is an ordinary name in any spelling, local and cloud alike; staging files and `.bunko-case-*` leftovers are hidden; other dotfiles are listed (Q3). |
 | 14.14 | One audit row per successful PUT incl. each progress save; a DB error after the rename makes the PUT `500` although the file was stored. | decide in DB spec; at least do not 500 after commit. |
-| 14.15 | Per-user names are matched case-sensitively; `Volume-Data.json` is a shared library file. | replicate. |
+| 14.15 | Per-user names are matched case-sensitively; `Volume-Data.json` is a shared library file. | **changed in 0.8** (deliberate): per-user names match in any case, so `Volume-Data.json` is the caller's `volume-data.json`. The library is case-insensitive and case-preserving on every host. |
 | 14.16 | `AuthMiddleware` error bodies have no `Content-Length` (cheroot frames them); 429 has no `Retry-After`. | add `Content-Length`; `Retry-After` optional. |
 | 14.17 | Two independent auth limiters (WebDAV vs login/queue pages); limiter map grows per distinct key; failures from non-existent users count the same as existing ones. | Q7. |
 | 14.18 | No SIGTERM handler. | **FIX** (1.2). |

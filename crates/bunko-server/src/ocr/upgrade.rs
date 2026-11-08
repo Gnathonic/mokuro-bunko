@@ -285,6 +285,15 @@ pub fn engine_of(data: &Value) -> Option<(String, u32)> {
     Some((stamp_id(data)?, block_revision(block)))
 }
 
+/// The plain sidecar `<stem><suffix>` of `cbz` as Bunko reads and writes it: the
+/// spelling the folder lists ([`super::owed::listed_sidecar_paths`]: `vol 1.hayai.mokuro`
+/// for `Vol 1.cbz`, the winner of several), the one an install replaces, so whether a
+/// layer is owed again is judged on the very file it would write, on every host. `None`
+/// when nothing may be written for the archive (it owes nothing).
+fn existing_plain(cbz: &Path, suffix: &str) -> Option<PathBuf> {
+    super::owed::listed_sidecar_paths(cbz, suffix).map(|(plain, _)| plain)
+}
+
 /// Bunko's own output of `engine` (sealed, no `edited` block) at a revision below
 /// `revision`: the one file an install of `engine` at `revision` replaces in place.
 /// Anything else at its destination (a person's file, an edit, another engine's, an
@@ -451,8 +460,8 @@ impl Upgrade {
         if row.primary {
             return false;
         }
-        let (plain, _) = super::owed::sidecar_paths(cbz, &row.sidecar_suffix());
-        self.own_outdated(&plain, &row.engine)
+        existing_plain(cbz, &row.sidecar_suffix())
+            .is_some_and(|plain| self.own_outdated(&plain, &row.engine))
     }
 
     /// The file at `plain` is Bunko's own output of `engine` at a revision below the
@@ -497,10 +506,12 @@ impl Upgrade {
         let Some(layer) = self.edited_main_layer().filter(|_| outdated) else {
             return false;
         };
+        let Some(plain) = existing_plain(cbz, &layer.sidecar_suffix()) else {
+            return false;
+        };
         if !super::owed::row_done(cbz, &layer, None) {
             return true;
         }
-        let (plain, _) = super::owed::sidecar_paths(cbz, &layer.sidecar_suffix());
         self.own_outdated(&plain, &layer.engine)
     }
 
@@ -517,12 +528,25 @@ impl Upgrade {
             .edited_main_layer()
             .ok_or_else(|| Outcome::Failed("no primary generation".into()))?;
         let rel = rel_of(&self.library, cbz).unwrap_or_default();
-        let bare = cbz.with_extension("mokuro");
-        let (plain, gz) = super::owed::sidecar_paths(cbz, &layer_row.sidecar_suffix());
+        if bunko_library::fsutil::frozen_path(&self.library, cbz).is_some() {
+            return Err(Outcome::Superseded(super::collect::SHADOWED.into()));
+        }
+        let bare = bunko_library::sidecar::sibling(cbz, ".mokuro")
+            .ok_or_else(|| Outcome::Superseded(super::collect::SHADOWED.into()))?;
+        let (plain, gz) = super::owed::listed_sidecar_paths(cbz, &layer_row.sidecar_suffix())
+            .ok_or_else(|| Outcome::Superseded(super::collect::SHADOWED.into()))?;
         let locked =
             |p: &Path| Outcome::Busy(format!("{} is locked by a WebDAV write", p.display()));
         let _bare_guard = self.locks.try_lock(&bare).ok_or_else(|| locked(&bare))?;
         let _guard = self.locks.try_lock(&plain).ok_or_else(|| locked(&plain))?;
+        // Under the locks, from a fresh listing: a file that reached either name since
+        // (in any spelling) stays, and the result is discarded.
+        if bunko_library::sidecar::sibling(cbz, ".mokuro").as_ref() != Some(&bare)
+            || super::owed::listed_sidecar_paths(cbz, &layer_row.sidecar_suffix())
+                != Some((plain.clone(), gz.clone()))
+        {
+            return Err(Outcome::Superseded(super::collect::SUPERSEDED.into()));
+        }
         self.census.lock().remove(&rel);
         if self.judge(cbz, &rel).1 != Verdict::Edited {
             return Err(Outcome::Superseded(format!(
@@ -686,7 +710,11 @@ impl Upgrade {
 
     /// The census verdict for one volume (cached by the bare file's stat).
     pub fn judge(&self, cbz: &Path, rel: &str) -> (String, Verdict) {
-        let bare = cbz.with_extension("mokuro");
+        // The bare file in the spelling the folder lists (`V.MOKURO`); nothing for a
+        // volume shadowed by another spelling of itself.
+        let Some(bare) = bunko_library::sidecar::sibling(cbz, ".mokuro") else {
+            return (UNKNOWN.into(), Verdict::Current);
+        };
         let Some(meta) = fs::metadata(&bare).ok().filter(|m| m.is_file()) else {
             return (UNKNOWN.into(), Verdict::Current);
         };
@@ -1001,10 +1029,24 @@ impl Upgrade {
     }
 
     fn swap_install(&self, cbz: &Path, install: Install<'_>) -> Result<PathBuf, String> {
-        let bare = cbz.with_extension("mokuro");
+        if let Some(frozen) = bunko_library::fsutil::frozen_path(&self.library, cbz) {
+            return Err(frozen.describe());
+        }
+        let bare = bunko_library::sidecar::sibling(cbz, ".mokuro").ok_or_else(|| {
+            "the volume is in a case-variant group, or its OCR's name is another volume's"
+                .to_string()
+        })?;
         let Some(_guard) = self.locks.try_lock(&bare) else {
             return Err(format!("{} is locked by a WebDAV write", bare.display()));
         };
+        // Under the lock, from a fresh listing: a file that reached the name since, in
+        // another spelling, is the volume's primary now (judged by the next census).
+        if bunko_library::sidecar::sibling(cbz, ".mokuro").as_ref() != Some(&bare) {
+            return Err(format!(
+                "{} changed during its upgrade; the next census judges it again",
+                bare.display()
+            ));
+        }
         let rel = rel_of(&self.library, cbz).unwrap_or_default();
         let result = self.swap_locked(cbz, &bare, &rel, &install);
         if result.is_err() {
@@ -1027,7 +1069,7 @@ impl Upgrade {
             .as_ref()
             .and_then(|db| db.get_ocr_sidecar(&bare_rel).ok().flatten());
         let target = self.primary.lock().clone().map(|p| p.output_affecting());
-        let (judged, recipe) = if fs::exists(bare) {
+        let (judged, recipe) = if bunko_library::fsutil::listed_exactly(bare) {
             let entry = self.judged(cbz, rel, bare)?;
             (Some(entry), classify(bare, row.as_ref()))
         } else {
@@ -1197,7 +1239,9 @@ impl Upgrade {
     /// kept, once its bare file is the upgraded output. Only layer names such an upgrade
     /// gave (`mokuro`, `mokuro-old`, `-prev…`) are read; the stamp decides.
     fn sweep_kept(&self, cbz: &Path) -> usize {
-        let bare = cbz.with_extension("mokuro");
+        let Some(bare) = bunko_library::sidecar::sibling(cbz, ".mokuro") else {
+            return 0;
+        };
         let named: Vec<PathBuf> = self
             .layer_candidates(cbz)
             .into_iter()
@@ -1272,27 +1316,60 @@ impl Upgrade {
         }
         let mut removed = 0;
         let mut touched: HashSet<PathBuf> = HashSet::new();
+        // The audit's spellings are resolved through the folder listings, never opened
+        // as written (a host that folds names would open another spelling, even a
+        // hidden one): each must lead to the entry a request reaches, both in one
+        // folder, and nothing there a case-variant group freezes.
+        let walk = bunko_library::fsutil::ListedWalk::new(&self.library);
+        let listed = |rel: &str| match walk.walk(rel) {
+            Ok(bunko_library::fsutil::ListedPath::Reaches(listed)) => Some(listed),
+            _ => None,
+        };
         for (bare_rel, kept_rel) in seen {
+            let (Some(bare_rel), Some(kept_rel)) = (listed(&bare_rel), listed(&kept_rel)) else {
+                continue;
+            };
             let bare = self.library.join(&bare_rel);
             let layer = self.library.join(&kept_rel);
+            if bare.parent() != layer.parent()
+                || bunko_library::fsutil::frozen(&self.library, &bare_rel).is_some()
+                || bunko_library::fsutil::frozen(&self.library, &kept_rel).is_some()
+            {
+                continue;
+            }
             if fs::is_file(&layer)
                 && self.bare_upgraded(&bare)
                 && self.drop_kept_layer(&bare, &layer)
             {
                 removed += 1;
-                touched.insert(bare.with_extension("cbz"));
+                if let Some(cbz) = archive_of_primary(&bare) {
+                    touched.insert(cbz);
+                }
             }
         }
         for cbz in touched {
-            if fs::is_file(&cbz) {
-                self.facts.sidecar_installed(&cbz);
-            }
+            self.facts.sidecar_installed(&cbz);
             if let Some(rel) = rel_of(&self.library, &cbz) {
                 self.census.lock().remove(&rel);
             }
         }
         removed
     }
+}
+
+/// The listed archive whose primary sidecar (rule v1, over the folder listing) is
+/// `primary`: `V.CBZ` for `v.mokuro`. Never a constructed archive name opened on the
+/// host.
+fn archive_of_primary(primary: &Path) -> Option<PathBuf> {
+    let dir = primary.parent()?;
+    let name = primary.file_name()?.to_str()?;
+    let listed = bunko_library::sidecar::list_names(dir)?;
+    let names: Vec<&str> = listed.iter().map(String::as_str).collect();
+    let folder = sidecar_names::Folder::new(&names);
+    names
+        .iter()
+        .find(|n| sidecar_names::cbz_stem(n).is_some() && folder.primary_of(n) == Some(name))
+        .map(|n| dir.join(n))
 }
 
 impl UpgradeProbe for Upgrade {

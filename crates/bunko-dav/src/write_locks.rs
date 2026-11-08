@@ -1,9 +1,10 @@
 //! Per-path write locks (0.5.2 batch 5 `_PathWriteLocks`, spec §8.7).
 //!
 //! Non-blocking: a write that finds its path (or an ancestor or descendant of it) held
-//! fails at once with 423 instead of queueing. Keys are the case-folded components of the
-//! resolved path, so `Series/Vol.CBZ` conflicts with `series/vol.cbz` (case-insensitive
-//! filesystems). Reads never take these locks: they see the old file until the atomic
+//! fails at once with 423 instead of queueing. Keys are the folded components of the
+//! resolved path (the one filename fold, `bunko_core::names::fold_name`), so `Series/Vol.CBZ`
+//! conflicts with `series/vol.cbz`, and a decomposed spelling with the composed one: one
+//! name is one entry on every host. Reads never take these locks: they see the old file until the atomic
 //! rename.
 
 use std::collections::HashMap;
@@ -40,7 +41,7 @@ impl Drop for WriteLockGuard {
 fn key_of(path: &Path) -> Key {
     resolved(path)
         .components()
-        .map(|c| c.as_os_str().to_string_lossy().to_lowercase())
+        .map(|c| crate::fold_name(&c.as_os_str().to_string_lossy()))
         .collect()
 }
 
@@ -167,6 +168,18 @@ impl AccountWriteLocks {
         }
     }
 
+    /// [`Self::lock`], from blocking code (a `spawn_blocking` thread, never an async
+    /// task).
+    pub fn blocking_lock(&self, base: PathBuf) -> AccountWriteGuard {
+        let mutex = self.held.lock().entry(base.clone()).or_default().clone();
+        let guard = mutex.blocking_lock_owned();
+        AccountWriteGuard {
+            locks: self.clone(),
+            key: base,
+            guard: Some(guard),
+        }
+    }
+
     /// Number of accounts held or waited for (tests).
     pub fn held_count(&self) -> usize {
         self.held.lock().len()
@@ -214,6 +227,19 @@ mod tests {
         drop(folder);
         assert!(locks.try_lock(&a).is_some());
         assert_eq!(locks.held_count(), 0);
+    }
+
+    #[test]
+    fn a_decomposed_spelling_is_the_same_lock() {
+        let locks = PathWriteLocks::new();
+        let _g = locks
+            .try_lock(Path::new("/lib/Pok\u{e9}mon/v.cbz"))
+            .unwrap();
+        assert!(
+            locks
+                .try_lock(Path::new("/lib/POKE\u{301}MON/V.cbz"))
+                .is_none()
+        );
     }
 
     #[test]

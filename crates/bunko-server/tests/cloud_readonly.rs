@@ -5,7 +5,9 @@
 //! reports the store, a rename made in the cloud carries the DB rows along, a store
 //! that needs a sign-in holds the queue, and a local OCR claim reads a spooled copy of
 //! the archive and installs into the cloud (or, refused, goes back to the queue
-//! unrecorded). The whole server's write side is `cloud_e2e.rs`.
+//! unrecorded). The scheduler keeps a cloud volume's failure records across scans,
+//! and learns its page formats on a helper thread. The whole server's write side is
+//! `cloud_e2e.rs`.
 
 // Fixtures are checked with std::fs on purpose (the spool is a real local file).
 #![allow(clippy::disallowed_methods)]
@@ -26,9 +28,9 @@ use bunko_proto::{Event, Op};
 use bunko_remote::fake::FakeBackend;
 use bunko_server::app::{ServeOptions, Services, assemble};
 use bunko_server::ocr::sched::{Exec, Msg, SchedDeps, Scheduler};
-use bunko_server::ocr::types::FileFacts;
+use bunko_server::ocr::types::{FileFacts, LibraryFacts};
 use http::{Request, StatusCode};
-use ocr_common::{primary, ready, settings, started};
+use ocr_common::{exit, primary, ready, settings, started};
 use tower::ServiceExt;
 
 const ROOT: &str = "mokuro-reader";
@@ -716,21 +718,31 @@ fn cloud_sched() -> CloudSched {
 }
 
 fn sched_over(layout: &bunko_core::StorageLayout, exec: Exec) -> Scheduler {
+    sched_with(layout, exec, Arc::new(FileFacts)).0
+}
+
+/// [`sched_over`] with the library facts given, and its clock.
+fn sched_with(
+    layout: &bunko_core::StorageLayout,
+    exec: Exec,
+    facts: Arc<dyn LibraryFacts>,
+) -> (Scheduler, Arc<bunko_sched::rate::ManualClock>) {
     let clock = Arc::new(bunko_sched::rate::ManualClock::new(ocr_common::t0()));
-    Scheduler::new(
+    let sched = Scheduler::new(
         SchedDeps {
             layout: layout.clone(),
             db: None,
-            facts: Arc::new(FileFacts),
+            facts,
             locks: Arc::new(bunko_library::service::NoPathLocks),
-            clock,
+            clock: clock.clone(),
             exec,
             upgrade: None,
             generator: "mokuro-bunko test".into(),
             version: "0.8.0-test".into(),
         },
         settings(vec![primary()]),
-    )
+    );
+    (sched, clock)
 }
 
 /// Wait (blocking) until `f` holds.
@@ -1038,4 +1050,376 @@ fn run_local_claim(refuse: bool) {
             .is_none(),
         "nothing was written to the cloud"
     );
+}
+
+/// Register a remote processor of mokuro-bunko `version` and open its socket.
+fn connect(
+    sched: &mut Scheduler,
+    name: &str,
+    sessions: u32,
+    version: &str,
+) -> (String, tokio::sync::mpsc::UnboundedReceiver<Op>) {
+    let (reply, mut rx) = tokio::sync::oneshot::channel();
+    let body = serde_json::json!({
+        "protocol": 3,
+        "name": name,
+        "host": {"cpu": "Test CPU", "gpu": "Test GPU", "backend": "cuda", "version": version},
+        "catalog": {"engines": ["hayai-nova", "paddle-manga", "ppocr-manga"], "detectors": ["ppocr-manga"], "devices": [{"id": "cpu", "label": "CPU"}]},
+        "max_sessions": sessions,
+    });
+    sched.handle(Msg::Register {
+        input: bunko_server::ocr::sched::RegisterInput {
+            username: format!("acct-{name}"),
+            body,
+            account_stamp: None,
+        },
+        reply,
+    });
+    let pid = match rx.try_recv().unwrap() {
+        bunko_server::ocr::sched::RegisterOutcome::Ok(r) => r.processor_id,
+        other => panic!("register refused: {other:?}"),
+    };
+    let (tx, ops) = tokio::sync::mpsc::unbounded_channel();
+    let (reply, mut rx) = tokio::sync::oneshot::channel();
+    sched.handle(Msg::SocketOpen {
+        pid: pid.clone(),
+        username: format!("acct-{name}"),
+        ops: tx,
+        reply,
+    });
+    rx.try_recv().unwrap().unwrap();
+    (pid, ops)
+}
+
+fn drain(ops: &mut tokio::sync::mpsc::UnboundedReceiver<Op>) -> Vec<Op> {
+    let mut out = Vec::new();
+    while let Ok(op) = ops.try_recv() {
+        out.push(op);
+    }
+    out
+}
+
+/// `(sid, claim, library-relative archive)` of every volume op.
+fn volume_ops(ops: &[Op]) -> Vec<(String, String, String)> {
+    ops.iter()
+        .filter_map(|o| match o {
+            Op::Volume(v) => Some((
+                v.sid.clone(),
+                v.claim.clone(),
+                v.archive.trim_start_matches("/mokuro-reader/").to_string(),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A remote processor fails `Series/Vol 2.cbz` with "no page images found"; returns
+/// its pid and op channel (its session is over).
+fn fail_vol2(sched: &mut Scheduler) -> (String, tokio::sync::mpsc::UnboundedReceiver<Op>) {
+    sched.handle(Msg::Tick);
+    assert!(sched.owed.volumes.contains_key("Series/Vol 2.cbz"));
+    let (pid, mut ops) = connect(sched, "box", 1, "0.7.6");
+    let sent = drain(&mut ops);
+    let (sid, claim, rel) = volume_ops(&sent).pop().expect("Vol 2 is offered");
+    assert_eq!(rel, "Series/Vol 2.cbz");
+    let event = |sched: &mut Scheduler, event: Event| {
+        sched.handle(Msg::Event {
+            pid: pid.clone(),
+            event,
+        })
+    };
+    event(sched, ready(&sid));
+    event(
+        sched,
+        Event::VolumeFailed {
+            sid: sid.clone(),
+            id: claim,
+            error: "no page images found in Vol 2.cbz".into(),
+        },
+    );
+    event(sched, exit(&sid, Some(0)));
+    let rec = &sched.failures["Series/Vol 2.cbz"];
+    assert_eq!(rec["tried_by"], serde_json::json!(["0.7.6"]));
+    (pid, ops)
+}
+
+/// Regression: a failure record was kept only while `<library>/<series>/<volume>.cbz`
+/// was a file on disk, and a cloud library's root never is, so every scan dropped every
+/// record: a volume nothing in which decodes was never parked (each scan offered it to
+/// the release that had just failed it), and the catalog never showed it as failing.
+#[test]
+fn a_cloud_volumes_failure_record_survives_scans_and_parks_it() {
+    let c = cloud_sched();
+    let (mut sched, clock) = sched_with(&c.layout, Exec::Inline, Arc::new(FileFacts));
+    let (_pid, mut ops) = fail_vol2(&mut sched);
+    // A day of scans.
+    for hours in 1..=24 {
+        clock.set(ocr_common::t0() + f64::from(hours) * 3600.0);
+        sched.handle(Msg::Tick);
+    }
+    sched.prune_failures();
+    assert!(
+        sched.failures.contains_key("Series/Vol 2.cbz"),
+        "the record survives the scans"
+    );
+    assert!(
+        volume_ops(&drain(&mut ops)).is_empty(),
+        "parked: never retried by the release that failed it"
+    );
+    assert_eq!(
+        sched
+            .failing_volumes()
+            .get("series/vol 2.cbz")
+            .map(String::as_str),
+        Some("This volume has no pages that could be decoded."),
+        "the catalog's badge"
+    );
+    // A release that has not tried it gets it at once.
+    let (_, mut newer) = connect(&mut sched, "newer", 1, "0.7.7");
+    let got: Vec<String> = volume_ops(&drain(&mut newer))
+        .into_iter()
+        .map(|(_, _, rel)| rel)
+        .collect();
+    assert_eq!(got, ["Series/Vol 2.cbz"]);
+}
+
+/// The other half of the prune rule on a cloud library: a record whose archive left
+/// the cloud folder goes at the next scan.
+#[test]
+fn a_cloud_volumes_failure_record_goes_with_its_archive() {
+    let c = cloud_sched();
+    let (mut sched, clock) = sched_with(&c.layout, Exec::Inline, Arc::new(FileFacts));
+    fail_vol2(&mut sched);
+    c.remote
+        .backend()
+        .reader_delete(&format!("{ROOT}/Series/Vol 2.cbz"));
+    c.remote.feed().poll_now();
+    let vol2 = c.layout.library().join("Series/Vol 2.cbz");
+    eventually_sync("the delete in the index", || {
+        !bunko_store::fs::exists(&vol2)
+    });
+    clock.set(ocr_common::t0() + 3600.0);
+    sched.handle(Msg::Tick);
+    assert!(
+        sched.failures.is_empty(),
+        "the record of a removed archive is pruned: {:?}",
+        sched.failures
+    );
+}
+
+/// A `.cbz` of `pages` stored members named `NNN.<suffix>`.
+fn cbz_of(pages: usize, suffix: &str) -> Vec<u8> {
+    let mut z = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let opts =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    for i in 0..pages {
+        z.start_file(format!("{:03}.{suffix}", i + 1), opts)
+            .unwrap();
+        z.write_all(b"not really an image").unwrap();
+    }
+    z.finish().unwrap().into_inner()
+}
+
+/// Page counts without opening an archive (what the metadata cache gives a server), so
+/// nothing but the page-format check reads one.
+struct CachedCounts;
+impl LibraryFacts for CachedCounts {
+    fn missing_pages(&self, cbz: &std::path::Path) -> i64 {
+        LibraryFacts::missing_pages(&FileFacts, cbz)
+    }
+    fn page_count(&self, _cbz: &std::path::Path) -> Option<i64> {
+        Some(3)
+    }
+}
+
+/// Spec §8 with the page-format rule (0.7.6): whether an older processor's release
+/// reads a cloud volume's pages is learnt from its zip directory on a helper thread,
+/// never on the actor; until then the volume waits. A volume of JPEG XL pages is then
+/// not offered to a release older than 0.7.5, and is offered to one that reads them.
+#[test]
+fn a_cloud_volumes_page_formats_are_read_off_the_actor() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let c = cloud_sched();
+    let fake = c.remote.backend().clone();
+    fake.reader_put(&format!("{ROOT}/Series/Vol 3.cbz"), &cbz_of(3, "jxl"));
+    c.remote.feed().poll_now();
+    let vol3 = c.layout.library().join("Series/Vol 3.cbz");
+    eventually_sync("the new archive in the index", || {
+        bunko_store::fs::is_file(&vol3)
+    });
+    // A read the actor makes while it handles a message would hold the actor here
+    // (the helper's reads wait until it is done): it is recorded, never waited out.
+    let on_actor = Arc::new(AtomicBool::new(false));
+    let read_on_actor = Arc::new(AtomicBool::new(false));
+    let hook = {
+        let (on_actor, read_on_actor) = (on_actor.clone(), read_on_actor.clone());
+        Arc::new(move |op: bunko_remote::fake::FakeOp| {
+            if op != bunko_remote::fake::FakeOp::Read {
+                return;
+            }
+            let until = Instant::now() + Duration::from_secs(2);
+            while on_actor.load(Ordering::SeqCst) {
+                if Instant::now() > until {
+                    read_on_actor.store(true, Ordering::SeqCst);
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        })
+    };
+    fake.set_call_hook(Some(hook));
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (mut sched, _clock) = sched_with(&c.layout, Exec::Threads(tx), Arc::new(CachedCounts));
+    let mut handle = |sched: &mut Scheduler, msg: Msg| {
+        on_actor.store(true, Ordering::SeqCst);
+        sched.handle(msg);
+        on_actor.store(false, Ordering::SeqCst);
+    };
+    // Take helper messages until `done` holds.
+    let helpers = |sched: &mut Scheduler,
+                   handle: &mut dyn FnMut(&mut Scheduler, Msg),
+                   done: &dyn Fn(&Scheduler) -> bool| {
+        while !done(sched) {
+            let msg = rx
+                .recv_timeout(Duration::from_secs(20))
+                .expect("a helper's answer");
+            handle(sched, msg);
+        }
+    };
+    handle(&mut sched, Msg::Tick);
+    helpers(&mut sched, &mut handle, &|s| s.walks > 0);
+    let owed: Vec<&String> = sched.owed.volumes.keys().collect();
+    assert_eq!(owed, ["Series/Vol 2.cbz", "Series/Vol 3.cbz"]);
+    fake.reset_calls();
+
+    // 0.7.4 reads no JPEG XL: offered nothing until the formats are known, then only
+    // the volume of JPEG pages.
+    on_actor.store(true, Ordering::SeqCst);
+    let (_, mut old) = connect(&mut sched, "old", 2, "0.7.4");
+    on_actor.store(false, Ordering::SeqCst);
+    assert!(
+        volume_ops(&drain(&mut old)).is_empty(),
+        "offered before its pages were known"
+    );
+    helpers(&mut sched, &mut handle, &|s| {
+        s.owed.volumes["Series/Vol 3.cbz"].page_suffixes.is_some()
+    });
+    let got: Vec<String> = volume_ops(&drain(&mut old))
+        .into_iter()
+        .map(|(_, _, rel)| rel)
+        .collect();
+    assert_eq!(got, ["Series/Vol 2.cbz"], "0.7.4 cannot read JPEG XL pages");
+    let (_, read) = sched.owed.volumes["Series/Vol 3.cbz"]
+        .page_suffixes
+        .clone()
+        .unwrap();
+    assert_eq!(
+        read,
+        bunko_server::ocr::owed::PageSuffixes::Read(Arc::from(vec![".jxl".to_string()]))
+    );
+    let vol3_pid = fake
+        .node_at(&format!("{ROOT}/Series/Vol 3.cbz"))
+        .unwrap()
+        .pid;
+    assert!(
+        fake.read_log().iter().any(|r| r.pid == vol3_pid),
+        "a helper read the archive: {:?}",
+        fake.read_log()
+    );
+    assert!(sched.failures.is_empty());
+
+    // A release that reads them is offered it at once (nothing more to read).
+    on_actor.store(true, Ordering::SeqCst);
+    let (_, mut new) = connect(&mut sched, "new", 1, "0.7.5");
+    on_actor.store(false, Ordering::SeqCst);
+    let got: Vec<String> = volume_ops(&drain(&mut new))
+        .into_iter()
+        .map(|(_, _, rel)| rel)
+        .collect();
+    assert_eq!(got, ["Series/Vol 3.cbz"]);
+    fake.set_call_hook(None);
+    assert!(
+        !read_on_actor.load(Ordering::SeqCst),
+        "the actor read an archive"
+    );
+}
+
+/// An older processor facing a long backlog of cloud volumes whose page formats are not
+/// known yet is offered the first it reads after one helper batch
+/// ([`bunko_server::ocr::sched::SUFFIX_BATCH`] reads), not after the whole backlog has
+/// been read, and the batch reports on its own.
+#[test]
+fn an_older_processor_is_offered_work_after_one_batch_of_page_format_reads() {
+    use bunko_server::ocr::sched::SUFFIX_BATCH;
+    const BACKLOG: usize = 40;
+    let c = cloud_sched();
+    let fake = c.remote.backend().clone();
+    for i in 0..BACKLOG {
+        fake.reader_put(
+            &format!("{ROOT}/Backlog/Vol {:02}.cbz", i + 1),
+            &cbz_of(3, "jpg"),
+        );
+    }
+    c.remote.feed().poll_now();
+    let last = c
+        .layout
+        .library()
+        .join(format!("Backlog/Vol {BACKLOG:02}.cbz"));
+    eventually_sync("the backlog in the index", || {
+        bunko_store::fs::is_file(&last)
+    });
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (mut sched, _clock) = sched_with(&c.layout, Exec::Threads(tx), Arc::new(CachedCounts));
+    sched.handle(Msg::Tick);
+    while sched.walks == 0 {
+        let msg = rx
+            .recv_timeout(Duration::from_secs(20))
+            .expect("a helper's answer");
+        sched.handle(msg);
+    }
+    assert!(
+        sched.owed.volumes.len() > BACKLOG,
+        "{:?}",
+        sched.owed.volumes.keys()
+    );
+    fake.reset_calls();
+
+    let (_, mut old) = connect(&mut sched, "old", 2, "0.7.4");
+    assert!(volume_ops(&drain(&mut old)).is_empty());
+    assert!(sched.suffixes_reading, "a batch is being read");
+    assert!(sched.suffixes_wanted.len() <= SUFFIX_BATCH);
+    // The first batch's answer arrives once its reads are done, and the next batch
+    // cannot start before the actor has taken it: the read log, taken as the answer
+    // arrives, holds that batch's archives only. (Taking the answer starts the next
+    // batch on a helper at once, so the log is read before it is handled.)
+    let (batch, read) = loop {
+        let msg = rx
+            .recv_timeout(Duration::from_secs(20))
+            .expect("a helper's answer");
+        if let Msg::PageSuffixesRead(answer) = &msg {
+            let read: std::collections::HashSet<_> =
+                fake.read_log().iter().map(|r| r.pid.clone()).collect();
+            let batch: Vec<String> = answer.iter().map(|(rel, _, _)| rel.clone()).collect();
+            sched.handle(msg);
+            break (batch, read);
+        }
+        sched.handle(msg);
+    };
+    assert!(
+        (1..=SUFFIX_BATCH).contains(&batch.len()),
+        "batch of {}",
+        batch.len()
+    );
+    let batch_pids: std::collections::HashSet<_> = batch
+        .iter()
+        .map(|rel| fake.node_at(&format!("{ROOT}/{rel}")).unwrap().pid)
+        .collect();
+    assert!(
+        read.len() <= SUFFIX_BATCH && read.is_subset(&batch_pids),
+        "{} archives read before the first offer, not all of the batch {batch:?}",
+        read.len()
+    );
+    let got = volume_ops(&drain(&mut old));
+    assert!(!got.is_empty(), "offered nothing after the first batch");
+    assert!(sched.failures.is_empty());
 }

@@ -2,21 +2,23 @@
 //! `publish`, moves, deletes, folders, `copy`, and the cloud queue-file writer
 //! (§9.1, D10). The ops themselves run in `outbox.rs`.
 
+use std::collections::BTreeMap;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use bunko_store::{
     Durability, File, LibraryStore, Mode, OpId, OpenOptions, Origin, Published, WriteIntent,
-    conflict,
+    conflict, unavailable,
 };
 
 use crate::backend::Backend;
 use crate::file::StagingFile;
 use crate::index::RelPath;
 use crate::names::{fold, is_reserved_name};
-use crate::outbox::{Op, OpKind, OpState};
+use crate::outbox::{BARRIER, Op, OpKind, OpState};
 use crate::state::{ConflictRow, random_id};
 use crate::status::{MARKER_NAME, QUEUE_DOC_MAX_BYTES, cloud_queue_doc, queue_doc_changed};
 use crate::store::{Core, RemoteStore};
@@ -31,6 +33,21 @@ pub(crate) enum Remove {
 
 /// The queue file's name in the merged root.
 pub const QUEUE_FILE: &str = ".mokuro-queue.json";
+
+/// A Deferred write of the outbox at or under `rel` (a case merge's steps aside: they
+/// run in their group).
+fn deferred_under(o: &Op, rel: &RelPath) -> bool {
+    o.durability == Durability::Deferred
+        && o.group.is_none()
+        && o.dest.segments().starts_with(rel.segments())
+}
+
+/// The worker is running such a write (`ops` locked: the worker claims under it, and
+/// `running` is the op it claimed, 0 for none).
+fn running_under(ops: &BTreeMap<u64, Op>, running: u64, rel: &RelPath) -> bool {
+    ops.get(&running)
+        .is_some_and(|o| deferred_under(o, rel) && o.state.live())
+}
 
 fn parent_of(rel: &RelPath) -> RelPath {
     let s = rel.segments();
@@ -485,27 +502,58 @@ impl<B: Backend> RemoteStore<B> {
                 "a folder cannot move into itself",
             ));
         }
-        let src = self.lookup(from)?;
-        self.parent_dir_exists(&trel, to)?;
-        // A pending Deferred create that has not left yet: move the op, not a node.
-        if src.winner_pid.is_none()
-            && let Some(mut op) = src.pending_op.as_deref().and_then(|id| self.pending(id))
-        {
+        let deadline = std::time::Instant::now() + BARRIER;
+        let src = loop {
+            // A write of the source the worker has on its way lands (or is back for a
+            // later try) before the source is looked at: an op on its way cannot move.
+            self.settle_under(&frel)?;
+            let src = self.lookup(from)?;
+            self.parent_dir_exists(&trel, to)?;
+            // A pending Deferred create that has not left yet: move the op, not a node.
+            let pending = match (&src.winner_pid, src.pending_op.as_deref()) {
+                (None, Some(id)) => id.parse::<u64>().ok(),
+                _ => None,
+            };
+            let Some(id) = pending else {
+                break src;
+            };
             if self.core.index.lock().lookup(&trel).is_some() {
                 return Err(kind_err(io::ErrorKind::AlreadyExists, to, "exists"));
             }
-            let ch = self
-                .core
-                .index
-                .lock()
-                .clear_pending(&op.op_id())
-                .map_err(io::Error::other)?;
+            // Out of the op map while it moves (the worker claims under that lock): it
+            // is sent to the new name, or not yet. One claimed meanwhile is waited out.
+            let taken = {
+                let mut ops = self.core.ops.lock();
+                (self.core.running.load(Ordering::Acquire) != id).then(|| match ops.get(&id) {
+                    Some(o) if o.state.live() => ops.remove(&id),
+                    _ => None,
+                })
+            };
+            let Some(taken) = taken else {
+                self.settle(deadline)?;
+                continue;
+            };
+            let Some(mut op) = taken else {
+                break src;
+            };
+            let cleared = self.core.index.lock().clear_pending(&op.op_id());
+            let ch = match cleared {
+                Ok(ch) => ch,
+                Err(e) => {
+                    self.core.ops.lock().insert(op.id, op);
+                    return Err(io::Error::other(e));
+                }
+            };
             self.core.emit_changes(&ch);
             op.dest = trel;
-            self.core.save_op(&op)?;
+            if let Err(e) = self.core.save_op(&op) {
+                // Not lost for this run: it is sent to the new name all the same.
+                self.core.ops.lock().insert(op.id, op);
+                return Err(e);
+            }
             self.core.stage_deferred(op)?;
             return Ok(());
-        }
+        };
         let Some(pid) = src.winner_pid.clone() else {
             return Err(kind_err(io::ErrorKind::NotFound, from, "no such file"));
         };
@@ -568,52 +616,37 @@ impl<B: Backend> RemoteStore<B> {
                 "the library root",
             ));
         }
-        match how {
-            Remove::File if e.is_dir => {
-                return Err(kind_err(io::ErrorKind::IsADirectory, p, "a folder"));
+        let fits = |e: &crate::index::Entry| -> io::Result<()> {
+            match how {
+                Remove::File if e.is_dir => {
+                    Err(kind_err(io::ErrorKind::IsADirectory, p, "a folder"))
+                }
+                Remove::EmptyDir | Remove::Tree if !e.is_dir => {
+                    Err(kind_err(io::ErrorKind::NotADirectory, p, "a file"))
+                }
+                Remove::EmptyDir if !self.core.index.lock().children(e.eid).is_empty() => {
+                    Err(kind_err(io::ErrorKind::DirectoryNotEmpty, p, "not empty"))
+                }
+                _ => Ok(()),
             }
-            Remove::EmptyDir | Remove::Tree if !e.is_dir => {
-                return Err(kind_err(io::ErrorKind::NotADirectory, p, "a file"));
-            }
-            Remove::EmptyDir if !self.core.index.lock().children(e.eid).is_empty() => {
-                return Err(kind_err(io::ErrorKind::DirectoryNotEmpty, p, "not empty"));
-            }
-            _ => {}
-        }
+        };
+        fits(&e)?;
         if let Some(local) = staged {
             self.core.staging.lock().remove(&rel);
             self.core.state.local_del(&rel.to_string());
             let _ = std::fs::remove_file(local);
         }
-        // Pending Deferred writes at or under the path will never land.
-        let doomed: Vec<Op> = self
-            .core
-            .ops
-            .lock()
-            .values()
-            .filter(|o| {
-                o.durability == Durability::Deferred
-                    && o.group.is_none()
-                    && matches!(o.state, OpState::Staged | OpState::Held)
-                    && o.dest.segments().starts_with(rel.segments())
-            })
-            .cloned()
-            .collect();
-        for mut o in doomed {
-            // Deleting the pending file itself is intended; anything under a deleted
-            // folder is a lost write.
-            if o.dest != rel {
-                self.core.state.conflict_add(
-                    ConflictRow::LostWrite,
-                    &o.dest.to_string(),
-                    None,
-                    "its destination was deleted before it was uploaded",
-                );
-            }
-            self.core.finish(&mut o, OpState::Superseded);
-        }
-        let Some(pid) = e.winner_pid.clone() else {
+        // Pending Deferred writes at or under the path will never land. One the worker
+        // is running there may be on its way: it is waited out, so the entry is looked
+        // at again as it stands now (a write may have landed since the lookup above).
+        self.cancel_deferred_under(&rel)?;
+        let Some(e) = self.core.index.lock().lookup(&rel) else {
             return Ok(()); // a local-only pending entry: cancelled above
+        };
+        fits(&e)?;
+        let Some(pid) = e.winner_pid.clone() else {
+            // Still pending: an upload whose outcome is in doubt, settled at its next run.
+            return Ok(());
         };
         let own = !e.is_dir
             && e.cver
@@ -629,6 +662,89 @@ impl<B: Backend> RemoteStore<B> {
         let core = self.core.clone();
         self.block_on("remove", async move { core.run_sync(op).await })
             .map(|_| ())
+    }
+
+    /// Cancel the Deferred writes at or under `rel` that have not left: STAGED, HELD,
+    /// or back from a PREFLIGHT that failed (it never sent a byte). Each is taken out
+    /// of the op map under the lock the worker claims an op under, so it is never sent
+    /// after this. The one the worker is running there may be on its way to the
+    /// provider and cannot be called back: its attempt is waited out
+    /// ([`RemoteStore::settle`]) and the rest looked at again (it may have landed, or
+    /// be back for a later try).
+    fn cancel_deferred_under(&self, rel: &RelPath) -> io::Result<()> {
+        let deadline = std::time::Instant::now() + BARRIER;
+        loop {
+            let (doomed, busy) = {
+                let mut ops = self.core.ops.lock();
+                let running = self.core.running.load(Ordering::Acquire);
+                let busy = running_under(&ops, running, rel);
+                let ids: Vec<u64> = ops
+                    .values()
+                    .filter(|o| {
+                        o.id != running
+                            && deferred_under(o, rel)
+                            && matches!(
+                                o.state,
+                                OpState::Staged | OpState::Held | OpState::Preflight
+                            )
+                    })
+                    .map(|o| o.id)
+                    .collect();
+                let doomed: Vec<Op> = ids.iter().filter_map(|id| ops.remove(id)).collect();
+                (doomed, busy)
+            };
+            for mut o in doomed {
+                // Deleting the pending file itself is intended; anything under a deleted
+                // folder is a lost write.
+                if o.dest != *rel {
+                    self.core.state.conflict_add(
+                        ConflictRow::LostWrite,
+                        &o.dest.to_string(),
+                        None,
+                        "its destination was deleted before it was uploaded",
+                    );
+                }
+                self.core.finish(&mut o, OpState::Superseded);
+            }
+            if !busy {
+                return Ok(());
+            }
+            self.settle(deadline)?;
+        }
+    }
+
+    /// Wait until the worker's run of a Deferred write at or under `rel` (if any) is
+    /// over: it landed, or is back for a later try.
+    fn settle_under(&self, rel: &RelPath) -> io::Result<()> {
+        let deadline = std::time::Instant::now() + BARRIER;
+        loop {
+            let busy = {
+                let ops = self.core.ops.lock();
+                running_under(&ops, self.core.running.load(Ordering::Acquire), rel)
+            };
+            if !busy {
+                return Ok(());
+            }
+            self.settle(deadline)?;
+        }
+    }
+
+    /// Wait out the run the worker is making (it holds the op lock while it runs an
+    /// op), at most until `deadline`, as a Sync move or delete waits for in-flight ops
+    /// (§5.7 Barrier): then 503. The failpoint `settle` is passed first.
+    fn settle(&self, deadline: std::time::Instant) -> io::Result<()> {
+        self.core.fail_at("settle")?;
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        let core = self.core.clone();
+        let settled = self.block_on("settle", async move {
+            tokio::time::timeout(left, core.exec.lock()).await.is_ok()
+        });
+        if !settled {
+            return Err(unavailable(
+                "a write of the path on its way to the provider did not finish in time",
+            ));
+        }
+        Ok(())
     }
 
     /// `create_dir` / `create_dir_all`: Sync, idempotent, network only for missing

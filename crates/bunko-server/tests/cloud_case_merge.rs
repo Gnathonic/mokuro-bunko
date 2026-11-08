@@ -105,6 +105,57 @@ impl Env {
     }
 }
 
+impl Env {
+    /// `GET path` as `user` (an uploader made on first use): status and body.
+    async fn get_as(&self, user: &str, path: &str) -> (u16, Vec<u8>) {
+        let db = &self.services.db;
+        if db.get_user(user).ok().flatten().is_none() {
+            db.create_user(user, "pass1234", Role::Uploader, UserStatus::Active, "")
+                .unwrap();
+        }
+        let token = db
+            .create_auth_token(user, TokenKind::Web, "test", None)
+            .unwrap()
+            .0;
+        let req = Request::builder()
+            .method("GET")
+            .uri(path)
+            .header("host", "localhost:8080")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = self.app.clone().oneshot(req).await.unwrap();
+        let status = resp.status().as_u16();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, bytes.to_vec())
+    }
+}
+
+/// The one overlay folder that folds like `name` (the correction folder of a merged
+/// series keeps the spelling it had: a disk under `users/` that folds names could not
+/// hold a second one beside it), and what it lists.
+fn overlay_folder(overlays: &std::path::Path, name: &str) -> Vec<String> {
+    let folders: Vec<String> = listed(overlays)
+        .into_iter()
+        .filter(|n| n.eq_ignore_ascii_case(name))
+        .collect();
+    assert_eq!(folders.len(), 1, "{folders:?}");
+    listed(&overlays.join(&folders[0]))
+}
+
+/// The names in a local folder, sorted.
+fn listed(dir: &std::path::Path) -> Vec<String> {
+    let mut v: Vec<String> = bunko_store::fs::read_dir(dir)
+        .unwrap()
+        .flatten()
+        .map(|d| d.file_name().to_string_lossy().into_owned())
+        .collect();
+    v.sort();
+    v
+}
+
 async fn eventually(what: &str, mut f: impl FnMut() -> bool) {
     let until = Instant::now() + Duration::from_secs(30);
     while !f() {
@@ -184,19 +235,27 @@ async fn a_case_merge_carries_the_db_rows_per_volume_and_holds_the_queue() {
     for n in ["Vol 1.cbz", "Vol 2.cbz", "Vol 2.mokuro"] {
         assert!(kingdom.contains(&n.to_string()), "{kingdom:?}");
     }
-    // The account's correction follows its volume into the winning spelling.
-    assert!(bunko_store::fs::exists(
-        overlays.join("Kingdom/Vol 2.edit.mokuro")
-    ));
-    assert!(!bunko_store::fs::exists(
-        overlays.join("kingdom/Vol 2.edit.mokuro")
-    ));
+    // The account's correction follows its volume into the winning spelling, the
+    // same on every host: while both folders were listed it stayed in the loser's
+    // overlay folder (never mixed into the winner's), which, the loser gone, is the
+    // winner's. Checked by listing (a lookup by name folds on a case-insensitive
+    // disk) and through WebDAV as its account.
+    assert_eq!(overlay_folder(&overlays, "kingdom"), ["Vol 2.edit.mokuro"]);
+    assert_eq!(
+        e.get_as("alice", "/mokuro-reader/Kingdom/Vol%202.edit.mokuro")
+            .await,
+        (200, b"{}".to_vec())
+    );
     // Per volume: the owner, the OCR row and the volume id follow the archive.
     assert_eq!(
         db.get_volume_owner("Kingdom/Vol 2.cbz").unwrap().as_deref(),
         Some("alice")
     );
-    assert_eq!(db.get_volume_owner("kingdom/Vol 2.cbz").unwrap(), None);
+    // The row itself moved (a lookup by the old spelling folds to the new one).
+    assert_eq!(
+        db.get_volume_owner_exact("kingdom/Vol 2.cbz").unwrap(),
+        None
+    );
     let row = db.get_ocr_sidecar("Kingdom/Vol 2.mokuro").unwrap().unwrap();
     assert_eq!(row.volume_key, "Kingdom/Vol 2.cbz");
     assert!(
@@ -441,8 +500,10 @@ async fn corrections_of_a_trashed_identical_copy_move_to_the_kept_one() {
         f2.node_at(&format!("{ROOT}/kingdom")).is_none()
     })
     .await;
-    assert!(bunko_store::fs::exists(
-        overlays.join("Kingdom/Vol 1.edit.mokuro")
-    ));
-    assert!(!bunko_store::fs::exists(overlays.join("kingdom")));
+    assert_eq!(overlay_folder(&overlays, "kingdom"), ["Vol 1.edit.mokuro"]);
+    assert_eq!(
+        e.get_as("alice", "/mokuro-reader/Kingdom/Vol%201.edit.mokuro")
+            .await,
+        (200, b"{\"pages\":[]}".to_vec())
+    );
 }

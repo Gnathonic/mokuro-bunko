@@ -110,16 +110,22 @@ pub fn layer_id_of_path(path: &str) -> Option<String> {
     Some(id.to_string())
 }
 
-/// The ROOT `catalog.json` only (ASCII case-insensitive).
+/// The ROOT `catalog.json` only, in any spelling the filename fold joins
+/// (`bunko_core::names::is_fixed_name`: `CATALOG.json`, `catalog\u{200B}.json`).
 pub fn is_catalog_file_path(path: &str) -> bool {
-    library_relative_normalized(path).is_some_and(|r| r.eq_ignore_ascii_case("catalog.json"))
+    library_relative_normalized(path)
+        .is_some_and(|r| !r.contains('/') && bunko_core::names::is_fixed_name(&r, "catalog.json"))
 }
 
-/// `/mokuro-reader/<Series>/series.json` → `<Series>`.
+/// `/mokuro-reader/<Series>/series.json` → `<Series>`, the file name in any spelling the
+/// filename fold joins (`ſeries.json`, `series\u{200B}.json`).
 pub fn series_title_from_series_file_path(path: &str) -> Option<String> {
     let rel = library_relative_normalized(path)?;
     let (head, tail) = rel.rsplit_once('/')?;
-    if !tail.eq_ignore_ascii_case("series.json") || head.contains('/') || head.trim().is_empty() {
+    if !bunko_core::names::is_fixed_name(tail, "series.json")
+        || head.contains('/')
+        || head.trim().is_empty()
+    {
         return None;
     }
     Some(head.to_string())
@@ -158,8 +164,9 @@ mod tests {
     #[test]
     fn progress_and_library() {
         assert!(is_progress_path("/mokuro-reader/volume-data.json"));
-        assert!(!is_progress_path("/mokuro-reader/Volume-Data.json"));
-        assert!(is_library_path("/mokuro-reader/Volume-Data.json"));
+        // Per-user names match in any case (no shared `Volume-Data.json`).
+        assert!(is_progress_path("/mokuro-reader/Volume-Data.json"));
+        assert!(!is_library_path("/mokuro-reader/Volume-Data.json"));
         assert!(!is_library_path("/mokuro-reader/"));
         assert!(!is_library_path("/mokuro-reader/profiles.json"));
         // The reader's position index is the user's own, like their progress.
@@ -180,11 +187,14 @@ mod tests {
         }
         assert!(is_progress_path("/mokuro-reader/goals.json"));
         assert!(!is_history_path("/mokuro-reader/goals.json"));
-        for p in ["/mokuro-reader/History/v.cbz", "/mokuro-reader/historyx"] {
-            assert!(!is_progress_path(p), "{p}");
-            assert!(!is_history_path(p), "{p}");
-            assert!(is_library_path(p), "{p}");
+        for p in ["/mokuro-reader/History/v.cbz", "/mokuro-reader/HISTORY"] {
+            assert!(is_progress_path(p), "{p}");
+            assert!(is_history_path(p), "{p}");
+            assert!(!is_library_path(p), "{p}");
         }
+        assert!(!is_progress_path("/mokuro-reader/historyx"));
+        assert!(!is_history_path("/mokuro-reader/historyx"));
+        assert!(is_library_path("/mokuro-reader/historyx"));
         assert!(!is_compiled_metadata_path(
             "/mokuro-reader/history/series.json"
         ));
@@ -238,6 +248,23 @@ mod tests {
         assert!(is_catalog_file_path("/mokuro-reader/catalog.json"));
         assert!(is_catalog_file_path("/mokuro-reader//CATALOG.json"));
         assert!(is_catalog_file_path("/mokuro-reader/x/../catalog.json"));
+        // Every spelling the filename fold joins, as every host makes them one file.
+        for p in [
+            "/mokuro-reader/catalog\u{200B}.json",
+            "/mokuro-reader/CATALOG\u{FE0F}.JSON",
+        ] {
+            assert!(is_catalog_file_path(p), "{p:?}");
+            assert!(is_compiled_metadata_path(p), "{p:?}");
+        }
+        for p in [
+            "/mokuro-reader/S/\u{17F}eries.json",
+            "/mokuro-reader/T/series\u{200B}.json",
+            "/mokuro-reader/T/SERIES\u{AD}.JSON",
+        ] {
+            assert!(is_series_file_path(p), "{p:?}");
+            assert!(is_compiled_metadata_path(p), "{p:?}");
+        }
+        assert!(!is_series_file_path("/mokuro-reader/T/series.json.bak"));
         assert!(!is_catalog_file_path("/mokuro-reader/S/catalog.json"));
         assert_eq!(
             series_title_from_series_file_path("/mokuro-reader/One Piece/series.json").as_deref(),
@@ -251,7 +278,7 @@ mod tests {
         assert!(series_title_from_series_file_path("/mokuro-reader/ /series.json").is_none());
         // The reading-history tree is the account's own, never compiled metadata.
         assert!(!is_series_file_path("/mokuro-reader/history/series.json"));
-        assert!(is_series_file_path("/mokuro-reader/History/series.json"));
+        assert!(!is_series_file_path("/mokuro-reader/History/series.json"));
     }
 
     /// C4: the segment helpers read the path as DAV resolves it.

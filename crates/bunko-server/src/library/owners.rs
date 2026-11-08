@@ -10,8 +10,11 @@
 //!   it changes no record.
 //! * Folders that existed before the records get one at startup, once
 //!   ([`adopt_series_folder_owners`]): the one uploader of their tracked volumes, when
-//!   no archive in them is untracked. Every other folder (mixed, untracked, empty) gets
-//!   none, and stays shared.
+//!   no archive in them is untracked. The spellings of one series (one series key, or
+//!   one name by the filename fold) count together. Every other folder (mixed,
+//!   untracked, empty) gets none, and stays shared, and so does a series whose folder
+//!   is a member of a frozen case-variant group at the root (`Kingdom/` beside
+//!   `kingdom/`): background work never acts on one.
 //!
 //! Records are read only through [`series_folder_is_live`]: a folder that went without
 //! a hook (a crash, a delete in the cloud while the server was off) leaves a record
@@ -42,15 +45,26 @@ pub struct FolderAdoption {
 }
 
 /// A top-level library name that can be a series folder: not the cloud-root owner's
-/// own tree, the cover cache, or a dot name (staging).
+/// own tree, or a dot name (staging). `thumbnails` is a name like any (no cover cache
+/// folder is kept in the library), on every store.
 fn is_series_folder_name(name: &str) -> bool {
-    !reader_tree::is_per_user_root_name(name) && name != "thumbnails" && !name.starts_with('.')
+    !reader_tree::is_per_user_root_name(name) && !name.starts_with('.')
 }
 
 /// The series folders listed at the library root (through the store: an index read on
-/// a cloud library); `Err` when the root, or any entry of it, cannot be read: a listing
-/// missing a folder would read its series as unowned. Blocking.
+/// a cloud library), but those another listed spelling shadows: no request reaches
+/// them. `Err` when the root, or any entry of it, cannot be read: a listing missing a
+/// folder would read its series as unowned. Blocking.
 fn series_folders(library: &Path) -> std::io::Result<Vec<String>> {
+    let mut out = every_series_folder(library)?;
+    // A folder another listed spelling shadows is no series anyone reaches.
+    let losers = bunko_library::fsutil::case_losers(library, out.iter().map(String::as_str));
+    out.retain(|n| !losers.contains(n));
+    Ok(out)
+}
+
+/// [`series_folders`] with the shadowed spellings too: every series folder listed.
+fn every_series_folder(library: &Path) -> std::io::Result<Vec<String>> {
     let mut out = Vec::new();
     for entry in bunko_store::fs::read_dir(library)? {
         let entry = entry?;
@@ -69,6 +83,48 @@ fn series_folders(library: &Path) -> std::io::Result<Vec<String>> {
     Ok(out)
 }
 
+/// `names` in groups of one series: two names are one when they share a series key
+/// ([`fold_series_title_key`]) or fold alike by the filename fold (`Straße/` and
+/// `STRASSE/`, one folder on every host though their keys differ), and so on
+/// transitively. Each group sorted, the groups by their first name.
+fn series_groups(names: Vec<String>) -> Vec<Vec<String>> {
+    let mut parent: Vec<usize> = (0..names.len()).collect();
+    fn root(parent: &mut [usize], mut i: usize) -> usize {
+        while parent[i] != i {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        i
+    }
+    let mut by_key: HashMap<String, usize> = HashMap::new();
+    let mut by_fold: HashMap<String, usize> = HashMap::new();
+    for (i, name) in names.iter().enumerate() {
+        for first in [
+            *by_key.entry(fold_series_title_key(name)).or_insert(i),
+            *by_fold
+                .entry(bunko_core::names::fold_name(name))
+                .or_insert(i),
+        ] {
+            let (a, b) = (root(&mut parent, first), root(&mut parent, i));
+            parent[a.max(b)] = a.min(b);
+        }
+    }
+    let mut groups: BTreeMap<usize, Vec<String>> = BTreeMap::new();
+    for (i, name) in names.iter().enumerate() {
+        let r = root(&mut parent, i);
+        groups.entry(r).or_default().push(name.clone());
+    }
+    let mut out: Vec<Vec<String>> = groups
+        .into_values()
+        .map(|mut g| {
+            g.sort();
+            g
+        })
+        .collect();
+    out.sort();
+    out
+}
+
 /// One segment, no more: a series folder's library rel.
 fn top_level(rel: &str) -> Option<&str> {
     let rel = rel.trim_matches('/');
@@ -83,16 +139,15 @@ pub fn live_series_keys(library: &Path) -> std::io::Result<HashSet<String>> {
         .collect())
 }
 
-/// Is a folder of `folder`'s series listed at the library root? The folder itself is
-/// one lookup; any other spelling takes the root listing, and `Err` when that cannot
-/// be read: "not listed" would make an owned series anyone's. Blocking.
+/// Is a folder of `folder`'s series listed at the library root? Always from the root
+/// listing, `Err` when that cannot be read: "not listed" would make an owned series
+/// anyone's. Never by opening the name: a case-insensitive disk would find `S/` for
+/// `s`, a case-sensitive one would not, so the answer would depend on the host.
+/// Blocking.
 pub fn series_folder_is_live(library: &Path, folder: &str) -> std::io::Result<bool> {
     let Some(folder) = top_level(folder) else {
         return Ok(false);
     };
-    if is_series_folder_name(folder) && bunko_store::fs::is_dir(library.join(folder)) {
-        return Ok(true);
-    }
     let key = fold_series_title_key(folder);
     Ok(live_series_keys(library)?.contains(&key))
 }
@@ -287,7 +342,9 @@ pub fn adopt_series_folder_owners(db: &Database, library: &Path) -> Option<Folde
             return None;
         }
     }
-    let folders = match series_folders(library) {
+    // Every spelling listed, shadowed ones too: a series split across `Kingdom/`
+    // (alice's) and `kingdom/` (bob's) is not the winner's only uploader's.
+    let folders = match every_series_folder(library) {
         Ok(folders) => folders,
         Err(e) => {
             tracing::warn!(
@@ -314,16 +371,20 @@ pub fn adopt_series_folder_owners(db: &Database, library: &Path) -> Option<Folde
     for (_, user) in &tracked {
         spelled.entry(user.to_ascii_lowercase()).or_insert(user);
     }
-    let mut by_key: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for name in folders {
-        by_key
-            .entry(fold_series_title_key(&name))
-            .or_default()
-            .push(name);
-    }
     let mut owners: Vec<(String, String)> = Vec::new();
     let mut unowned = 0;
-    for names in by_key.values() {
+    for names in &series_groups(folders) {
+        // Background work never acts on a frozen case-variant group: a series whose
+        // folder is a member of one at the root (two spellings of one name, a hidden
+        // one included) gets no owner, whoever uploaded what. It stays shared, as a
+        // mixed one does, until an admin merges it (and reconciles its record: MIGRATING-0.7).
+        if names
+            .iter()
+            .any(|name| bunko_library::fsutil::frozen(library, name).is_some())
+        {
+            unowned += 1;
+            continue;
+        }
         // The uploaders (ignoring case, first spelling kept), the spellings holding a
         // tracked volume, and whether anything in them is not a tracked volume.
         let mut uploaders: BTreeMap<String, &str> = BTreeMap::new();

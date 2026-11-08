@@ -135,6 +135,9 @@ fn compute_stats(ocr: &OcrControl, rows: &[Generation]) -> Value {
         .db()
         .and_then(|db| db.ocr_sidecar_producers().ok())
         .unwrap_or_default();
+    // Each folder's names, folded and listed once: a row's files count in any spelling,
+    // as they do on a case-insensitive disk (`v.mokuro` for `V.cbz`).
+    let mut folded: HashMap<std::path::PathBuf, std::collections::HashSet<String>> = HashMap::new();
     for row in rows {
         let mut done = 0u64;
         let mut present: std::collections::HashSet<String> = Default::default();
@@ -143,7 +146,20 @@ fn compute_stats(ocr: &OcrControl, rows: &[Generation]) -> Value {
             let rel = super::types::rel_of(&library, cbz).unwrap_or_default();
             // The row's own files: a row retired from primary left bare ones.
             let (plain, gz) = super::owed::sidecar_paths(cbz, &row.files_suffix());
-            if bunko_store::fs::exists(&plain) || bunko_store::fs::exists(&gz) {
+            let dir = cbz.parent().unwrap_or(std::path::Path::new(""));
+            let names = folded.entry(dir.to_path_buf()).or_insert_with(|| {
+                bunko_library::sidecar::list_names(dir)
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|n| bunko_core::sidecar_names::fold(n))
+                    .collect()
+            });
+            let listed = |p: &std::path::Path| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| names.contains(&bunko_core::sidecar_names::fold(n)))
+            };
+            if listed(&plain) || listed(&gz) {
                 done += 1;
                 present.insert(rel.clone());
             } else if !row.primary && skipped.get(&rel).is_some_and(|g| g.contains(&row.id)) {
@@ -619,8 +635,23 @@ impl OcrAdmin for OcrControl {
         method: &Method,
         path: &[&str],
         _query: &str,
-        _body: &Value,
+        body: &Value,
     ) -> Option<Result<(u16, Value), OcrError>> {
+        // `POST /api/ocr/failures/retry` (`{"volume": "<series>/<volume>.cbz"}`, or no
+        // volume: every one): drop the failure records, so those volumes are tried again
+        // at once, parked or not (a failure of the volume itself waits for an archive or
+        // release change otherwise).
+        if path == ["ocr", "failures", "retry"] {
+            if *method != Method::POST {
+                return Some(Err(OcrError::not_found()));
+            }
+            let volume = body
+                .get("volume")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let cleared = ask(self, move |s| s.retry_failed(volume.as_deref())).unwrap_or(0);
+            return Some(Ok((200, json!({"success": true, "cleared": cleared}))));
+        }
         // 0.7: `GET /api/ocr/install` (where this server's background OCR backend
         // install stands) and `POST /api/ocr/install` (start it, or retry a failed one).
         if path == ["ocr", "install"] {
@@ -678,7 +709,10 @@ impl OcrAdmin for OcrControl {
         {
             return Some(Err(OcrError::new(400, "not a volume of the library")));
         }
-        let cbz = self.core().layout.library().join(&rel);
+        // In the library's spelling, whatever case the request has (as DAV paths).
+        let library = self.core().layout.library();
+        let rel = bunko_dav::LibraryPathCanonicalizer::new(&library).canonicalize(&rel, None);
+        let cbz = library.join(&rel);
         if !bunko_store::fs::is_file(&cbz) {
             return Some(Err(OcrError::new(404, "no such volume")));
         }

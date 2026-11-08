@@ -59,10 +59,146 @@ pub(crate) fn edits_base(users: &Path, username: &str) -> Option<PathBuf> {
 }
 
 /// `users/<u>/edits/<rel>`, which must stay inside `users/<u>/edits` (symlinks followed).
-pub(crate) fn overlay_path(users: &Path, username: &str, rel: &str) -> Option<PathBuf> {
+/// `rel` is a library rel in the library's own spelling. Every segment that names an
+/// existing overlay folder or file in any spelling takes its listed spelling, so one
+/// volume's correction is one file on every host, whatever case the library or the
+/// request spells it in; except an overlay spelling the library lists as an entry of its
+/// own (a case variant a case-sensitive disk holds, shadowed): those are that entry's
+/// corrections, never another's ([`resolve_existing`]).
+pub(crate) fn overlay_path(
+    library: &Path,
+    users: &Path,
+    username: &str,
+    rel: &str,
+) -> Option<PathBuf> {
     let base = edits_base(users, username)?;
+    let rel = resolve_existing(library, &base, rel)?;
     let resolved = paths::resolve_under(users, &format!("{username}/{EDITS_DIR}/{rel}"))?;
     resolved.starts_with(&base).then_some(resolved)
+}
+
+/// Does `username`'s overlay folder for the library folder of `dest` (a library path)
+/// list `dest`'s name in another spelling (`V.edit.mokuro` for a library file
+/// `v.EDIT.mokuro`)? The account's listings show its overlay beside the library, so a
+/// library file of that name would be a second spelling of one in its view: refused,
+/// as a second spelling in the library itself is. From the listing, on every host.
+pub(crate) fn overlay_spells_otherwise(
+    library: &Path,
+    users: &Path,
+    username: Option<&str>,
+    dest: &Path,
+) -> bool {
+    let (Some(username), Some(rel)) = (username, paths::relative_posix(dest, library)) else {
+        return false;
+    };
+    let (folder, name) = rel.rsplit_once('/').unwrap_or(("", rel.as_str()));
+    let Some(dir) = overlay_path(library, users, username, folder) else {
+        return false;
+    };
+    let folded = crate::fold_name(name);
+    names_in(&dir)
+        .iter()
+        .any(|n| n != name && crate::fold_name(n) == folded)
+}
+
+/// `rel` (a library rel, each segment the library's listed spelling of the entry, or
+/// of one gone) below the overlay base `base`, every segment that names an existing
+/// overlay entry in its listed spelling (any case). An overlay folder spelled otherwise
+/// than the segment that the library lists, beside the segment, as a folder of its own
+/// belongs to that folder and is never taken: on a case-sensitive disk holding both
+/// `Kingdom/` and `kingdom/`, `edits/kingdom/` stays `kingdom/`'s whatever happens to
+/// `Kingdom/`, before or after it goes. Decided from listings only, so every host
+/// answers alike.
+///
+/// `None` while such a folder is the only overlay folder of that name: the segment's
+/// own would be a second spelling of it, which the disk under `users/` may fold into
+/// that very folder (APFS, NTFS, casefold). Nothing is read, written, moved or deleted
+/// there for the segment's entry until the shadowed folder is merged (or gone, when
+/// its overlay folder becomes the name's).
+fn resolve_existing(library: &Path, base: &Path, rel: &str) -> Option<String> {
+    let mut parts: Vec<String> = rel.split('/').map(str::to_string).collect();
+    if parts.iter().any(|p| p == "." || p == "..") {
+        return Some(rel.to_string());
+    }
+    let mut library_dir = Some(library.to_path_buf());
+    let mut overlay_dir = base.to_path_buf();
+    let last = parts.iter().rposition(|p| !p.is_empty());
+    for (index, part) in parts.iter_mut().enumerate() {
+        let segment = part.clone();
+        if segment.is_empty() {
+            continue;
+        }
+        // The library's folders here (an overlay folder mirrors one; overlay files are
+        // matched to archives by rule v1, [`PersonalOverlays::owned`]).
+        let listed_here: Vec<String> = library_dir
+            .as_deref()
+            .and_then(|d| fs::read_dir(d).ok())
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+                    .filter_map(|e| e.file_name().into_string().ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let folded = crate::fold_name(&segment);
+        let alike: Vec<String> = fs::read_dir(&overlay_dir)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter_map(|e| e.file_name().into_string().ok())
+                    .filter(|n| *n == segment || crate::fold_name(n) == folded)
+                    .collect()
+            })
+            .unwrap_or_default();
+        // The correction file itself: an overlay spelled otherwise that rule v1 gives
+        // to another archive of the library folder (a hidden case variant's own
+        // correction, named by its exact stem) is that archive's, never this one's.
+        let others_file = |n: &String| {
+            Some(index) == last
+                && personal_name(&segment).is_some()
+                && library_dir
+                    .as_deref()
+                    .is_some_and(|d| owned_by_another(d, &segment, n))
+        };
+        let (mut ours, theirs): (Vec<String>, Vec<String>) = alike
+            .into_iter()
+            .partition(|n| *n == segment || (!listed_here.contains(n) && !others_file(n)));
+        if ours.is_empty() && !theirs.is_empty() {
+            return None;
+        }
+        ours.sort();
+        let chosen = if ours.contains(&segment) {
+            Some(segment.clone())
+        } else {
+            ours.into_iter().next()
+        };
+        library_dir = library_dir.map(|d| d.join(&segment));
+        let Some(chosen) = chosen else {
+            break;
+        };
+        overlay_dir.push(&chosen);
+        *part = chosen;
+    }
+    Some(parts.join("/"))
+}
+
+/// Does rule v1, over the library folder `dir`'s files, give the overlay name `other` to
+/// an archive that `segment` (a correction name) is not the correction of? Then `other`
+/// is that archive's correction (`v.edit.mokuro` is the hidden `v.cbz`'s beside a
+/// reachable `V.cbz`), however alike the two names fold.
+fn owned_by_another(dir: &Path, segment: &str, other: &str) -> bool {
+    let mut names = names_in(dir);
+    names.retain(|n| sidecar_names::cbz_stem(n).is_some());
+    let archives = names.clone();
+    names.push(segment.to_string());
+    names.push(other.to_string());
+    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    let folder = sidecar_names::Folder::new(&refs);
+    archives.iter().any(|archive| {
+        let files = folder.volume_files(archive);
+        files.iter().any(|(n, _)| *n == other) && !files.iter().any(|(n, _)| *n == segment)
+    })
 }
 
 /// A library file that is a personal correction.
@@ -243,8 +379,9 @@ impl PersonalOverlays {
     }
 
     /// Move one overlay into `to_dir` as `<stem>.<id>.mokuro`, or the next free
-    /// `edit-<n>` when that is taken (merge.rs `free_layer`: nothing is lost). The
-    /// destination when it moved.
+    /// `edit-<n>` when that is taken in any spelling (merge.rs `free_layer`: nothing is
+    /// lost). The destination when it moved, or the source itself when it is already
+    /// there under that name.
     fn move_one(&self, from: &Path, to_dir: &Path, stem: &str, id: &str) -> Option<PathBuf> {
         if fs::create_dir_all(to_dir).is_err() {
             return None;
@@ -255,8 +392,19 @@ impl PersonalOverlays {
                 n => format!("edit-{n}"),
             };
             let dest = to_dir.join(format!("{stem}.{id}.mokuro"));
-            // Free, or the source itself spelled differently (a case-insensitive disk).
-            let free = |dest: &Path| !fs::exists(dest) || crate::path_case::same_file(from, dest);
+            // Already there: the same file under the same name.
+            if dest.file_name() == from.file_name() && crate::path_case::same_file(from, &dest) {
+                return Some(from.to_path_buf());
+            }
+            // Free in every spelling, or taken only by the source itself (a case-only
+            // rename, which `fs::rename` carries out on every host).
+            let free = |dest: &Path| {
+                let name = dest.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                match crate::path_case::on_disk_name(to_dir, name, false) {
+                    None => true,
+                    Some(listed) => crate::path_case::same_file(from, &to_dir.join(listed)),
+                }
+            };
             if !free(&dest) {
                 continue;
             }
@@ -284,14 +432,25 @@ impl PersonalOverlays {
 
     /// The library rels of the physical correction files: names that read as a personal
     /// layer and are no listed archive's primary (rule 4). On a library on this disk,
-    /// and in a cloud library with no progress user, nobody sees them. Blocking (an
-    /// index walk on a cloud library).
+    /// and in a cloud library with no progress user, nobody sees them. Nothing a
+    /// case-variant group freezes is among them ([`bunko_core::fold_groups`]: a member,
+    /// the winner included, a file rule v1 gives an archive of the group, anything
+    /// inside a member folder): adopting one would move it out of the group. Blocking
+    /// (an index walk on a cloud library).
     pub fn physical_corrections(&self) -> Vec<String> {
         let mut out = Vec::new();
         let mut todo = vec![String::new()];
         while let Some(rel) = todo.pop() {
             let dir = self.library.join(&rel);
-            let names = names_in(&dir);
+            let Some((entries, groups)) = crate::path_case::listed_groups(&dir, rel.is_empty())
+            else {
+                continue;
+            };
+            let names: Vec<String> = entries
+                .iter()
+                .filter(|(n, is_dir)| !is_dir && !paths::is_staging_name(n))
+                .map(|(n, _)| n.clone())
+                .collect();
             let stems = stems_of(&names);
             let child_of = |name: &str| {
                 if rel.is_empty() {
@@ -300,23 +459,19 @@ impl PersonalOverlays {
                     format!("{rel}/{name}")
                 }
             };
-            for entry in fs::read_dir(&dir).into_iter().flatten().flatten() {
-                if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+            for (name, is_dir) in &entries {
+                if groups.is_frozen(name) {
                     continue;
                 }
-                let child = child_of(&entry.file_name().to_string_lossy());
-                let path = self.library.join(&child);
-                // The cloud-root owner's own tree holds no volume, and a symlinked
-                // folder is not walked (the index's scan does not either; a link up
-                // the tree would loop).
-                let linked = fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink());
-                if !linked && !reader_tree::is_per_user_rel(&child) {
-                    todo.push(child);
-                }
-            }
-            for name in &names {
                 let child = child_of(name);
-                if personal_name(name).is_some()
+                if *is_dir {
+                    // A symlinked folder is not walked (the index's scan does not
+                    // either; a link up the tree would loop).
+                    let path = self.library.join(&child);
+                    if !fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
+                        todo.push(child);
+                    }
+                } else if personal_name(name).is_some()
                     && !matches!(
                         sidecar_names::classify(name, &stems),
                         SidecarClass::Primary { .. }
@@ -335,6 +490,10 @@ impl PersonalOverlays {
     /// has one there. False when it stayed (a write in progress, a bad name).
     pub fn adopt(&self, rel: &str, username: &str) -> bool {
         let rel = rel.trim_matches('/');
+        // Never out of a frozen case-variant group (one made since the walk).
+        if crate::path_case::frozen(&self.library, rel).is_some() {
+            return false;
+        }
         let (folder, name) = rel.rsplit_once('/').unwrap_or(("", rel));
         let Some((stem, id, false)) = personal_name(name) else {
             return false;
@@ -345,7 +504,7 @@ impl PersonalOverlays {
         let to_dir = if folder.is_empty() {
             base
         } else {
-            match overlay_path(&self.users, username, folder) {
+            match overlay_path(&self.library, &self.users, username, folder) {
                 Some(dir) => dir,
                 None => return false,
             }
@@ -367,14 +526,66 @@ impl PersonalOverlays {
         };
         let old_name = paths::uri_name(old).to_string();
         for base in self.bases() {
-            let dir = base.join(old_folder);
+            let Some(from_rel) = resolve_existing(&self.library, &base, old_folder) else {
+                continue;
+            };
+            let dir = base.join(from_rel);
             let owned = self.owned(&dir, old_folder, &old_name);
-            for (name, id) in &owned {
-                self.move_one(&dir.join(name), &base.join(new_folder), new_stem, id);
+            if owned.is_empty() {
+                continue;
             }
-            if !owned.is_empty() && !old_folder.is_empty() {
+            // Where the new folder's overlays would collide with a shadowed folder's,
+            // they stay where they are (still found once that folder is gone).
+            let Some(to_rel) = resolve_existing(&self.library, &base, new_folder) else {
+                continue;
+            };
+            let to_dir = base.join(&to_rel);
+            for (name, id) in &owned {
+                self.move_one(&dir.join(name), &to_dir, new_stem, id);
+            }
+            if !old_folder.is_empty() && dir != to_dir {
                 self.drop_if_empty(&dir);
             }
+            // The receiving folder takes the library's spelling (a case merge or a case
+            // fix of the folder): the overlay tree stays aligned with the library.
+            self.respell(&base, &to_rel, new_folder);
+        }
+    }
+
+    /// Rename the overlay folders of `have` (below `base`, listed spellings) whose
+    /// spelling differs from `want`'s only in case, segment by segment, to `want`'s
+    /// spelling. A distinct folder already spelled that way (a case-sensitive disk)
+    /// takes the other's overlays instead ([`Self::merge_dir`]).
+    fn respell(&self, base: &Path, have: &str, want: &str) {
+        let have: Vec<&str> = have.split('/').filter(|s| !s.is_empty()).collect();
+        let want: Vec<&str> = want.split('/').filter(|s| !s.is_empty()).collect();
+        if have.len() != want.len() {
+            return;
+        }
+        let mut parent = base.to_path_buf();
+        for (h, w) in have.iter().zip(&want) {
+            if h != w && crate::fold_name(h) == crate::fold_name(w) {
+                let (from, to) = (parent.join(h), parent.join(w));
+                if fs::exists(&to) && !crate::path_case::same_file(&from, &to) {
+                    self.merge_dir(&from, &to);
+                } else {
+                    let Some(_guard) = self.locks.try_lock_all(&[&from, &to]) else {
+                        tracing::warn!(
+                            "[DAV] corrections are being written under {}: its spelling stays",
+                            from.display()
+                        );
+                        return;
+                    };
+                    if let Err(e) = fs::rename(&from, &to) {
+                        tracing::warn!(
+                            "[DAV] respelling the corrections folder {}: {e}",
+                            from.display()
+                        );
+                        return;
+                    }
+                }
+            }
+            parent.push(w);
         }
     }
 
@@ -418,7 +629,10 @@ impl PersonalOverlays {
         };
         let name = paths::uri_name(rel).to_string();
         for base in self.bases() {
-            let dir = base.join(folder);
+            let Some(rel) = resolve_existing(&self.library, &base, folder) else {
+                continue;
+            };
+            let dir = base.join(rel);
             let owned = self.owned(&dir, folder, &name);
             for (file, _) in &owned {
                 let path = dir.join(file);
@@ -445,11 +659,39 @@ impl PersonalOverlays {
         if old == new || old.is_empty() || new.is_empty() {
             return;
         }
+        let (new_parent, new_name) = new.rsplit_once('/').unwrap_or(("", new));
         for base in self.bases() {
-            let (from, to) = (base.join(old), base.join(new));
+            let Some(from) = resolve_existing(&self.library, &base, old) else {
+                continue;
+            };
+            let from = base.join(from);
             if !fs::is_dir(&from) {
                 continue;
             }
+            // Into an existing folder of the new name in any spelling (never a shadowed
+            // folder's), unless that is the source itself (a case fix: renamed to the
+            // new spelling).
+            let Some(to_parent) = resolve_existing(&self.library, &base, new_parent) else {
+                continue;
+            };
+            let to_parent = base.join(to_parent);
+            let to = match resolve_existing(&self.library, &base, new) {
+                Some(to_rel) if !crate::path_case::same_file(&from, &base.join(&to_rel)) => {
+                    base.join(to_rel)
+                }
+                Some(_) => to_parent.join(new_name),
+                // Only the source's own folder holds the new name in another spelling
+                // (a case fix, or a case merge whose losing folder is gone): renamed.
+                None if from.parent() == Some(to_parent.as_path())
+                    && from
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| crate::fold_name(n) == crate::fold_name(new_name)) =>
+                {
+                    to_parent.join(new_name)
+                }
+                None => continue,
+            };
             // Free, or the same directory spelled differently (a case-insensitive disk):
             // one rename.
             if !fs::exists(&to) || crate::path_case::same_file(&from, &to) {
@@ -484,7 +726,8 @@ impl PersonalOverlays {
                 entry.file_name().to_string_lossy().into_owned(),
             );
             if fs::is_dir(&path) {
-                self.merge_dir(&path, &to.join(&name));
+                let into = crate::path_case::on_disk_name(to, &name, false).unwrap_or(name);
+                self.merge_dir(&path, &to.join(into));
             } else if let Some((stem, id, _)) = personal_name(&name) {
                 self.move_one(&path, to, stem, id);
             }
@@ -499,7 +742,10 @@ impl PersonalOverlays {
             return;
         }
         for base in self.bases() {
-            let dir = base.join(rel);
+            let Some(dir) = resolve_existing(&self.library, &base, rel) else {
+                continue;
+            };
+            let dir = base.join(dir);
             if !fs::is_dir(&dir) {
                 continue;
             }
@@ -553,6 +799,39 @@ mod tests {
         std::os::unix::fs::symlink("..", library.join("S/all")).unwrap();
         let overlays = PersonalOverlays::new(library, users, PathWriteLocks::new());
         assert_eq!(overlays.physical_corrections(), ["S/V.edit.mokuro"]);
+    }
+
+    /// Nothing a case-variant group freezes is adopted: `S/` lists `V.cbz` and `v.cbz`
+    /// (where the disk keeps both), so neither's correction moves, the winner's
+    /// included; `T/` is an ordinary series.
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn the_correction_walk_leaves_frozen_groups() {
+        let dir = tempfile::tempdir().unwrap();
+        let (library, users) = (dir.path().join("library"), dir.path().join("users"));
+        std::fs::create_dir_all(library.join("S")).unwrap();
+        std::fs::create_dir_all(library.join("T")).unwrap();
+        std::fs::create_dir_all(&users).unwrap();
+        std::fs::write(library.join("S/V.cbz"), b"x").unwrap();
+        std::fs::write(library.join("S/V.edit.mokuro"), b"{}").unwrap();
+        std::fs::write(library.join("T/W.cbz"), b"x").unwrap();
+        std::fs::write(library.join("T/W.edit.mokuro"), b"{}").unwrap();
+        let two = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(library.join("S/v.cbz"))
+            .is_ok();
+        let overlays = PersonalOverlays::new(library.clone(), users, PathWriteLocks::new());
+        if two {
+            assert_eq!(overlays.physical_corrections(), ["T/W.edit.mokuro"]);
+            assert!(!overlays.adopt("S/V.edit.mokuro", "alice"));
+            assert!(library.join("S/V.edit.mokuro").is_file());
+        } else {
+            assert_eq!(
+                overlays.physical_corrections(),
+                ["S/V.edit.mokuro", "T/W.edit.mokuro"]
+            );
+        }
     }
 
     #[test]

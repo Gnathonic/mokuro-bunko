@@ -85,7 +85,7 @@ pub(crate) async fn put(inner: &Arc<Inner>, req: &Req, body: Body) -> Resp {
     resp
 }
 
-fn failure_response(rej: &Rejection) -> Resp {
+pub(crate) fn failure_response(rej: &Rejection) -> Resp {
     let body = upload::failure_json(rej.reason, &rej.detail, rej.retry).into_bytes();
     let len = body.len();
     let mut resp = Response::new(Body::from(body));
@@ -267,6 +267,47 @@ async fn put_inner(inner: &Arc<Inner>, req: &Req, body: Body) -> Result<Resp, Pu
         )
         .into());
     };
+    // A name that is not there as spelled, in a library folder that lists it in another
+    // spelling: one created since PathCase resolved this request (a racing upload that
+    // held this folded lock before it; a case-variant group is refused before, by the
+    // freeze). That entry is this name: Bunko never creates a second spelling of it.
+    // Refused, so a retry resolves to it and is judged as a write to that existing file.
+    // Decided from the folder listing under the lock, so every host answers alike.
+    if res.is_none() && dest.starts_with(&inner.roots.library) {
+        let (dest2, library) = (dest.clone(), inner.roots.library.clone());
+        let users = inner.roots.users.clone();
+        let user = req.username().map(str::to_string);
+        let library_file = kind == Some(FileKind::Library);
+        let appeared = super::blocking(move || {
+            let (Some(parent), Some(name)) =
+                (dest2.parent(), dest2.file_name().and_then(|n| n.to_str()))
+            else {
+                return false;
+            };
+            crate::path_case::spelled_otherwise(parent, name, parent == library)
+                // The caller's own correction of that name, listed beside the library
+                // in its view.
+                || (library_file
+                    && crate::personal::overlay_spells_otherwise(
+                        &library,
+                        &users,
+                        user.as_deref(),
+                        &dest2,
+                    ))
+        })
+        .await?;
+        if appeared {
+            return Err(Rejection::new(
+                409,
+                "case-variant",
+                "Another spelling of this name is listed here (just created, or one of your \
+                 own corrections); Bunko keeps one spelling per name: send the request \
+                 again to reach it.",
+                true,
+            )
+            .into());
+        }
+    }
     // One history writer per account from the measure to the publish, so the room
     // left is never handed to two files at once.
     let history_base = history
@@ -303,6 +344,22 @@ async fn put_inner(inner: &Arc<Inner>, req: &Req, body: Body) -> Result<Resp, Pu
     // the body is in, so an archive that landed meanwhile and governs it refuses it.
     if let Some(recheck) = req.ctx.ownership_recheck.clone() {
         staging.recheck_before_publish(Box::new(move || recheck()));
+    }
+    // One volume name per fold, asked again from the folder as it is when this archive
+    // lands, for every account: an archive that landed while this body was read (dispatch
+    // judged the listing before it) and that the fold makes one volume name with this
+    // one keeps it. One archive publish per folder at a time, so of two such uploads only
+    // the first to land is published.
+    if super::lands_library_archive(inner, &dest) {
+        let dest2 = dest.clone();
+        staging.check_name_before_publish(
+            inner.archive_publishes.clone(),
+            super::archive_publish_key(&dest),
+            Box::new(move || {
+                super::archive_name_check(&dest2, None)
+                    .map(|detail| Rejection::new(409, "ambiguous-name", detail, false))
+            }),
+        );
     }
     // The client's precondition travels with the publish (spec §10 PUT): a remote
     // store checks it against the provider's version, so a change made in the cloud

@@ -753,6 +753,32 @@ async fn layers_beta3_kept_are_removed_at_startup_and_nothing_else() {
     assert_eq!(env.up().sweep_kept_from_audit(), 0, "idempotent");
 }
 
+/// The audit's spellings are resolved through the listings, the same on every host: a
+/// folder respelled outside Bunko since (`d/` in the audit, `D/` listed) is found, and a
+/// folder that is a hidden case variant (`d/` beside `D/`, where the disk lists both)
+/// is a frozen group: nothing in it is removed.
+#[tokio::test]
+async fn layers_beta3_kept_are_found_by_the_listings() {
+    let env = Env::new();
+    env.mkcol("D");
+    std::fs::write(env.lib("D/V1.cbz"), cbz(3)).unwrap();
+    std::fs::write(env.lib("D/V1.mokuro"), HAYAI).unwrap();
+    std::fs::write(env.lib("D/V1.mokuro.mokuro"), KEPT).unwrap();
+    beta3_upgrade_audit(&env, "d/V1.mokuro", "d/V1.mokuro.mokuro");
+    if std::fs::create_dir(env.lib("d")).is_err() {
+        // One folder (a disk that folds names): the audit's `d/` is `D/`.
+        assert_eq!(env.up().sweep_kept_from_audit(), 1);
+        assert_eq!(sidecars(&env.lib("D")), ["V1.mokuro"]);
+        return;
+    }
+    std::fs::write(env.lib("d/V1.cbz"), cbz(3)).unwrap();
+    std::fs::write(env.lib("d/V1.mokuro"), HAYAI).unwrap();
+    std::fs::write(env.lib("d/V1.mokuro.mokuro"), KEPT).unwrap();
+    assert_eq!(env.up().sweep_kept_from_audit(), 0);
+    assert_eq!(sidecars(&env.lib("d")), ["V1.mokuro", "V1.mokuro.mokuro"]);
+    assert_eq!(sidecars(&env.lib("D")), ["V1.mokuro", "V1.mokuro.mokuro"]);
+}
+
 /// `content` sealed, then marked EDITED by a reader (the `edited` block is outside the
 /// seal, so the seal still checks).
 fn sealed_then_edited(content: &str) -> String {

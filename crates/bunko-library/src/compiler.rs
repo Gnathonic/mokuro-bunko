@@ -45,9 +45,11 @@ fn is_cbz_name(name: &str) -> bool {
 /// `iter_series_folders`: top-level, non-hidden directories (symlinks
 /// followed) directly holding at least one `.cbz` file, sorted by name. A
 /// missing/unreadable library is empty. The per-user `history/` (0.8, a cloud
-/// root's reading history) is never a series, whatever it holds.
+/// root's reading history), in any spelling, is never a series, whatever it holds,
+/// nor is a folder another spelling of a listed folder shadows
+/// ([`fsutil::case_losers`]).
 pub fn iter_series_folders(library_path: &Path) -> Vec<SeriesFolder> {
-    let Ok(mut entries) = fsutil::list_dir(library_path) else {
+    let Ok(mut entries) = fsutil::list_dir_reachable(library_path) else {
         return Vec::new();
     };
     entries.sort_by(|a, b| a.0.cmp(&b.0));
@@ -87,7 +89,7 @@ pub fn orphan_series_files_where(
     library_path: &Path,
     wanted: impl Fn(&str) -> bool,
 ) -> Vec<(String, PathBuf)> {
-    let Ok(mut entries) = fsutil::list_dir(library_path) else {
+    let Ok(mut entries) = fsutil::list_dir_reachable(library_path) else {
         return Vec::new();
     };
     entries.sort_by(|a, b| a.0.cmp(&b.0));
@@ -100,13 +102,13 @@ pub fn orphan_series_files_where(
                 && fsutil::is_dir(path)
         })
         .filter_map(|(title, path)| {
-            let children = fsutil::list_dir(&path).ok()?;
+            let children = fsutil::list_dir_reachable(&path).ok()?;
             let archive = children
                 .iter()
                 .any(|(name, child)| is_cbz_name(name) && fsutil::is_file(child));
-            let series_file = children
-                .into_iter()
-                .find(|(name, child)| name == SERIES_FILE_NAME && fsutil::is_file(child))?;
+            let series_file = children.into_iter().find(|(name, child)| {
+                bunko_core::sidecar_names::fold(name) == SERIES_FILE_NAME && fsutil::is_file(child)
+            })?;
             (!archive).then_some((title, series_file.1))
         })
         .collect()
@@ -114,7 +116,7 @@ pub fn orphan_series_files_where(
 
 /// The `.cbz` file names directly in `folder`, sorted.
 pub fn archive_names(folder: &Path) -> Vec<String> {
-    let Ok(entries) = fsutil::list_dir(folder) else {
+    let Ok(entries) = fsutil::list_dir_reachable(folder) else {
         return Vec::new();
     };
     let mut names: Vec<String> = entries
@@ -456,12 +458,16 @@ fn compiled_before_bom_tolerance(object: &JsonObject, stats: &VolumeStats) -> bo
             .is_some_and(sidecar::starts_with_bom)
 }
 
+/// Cache a compiled entry. `frozen`: the volume is in a case-variant group
+/// ([`bunko_core::fold_groups`]); its entry is cached (a read), but its recorded
+/// identity (`volume_identities`) is not re-keyed from it until the group is merged.
 fn put_entry(
     store: &dyn MetadataStore,
     key: &str,
     series_key: &str,
     entry: &VolumeEntry,
     stats: &VolumeStats,
+    frozen: bool,
 ) -> StoreResult<()> {
     let object = entry_to_object(entry);
     let text = pyjson::dumps(
@@ -476,8 +482,21 @@ fn put_entry(
         cbz_size: stats.cbz_size,
         cbz_mtime: stats.cbz_mtime,
         sidecar_key: &stats.sidecar_key,
-        identity: identity_from_entry(&object),
+        identity: if frozen {
+            None
+        } else {
+            identity_from_entry(&object)
+        },
     })
+}
+
+/// Is the archive `cbz_path` (in a series folder directly under the library root) in a
+/// case-variant group, or below one ([`fsutil::frozen`])? From the listings.
+fn frozen_volume(cbz_path: &Path) -> bool {
+    cbz_path
+        .parent()
+        .and_then(Path::parent)
+        .is_some_and(|root| fsutil::frozen_path(root, cbz_path).is_some())
 }
 
 /// The sidecar's SHA-256 as the provider lists it, when that is the hash
@@ -497,8 +516,10 @@ fn listed_sidecar_sha256(stats: &VolumeStats) -> Option<String> {
 /// empty when missing or unreadable).
 fn load_published(series_dir: &Path) -> HashMap<String, JsonObject> {
     let mut by_title = HashMap::new();
-    let Ok(text) = bunko_store::fs::read_to_string(series_dir.join(crate::paths::SERIES_FILE_NAME))
-    else {
+    let Ok(text) = bunko_store::fs::read_to_string(fsutil::spelled(
+        series_dir,
+        crate::paths::SERIES_FILE_NAME,
+    )) else {
         return by_title;
     };
     let Ok(JsonValue::Object(raw)) = pyjson::parse(&text) else {
@@ -562,11 +583,18 @@ pub fn compile_series_volumes(
     let series_key = normalize_volume_title_key(&series.title);
     let mut entries: Vec<VolumeEntry> = Vec::new();
     let mut published: Option<HashMap<String, JsonObject>> = None;
-    let listed = sidecar::list_names(&series.path).unwrap_or_default();
-    let listed: Vec<&str> = listed.iter().map(String::as_str).collect();
+    let listing = sidecar::Listed::of(&series.path).unwrap_or_default();
+    let listed: Vec<&str> = listing.files.iter().map(String::as_str).collect();
     let folder = Folder::new(&listed);
+    // The freeze: the series folder a member of a group at the root, or the volume of
+    // one in the folder.
+    let series_frozen = series.path.parent().is_some_and(|root| {
+        fsutil::listed_groups(root, true).is_some_and(|(_, groups)| groups.is_frozen(&series.title))
+    });
+    let groups = fsutil::fold_groups(&series.path, listing.entries());
     for name in archive_names(&series.path) {
         let cbz_path = series.path.join(&name);
+        let frozen = series_frozen || groups.is_frozen(&name);
         let volume_title = py_stem(&name).to_owned();
         let Some(stats) = volume_stats(&cbz_path, Some(&folder)) else {
             continue;
@@ -584,7 +612,7 @@ pub fn compile_series_volumes(
                 && let Some(digest) = sidecar::sidecar_sha256(sidecar)
             {
                 found.mokuro_sha256 = Some(digest);
-                put_entry(store, &key, &series_key, found, &stats)?;
+                put_entry(store, &key, &series_key, found, &stats, frozen)?;
             }
         }
         if entry.is_none()
@@ -592,7 +620,7 @@ pub fn compile_series_volumes(
             && let Some(found) =
                 published_entry(&mut published, &series.path, &volume_title, &stats)
         {
-            put_entry(store, &key, &series_key, &found, &stats)?;
+            put_entry(store, &key, &series_key, &found, &stats, frozen)?;
             entry = Some(found);
         }
         let mut entry = match entry {
@@ -607,13 +635,16 @@ pub fn compile_series_volumes(
                 if let Some(store) = store
                     && cacheable
                 {
-                    put_entry(store, &key, &series_key, &entry, &stats)?;
+                    put_entry(store, &key, &series_key, &entry, &stats, frozen)?;
                 }
                 entry
             }
         };
         // The cover stat is never cached: thumbnails appear on their own schedule.
-        let cover = fsutil::stat(&sidecar::cover_path(&cbz_path));
+        // Only a cover the folder lists for the volume (never a built name a host
+        // might open in another spelling).
+        let cover = sidecar::listed_file_in(&cbz_path, ".webp", &listing)
+            .and_then(|path| fsutil::stat(&path));
         entry.cover_size = cover.as_ref().map(size_of);
         entry.cover_modified = cover.as_ref().map(py_mtime_int);
         entries.push(entry);
@@ -729,6 +760,7 @@ pub fn missing_pages_now(
             &normalize_volume_title_key(series_title),
             &entry,
             &stats,
+            frozen_volume(cbz_path),
         )?;
         return Ok(missing_page_count(
             entry.page_count,
@@ -750,6 +782,7 @@ pub fn missing_pages_now(
             &normalize_volume_title_key(series_title),
             &entry,
             &stats,
+            frozen_volume(cbz_path),
         )?;
     }
     Ok(missing_page_count(
@@ -780,38 +813,57 @@ mod tests {
             Some(hex::encode(Sha256::digest(raw.as_bytes())))
         );
     }
-    /// `history/` at the library root is the cloud-root owner's reading history
-    /// (0.8), never a series, even with an archive in it; `History/` is a series.
+    /// `history/` at the library root, in any spelling, is the cloud-root owner's
+    /// reading history (0.8), never a series, even with an archive in it.
     #[test]
     fn the_reading_history_folder_is_not_a_series() {
-        let dir = tempfile::tempdir().unwrap();
-        for folder in ["history", "History", "S"] {
-            let path = dir.path().join(folder);
-            bunko_store::fs::create_dir(&path).unwrap();
-            bunko_store::fs::write(path.join("V.cbz"), "x").unwrap();
+        for history in ["history", "History"] {
+            let dir = tempfile::tempdir().unwrap();
+            for folder in [history, "S"] {
+                let path = dir.path().join(folder);
+                bunko_store::fs::create_dir(&path).unwrap();
+                bunko_store::fs::write(path.join("V.cbz"), "x").unwrap();
+            }
+            let titles: Vec<String> = iter_series_folders(dir.path())
+                .into_iter()
+                .map(|f| f.title)
+                .collect();
+            assert_eq!(titles, ["S"], "{history}");
         }
+    }
+
+    /// Nor is a `series.json` in that `history/` (any spelling) an orphan to retire:
+    /// the tree is its owner's, whatever it holds.
+    #[test]
+    fn the_reading_history_folder_has_no_orphan_series_file() {
+        for history in ["history", "History"] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(history);
+            bunko_store::fs::create_dir(&path).unwrap();
+            bunko_store::fs::write(path.join(SERIES_FILE_NAME), "{}").unwrap();
+            let titles: Vec<String> = iter_orphan_series_files(dir.path())
+                .into_iter()
+                .map(|(title, _)| title)
+                .collect();
+            assert!(titles.is_empty(), "{history}: {titles:?}");
+        }
+    }
+
+    /// A folder another listed spelling shadows is no series (a case-sensitive disk can
+    /// hold `Kingdom/` and `kingdom/`; the byte-smallest is the one reached). Written
+    /// winner first, so every host lists the one folder.
+    #[test]
+    fn a_shadowed_spelling_is_no_series() {
+        let dir = tempfile::tempdir().unwrap();
+        bunko_store::fs::create_dir(dir.path().join("Kingdom")).unwrap();
+        bunko_store::fs::write(dir.path().join("Kingdom/V1.cbz"), "x").unwrap();
+        let _ = bunko_store::fs::create_dir(dir.path().join("kingdom"));
+        bunko_store::fs::write(dir.path().join("kingdom/V2.cbz"), "x").unwrap();
         let titles: Vec<String> = iter_series_folders(dir.path())
             .into_iter()
             .map(|f| f.title)
             .collect();
-        assert_eq!(titles, ["History", "S"]);
-    }
-
-    /// Nor is a `series.json` in that `history/` an orphan to retire: the tree is its
-    /// owner's, whatever it holds. A `History/` series that lost its archives is one.
-    #[test]
-    fn the_reading_history_folder_has_no_orphan_series_file() {
-        let dir = tempfile::tempdir().unwrap();
-        for folder in ["history", "History"] {
-            let path = dir.path().join(folder);
-            bunko_store::fs::create_dir(&path).unwrap();
-            bunko_store::fs::write(path.join(SERIES_FILE_NAME), "{}").unwrap();
-        }
-        let titles: Vec<String> = iter_orphan_series_files(dir.path())
-            .into_iter()
-            .map(|(title, _)| title)
-            .collect();
-        assert_eq!(titles, ["History"]);
+        assert_eq!(titles, ["Kingdom"]);
     }
 
     /// A series pass lists its folder once and still finds a primary spelled

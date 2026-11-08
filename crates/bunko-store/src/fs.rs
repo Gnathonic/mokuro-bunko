@@ -151,17 +151,104 @@ pub fn remove_dir_all(p: impl AsRef<Path>) -> io::Result<()> {
 /// `std::fs::rename` (spec §3.4): within one store, the store's `rename`; from an
 /// unmounted path into a store, `publish` with the default intent; between two
 /// different stores, `CrossesDevices`.
+///
+/// A local rename between two names of one file (a case-only rename on a
+/// case-insensitive disk) goes through a temporary name, see [`local_rename`].
 pub fn rename(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<()> {
     let (from, to) = (from.as_ref(), to.as_ref());
     match (store_for(from), store_for(to)) {
-        (None, None) => std::fs::rename(from, to),
+        (None, None) => local_rename(from, to),
         (Some(a), Some(b)) if same_store(&a, &b) => a.rename(from, to),
         (None, Some(b)) => b
             .publish(from, to, &WriteIntent::default_publish())
             .map(|_| ()),
-        (Some(a), None) if !a.caps().remote => std::fs::rename(from, to),
+        (Some(a), None) if !a.caps().remote => local_rename(from, to),
         _ => Err(crosses_devices()),
     }
+}
+
+/// Do `a` and `b` name one existing file or folder (Python `os.path.samefile`)? `false`
+/// when either is missing.
+pub fn same_file(a: &Path, b: &Path) -> bool {
+    match (metadata(a), metadata(b)) {
+        (Ok(x), Ok(y)) => match (x.dev().zip(x.ino()), y.dev().zip(y.ino())) {
+            (Some(p), Some(q)) => p == q,
+            // Windows: the final path of an open handle carries the on-disk spelling.
+            _ => matches!(
+                (canonicalize(a), canonicalize(b)),
+                (Ok(x), Ok(y)) if x == y
+            ),
+        },
+        _ => false,
+    }
+}
+
+/// The prefix of the temporary name a case-only rename passes through.
+pub const CASE_RENAME_PREFIX: &str = ".bunko-case-";
+
+/// `std::fs::rename`, except between two names of one file. POSIX makes that a no-op
+/// (Linux casefold, hard links), while APFS and NTFS rename. Bunko behaves the same on
+/// every host: when `from` and `to` differ but [`same_file`] holds, a plain rename is
+/// tried first and its result read back from the listing (never a probe of the host);
+/// when `to` is not listed yet, or `from` still is, the entry goes through a hidden
+/// `.bunko-case-<random>-<to's name>` (`.bunko-case-<random>` when that would be too
+/// long a name) in `from`'s folder, then to `to`. When the second step fails the first
+/// is undone and its error returned. A crash between the two leaves the temporary name
+/// behind (doctor reports it). Two hard links of one file end as the one name `to`.
+pub(crate) fn local_rename(from: &Path, to: &Path) -> io::Result<()> {
+    if from == to || !same_file(from, to) {
+        return std::fs::rename(from, to);
+    }
+    let (Some(parent), Some(from_name), Some(name)) =
+        (from.parent(), from.file_name(), to.file_name())
+    else {
+        return std::fs::rename(from, to);
+    };
+    let to_parent = to.parent().unwrap_or(parent);
+    std::fs::rename(from, to)?;
+    if listed(to_parent, name) && !listed(parent, from_name) {
+        return Ok(());
+    }
+    let mut temp_name = format!("{CASE_RENAME_PREFIX}{}", temp_token());
+    let full = format!("{temp_name}-{}", name.to_string_lossy());
+    // 255 bytes is the longest name APFS, ext4 and NTFS (in UTF-16 units) take.
+    if full.len() <= 255 {
+        temp_name = full;
+    }
+    let temp = parent.join(temp_name);
+    std::fs::rename(from, &temp)?;
+    if let Err(e) = std::fs::rename(&temp, to) {
+        if let Err(back) = std::fs::rename(&temp, from) {
+            tracing::error!(
+                temp = %temp.display(),
+                from = %from.display(),
+                error = %back,
+                "a case-only rename failed and could not be undone: rename the temporary name back by hand"
+            );
+        }
+        return Err(e);
+    }
+    // Hard links: the second step was itself a rename between two names of one file.
+    if listed(parent, temp.file_name().unwrap_or_default()) && same_file(&temp, to) {
+        std::fs::remove_file(&temp)?;
+    }
+    Ok(())
+}
+
+/// `dir` lists exactly `name`.
+fn listed(dir: &Path, name: &std::ffi::OsStr) -> bool {
+    std::fs::read_dir(dir).is_ok_and(|entries| entries.flatten().any(|e| e.file_name() == name))
+}
+
+/// A short token unique enough for a temporary name in one folder.
+fn temp_token() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{:x}{:x}{:x}", std::process::id(), nanos, n)
 }
 
 /// `std::fs::copy`, routed by the destination's store.

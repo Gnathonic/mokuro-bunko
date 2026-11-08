@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use bunko_core::{Role, StorageLayout};
-use bunko_dav::{AuditEvent, Dav, DavConfig, DavContext, DavHooks, PutFollowUp};
+use bunko_dav::{AuditEvent, Dav, DavConfig, DavContext, DavHooks, HookGuard, PutFollowUp};
 use http::{HeaderMap, Request, Response, StatusCode};
 use http_body_util::BodyExt;
 use parking_lot::Mutex;
@@ -22,9 +22,22 @@ pub struct Recorder {
     /// `ocr_sidecar_staged` calls, as `<parent>/<name>` of the destination (kept apart
     /// from `calls`, whose exact lists other tests compare).
     pub staged: Mutex<Vec<String>>,
+    /// An archive MOVE's notices, in order (apart from `calls` too): `moving a b` before
+    /// the rename, `moved a b` (the hook after it), `over a b` when the notice's guard
+    /// is dropped.
+    pub moves: Arc<Mutex<Vec<String>>>,
+    /// `archive_moving` removes the source first: the rename that follows fails.
+    pub fail_moves: std::sync::atomic::AtomicBool,
+}
+
+fn file_name(p: &Path) -> String {
+    p.file_name().unwrap().to_string_lossy().into_owned()
 }
 
 impl Recorder {
+    pub fn moves(&self) -> Vec<String> {
+        self.moves.lock().clone()
+    }
     pub fn calls(&self) -> Vec<String> {
         self.calls.lock().clone()
     }
@@ -108,6 +121,25 @@ impl DavHooks for Recorder {
             cbz.file_name().unwrap().to_string_lossy()
         ));
     }
+    fn archive_moving(&self, from: &Path, to: &Path) -> HookGuard {
+        let pair = format!("{} {}", file_name(from), file_name(to));
+        self.moves.lock().push(format!("moving {pair}"));
+        if self.fail_moves.load(std::sync::atomic::Ordering::SeqCst) {
+            std::fs::remove_file(from).unwrap();
+        }
+        struct Over(Arc<Mutex<Vec<String>>>, String);
+        impl Drop for Over {
+            fn drop(&mut self) {
+                self.0.lock().push(format!("over {}", self.1));
+            }
+        }
+        HookGuard::new(Over(self.moves.clone(), pair))
+    }
+    fn archive_moved(&self, from: &Path, to: &Path) {
+        self.moves
+            .lock()
+            .push(format!("moved {} {}", file_name(from), file_name(to)));
+    }
     fn put_follow_up(&self, _cbz: &Path, series: &str, volume: &str) -> Option<PutFollowUp> {
         self.push(format!("put_follow_up {series} {volume}"));
         self.follow_up.lock().clone()
@@ -131,11 +163,12 @@ pub struct Env {
 }
 
 impl Env {
-    /// The fixture of `tests/integration/test_webdav_ops.py`.
+    /// The fixture of `tests/integration/test_webdav_ops.py` (without its empty
+    /// `library/thumbnails/`, which a start removes since 0.8).
     pub fn new() -> Env {
         let dir = tempfile::tempdir().unwrap();
         let base = dir.path().join("storage");
-        std::fs::create_dir_all(base.join("library/thumbnails")).unwrap();
+        std::fs::create_dir_all(base.join("library")).unwrap();
         std::fs::create_dir_all(base.join("inbox")).unwrap();
         std::fs::create_dir_all(base.join("users/reader")).unwrap();
         std::fs::create_dir_all(base.join("users/uploader")).unwrap();
@@ -372,4 +405,16 @@ pub fn decode_gzip(data: &[u8]) -> Vec<u8> {
         .read_to_end(&mut out)
         .unwrap();
     out
+}
+
+/// Does `dir` hold two entries after writing both spellings of a name? A fixture
+/// capability check (only a case-sensitive filesystem can), for the few assertions
+/// about a state an insensitive disk cannot hold. Never used by production code.
+pub fn holds_two_spellings(dir: &Path, a: &str, b: &str) -> bool {
+    let names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.iter().any(|n| n == a) && names.iter().any(|n| n == b)
 }

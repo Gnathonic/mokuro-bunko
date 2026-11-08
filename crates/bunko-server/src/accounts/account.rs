@@ -257,6 +257,20 @@ async fn delete_account(
                 .target_username(&username),
         )?;
         db.delete_user(&username)?;
+        // A database from before names were unique ignoring case can hold another
+        // account spelled like this one: on a disk that folds case `users/<u>/` is that
+        // account's folder too. Kept, and logged, rather than deleting its tree.
+        if let Some(other) = db
+            .list_users(None)?
+            .into_iter()
+            .find(|u| u.username != username && u.username.eq_ignore_ascii_case(&username))
+        {
+            warn!(
+                "the account folder of {username} is kept: the account {} is spelled the same but for case, and on a case-insensitive disk it is that account's folder too",
+                other.username
+            );
+            return Ok(true);
+        }
         // `users/<u>/` holds everything that is only this account's: progress, its
         // reading history, its correction layers (`edits/`, D27). An admin delete
         // is a soft delete and keeps it all for a restore.

@@ -474,18 +474,35 @@ impl Listing {
         }
     }
 
-    /// The archives (library rels) that govern the path, listed or new.
+    /// The archives (library rels) that govern the path, listed or new, by rule v1 and
+    /// by the filename fold alike
+    /// ([`sidecar_names::governing_archives_by_either_fold`]): `S/STRASSE.mokuro` is
+    /// governed by a listed `S/Straße.cbz`, as every host makes them one name.
     fn governors(&self) -> Vec<String> {
-        sidecar_names::governing_archives(&self.name, &self.refs())
+        sidecar_names::governing_archives_by_either_fold(&self.name, &self.refs())
             .into_iter()
             .map(|a| self.rel(a))
             .collect()
     }
 
     /// The path, a new archive, would turn a reserved layer of a listed volume into its
-    /// own primary (OWN-2).
+    /// own primary (OWN-2), as rule v1 reads it (`V.edit.cbz`, `v.EDIT.cbz` beside
+    /// `V.cbz`). One the filename fold alone makes such an archive
+    /// (`STRASSE.curated.cbz` beside `Straße.cbz`, `V.ed\u{200B}it.cbz`) is created by
+    /// nobody: DAV answers it 409 `ambiguous-name` for every account
+    /// (`bunko_dav`'s one volume name per fold, and its shadowing archives), the
+    /// volume's own controller included.
     fn hides_reserved_layer(&self) -> bool {
         sidecar_names::hides_reserved_layer(&self.name, &self.refs())
+    }
+
+    /// The folder lists the path's name, in any spelling the filename fold joins: a
+    /// write reaches that file (PathCase), so it is a replacement.
+    fn lists_name(&self) -> bool {
+        let target = sidecar_names::fold(&self.name);
+        self.names
+            .iter()
+            .any(|n| *n == self.name || sidecar_names::fold(n) == target)
     }
 }
 
@@ -885,7 +902,7 @@ fn authorize_put(
         let governors = listing.governors();
         // Listed counts as there: a file that fails its own lookup is still replaced,
         // never added by the laxer rules for new files.
-        if listing.names.contains(&listing.name) || backend.physical_exists(path, id.caller()) {
+        if listing.lists_name() || backend.physical_exists(path, id.caller()) {
             if !controls(path, user, &governors, backend)? {
                 return Err(Denied::new(
                     403,
@@ -1374,8 +1391,9 @@ mod tests {
             )
             .is_ok()
         );
-        // history/series.json is the account's, not compiled metadata; a library
-        // `History/` series is still the library's.
+        // history/series.json is the account's, not compiled metadata; `History/` is
+        // the account's history too (any case), so an archive there is refused by the
+        // history shape, never treated as a library upload.
         assert!(
             authorize(
                 &m("PUT"),
@@ -1387,7 +1405,7 @@ mod tests {
             )
             .is_ok()
         );
-        assert_eq!(
+        assert!(
             authorize(
                 &m("PUT"),
                 "/mokuro-reader/History/v.cbz",
@@ -1396,9 +1414,7 @@ mod tests {
                 OPEN,
                 &B
             )
-            .unwrap_err()
-            .message,
-            "Permission denied: cannot add files"
+            .is_ok()
         );
     }
 

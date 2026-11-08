@@ -71,8 +71,9 @@ use crate::store::{Core, Ver};
 /// Decides whether Deferred ops may run (the lease fence, or a caller's gate).
 pub type Gate = Arc<dyn Fn() -> bool + Send + Sync>;
 /// Test-only crash injection: called with a state name after that state was
-/// persisted (and with `uploaded` after an upload returned, before COMMITTED is
-/// written); `true` stops the store there, as a crash would.
+/// persisted (with `uploaded` after an upload returned, before COMMITTED is written,
+/// and with `settle` before a move or delete waits out a Deferred write of its path
+/// that is on its way); `true` stops the store there, as a crash would.
 pub type Failpoint = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
 /// How long a Sync move or delete waits for in-flight ops before 503 (§5.7 Barrier).

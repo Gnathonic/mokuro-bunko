@@ -16,7 +16,7 @@ use bunko_store::{Durability, Mode, Origin, Version, WriteIntent, fs};
 use serde_json::{Map, Value};
 use sha2::Digest;
 
-use super::owed::sidecar_paths;
+use super::owed::{listed_sidecar_paths, sidecar_paths};
 use super::types::{Job, LibraryFacts, PathLocks, Stamp, stamp_of};
 
 /// Everything one installation needs, owned (it crosses to a helper thread).
@@ -67,6 +67,10 @@ pub enum Outcome {
     Superseded(String),
 }
 
+/// Why a result was discarded for a volume where nothing may be written: a frozen
+/// case-variant group, or a name another volume owns.
+pub const SHADOWED: &str = "the volume is in a case-variant group (frozen until it is merged by hand) or its name is another volume's; the result was discarded";
+
 /// Why a result was discarded for a file already at its destination.
 pub const SUPERSEDED: &str = "a sidecar was already at the destination; the result was discarded";
 
@@ -83,17 +87,46 @@ pub(crate) enum Existing {
 /// output of the same engine at a lower revision is replaced
 /// ([`super::upgrade::superseded_own_output`]); anything else is kept, and so is a
 /// `.gz` alone (the result would sit beside it as a second copy).
+///
+/// What is there is decided from a fresh listing of the folder, never by opening the
+/// names: an entry listed in another spelling of either name (or a folder of that
+/// name) is kept, so a host that would open it (casefold, APFS, NTFS) and one that
+/// would not (a case-sensitive disk, a remote store) answer alike. The caller holds
+/// the write lock of `plain` and resolved `plain`/`gz` under it.
 pub(crate) fn reconcile_existing(
     plain: &Path,
     gz: &Path,
     result: Option<&(String, u32)>,
 ) -> Existing {
-    let Some(meta) = fs::metadata(plain).ok() else {
-        return if fs::exists(gz) {
+    let directory = plain.parent().unwrap_or_else(|| Path::new(""));
+    let Some(listed) = bunko_library::sidecar::Listed::of(directory) else {
+        return Existing::Keep;
+    };
+    let name_of = |p: &Path| {
+        p.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+    let (plain_name, gz_name) = (name_of(plain), name_of(gz));
+    let taken_otherwise = |name: &str| {
+        let fold = bunko_core::names::fold_name(name);
+        listed.entries().any(|(n, dir)| {
+            (n != name || dir) && (n == name || bunko_core::names::fold_name(n) == fold)
+        })
+    };
+    if taken_otherwise(&plain_name) || taken_otherwise(&gz_name) {
+        return Existing::Keep;
+    }
+    if !listed.files.contains(&plain_name) {
+        return if listed.files.contains(&gz_name) {
             Existing::Keep
         } else {
             Existing::Absent
         };
+    }
+    let Some(meta) = fs::metadata(plain).ok() else {
+        return Existing::Keep;
     };
     let Some((engine, revision)) = result else {
         return Existing::Keep;
@@ -192,7 +225,7 @@ pub fn volume_uuid_for(
     if !row.primary {
         for suffix in [".mokuro", ".mokuro.gz"] {
             if let Some(found) =
-                sidecar_volume_uuid(&bunko_library::sidecar::with_suffix(cbz, suffix))
+                bunko_library::sidecar::sibling(cbz, suffix).and_then(|p| sidecar_volume_uuid(&p))
             {
                 return found;
             }
@@ -208,7 +241,9 @@ pub fn volume_uuid_for(
         if other.primary || other.id == row.id {
             continue;
         }
-        let (plain, gz) = sidecar_paths(cbz, &other.sidecar_suffix());
+        let Some((plain, gz)) = listed_sidecar_paths(cbz, &other.sidecar_suffix()) else {
+            continue;
+        };
         for candidate in [plain, gz] {
             let Some(uuid) = sidecar_volume_uuid(&candidate) else {
                 continue;
@@ -397,7 +432,11 @@ fn install(req: &CollectRequest) -> Outcome {
     if let Err(e) = bunko_layout::seal::seal_sidecar_file(&req.result) {
         return Outcome::Failed(format!("the {} sidecar could not be sealed: {e}", row.name));
     }
-    // 5. Into place, under the DAV write lock.
+    // 5. Into place, under the DAV write lock. Never into a frozen case-variant group,
+    // in any folder on the way (the volume's own folder is the listing's below).
+    if bunko_library::fsutil::frozen_path(&req.library, &cbz).is_some() {
+        return Outcome::Superseded(SHADOWED.into());
+    }
     let mut mode = None;
     let destination = if req.job.upgrade {
         match super::upgrade::swap_in_generated(req, &cbz) {
@@ -410,10 +449,23 @@ fn install(req: &CollectRequest) -> Outcome {
             Err(outcome) => return outcome,
         }
     } else {
-        let (plain, gz) = sidecar_paths(&cbz, &row.sidecar_suffix());
+        // The spelling the folder lists (a client's `v.mokuro` for `V.cbz` is this
+        // volume's primary on every host): never a second spelling beside it.
+        let Some((plain, gz)) = listed_sidecar_paths(&cbz, &row.sidecar_suffix()) else {
+            return Outcome::Superseded(SHADOWED.into());
+        };
         let Some(_guard) = lock_with_patience(&req.locks, &plain) else {
             return Outcome::Busy(format!("{} is locked by a WebDAV write", plain.display()));
         };
+        // Under the lock, from a fresh listing: a client's upload that landed while the
+        // lock was awaited (in any spelling) is the volume's sidecar now, and stays.
+        match listed_sidecar_paths(&cbz, &row.sidecar_suffix()) {
+            None => return Outcome::Superseded(SHADOWED.into()),
+            Some(now) if now != (plain.clone(), gz.clone()) => {
+                return Outcome::Superseded(SUPERSEDED.into());
+            }
+            Some(_) => {}
+        }
         let result_facts = bunko_library::sidecar::read_capped(
             &req.result,
             bunko_library::sidecar::MAX_SIDECAR_BYTES,

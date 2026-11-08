@@ -799,7 +799,7 @@ Updates card), `processor.auto_update: true` in a processor's `processor.yaml`
 release (its `pack.json` says `bunko_version`; a pack built outside a release,
 without one, is accepted as a development pack). Release X's program opens the
 packs of the releases that build the same pack as X, from the oldest such
-release up to X itself (0.7.1 and later, for 0.8); any other is refused with
+release up to X itself (0.7.4 and later, for 0.8); any other is refused with
 `the backend pack is from mokuro-bunko A, this is B, which opens the packs of O
 to B; run 'mokuro-bunko install-ocr' (with automatic updates on, an update
 installs it)`, and `doctor`, `/control/status` and

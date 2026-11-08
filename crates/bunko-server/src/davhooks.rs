@@ -2,8 +2,9 @@
 //! OCR provenance, volume identities) plus fan-out of library events to the modules that
 //! care (OCR queue, metadata/index runtime).
 
-use bunko_dav::{AuditEvent, DavHooks, PutFollowUp};
+use bunko_dav::{AuditEvent, DavHooks, HookGuard, PutFollowUp};
 use bunko_db::{AuditDetails, Database, NewAuditEvent};
+use bunko_library::fsutil::ListedWalk;
 use parking_lot::RwLock;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -74,14 +75,27 @@ impl DavHooks for ServerDavHooks {
         crate::ocr::provenance::reattach_on_put(dest, staged);
     }
 
-    fn record_volume_upload(&self, rel: &str, actor: &str, _existed_before: bool) {
+    fn record_volume_upload(&self, rel: &str, actor: &str, existed_before: bool) {
+        let walk = ListedWalk::new(&self.library);
+        let key = bunko_db::normalize_volume_key(rel).unwrap_or_default();
+        // A row under another spelling of this volume's name is taken over only when
+        // this write replaced an existing file (the volume, respelled outside Bunko).
+        // A new file never inherits a row left behind by one deleted outside Bunko: auth
+        // judged it with no owner, and it is the writer's.
         Self::log(
             "record_volume_upload",
-            self.db.record_volume_upload(rel, actor),
+            self.db.record_volume_upload_where(rel, actor, |k| {
+                existed_before && walk.same_entry(k, &key)
+            }),
         );
     }
     fn forget_volume_upload(&self, rel: &str) {
-        Self::log("forget_volume_upload", self.db.forget_volume_upload(rel));
+        let walk = ListedWalk::new(&self.library);
+        Self::log(
+            "forget_volume_upload",
+            self.db
+                .forget_volume_upload_where(rel, |k| walk.leads_nowhere(k)),
+        );
     }
     fn forget_volume_uuid(&self, rel: &str) {
         Self::log("forget_volume_uuid", self.db.forget_volume_uuid(rel));
@@ -96,15 +110,24 @@ impl DavHooks for ServerDavHooks {
         Self::log("forget_ocr_sidecar", self.db.forget_ocr_sidecar(rel));
     }
     fn rename_volume_upload(&self, old: &str, new: &str) {
+        let walk = ListedWalk::new(&self.library);
+        // A volume that lands in a case-variant group (a folder moved whole in the
+        // cloud with two spellings of a volume in it) takes its own row only: a row of
+        // another spelling is that member's, whose own move follows (the group is
+        // frozen: no row of it is re-keyed or dropped for another).
+        let frozen = bunko_library::fsutil::frozen(&self.library, new).is_some();
         Self::log(
             "rename_volume_upload",
-            self.db.rename_volume_upload(old, new),
+            self.db
+                .rename_volume_upload_where(old, new, |k| !frozen && walk.leads_nowhere(k)),
         );
     }
     fn forget_volume_uploads_under_prefix(&self, p: &str) {
+        let walk = ListedWalk::new(&self.library);
         Self::log(
             "forget_volume_uploads_under_prefix",
-            self.db.forget_volume_uploads_under_prefix(p),
+            self.db
+                .forget_volume_uploads_under_prefix_where(p, |k| walk.leads_nowhere(k)),
         );
     }
     fn forget_ocr_sidecars_under_prefix(&self, p: &str) {
@@ -158,6 +181,14 @@ impl DavHooks for ServerDavHooks {
     }
     fn archive_arrived(&self, cbz: &Path) {
         self.each(|l| l.archive_arrived(cbz));
+    }
+    fn archive_moving(&self, from: &Path, to: &Path) -> HookGuard {
+        self.listeners
+            .read()
+            .iter()
+            .fold(HookGuard::default(), |held, l| {
+                held.and(l.archive_moving(from, to))
+            })
     }
     fn archive_moved(&self, from: &Path, to: &Path) {
         self.each(|l| l.archive_moved(from, to));

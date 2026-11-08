@@ -156,3 +156,116 @@ fn copy_and_canonicalize_pass_through() {
     );
     assert_eq!(fs::read_to_string(&b).unwrap(), "xyz");
 }
+
+/// Names in a folder, sorted.
+fn names(dir: &std::path::Path) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    v.sort();
+    v
+}
+
+/// A case-only rename takes effect on every host: POSIX `rename(2)` between two names
+/// of one file does nothing (Linux casefold), APFS and NTFS rename. The listing holds
+/// exactly the new spelling afterwards, with no temporary name left behind.
+#[test]
+fn a_case_only_rename_takes_effect() {
+    let d = tmp();
+    std::fs::write(d.path().join("a.txt"), b"body").unwrap();
+    fs::rename(d.path().join("a.txt"), d.path().join("A.txt")).unwrap();
+    assert_eq!(names(d.path()), ["A.txt"]);
+    assert_eq!(std::fs::read(d.path().join("A.txt")).unwrap(), b"body");
+
+    let s = d.path().join("s");
+    std::fs::create_dir(&s).unwrap();
+    std::fs::write(s.join("v.cbz"), b"zip").unwrap();
+    fs::rename(&s, d.path().join("S")).unwrap();
+    assert_eq!(names(d.path()), ["A.txt", "S"]);
+    assert_eq!(names(&d.path().join("S")), ["v.cbz"]);
+    assert_eq!(
+        std::fs::read(d.path().join("S").join("v.cbz")).unwrap(),
+        b"zip"
+    );
+}
+
+/// A rename between two names only the wider filename fold joins (`STRASSE` and
+/// `Stra\u{df}e`, a default-ignorable code point dropped, a dotless `\u{131}`) takes
+/// effect too, whether the host makes them one file (casefold) or two: the listing holds
+/// exactly the new name afterwards.
+#[test]
+fn a_fold_only_rename_takes_effect() {
+    let d = tmp();
+    for (from, to) in [
+        ("STRASSE.mokuro", "Stra\u{df}e.mokuro"),
+        ("Vol\u{200B}1.webp", "Vol1.webp"),
+        ("\u{131}.nocover", "i.nocover"),
+        ("V.Fast.mokuro", "V.fast.mokuro"),
+    ] {
+        std::fs::write(d.path().join(from), from.as_bytes()).unwrap();
+        fs::rename(d.path().join(from), d.path().join(to)).unwrap();
+        assert_eq!(names(d.path()), [to], "{from:?} to {to:?}");
+        assert_eq!(std::fs::read(d.path().join(to)).unwrap(), from.as_bytes());
+        std::fs::remove_file(d.path().join(to)).unwrap();
+    }
+}
+
+/// The same through a mounted [`LocalStore`] and through the tokio shim.
+#[cfg(feature = "tokio")]
+#[tokio::test]
+async fn a_case_only_rename_takes_effect_in_a_store() {
+    let d = tmp();
+    let root = d.path().join("lib");
+    std::fs::create_dir(&root).unwrap();
+    let _g = mount(Arc::new(LocalStore::new(&root)));
+    std::fs::write(root.join("v.cbz"), b"zip").unwrap();
+    fs::rename(root.join("v.cbz"), root.join("V.cbz")).unwrap();
+    assert_eq!(names(&root), ["V.cbz"]);
+    bunko_store::afs::rename(root.join("V.cbz"), root.join("V.CBZ"))
+        .await
+        .unwrap();
+    assert_eq!(names(&root), ["V.CBZ"]);
+    assert_eq!(std::fs::read(root.join("V.CBZ")).unwrap(), b"zip");
+}
+
+#[test]
+fn same_file_tells_one_entry_from_two() {
+    let d = tmp();
+    let a = d.path().join("a");
+    std::fs::write(&a, b"x").unwrap();
+    std::fs::write(d.path().join("b"), b"x").unwrap();
+    assert!(fs::same_file(&a, &a));
+    assert!(!fs::same_file(&a, &d.path().join("b")));
+    assert!(!fs::same_file(&a, &d.path().join("missing")));
+}
+
+/// A case-only rename of a name near the 255-byte limit still takes effect: the
+/// temporary name never carries more than the file system takes.
+#[test]
+fn a_case_only_rename_of_a_long_name_takes_effect() {
+    let d = tmp();
+    // 78 three-byte characters plus `v.cbz`: 239 bytes.
+    let stem = "巻".repeat(78);
+    let from = d.path().join(format!("{stem}v.cbz"));
+    let to = d.path().join(format!("{stem}V.cbz"));
+    std::fs::write(&from, b"zip").unwrap();
+    fs::rename(&from, &to).unwrap();
+    assert_eq!(names(d.path()), [format!("{stem}V.cbz")]);
+    assert_eq!(std::fs::read(&to).unwrap(), b"zip");
+}
+
+/// Two hard links of one file end as the one name renamed to, with no temporary name
+/// left behind (rename semantics: the source name goes).
+#[cfg(unix)]
+#[test]
+fn a_rename_between_two_hard_links_leaves_one_name() {
+    let d = tmp();
+    let a = d.path().join("a.cbz");
+    let b = d.path().join("b.cbz");
+    std::fs::write(&a, b"zip").unwrap();
+    std::fs::hard_link(&a, &b).unwrap();
+    fs::rename(&a, &b).unwrap();
+    assert_eq!(names(d.path()), ["b.cbz"]);
+    assert_eq!(std::fs::read(&b).unwrap(), b"zip");
+}

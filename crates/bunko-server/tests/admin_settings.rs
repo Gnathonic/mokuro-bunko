@@ -341,8 +341,9 @@ async fn status_and_absent_services() {
         ]
     );
     assert_eq!(s["user_count"], 1);
-    // Every immediate directory, `thumbnails/` included (0.5.2 counts it too).
-    assert_eq!(s["volume_count"], 3);
+    // Every immediate directory (0.5.2 counted its `thumbnails/` too; no such folder
+    // is made any more).
+    assert_eq!(s["volume_count"], 2);
     assert_eq!(s["port"], 8080);
     assert_eq!(s["library"]["storage"]["backend"], "local");
     assert!(s["disk_total"].as_u64().unwrap() > 0);

@@ -883,3 +883,315 @@ async fn a_large_file_changed_behind_the_index_is_a_retry_before_any_header() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
+
+/// In a cloud library too: an archive only the filename fold makes `X.<layer>.cbz`
+/// (`X.ed\u{200B}it.cbz`) is created by nobody, so once `X.cbz` is there every account's
+/// correction of `X` (the cloud-root owner's in the cloud folder, the others' here) and
+/// its controller's curated publish are written. Beside one made in the cloud, the
+/// accounts whose corrections stay on this disk are never refused for it either.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_archive_the_fold_ties_to_a_layer_never_blocks_that_layer_in_the_cloud() {
+    fn enc(path: &str) -> String {
+        const SET: &percent_encoding::AsciiSet = &percent_encoding::CONTROLS.add(b' ');
+        percent_encoding::utf8_percent_encode(path, SET).to_string()
+    }
+    let cases = [
+        ("X.ed\u{200B}it.cbz", "X.edit.mokuro"),
+        ("X.ed\u{131}t.cbz", "X.edit.mokuro"),
+        ("X.edit-\u{200B}2.cbz", "X.edit-2.mokuro"),
+        ("X.cura\u{200B}ted.cbz", "X.curated.mokuro"),
+    ];
+    let fake = library_fake();
+    // Shared folders, made in the cloud: anyone may add to them.
+    for i in 0..cases.len() {
+        fake.reader_put(&format!("{ROOT}/U{i}/notes.txt"), b"shared");
+    }
+    fake.reader_put(&format!("{ROOT}/H/X.ed\u{200B}it.cbz"), &cbz(1));
+    let e = env(LibraryBackend::GDrive, Some(fake.clone())).await;
+    for name in ["alice", "bob"] {
+        e.services
+            .db
+            .create_user(name, "pass1234", Role::Uploader, UserStatus::Active, "")
+            .unwrap();
+    }
+    let put = |user: &'static str, path: String, body: Vec<u8>| {
+        let e = &e;
+        async move {
+            let (status, body) = e.req(Some(user), "PUT", &enc(&path), &[], &body).await;
+            (status, String::from_utf8_lossy(&body).into_owned())
+        }
+    };
+    for (i, (archive, layer)) in cases.iter().enumerate() {
+        let folder = format!("/mokuro-reader/U{i}");
+        let (status, body) = put("bob", format!("{folder}/{archive}"), cbz(1)).await;
+        assert_eq!(status, 409, "bob PUT {archive:?}: {body}");
+        assert!(body.contains("ambiguous-name"), "{body}");
+        let (status, body) = put("alice", format!("{folder}/X.cbz"), cbz(1)).await;
+        assert_eq!(status, 201, "alice PUT X.cbz: {body}");
+        let path = format!("{folder}/{layer}");
+        let users: &[&'static str] = if layer.contains("curated") {
+            &["alice"]
+        } else {
+            &["owner", "other", "alice", "bob"]
+        };
+        for user in users {
+            let mine = format!(r#"{{"pages":[],"by":"{user}"}}"#).into_bytes();
+            let (status, body) = put(user, path.clone(), mine.clone()).await;
+            assert!(
+                matches!(status, 201 | 204),
+                "{user} PUT {path:?} after {archive:?}: {status} {body}"
+            );
+            assert_eq!(
+                e.get(user, &enc(&path)).await,
+                (200, mine),
+                "{user} {path:?}"
+            );
+        }
+    }
+    // Beside one made in the cloud: the corrections kept on this disk.
+    let (status, body) = put("alice", "/mokuro-reader/H/X.cbz".into(), cbz(1)).await;
+    assert_eq!(status, 201, "alice PUT H/X.cbz: {body}");
+    for user in ["other", "alice", "bob"] {
+        let mine = format!(r#"{{"pages":[],"by":"{user}"}}"#).into_bytes();
+        let path = "/mokuro-reader/H/X.edit.mokuro".to_string();
+        let (status, body) = put(user, path.clone(), mine.clone()).await;
+        assert!(
+            matches!(status, 201 | 204),
+            "{user} PUT {path:?}: {status} {body}"
+        );
+        assert_eq!(e.get(user, &path).await, (200, mine), "{user}");
+        assert!(e.users(&format!("{user}/edits/H/X.edit.mokuro")).exists());
+    }
+}
+
+/// In a cloud library too: one volume name per filename fold, whichever came first
+/// (`STRASSE.curated.cbz` and `Straße.cbz` are one volume name), and a pair made in
+/// the cloud folder holds both volumes' files while it is read as ever.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn one_volume_name_per_fold_in_the_cloud() {
+    fn enc(path: &str) -> String {
+        const SET: &percent_encoding::AsciiSet = &percent_encoding::CONTROLS.add(b' ');
+        percent_encoding::utf8_percent_encode(path, SET).to_string()
+    }
+    let (squat, volume) = ("STRASSE.curated.cbz", "Stra\u{df}e.cbz");
+    let fake = library_fake();
+    for folder in ["A", "B"] {
+        fake.reader_put(&format!("{ROOT}/{folder}/notes.txt"), b"shared");
+    }
+    for name in [squat, volume] {
+        fake.reader_put(&format!("{ROOT}/P/{name}"), &cbz(1));
+    }
+    let e = env(LibraryBackend::GDrive, Some(fake.clone())).await;
+    for name in ["alice", "bob"] {
+        e.services
+            .db
+            .create_user(name, "pass1234", Role::Uploader, UserStatus::Active, "")
+            .unwrap();
+    }
+    let send = |user: &'static str, method: &'static str, path: String, body: Vec<u8>| {
+        let e = &e;
+        async move {
+            let (status, body) = e.req(Some(user), method, &enc(&path), &[], &body).await;
+            (status, String::from_utf8_lossy(&body).into_owned())
+        }
+    };
+    let layer = br#"{"pages":[]}"#.to_vec();
+    // The squatter first: the volume is refused, the squatter keeps its archive.
+    let (status, body) = send("bob", "PUT", format!("/mokuro-reader/A/{squat}"), cbz(1)).await;
+    assert_eq!(status, 201, "bob PUT {squat:?}: {body}");
+    let (status, body) = send("alice", "PUT", format!("/mokuro-reader/A/{volume}"), cbz(1)).await;
+    assert_eq!(status, 409, "alice PUT {volume:?}: {body}");
+    assert!(body.contains("ambiguous-name"), "{body}");
+    let (status, body) = send("bob", "DELETE", format!("/mokuro-reader/A/{squat}"), vec![]).await;
+    assert_eq!(status, 204, "bob DELETE {squat:?}: {body}");
+    // The volume first: the squatter is refused, the volume's layers are written.
+    let (status, body) = send("alice", "PUT", format!("/mokuro-reader/B/{volume}"), cbz(1)).await;
+    assert_eq!(status, 201, "alice PUT {volume:?}: {body}");
+    let (status, body) = send("alice", "PUT", format!("/mokuro-reader/B/{squat}"), cbz(1)).await;
+    assert_eq!(status, 409, "alice PUT {squat:?}: {body}");
+    assert!(body.contains("ambiguous-name"), "{body}");
+    let (status, body) = send(
+        "alice",
+        "PUT",
+        "/mokuro-reader/B/Stra\u{df}e.curated.mokuro".into(),
+        layer.clone(),
+    )
+    .await;
+    assert_eq!(status, 201, "alice PUT the curated layer: {body}");
+    // A pair made in the cloud: read, never written to.
+    for name in [squat, volume] {
+        let (status, _) = send("boss", "GET", format!("/mokuro-reader/P/{name}"), vec![]).await;
+        assert_eq!(status, 200, "GET {name:?}");
+    }
+    let (status, body) = send(
+        "boss",
+        "PUT",
+        "/mokuro-reader/P/Stra\u{df}e.curated.mokuro".into(),
+        layer.clone(),
+    )
+    .await;
+    assert_eq!(status, 409, "PUT beside the pair: {body}");
+    assert!(body.contains("ambiguous-name"), "{body}");
+    assert!(
+        fake.node_at(&format!("{ROOT}/P/Stra\u{df}e.curated.mokuro"))
+            .is_none()
+    );
+}
+
+/// In a cloud library too, the volume name is the first archive's to land: one that
+/// lands while another archive of that volume name is still uploading refuses that
+/// upload when it would be published (409 `ambiguous-name`), in either order, and the
+/// pairs whose sidecar names only the fold joins (`X.5.cbz` and `X\u{200B}.cbz`,
+/// `Q.cura\u{200B}ted.curated.cbz` and `Q.curated.cbz`, a final sigma) are one volume
+/// name like the rest.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_volume_name_taken_mid_upload_refuses_the_upload_in_the_cloud() {
+    fn enc(path: &str) -> String {
+        const SET: &percent_encoding::AsciiSet = &percent_encoding::CONTROLS.add(b' ');
+        percent_encoding::utf8_percent_encode(path, SET).to_string()
+    }
+    let pairs = [
+        ("STRASSE.curated.cbz", "Stra\u{df}e.cbz"),
+        ("X.5.cbz", "X\u{200B}.cbz"),
+        ("Q.cura\u{200B}ted.curated.cbz", "Q.curated.cbz"),
+        (
+            "\u{39F}\u{394}\u{39F}\u{3C2}.gcv.cbz",
+            "\u{39F}\u{394}\u{39F}\u{3A3}.cbz",
+        ),
+    ];
+    let fake = library_fake();
+    for i in 0..pairs.len() {
+        for folder in ["A", "B", "C"] {
+            fake.reader_put(&format!("{ROOT}/{folder}{i}/notes.txt"), b"shared");
+        }
+    }
+    let e = env(LibraryBackend::GDrive, Some(fake.clone())).await;
+    for name in ["alice", "bob"] {
+        e.services
+            .db
+            .create_user(name, "pass1234", Role::Uploader, UserStatus::Active, "")
+            .unwrap();
+    }
+    let send = |user: &'static str, method: &'static str, path: String, body: Vec<u8>| {
+        let e = &e;
+        async move {
+            let (status, body) = e.req(Some(user), method, &enc(&path), &[], &body).await;
+            (status, String::from_utf8_lossy(&body).into_owned())
+        }
+    };
+    // A PUT whose body is held open once the server has read its first bytes.
+    type Tx = tokio::sync::mpsc::Sender<Result<axum::body::Bytes, std::io::Error>>;
+    let slow = |user: &'static str, path: String, body: Vec<u8>| {
+        let app = e.app.clone();
+        async move {
+            let (tx, rx) = tokio::sync::mpsc::channel(1);
+            let stream = futures_util::stream::unfold(rx, |mut rx| async move {
+                rx.recv().await.map(|item| (item, rx))
+            });
+            let req = Request::builder()
+                .method("PUT")
+                .uri(enc(&path))
+                .header("host", "localhost:8080")
+                .header("authorization", basic(user))
+                .header("content-length", body.len().to_string())
+                .body(Body::from_stream(stream))
+                .unwrap();
+            let task = tokio::spawn(async move {
+                let resp = app.oneshot(req).await.unwrap();
+                let status = resp.status().as_u16();
+                let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+                (status, String::from_utf8_lossy(&bytes).into_owned())
+            });
+            let third = body.len() / 3;
+            let tx: Tx = tx;
+            for part in [&body[..third], &body[third..2 * third]] {
+                tokio::time::timeout(
+                    Duration::from_secs(20),
+                    tx.send(Ok(axum::body::Bytes::copy_from_slice(part))),
+                )
+                .await
+                .expect("the upload is read")
+                .expect("the upload is not answered before its body");
+            }
+            let rest = body[2 * third..].to_vec();
+            move || async move {
+                tx.send(Ok(axum::body::Bytes::from(rest))).await.unwrap();
+                drop(tx);
+                task.await.unwrap()
+            }
+        }
+    };
+    for (i, (squat, volume)) in pairs.iter().enumerate() {
+        // The volume mid-upload when the squatter lands.
+        let finish = slow("alice", format!("/mokuro-reader/A{i}/{volume}"), cbz(2)).await;
+        let (status, body) =
+            send("bob", "PUT", format!("/mokuro-reader/A{i}/{squat}"), cbz(1)).await;
+        assert_eq!(status, 201, "bob PUT {squat:?}: {body}");
+        let (status, body) = finish().await;
+        assert_eq!(status, 409, "alice's {volume:?} after {squat:?}: {body}");
+        assert!(body.contains("ambiguous-name"), "{body}");
+        assert!(fake.node_at(&format!("{ROOT}/A{i}/{volume}")).is_none());
+        let (status, body) = send(
+            "bob",
+            "DELETE",
+            format!("/mokuro-reader/A{i}/{squat}"),
+            vec![],
+        )
+        .await;
+        assert_eq!(status, 204, "bob DELETE {squat:?}: {body}");
+        // The squatter mid-upload (by the admin, who controls everything) when the
+        // volume lands; and either way round at once, by name alone.
+        let finish = slow("boss", format!("/mokuro-reader/B{i}/{squat}"), cbz(1)).await;
+        let (status, body) = send(
+            "alice",
+            "PUT",
+            format!("/mokuro-reader/B{i}/{volume}"),
+            cbz(2),
+        )
+        .await;
+        assert_eq!(status, 201, "alice PUT {volume:?}: {body}");
+        let (status, body) = finish().await;
+        assert_eq!(status, 409, "boss's {squat:?} after {volume:?}: {body}");
+        assert!(body.contains("ambiguous-name"), "{body}");
+        assert!(fake.node_at(&format!("{ROOT}/B{i}/{squat}")).is_none());
+        let stem = volume.strip_suffix(".cbz").unwrap();
+        for layer in ["curated", "gcv"] {
+            let (status, body) = send(
+                "alice",
+                "PUT",
+                format!("/mokuro-reader/B{i}/{stem}.{layer}.mokuro"),
+                br#"{"pages":[]}"#.to_vec(),
+            )
+            .await;
+            assert_eq!(status, 201, "alice PUT her {layer} layer: {body}");
+        }
+        for (first, second) in [(squat, volume), (volume, squat)] {
+            let folder = format!("C{i}");
+            let (status, body) = send(
+                "boss",
+                "PUT",
+                format!("/mokuro-reader/{folder}/{first}"),
+                cbz(1),
+            )
+            .await;
+            assert_eq!(status, 201, "PUT {first:?}: {body}");
+            let (status, body) = send(
+                "boss",
+                "PUT",
+                format!("/mokuro-reader/{folder}/{second}"),
+                cbz(1),
+            )
+            .await;
+            assert_eq!(status, 409, "PUT {second:?} after {first:?}: {body}");
+            assert!(body.contains("ambiguous-name"), "{body}");
+            let (status, body) = send(
+                "boss",
+                "DELETE",
+                format!("/mokuro-reader/{folder}/{first}"),
+                vec![],
+            )
+            .await;
+            assert_eq!(status, 204, "DELETE {first:?}: {body}");
+        }
+    }
+}

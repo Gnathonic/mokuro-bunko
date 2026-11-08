@@ -42,11 +42,15 @@ pub async fn create_dir_all(p: impl AsRef<Path>) -> io::Result<()> {
 
 pub async fn rename(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<()> {
     let (from, to) = (from.as_ref(), to.as_ref());
+    let (from_buf, to_buf): (PathBuf, PathBuf) = (from.into(), to.into());
     if local(from) && local(to) {
-        return tokio::fs::rename(from, to).await;
+        // A case-only rename takes two steps (`fs::local_rename`); a plain one is a
+        // single `rename(2)` there too.
+        return tokio::task::spawn_blocking(move || crate::fs::local_rename(&from_buf, &to_buf))
+            .await
+            .map_err(io::Error::other)?;
     }
-    let (from, to): (PathBuf, PathBuf) = (from.into(), to.into());
-    blocking(move || crate::fs::rename(&from, &to)).await
+    blocking(move || crate::fs::rename(&from_buf, &to_buf)).await
 }
 
 pub async fn remove_file(p: impl AsRef<Path>) -> io::Result<()> {

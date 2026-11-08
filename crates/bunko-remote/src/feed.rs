@@ -324,12 +324,13 @@ fn is_sidecar(rel: &RelPath) -> bool {
     n.ends_with(".mokuro") || n.ends_with(".mokuro.gz")
 }
 
+/// `series.json` in any spelling the filename fold joins (`ſeries.json`).
 fn is_series_json(rel: &RelPath) -> bool {
-    last_seg(rel).eq_ignore_ascii_case("series.json")
+    bunko_core::names::is_fixed_name(last_seg(rel), "series.json")
 }
 
 fn is_metadata_json(rel: &RelPath) -> bool {
-    is_series_json(rel) || last_seg(rel).eq_ignore_ascii_case("catalog.json")
+    is_series_json(rel) || bunko_core::names::is_fixed_name(last_seg(rel), "catalog.json")
 }
 
 fn parent_of(rel: &RelPath) -> RelPath {

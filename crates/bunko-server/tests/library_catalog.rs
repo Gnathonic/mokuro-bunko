@@ -112,6 +112,43 @@ impl OcrStatusSource for Progress {
     }
 }
 
+/// Volume 02 keeps failing: nothing in it could be decoded.
+struct Failing;
+
+impl OcrStatusSource for Failing {
+    fn progress(&self) -> Option<Map<String, Value>> {
+        None
+    }
+
+    fn volume_failure(&self, series: &str, volume: &str) -> Option<String> {
+        (series == "Dr Stone" && volume == "Volume 02")
+            .then(|| "This volume has no pages that could be decoded.".to_string())
+    }
+}
+
+/// A volume whose OCR keeps failing is "OCR failed", with the public text of the failure
+/// for the badge's hover text, instead of "OCR pending"; the other volumes' entries are
+/// unchanged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failing_volume_says_so_instead_of_pending() {
+    let mut env = catalog_env(|_| {}).await;
+    assert!(env.runtime.recompile_all_now().await > 0);
+    env.deps.ocr_status = Some(Arc::new(Failing));
+    let series = env
+        .send(get("/catalog/api/series?name=Dr+Stone"))
+        .await
+        .json();
+    let v2 = &series["volumes"][1];
+    assert_eq!(v2["ocr_pending"], false);
+    assert_eq!(v2["ocr_failed"], true);
+    assert_eq!(
+        v2["ocr_failure"],
+        "This volume has no pages that could be decoded."
+    );
+    let v1 = series["volumes"][0].as_object().unwrap();
+    assert!(!v1.contains_key("ocr_failed") && !v1.contains_key("ocr_failure"));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn series_page_config_status_cover_and_static() {
     let mut env = catalog_env(|c| c.catalog.reader_url = "https://reader.example".into()).await;
@@ -130,6 +167,15 @@ async fn series_page_config_status_cover_and_static() {
     );
     let by_path = env.send(get("/catalog/api/series/Dr%20Stone")).await;
     assert_eq!(by_path.text(), series.text());
+    // Any spelling of the name is that series, on every host (the library is
+    // case-insensitive): the answer names it as the library spells it.
+    for respelled in [
+        "/catalog/api/series?name=dr+stone",
+        "/catalog/api/series/DR%20STONE",
+    ] {
+        let r = env.send(get(respelled)).await;
+        assert_eq!((r.status, r.text()), (200, series.text()), "{respelled}");
+    }
     assert_eq!(
         env.send(get("/catalog/api/series")).await.text(),
         r#"{"error": "Missing series name"}"#
@@ -167,6 +213,17 @@ async fn series_page_config_status_cover_and_static() {
     assert_eq!(cover.status, 200);
     assert_eq!(&cover.body[..], b"RIFFwebp");
     assert_eq!(cover.header("content-type"), Some("image/webp"));
+    for respelled in [
+        "/catalog/api/cover?path=dr%20stone/VOLUME%2001.webp",
+        "/catalog/api/cover/DR%20STONE/volume%2001.webp",
+    ] {
+        let r = env.send(get(respelled)).await;
+        assert_eq!(
+            (r.status, &r.body[..]),
+            (200, &b"RIFFwebp"[..]),
+            "{respelled}"
+        );
+    }
     // Revalidated on every use: a cover remade under the same name shows at once.
     assert_eq!(cover.header("cache-control"), Some("no-cache"));
     let etag = cover.header("etag").expect("an ETag").to_string();
@@ -434,4 +491,103 @@ async fn manifest_is_gated_like_the_archive() {
         .registration
         .allow_anonymous_download = true;
     assert_eq!(env.send(get(uri)).await.status, 200);
+}
+
+/// A library folder spelled like a per-user name (`history/`, a legacy folder or the
+/// cloud-root owner's own tree) is never the catalog's, in any spelling, on any host:
+/// not listed (the index fallback included), its page, covers and manifest 404.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_per_user_named_folder_is_never_in_the_catalog() {
+    let env = catalog_env(|_| {}).await;
+    let dir = env.series_dir("history");
+    write_cbz(&dir.join("v.cbz"), 1);
+    std::fs::write(dir.join("v.webp"), b"RIFFwebp").unwrap();
+    let listing = env.send(get("/catalog/api/library")).await;
+    assert_eq!(listing.status, 200);
+    assert!(!listing.text().contains("history"), "{}", listing.text());
+    for path in [
+        "/catalog/api/cover/history/v.webp",
+        "/catalog/api/cover/HISTORY/v.webp",
+        "/catalog/api/cover/Aria/../history/v.webp",
+        "/catalog/api/series/history",
+        "/catalog/api/series?name=History",
+    ] {
+        let r = env.send(get(path)).await;
+        assert_eq!(r.status, 404, "{path}: {}", r.text());
+    }
+    assert!(env.runtime.recompile_all_now().await > 0);
+    let listing = env.send(get("/catalog/api/library")).await;
+    assert!(!listing.text().contains("history"), "{}", listing.text());
+}
+
+/// A hidden archive's own cover (`v.webp` beside the hidden `v.cbz`, where the disk
+/// keeps both spellings) is never served, through any spelling; a cover the listings
+/// reach is, in any spelling (`V.webp` beside `V.cbz` only).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hidden_archives_cover_is_never_served() {
+    let env = catalog_env(|_| {}).await;
+    let dir = env.series_dir("S");
+    write_cbz(&dir.join("V.cbz"), 1);
+    let two = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(dir.join("v.cbz"))
+        .is_ok();
+    std::fs::write(dir.join("v.webp"), b"RIFFwebp").unwrap();
+    for path in ["/catalog/api/cover/S/v.webp", "/catalog/api/cover/s/V.WEBP"] {
+        let r = env.send(get(path)).await;
+        if two {
+            assert_eq!(r.status, 404, "{path}: {}", r.text());
+        } else {
+            assert_eq!(r.status, 200, "{path}: {}", r.text());
+        }
+    }
+}
+
+/// Two folders that fold alike (only a case-sensitive disk holds both): the series view
+/// answers the winner, the byte-smallest, for either spelling, once the walk has listed
+/// the library as well as before. The exact spelling of the shadowed folder is never its
+/// own series: neither the walk nor, before it, the index's listing of the root names it
+/// as reachable, so it is resolved from the listings.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_shadowed_spelling_of_a_series_answers_its_winner() {
+    let env = Env::new(|_| {});
+    let winner = env.series_dir("Saga");
+    write_cbz(&winner.join("Saga 01.cbz"), 1);
+    let shadowed = env.library.join("saga");
+    if std::fs::create_dir(&shadowed).is_err() || shadowed.join("Saga 01.cbz").exists() {
+        return; // a case-insensitive disk: one folder.
+    }
+    write_cbz(&shadowed.join("saga 09.cbz"), 1);
+    let names = |r: &Value| -> (String, Vec<String>) {
+        (
+            r["name"].as_str().unwrap().to_string(),
+            r["volumes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v["name"].as_str().unwrap().to_string())
+                .collect(),
+        )
+    };
+    let want = ("Saga".to_string(), vec!["Saga 01".to_string()]);
+    // Before any walk: one listing of the root says which spelling a request reaches.
+    assert_eq!(env.runtime.index().scans(), 0);
+    assert!(env.runtime.index().lists_series("Saga"));
+    assert!(!env.runtime.index().lists_series("saga"));
+    assert!(!env.runtime.index().lists_series("SAGA"));
+    for walked in [false, true] {
+        if walked {
+            env.runtime.index().get_snapshot_fresh();
+            assert!(env.runtime.index().lists_series("Saga"));
+            assert!(!env.runtime.index().lists_series("saga"));
+        }
+        for spelled in ["Saga", "saga", "SAGA"] {
+            let r = env
+                .send(get(&format!("/catalog/api/series?name={spelled}")))
+                .await;
+            assert_eq!(r.status, 200, "{spelled} walked={walked}");
+            assert_eq!(names(&r.json()), want, "{spelled} walked={walked}");
+        }
+    }
 }

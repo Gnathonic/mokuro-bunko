@@ -7,7 +7,7 @@
 //! nothing. Every claim still re-checks its one job on disk ([`still_owed`]).
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use bunko_core::generations::Generation;
@@ -15,7 +15,7 @@ use bunko_core::sidecar_names::Folder;
 use bunko_library::sidecar;
 use bunko_store::fs;
 
-use super::types::{LibraryFacts, mtime_ns, rel_of};
+use super::types::{LibraryFacts, Stamp, mtime_ns, rel_of};
 
 /// One volume's debt.
 #[derive(Clone, Debug, PartialEq)]
@@ -34,6 +34,39 @@ pub struct OwedVolume {
     pub upgrade: bool,
     /// The metadata cache's page count, else the zip directory's own.
     pub pages: Option<i64>,
+    /// The page suffixes read from the archive at that version (`(size, mtime_ns)`),
+    /// once a processor of an older release needed them (`machine_reads`). Read on a
+    /// helper thread on a remote store; a walk keeps them while the version stays.
+    pub page_suffixes: Option<(Stamp, PageSuffixes)>,
+}
+
+/// What a volume's zip directory says about its page formats.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PageSuffixes {
+    /// The suffixes of its pages (lowercase, with the dot), each once.
+    Read(Arc<[String]>),
+    /// Damaged or of a kind this build cannot open: no format to judge (the claim's
+    /// own checks decide, as for any machine).
+    Unreadable,
+}
+
+/// The page suffixes of `cbz` from its zip directory. `Err`: it could not be read
+/// at all (an I/O error, the network), worth trying again.
+pub fn read_page_suffixes(cbz: &Path) -> std::io::Result<PageSuffixes> {
+    let volume = match bunko_library::Volume::open(cbz) {
+        Ok(volume) => volume,
+        Err(bunko_library::archive::ArchiveError::Io(e)) => return Err(e),
+        Err(_) => return Ok(PageSuffixes::Unreadable),
+    };
+    let suffixes: std::collections::BTreeSet<String> = volume
+        .pages()
+        .iter()
+        .filter_map(|page| {
+            let name = page.path.rsplit('/').next().unwrap_or(&page.path);
+            name.rfind('.').map(|i| name[i..].to_ascii_lowercase())
+        })
+        .collect();
+    Ok(PageSuffixes::Read(suffixes.into_iter().collect()))
 }
 
 /// `<library>/<rel>` → its debt.
@@ -53,16 +86,61 @@ pub fn sidecar_paths(cbz: &Path, suffix: &str) -> (std::path::PathBuf, std::path
     (plain, gz.into())
 }
 
-/// `needs_sidecar`, the other way round: the row's sidecar or its `.gz` exists, in any
-/// spelling of the volume's stem (sidecar names rule v1: `V.MOKURO`, `v.fast.mokuro`
-/// on a case-sensitive disk; generating it again would put a second copy beside it).
-/// `folder`: the archive's folder when a walk has listed it; else it is listed here,
-/// and only when the exact names are missing.
+/// [`sidecar_paths`] as Bunko reads and writes them: each name in the spelling the
+/// archive's folder lists (`v.mokuro` for `V.cbz`,
+/// [`bunko_library::sidecar::sibling_in`]), else the constructed name; a pair keeps one
+/// spelling (`v.mokuro` when only `v.mokuro.gz` is listed). Bunko never writes a second
+/// spelling of a sidecar. `None` when nothing may be written for the archive: another
+/// spelling of it shadows it, or every listed spelling is another archive's. One listing.
+pub fn listed_sidecar_paths(cbz: &Path, suffix: &str) -> Option<(PathBuf, PathBuf)> {
+    let directory = cbz.parent().unwrap_or_else(|| Path::new(""));
+    let listed = sidecar::Listed::of(directory).unwrap_or_default();
+    listed_sidecar_paths_in(cbz, suffix, &listed)
+}
+
+/// [`listed_sidecar_paths`] over `listed`, the archive folder's listing.
+pub fn listed_sidecar_paths_in(
+    cbz: &Path,
+    suffix: &str,
+    listed: &sidecar::Listed,
+) -> Option<(PathBuf, PathBuf)> {
+    let directory = cbz.parent().unwrap_or_else(|| Path::new(""));
+    let names = &listed.files;
+    let gz_suffix = format!("{suffix}.gz");
+    let plain = sidecar::sibling_in(cbz, suffix, listed)?;
+    let gz = sidecar::sibling_in(cbz, &gz_suffix, listed)?;
+    let listed = |p: &Path| {
+        p.file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| names.iter().any(|l| l == n))
+    };
+    let with_gz = |p: &Path| {
+        let mut s = p.as_os_str().to_owned();
+        s.push(".gz");
+        PathBuf::from(s)
+    };
+    Some(match (listed(&plain), listed(&gz)) {
+        (false, true) => {
+            let name = gz.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+            let base = name.get(..name.len().saturating_sub(3)).unwrap_or(name);
+            (directory.join(base), gz)
+        }
+        (true, false) => {
+            let gz = with_gz(&plain);
+            (plain, gz)
+        }
+        _ => (plain, gz),
+    })
+}
+
+/// `needs_sidecar`, the other way round: rule v1 finds the row's sidecar or its `.gz`
+/// in the archive's folder listing, in any spelling of the volume's stem (`V.MOKURO`,
+/// `v.fast.mokuro` on a case-sensitive disk), the layer id exact. Decided from the
+/// listing alone, never by opening a built name, so every host answers alike; the
+/// writer ([`listed_sidecar_paths`]) declines what rule v1 does not give the archive, so
+/// a row is never owed for a file that cannot be its own (`V.FAST.mokuro`).
+/// `folder`: the archive's folder when a walk has listed it; else it is listed here.
 pub fn row_done(cbz: &Path, row: &Generation, folder: Option<&Folder>) -> bool {
-    let (plain, gz) = sidecar_paths(cbz, &row.sidecar_suffix());
-    if fs::exists(&plain) || fs::exists(&gz) {
-        return true;
-    }
     let listed_in = |folder: &Folder| {
         if row.primary {
             sidecar::primary_sidecar_in(cbz, folder).is_some()
@@ -100,18 +178,25 @@ pub fn compute(
     facts: &dyn LibraryFacts,
     upgrade: Option<&dyn UpgradeProbe>,
 ) -> Option<OwedVolume> {
+    // One archive (an arrival): nothing is owed in a frozen case-variant group, in any
+    // folder on the way (the walk leaves those out as it lists).
+    if bunko_library::fsutil::frozen_path(library, cbz).is_some() {
+        return None;
+    }
     compute_in(library, cbz, rows, facts, upgrade, None)
 }
 
-/// [`compute`] with the archive's folder already listed (the walk lists each once).
+/// [`compute`] with the archive's folder already listed (the walk lists each once):
+/// its file names and their [`Folder`].
 fn compute_in(
     library: &Path,
     cbz: &Path,
     rows: &[Generation],
     facts: &dyn LibraryFacts,
     upgrade: Option<&dyn UpgradeProbe>,
-    folder: Option<&Folder>,
+    listed: Option<(&sidecar::Listed, &Folder)>,
 ) -> Option<OwedVolume> {
+    let folder = listed.map(|(_, folder)| folder);
     let name = cbz.file_name()?.to_string_lossy().into_owned();
     if !bunko_library::sidecar::is_cbz_name(&name) {
         return None;
@@ -125,11 +210,28 @@ fn compute_in(
     if !meta.is_file() {
         return None;
     }
+    // Nothing is owed that could not be written: a sidecar whose every listed spelling
+    // is another archive's (rule v1, a shadowed archive's included). Such a volume is
+    // left as it is until its case variants are merged by hand (doctor reports them).
+    let own_names;
+    let names: &sidecar::Listed = match listed {
+        Some((names, _)) => names,
+        None => {
+            own_names = sidecar::Listed::of(cbz.parent().unwrap_or_else(|| Path::new("")))
+                .unwrap_or_default();
+            &own_names
+        }
+    };
+    let writable = |suffix: &str| listed_sidecar_paths_in(cbz, suffix, names).is_some();
+    if !writable(".mokuro") {
+        return None;
+    }
     let enabled: Vec<&Generation> = bunko_core::generations::enabled_generations(rows).collect();
     let mut owed: Vec<&Generation> = enabled
         .iter()
         .copied()
         .filter(|r| !row_done(cbz, r, folder) || upgrade.is_some_and(|p| p.layer_outdated(cbz, r)))
+        .filter(|r| writable(&r.sidecar_suffix()))
         .collect();
     let primary_done = enabled
         .iter()
@@ -173,35 +275,32 @@ fn compute_in(
         missing_pages,
         upgrade: wants_upgrade,
         pages: None,
+        page_suffixes: None,
     })
 }
 
-/// Every `library/**/*.cbz` (a case-sensitive `.cbz` suffix, as 0.5.2's glob), sorted.
-/// The per-user names at the root (a cloud progress user's `history/`) are not walked.
+/// Every `library/**/*.cbz` (any case), sorted. The per-user names at the root (a cloud
+/// progress user's `history/`, a series spelled like one) are not walked, nor is
+/// anything a case-variant group freezes ([`bunko_core::fold_groups`]): the members of
+/// a group, the winner included, the files rule v1 gives their archives, and everything
+/// inside a member folder. Volumes there are owed nothing until the group is merged.
 pub fn list_archives(library: &Path) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![library.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let Ok(rd) = fs::read_dir(&dir) else {
+        let top = dir.as_path() == library;
+        let Some((entries, groups)) = bunko_library::fsutil::listed_groups(&dir, top) else {
             continue;
         };
-        let top = dir.as_path() == library;
-        for entry in rd.flatten() {
-            if top
-                && entry
-                    .file_name()
-                    .to_str()
-                    .is_some_and(bunko_core::reader_tree::is_per_user_root_name)
-            {
+        for (name, is_dir) in entries {
+            // Nor is the temporary name an interrupted case-only rename left (doctor's).
+            if groups.is_frozen(&name) || name.starts_with(bunko_store::fs::CASE_RENAME_PREFIX) {
                 continue;
             }
-            let Ok(ft) = entry.file_type() else { continue };
-            let path = entry.path();
-            if ft.is_dir() {
+            let path = dir.join(&name);
+            if is_dir {
                 stack.push(path);
-            } else if (ft.is_file() || ft.is_symlink())
-                && bunko_library::sidecar::is_cbz_name(&entry.file_name().to_string_lossy())
-            {
+            } else if bunko_library::sidecar::is_cbz_name(&name) {
                 out.push(path);
             }
         }
@@ -238,8 +337,8 @@ pub fn walk(
         by_folder.entry(directory).or_default().push(cbz);
     }
     for (directory, archives) in by_folder {
-        let listed = sidecar::list_names(directory).unwrap_or_default();
-        let names: Vec<&str> = listed.iter().map(String::as_str).collect();
+        let listed = sidecar::Listed::of(directory).unwrap_or_default();
+        let names: Vec<&str> = listed.files.iter().map(String::as_str).collect();
         let folder = Folder::new(&names);
         let stems = super::orphans::OrphanStems::new(&names);
         index.orphans.extend(
@@ -252,7 +351,9 @@ pub fn walk(
             let Some(rel) = rel_of(library, cbz) else {
                 continue;
             };
-            let Some(mut v) = compute_in(library, cbz, rows, facts, upgrade, Some(&folder)) else {
+            let Some(mut v) =
+                compute_in(library, cbz, rows, facts, upgrade, Some((&listed, &folder)))
+            else {
                 continue;
             };
             v.pages = match known.get(&rel) {
@@ -292,11 +393,21 @@ pub fn still_owed_with(
     if !fs::is_file(&cbz) {
         return false;
     }
+    // Nothing is owed in a frozen case-variant group, in any folder on the way.
+    if bunko_library::fsutil::frozen(library, rel).is_some() {
+        return false;
+    }
     // Held while a case merge is open on the volume's folder (spec §5.9).
     if merge_busy(&cbz) {
         return false;
     }
     if sidecar_recently_removed(&cbz, row) {
+        return false;
+    }
+    // Never owed where nothing may be written ([`compute`]).
+    if listed_sidecar_paths(&cbz, ".mokuro").is_none()
+        || listed_sidecar_paths(&cbz, &row.sidecar_suffix()).is_none()
+    {
         return false;
     }
     if upgrade {
@@ -423,7 +534,7 @@ mod tests {
     }
 
     /// Sidecar names rule v1: a sidecar in another spelling of the volume's stem
-    /// (`V.MOKURO`, `v.fast.mokuro` on a case-sensitive disk) is the volume's, so the
+    /// (`V.MOKURO`, `v2.fast.mokuro.gz`) is the volume's, so the
     /// walk does not OCR it again and write a second primary beside it.
     #[test]
     fn a_sidecar_in_another_spelling_is_done() {
@@ -439,12 +550,10 @@ mod tests {
         ] {
             std::fs::write(lib.join("S").join(name), b"{}").unwrap();
         }
-        // Two archives fold alike: a folded-only sidecar is neither's.
-        for name in [
-            "W.cbz", "w.cbz", "W.mokuro", "w.mokuro", "x.cbz", "X.cbz", "x.MOKURO",
-        ] {
-            std::fs::write(lib.join("S").join(name), b"{}").unwrap();
-        }
+        // A volume with no sidecar in any spelling owes everything. (Two archives whose
+        // stems fold alike, which only a case-sensitive store can list, are bunko-core's
+        // synthetic-listing vectors.)
+        std::fs::write(lib.join("S").join("X.cbz"), b"{}").unwrap();
         let index = walk(lib, &rows(), &FileFacts, None, &KnownPages::new());
         let owed: Vec<(&str, Vec<String>)> = index
             .volumes
@@ -455,14 +564,140 @@ mod tests {
             owed,
             [
                 ("S/V1.cbz", vec!["g-2".to_string()]),
-                ("S/W.cbz", vec!["g-2".to_string()]),
                 ("S/X.cbz", vec!["g-1".to_string(), "g-2".to_string()]),
-                ("S/w.cbz", vec!["g-2".to_string()]),
-                ("S/x.cbz", vec!["g-2".to_string()]),
             ]
         );
         assert!(!still_owed(lib, "S/V1.cbz", &rows()[0], false));
         assert!(!still_owed(lib, "S/V2.cbz", &rows()[1], false));
         assert!(still_owed(lib, "S/X.cbz", &rows()[0], false));
+    }
+
+    /// A layer file whose id is spelled in another case (`Vol.FAST.mokuro.gz`) is no
+    /// layer of the volume by rule v1 (the id exact), and it is the layer's name by the
+    /// filename fold: the walk owes nothing a write could not fill (it would be a second
+    /// spelling of that file), so the row is neither done nor owed again and again, and
+    /// the same on every host (decided from the listing, never by opening a built name).
+    #[test]
+    fn a_layer_id_in_another_case_is_never_owed() {
+        for other in ["Vol.FAST.mokuro.gz", "Vol.Fast.mokuro"] {
+            let dir = tempfile::tempdir().unwrap();
+            let lib = dir.path();
+            let s = lib.join("S");
+            std::fs::create_dir_all(&s).unwrap();
+            for name in ["Vol.cbz", "Vol.mokuro", other] {
+                std::fs::write(s.join(name), b"{}").unwrap();
+            }
+            let cbz = s.join("Vol.cbz");
+            let layer = &rows()[1];
+            assert!(!row_done(&cbz, layer, None), "{other}");
+            assert_eq!(listed_sidecar_paths(&cbz, ".fast.mokuro"), None, "{other}");
+            let index = walk(lib, &rows(), &FileFacts, None, &KnownPages::new());
+            assert!(index.volumes.is_empty(), "{other}: {:?}", index.volumes);
+            assert!(!still_owed(lib, "S/Vol.cbz", layer, false), "{other}");
+            let mut listed: Vec<String> = sidecar::list_names(&s).unwrap();
+            listed.sort();
+            let mut want = vec![
+                "Vol.cbz".to_string(),
+                "Vol.mokuro".to_string(),
+                other.to_string(),
+            ];
+            want.sort();
+            assert_eq!(listed, want);
+        }
+    }
+
+    /// A result goes to the spelling the folder lists, on every host: a reader's
+    /// `v.mokuro` beside `V.cbz` is the volume's primary, so the collector keeps it
+    /// (the result is discarded) instead of writing `V.mokuro` beside it on a
+    /// case-sensitive disk. A pair keeps the listed spelling; nothing listed keeps the
+    /// archive's.
+    #[test]
+    fn a_result_goes_to_the_listed_spelling() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = dir.path().join("S");
+        std::fs::create_dir_all(&s).unwrap();
+        std::fs::write(s.join("V.cbz"), b"zip").unwrap();
+        let pair = |a: &str, b: &str| Some((s.join(a), s.join(b)));
+        assert_eq!(
+            listed_sidecar_paths(&s.join("V.cbz"), ".mokuro"),
+            pair("V.mokuro", "V.mokuro.gz")
+        );
+        std::fs::write(s.join("v.mokuro.gz"), b"{}").unwrap();
+        assert_eq!(
+            listed_sidecar_paths(&s.join("V.cbz"), ".mokuro"),
+            pair("v.mokuro", "v.mokuro.gz")
+        );
+        std::fs::remove_file(s.join("v.mokuro.gz")).unwrap();
+        std::fs::write(s.join("v.mokuro"), b"{\"pages\":[]}").unwrap();
+        let (plain, gz) = listed_sidecar_paths(&s.join("V.cbz"), ".mokuro").unwrap();
+        assert_eq!(
+            (plain.clone(), gz.clone()),
+            (s.join("v.mokuro"), s.join("v.mokuro.gz"))
+        );
+        assert!(matches!(
+            crate::ocr::collect::reconcile_existing(&plain, &gz, Some(&("hayai-nova".into(), 9))),
+            crate::ocr::collect::Existing::Keep
+        ));
+        // A layer in another spelling of the stem.
+        std::fs::write(s.join("v.fast.mokuro"), b"{}").unwrap();
+        assert_eq!(
+            listed_sidecar_paths(&s.join("V.cbz"), ".fast.mokuro"),
+            pair("v.fast.mokuro", "v.fast.mokuro.gz")
+        );
+    }
+
+    /// A shadowed archive keeps the files its exact stem names (rule v1 over the whole
+    /// listing, as the walk reads it): the archive that shadows it is never given
+    /// `v.mokuro` or `v.webp` to overwrite, and is owed nothing until the two are merged
+    /// by hand. Where the host folds `V.cbz` and `v.cbz` into one entry, that one entry
+    /// owns them (done, nothing owed): the same outcome, nothing written.
+    #[test]
+    fn a_shadowed_archives_files_are_never_the_winners() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = dir.path();
+        let s = lib.join("S");
+        bunko_store::fs::create_dir_all(&s).unwrap();
+        bunko_store::fs::write(s.join("v.cbz"), b"zip").unwrap();
+        bunko_store::fs::write(s.join("v.mokuro"), b"{}").unwrap();
+        bunko_store::fs::write(s.join("v.webp"), b"cover").unwrap();
+        bunko_store::fs::write(s.join("V.cbz"), b"zip").unwrap();
+        let archives: Vec<String> = sidecar::list_names(&s)
+            .unwrap()
+            .into_iter()
+            .filter(|n| sidecar::is_cbz_name(n))
+            .collect();
+        let winner = s.join(&archives[0]);
+        let index = walk(lib, &rows(), &FileFacts, None, &KnownPages::new());
+        let primary = &rows()[0];
+        if archives.len() == 2 {
+            assert_eq!(archives, ["V.cbz", "v.cbz"]);
+            assert_eq!(listed_sidecar_paths(&winner, ".mokuro"), None);
+            assert_eq!(sidecar::sibling(&winner, ".webp"), None);
+            assert!(!crate::thumbs::needs_thumbnail(&winner));
+            assert!(index.volumes.is_empty(), "{:?}", index.volumes);
+            assert!(!still_owed(lib, "S/V.cbz", primary, false));
+            assert!(!still_owed(lib, "S/V.cbz", primary, true));
+            assert!(!still_owed(lib, "S/v.cbz", primary, false));
+        } else {
+            assert_eq!(
+                listed_sidecar_paths(&winner, ".mokuro").map(|(p, _)| p),
+                Some(s.join("v.mokuro"))
+            );
+            assert!(!still_owed(
+                lib,
+                &format!("S/{}", archives[0]),
+                primary,
+                false
+            ));
+            // Only the layer is owed, written beside the listed primary.
+            let owed: Vec<String> = index
+                .volumes
+                .values()
+                .flat_map(|v| v.rows.iter().map(|r| r.to_string()))
+                .collect();
+            assert_eq!(owed, ["g-2"]);
+        }
+        assert_eq!(bunko_store::fs::read(s.join("v.mokuro")).unwrap(), b"{}");
+        assert_eq!(bunko_store::fs::read(s.join("v.webp")).unwrap(), b"cover");
     }
 }

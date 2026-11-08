@@ -118,8 +118,10 @@ impl Env {
         (status, bytes.to_vec())
     }
 
+    /// The uploader recorded under exactly `rel` (the row as stored: a lookup would
+    /// fold to another spelling of the same volume).
     fn owner(&self, rel: &str) -> Option<String> {
-        self.services.db.get_volume_owner(rel).unwrap()
+        self.services.db.get_volume_owner_exact(rel).unwrap()
     }
 }
 

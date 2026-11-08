@@ -55,7 +55,6 @@ async fn propfind_reader_root_shows_own_progress_first() {
     let m1 = t.find("/mokuro-reader/manga1.cbz").unwrap();
     assert!(vd < m1);
     assert!(t.contains("<D:href>/mokuro-reader/series/</D:href>"));
-    assert!(t.contains("<D:href>/mokuro-reader/thumbnails/</D:href>"));
     // Anonymous: no per-user files.
     let anon = env
         .req(None, "PROPFIND", "/mokuro-reader", &[("depth", "1")], b"")
@@ -989,7 +988,6 @@ async fn options_allow_follows_the_account() {
         (Some("reader"), "/mokuro-reader/history", WRITE),
         (Some("reader"), "/mokuro-reader/history/dev/", WRITE),
         (Some("reader"), "/mokuro-reader/series/", PUT),
-        (Some("reader"), "/mokuro-reader/thumbnails", PUT),
         // Outside the reader root nothing changes, whoever asks.
         (Some("uploader"), "/", BASE),
         (Some("reader"), "/", BASE),
@@ -2014,6 +2012,8 @@ async fn cloud_root_owner_uses_the_library_root() {
             b"overwritten",
         )
         .await;
-    assert_eq!(r.code(), 403);
+    // Held before any handler resolves it: a `..` segment is never "not frozen"
+    // (the HTTP edge answers 400 for it first).
+    assert_eq!(r.code(), 409);
     assert_eq!(std::fs::read(env.lib("goals.json")).unwrap(), b"{}");
 }

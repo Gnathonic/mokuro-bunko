@@ -453,7 +453,6 @@ async fn check_listing(s: &Server) {
         "series",
         "series/vol1.cbz",
         "series/vol1.mokuro",
-        "thumbnails",
     ]
     .into_iter()
     .collect();

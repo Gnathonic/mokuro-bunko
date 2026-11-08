@@ -1,6 +1,6 @@
 # The sources of a backend pack; see tests/pack_inputs.rs before changing.
 # BUNKO_BLESS=1 cargo test -p bunko-torch --test pack_inputs
-242eaca678f44984a061e664f248c0040e77924222a0acb11610b7c223416e7a  Cargo.toml [profile.*]
+7b71eeed962e14fcf55fd3712f862ad586c0bcadcc7fb5c4434522c18cac8322  Cargo.toml [profile.*]
 270c97d3d5df673e5f3540e720ecb1f53f77b570a6bf4c9340cf4e1a068466d2  crates/bunko-ncnn/Cargo.toml
 0ceaebb0a67031fd7c9134ff44dd45d4db5547acad393eb530c3611060d8a3ef  crates/bunko-ncnn/build.rs
 d372f55d2b5929872a917aeafc478d31229e3c0d74d93bc8fbf781abe42bb439  crates/bunko-ncnn/shim/bench/bench.cpp
@@ -12,7 +12,7 @@ c8ff0c5822f0a0ce6d9b5f3cc17ec50d39a99e40431dc5e1785f9fb635b12ed4  crates/bunko-n
 dd93c031ff20dd06ff0d865b8f99cd3dda3223e5e06f8dbc2be7913e2e53673a  crates/bunko-ncnn/src/lib.rs
 8fd9aa3cc999fe36d37628715ae1150d9fe1b4baf34baed07811dc7268395f0e  crates/bunko-ocr/Cargo.toml
 afec91406ad9352c231b1a9a5b7e5a68122d30e1261a987c5583aeb6ea765772  crates/bunko-ocr/src/error.rs
-5472b4581b09e6f46d56e2504b82411ebef66702f1a2e7586dbe1874b2ce6dd2  crates/bunko-ocr/src/image/decode.rs
+76773e4c7a15ecfbc1cbde4b85c43598a651d4149a3b95438631b65f1b4a0215  crates/bunko-ocr/src/image/decode.rs
 40a8c9737cc821b40a930791e8960eeaa5400862f5ce31c900cc627efe123383  crates/bunko-ocr/src/image/mod.rs
 12162f8a2d721cb6246be2710fecf71117f26a554a0ba90b48f227c48756cf1d  crates/bunko-ocr/src/image/resize.rs
 658a028adb4934e8918d5fe4a31f05bfd6c1c830c896097c4847da59717cb4f6  crates/bunko-ocr/src/image/warp.rs
@@ -22,7 +22,7 @@ afec91406ad9352c231b1a9a5b7e5a68122d30e1261a987c5583aeb6ea765772  crates/bunko-o
 eda6cc04a0779dbaabd24722164b20b22c85a8cd2e3112dcead90652f6bf1112  crates/bunko-ocr/src/models_release.rs
 981c0ba33381d0fe88bb89a5c389a31a824825021b35a463e3b2c65fb592a420  crates/bunko-ocr/src/natsort.rs
 6553af4fe782d27f828625eade191cbf2f4278f112f6d998bfef0ea8bf9016c2  crates/bunko-ocr/src/natsort_tables.rs
-ebbca0f38a2c634c30be7d7b5b992dbf4df13ff02e78046711d63223a9dca82a  crates/bunko-ocr/src/pages.rs
+088f8e26e413cb6da11d5a72d2e5f664edf8f5653e6e4fce62ca0607007595e6  crates/bunko-ocr/src/pages.rs
 634aee745667ac11b1c7deca921b7927ab51233a1badcda0d56a276dac406b3e  crates/bunko-ocr/src/ppocr/contours.rs
 7026f5701231439f714c6ba52c6658c89f644801a8a61224eae11e87e6d0f1e6  crates/bunko-ocr/src/ppocr/ctc.rs
 195f73558cfaa5d0a7c40f44b5435e14908b9acc4779a05d3b684358be2bc21a  crates/bunko-ocr/src/ppocr/cv_golden.rs
@@ -42,7 +42,7 @@ c1e346cd353151a063640508f85c38f0c98ae99e574adc75a85105bd8cce08ec  crates/bunko-o
 bb84527d66d56d0915761f353c4b0a07681d5a736b63cca357bd47509259bbf3  crates/bunko-torch/Cargo.toml
 ee29dfbde6a690443a68d0a947b6d52a720352935c4aadc63daa033df8d4fbec  crates/bunko-torch/build.rs
 0aa7677e17b2bf1f32094e989d447763cfdca5368528a9e0df1d43dccf63d689  crates/bunko-torch/shim/aoti_shim.cpp
-1cef7bcf7ee2516db9ad7d68679ae6bf997e117755b5ff2969b09c103b9fc4d0  crates/bunko-torch/src/abi.rs
+1198ebbd0a31e6bc3f335cd473a2c4958bcf2b1e7ddd4f24c0a1a1a60c443dd6  crates/bunko-torch/src/abi.rs
 56604ad3559b24a1cf6181517daae6f83983bfd09c7dbb55fe2cb0bbf09b2510  crates/bunko-torch/src/aoti.rs
 656ba18aae3144636338963cdd34cb143a67d864f25a824a3b7a7ae7c0d8679a  crates/bunko-torch/src/ffi.rs
 552d24f4940cbd3ab1210d22ec448fbe5d600d81dc2729d44af2e70119ed6278  crates/bunko-torch/src/gpu.rs

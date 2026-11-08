@@ -316,21 +316,24 @@ impl MetadataService {
         }
         let data = dump_series_file(&folder.title, facts, index, volumes)
             .map_err(|error| WriteError::Io(std::io::Error::other(error)))?;
-        write_if_changed(
-            &folder.path.join(SERIES_FILE_NAME),
-            &data,
-            self.locks.as_ref(),
-        )
+        // The spelling the folder lists (`Series.json`): never a second one beside it.
+        let path = fsutil::spelled(&folder.path, SERIES_FILE_NAME);
+        // Nothing is written in a frozen case-variant group (the series folder a member
+        // of one, or two spellings of `series.json` in it).
+        if fsutil::frozen_path(&self.library_path, &path).is_some() {
+            return Ok(false);
+        }
+        write_if_changed(&path, &data, self.locks.as_ref())
     }
 
     fn publish_catalog(&self, entries: &[(String, SeriesFacts)]) -> Result<bool, WriteError> {
         let data = dump_catalog_file(entries)
             .map_err(|error| WriteError::Io(std::io::Error::other(error)))?;
-        write_if_changed(
-            &self.library_path.join(CATALOG_FILE_NAME),
-            &data,
-            self.locks.as_ref(),
-        )
+        let path = fsutil::spelled(&self.library_path, CATALOG_FILE_NAME);
+        if fsutil::frozen_path(&self.library_path, &path).is_some() {
+            return Ok(false);
+        }
+        write_if_changed(&path, &data, self.locks.as_ref())
     }
 
     /// Publish one series file, logging and rescheduling on failure.
@@ -383,22 +386,43 @@ impl MetadataService {
             return Ok(());
         };
         let mut latest = 0.0f64;
-        let mut covers: HashSet<String> = HashSet::new();
+        let mut files: Vec<String> = Vec::new();
+        let mut dirs: Vec<String> = Vec::new();
         for (name, path) in entries {
             let lower = crate::pyunicode::lower(&name);
-            let Some(meta) = fsutil::stat(&path).filter(|meta| meta.is_file()) else {
+            let Some(meta) = fsutil::stat(&path) else {
                 continue;
             };
+            if !meta.is_file() {
+                if meta.is_dir() {
+                    dirs.push(name);
+                }
+                continue;
+            }
             if lower.ends_with(".cbz") {
                 latest = latest.max(fsutil::py_mtime(&meta));
-            } else if lower.ends_with(".webp") {
-                covers.insert(name);
             }
+            files.push(name);
         }
+        files.sort();
+        let listed = crate::sidecar::Listed { files, dirs };
+        let files = &listed.files;
+        // The first volume's cover as the thumbnail worker writes it: in the spelling
+        // the folder lists (`v.webp` for `V.cbz`, rule v1, never a shadowed archive's).
         let cover_path = volumes
             .iter()
-            .map(|volume| format!("{}.webp", volume.volume_title))
-            .find(|candidate| covers.contains(candidate))
+            .find_map(|volume| {
+                let archive = files.iter().find(|n| {
+                    bunko_core::sidecar_names::cbz_stem(n) == Some(volume.volume_title.as_str())
+                })?;
+                let cover = crate::sidecar::listed_sibling_in(
+                    &folder.path.join(archive),
+                    ".webp",
+                    &listed,
+                )?;
+                let name = cover.file_name()?.to_str()?.to_string();
+                files.contains(&name).then_some(name)
+            })
             .map(|candidate| format!("{}/{candidate}", folder.title));
         let character_total = volumes.iter().fold(0i64, |sum, v| {
             sum.saturating_add(match &v.character_count {
@@ -484,7 +508,9 @@ impl MetadataService {
         }
         let mut retired = 0;
         for (title, path) in orphans {
-            if !self.regenerable(&normalize_volume_title_key(&title), &path)? {
+            if fsutil::frozen_path(&self.library_path, &path).is_some()
+                || !self.regenerable(&normalize_volume_title_key(&title), &path)?
+            {
                 continue;
             }
             let Some(_guard) = self.locks.try_lock(&path) else {

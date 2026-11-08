@@ -252,7 +252,7 @@ fn metadata_and_read_dir_match_the_fake_tree() {
         assert_eq!(t.fake().calls(FakeOp::Mkdir), 0);
         fs::write(t.abs("Series A/x.txt"), b"x").unwrap();
         assert_eq!(fs::read(t.abs("Series A/x.txt")).unwrap(), b"x");
-        assert!(t.store.caps().remote && t.store.caps().case_sensitive);
+        assert!(t.store.caps().remote);
         assert!(!t.store.caps().local_paths && !t.store.caps().symlinks);
         assert_eq!(t.store.health(), bunko_store::Health::Online);
     }

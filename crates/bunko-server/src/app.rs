@@ -237,11 +237,22 @@ impl Services {
                     (guard, Some(handle), layout)
                 }
                 None => {
-                    if let Some(r) =
-                        crate::storage::doctor::history_series_row(&layout.library(), None)
-                    {
+                    for r in crate::storage::doctor::reserved_series_rows(&layout.library(), None) {
                         tracing::warn!("[STORAGE] {}. {}", r.detail, r.hint.unwrap_or_default());
                     }
+                    // Names held in two spellings (a case-sensitive disk): one folder walk,
+                    // off the startup path.
+                    let library = layout.library();
+                    std::thread::spawn(move || {
+                        for r in crate::storage::doctor::case_variant_rows(&library) {
+                            tracing::warn!(
+                                "[STORAGE] {}: {}. {}",
+                                r.label,
+                                r.detail,
+                                r.hint.unwrap_or_default()
+                            );
+                        }
+                    });
                     (crate::library::mount_local(&layout.library()), None, layout)
                 }
             };
@@ -282,6 +293,7 @@ impl Services {
         };
         dav_hooks.add_listener(library.clone());
         let thumbs = Arc::new(crate::thumbs::Thumbnails::default());
+        thumbs.set_locks(Arc::new(DavPathLocks(dav.write_locks().clone())));
         dav_hooks.add_listener(thumbs.clone());
         let ocr = {
             let store: Arc<dyn bunko_library::MetadataStore> = library.store().clone();
@@ -854,12 +866,14 @@ pub fn start_library_services(
             // then uploaders' additions wait (auth answers 503). Then 0.5.2's one-shot
             // corrupt-sidecar sweep, off the request path, and the corrections written
             // into the shared folder before 0.8 go to their writers (after: the two
-            // sweeps would race for the same files).
+            // sweeps would race for the same files). The same pass lets JPEG XL volumes
+            // an older server marked `.nocover` get their cover.
             let (lib, db) = (library_dir.clone(), services.db.clone());
             let corrections = CorrectionSweeper::of(services);
             let first = tokio::task::spawn_blocking(move || {
                 crate::library::adopt_series_folder_owners(&db, &lib);
                 crate::thumbs::remove_corrupt_sidecars(&lib, Some(&db));
+                crate::thumbs::clear_jxl_nocovers(&lib);
                 corrections.run(true);
             });
             // A first try that could not adopt is tried again (F4).
@@ -979,7 +993,7 @@ pub fn start_library_services(
             // doctor cannot see the cloud folder: the reserved-name finding is logged here.
             let (lib, folder) = (library_dir.clone(), storage.folder.clone());
             tokio::task::spawn_blocking(move || {
-                if let Some(r) = crate::storage::doctor::history_series_row(&lib, Some(&folder)) {
+                for r in crate::storage::doctor::reserved_series_rows(&lib, Some(&folder)) {
                     tracing::warn!("[STORAGE] {}. {}", r.detail, r.hint.unwrap_or_default());
                 }
             });

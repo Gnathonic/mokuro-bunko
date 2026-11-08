@@ -89,11 +89,29 @@ pub fn build_volume_manifest(
     volume: &str,
     layer_order: &[String],
 ) -> Option<JsonObject> {
-    let entries: HashMap<String, PathBuf> =
-        fsutil::list_dir(series_dir).ok()?.into_iter().collect();
-    let archive_name = format!("{volume}.cbz");
+    let entries: HashMap<String, PathBuf> = fsutil::list_dir_reachable(series_dir)
+        .ok()?
+        .into_iter()
+        .collect();
+    // The archive in any spelling (`kingdom/v` for `Kingdom/V.CBZ`): one name is one
+    // entry on every host. Its listed stem is what its files are matched by.
+    let wanted = format!("{volume}.cbz");
+    let archive_name: String = if entries.contains_key(&wanted) {
+        wanted
+    } else {
+        let fold = bunko_core::sidecar_names::fold(&wanted);
+        entries
+            .keys()
+            .filter(|n| crate::sidecar::is_cbz_name(n))
+            .filter(|n| {
+                bunko_core::sidecar_names::fold(&format!("{}.cbz", &n[..n.len() - 4])) == fold
+            })
+            .min()?
+            .clone()
+    };
     let archive_meta = file_meta(entries.get(&archive_name)?)?;
-    let prefix = format!("{volume}.");
+    let stem = &archive_name[..archive_name.len() - 4];
+    let prefix = format!("{stem}.");
     let longer: Vec<&str> = entries
         .keys()
         .filter(|name| {
@@ -127,7 +145,7 @@ pub fn build_volume_manifest(
                     continue;
                 };
                 // Anonymous-capable: never anyone's personal corrections (D27).
-                if owner != volume || layer_class(layer_id) == LayerClass::Personal {
+                if owner != stem || layer_class(layer_id) == LayerClass::Personal {
                     continue;
                 }
                 if !layers.contains_key(layer_id) || name.ends_with(".mokuro") {
@@ -154,12 +172,32 @@ pub fn build_volume_manifest(
     rest.sort_unstable();
     ordered.extend(rest);
 
+    // Rule v1 over the listing: the primary or cover in another spelling of the stem
+    // (`V.MOKURO`, `v.webp`) is the volume's too.
+    let mut names: Vec<&str> = entries.keys().map(String::as_str).collect();
+    names.sort_unstable();
+    let folder = bunko_core::sidecar_names::Folder::new(&names);
+    if plain_ocr.is_none() && gz_ocr.is_none() {
+        match folder.primary_of(&archive_name) {
+            Some(name) if name.to_ascii_lowercase().ends_with(".gz") => gz_ocr = Some(name),
+            Some(name) => plain_ocr = Some(name),
+            None => {}
+        }
+    }
+    if cover.is_none() {
+        cover = folder
+            .volume_files(&archive_name)
+            .into_iter()
+            .find(|(_, f)| matches!(f, bunko_core::sidecar_names::VolumeFile::Cover))
+            .map(|(name, _)| name);
+    }
     let ocr = with_meta(&entries, plain_ocr).or_else(|| with_meta(&entries, gz_ocr));
     let cover = with_meta(&entries, cover);
-    let series_file = entries
-        .get(crate::paths::SERIES_FILE_NAME)
-        .and_then(|path| file_meta(path))
-        .map(|meta| (crate::paths::SERIES_FILE_NAME, meta));
+    let series_file = names
+        .iter()
+        .copied()
+        .find(|n| bunko_core::names::is_fixed_name(n, crate::paths::SERIES_FILE_NAME))
+        .and_then(|name| Some((name, file_meta(&entries[name])?)));
 
     let entry_or_null = |item: Option<(&str, Meta)>| match item {
         Some((name, meta)) => JsonValue::Object(file_entry(series, name, &meta)),
@@ -210,7 +248,10 @@ pub fn with_ocr_sha256(manifest: &mut JsonObject, digest: &str) {
 /// `_damage_by_volume_title`). Missing or corrupt file: empty.
 pub fn damage_by_volume_title(series_dir: &Path) -> HashMap<String, (i64, i64)> {
     let mut damage = HashMap::new();
-    let Ok(text) = fs::read_to_string(series_dir.join(crate::paths::SERIES_FILE_NAME)) else {
+    let Ok(text) = fs::read_to_string(crate::fsutil::spelled(
+        series_dir,
+        crate::paths::SERIES_FILE_NAME,
+    )) else {
         return damage;
     };
     let Ok(JsonValue::Object(raw)) = crate::pyjson::parse(&text) else {
@@ -243,6 +284,34 @@ pub fn damage_by_volume_title(series_dir: &Path) -> HashMap<String, (i64, i64)> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A volume asked for in another spelling than the folder lists, its files
+    /// spelled otherwise too, is found: one name is one entry on every host.
+    #[test]
+    fn a_volume_in_any_spelling() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        for name in ["V.CBZ", "V.MOKURO", "V.WEBP", "Series.json"] {
+            fs::write(d.join(name), b"{}").unwrap();
+        }
+        let m = build_volume_manifest(d, "Kingdom", "v", &[]).expect("found");
+        let url = |key: &str| match m.get(key) {
+            Some(JsonValue::Object(o)) => match o.get("url") {
+                Some(JsonValue::Str(u)) => u.clone(),
+                other => panic!("{key}: {other:?}"),
+            },
+            other => panic!("{key}: {other:?}"),
+        };
+        assert!(url("archive").ends_with("/V.CBZ"), "{}", url("archive"));
+        assert!(url("ocr").ends_with("/V.MOKURO"), "{}", url("ocr"));
+        assert!(url("cover").ends_with("/V.WEBP"), "{}", url("cover"));
+        assert!(
+            url("series_file").ends_with("/Series.json"),
+            "{}",
+            url("series_file")
+        );
+        assert!(build_volume_manifest(d, "Kingdom", "w", &[]).is_none());
+    }
 
     #[test]
     fn encodes_like_encode_uri_component() {

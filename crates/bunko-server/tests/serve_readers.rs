@@ -221,5 +221,8 @@ fn cloud_library_passes_startup_without_a_library_folder() {
     let mut local = Config::default();
     local.storage.base_path = dir.path().join("local");
     validate_startup(&local).unwrap();
-    assert!(local.storage.layout().library().join("thumbnails").is_dir());
+    let library = local.storage.layout().library();
+    assert!(library.is_dir());
+    // Nothing is made inside it (no `thumbnails/`: a second spelling of a series).
+    assert_eq!(std::fs::read_dir(&library).unwrap().count(), 0);
 }

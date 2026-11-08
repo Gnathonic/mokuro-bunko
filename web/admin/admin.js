@@ -1234,6 +1234,27 @@ function initGenerations() {
     list.addEventListener('toggle', onGenToggle, true);
     document.addEventListener('visibilitychange', onBenchVisibility);
     document.getElementById('gen-add-btn').addEventListener('click', addGeneration);
+    // Failed volumes: drop their failure records so they are tried again now (a volume
+    // with no decodable page or a damaged archive otherwise waits for a new archive or
+    // release).
+    const retryFailed = document.getElementById('ocr-failures-retry');
+    if (retryFailed) {
+        retryFailed.addEventListener('click', async () => {
+            retryFailed.disabled = true;
+            try {
+                const r = await apiPost('/ocr/failures/retry', {});
+                const n = r && typeof r.cleared === 'number' ? r.cleared : 0;
+                showToast(n === 0
+                    ? 'No failed volumes to retry'
+                    : n + (n === 1 ? ' failed volume is' : ' failed volumes are') + ' tried again now',
+                    'success');
+            } catch (e) {
+                showToast(e.message || String(e), 'error');
+            } finally {
+                retryFailed.disabled = false;
+            }
+        });
+    }
     document.getElementById('gen-revert-btn').addEventListener('click', revertGenerations);
     document.getElementById('gen-save-btn').addEventListener('click', saveGenerations);
     document.getElementById('upgrade-save-btn').addEventListener('click', saveUpgrade);

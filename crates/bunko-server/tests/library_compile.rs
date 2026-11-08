@@ -427,6 +427,12 @@ async fn a_steady_stream_of_changes_still_fires_at_the_cap() {
     // for a whole debounce (a 50 ms sleep took over 100 ms on macOS): the pass then
     // fires early, rightly, because the quiet period really elapsed, and the run says
     // nothing about the cap. Such a run is repeated, never judged.
+    //
+    // What is timed is the pass's START (the metadata thread taking the work), which is
+    // what the cap decides. The compile after it (a folder scan, SQLite commits, an
+    // atomic write) runs at the file system's pace: on Windows it now and then took
+    // over half a second on its own, and CI saw series.json only 1.5-2.6 s in, while
+    // in every measured run the start came within 50 ms of the cap.
     let policy = fast_policy();
     let mut stalled = Vec::new();
     for _ in 0..10 {
@@ -437,16 +443,16 @@ async fn a_steady_stream_of_changes_still_fires_at_the_cap() {
         let series_file = dir.join("series.json");
         // A change is scheduled somewhere inside its call, so the quiet period between
         // two changes is at most from one call's start to the next call's end (or to
-        // the check that found the file).
+        // the check that saw the pass start).
         let start = Instant::now();
         let mut last_call: Option<Instant> = None;
         let mut longest_quiet = Duration::ZERO;
         let fired_by = loop {
-            let found = series_file.is_file();
+            let fired = env.runtime.passes_run() > 0;
             if let Some(last) = last_call {
                 longest_quiet = longest_quiet.max(last.elapsed());
             }
-            if found {
+            if fired {
                 break start.elapsed();
             }
             assert!(
@@ -461,6 +467,10 @@ async fn a_steady_stream_of_changes_still_fires_at_the_cap() {
             last_call = Some(called);
             tokio::time::sleep(Duration::from_millis(20)).await;
         };
+        assert!(
+            wait_for(Duration::from_secs(10), || series_file.is_file()).await,
+            "the pass the cap fired wrote no series.json"
+        );
         env.runtime.stop().await;
         if longest_quiet >= policy.debounce {
             stalled.push((longest_quiet, fired_by));
@@ -469,23 +479,24 @@ async fn a_steady_stream_of_changes_still_fires_at_the_cap() {
         // Steady: only the cap, armed by the first change, could have fired it.
         assert!(
             fired_by >= policy.max_debounce,
-            "fired before the cap: {fired_by:?} (longest quiet {longest_quiet:?})"
+            "the pass started before the cap: {fired_by:?} (longest quiet {longest_quiet:?})"
         );
         assert!(
             fired_by < Duration::from_millis(1500),
-            "fired long after the cap: {fired_by:?}"
+            "the pass started long after the cap: {fired_by:?}"
         );
         return;
     }
     panic!("the runner stalled every stream for a debounce (longest quiet, fired by): {stalled:?}");
 }
 
-/// 0.5.3 `test_case_variant_folders_each_keep_their_own_row`: `Kingdom/` and `kingdom/`
-/// fold to one series key but are two folders on a case-sensitive host; neither catalog row
-/// may overwrite the other (a stray one-volume `kingdom/` can hide all the
-/// volumes of `Kingdom/` from the catalog).
+/// `Kingdom/` and `kingdom/` are one series key, and one name: every host lists one
+/// catalog row for them. A case-sensitive disk can hold both folders (made outside
+/// Bunko); the byte-smallest spelling is the one Bunko reaches, and the other is hidden
+/// until it is merged by hand (doctor names it). The fixture writes `Kingdom/` first, so
+/// a case-insensitive host (one folder) gives the same row.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn case_variant_folders_each_keep_their_own_catalog_row() {
+async fn case_variants_list_one_catalog_row() {
     let env = Env::new(|_| {});
     write_cbz(&env.series_dir("Kingdom").join("Volume 01.cbz"), 1);
     write_cbz(&env.series_dir("Kingdom").join("Volume 02.cbz"), 1);
@@ -498,35 +509,23 @@ async fn case_variant_folders_each_keep_their_own_catalog_row() {
             .map(|r| (r.folder_name, r.volume_count, r.series_key))
             .collect()
     };
-    if env.library.join("KINGDOM").exists() {
-        // A case-insensitive host (APFS, NTFS): `kingdom/` IS `Kingdom/`, so the two
-        // folders cannot exist and the third volume landed in the one there is.
-        env.runtime.recompile_all_now().await;
-        assert_eq!(
-            rows(&env),
-            [("Kingdom".to_string(), 3, "kingdom".to_string())]
-        );
-        env.runtime.stop().await;
-        return;
-    }
-    let both = vec![
-        ("Kingdom".to_string(), 2, "kingdom".to_string()),
-        ("kingdom".to_string(), 1, "kingdom".to_string()),
-    ];
+    // The volumes listed in `Kingdom/` itself: 3 where the host merged the two
+    // spellings, 2 where it did not.
+    let listed = std::fs::read_dir(env.library.join("Kingdom"))
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".cbz"))
+        .count() as i64;
+    let one = vec![("Kingdom".to_string(), listed, "kingdom".to_string())];
 
     env.runtime.recompile_all_now().await;
-    assert_eq!(rows(&env), both);
+    assert_eq!(rows(&env), one);
 
     let service = env.runtime.service().clone();
     tokio::task::spawn_blocking(move || service.recompile_series("kingdom").unwrap())
         .await
         .unwrap();
-    assert_eq!(rows(&env), both);
-
-    std::fs::remove_dir_all(env.library.join("kingdom")).unwrap();
-    env.runtime.recompile_all_now().await;
-    let names: Vec<String> = rows(&env).into_iter().map(|r| r.0).collect();
-    assert_eq!(names, ["Kingdom"]);
+    assert_eq!(rows(&env), one);
     env.runtime.stop().await;
 }
 
@@ -614,5 +613,40 @@ async fn deleting_the_last_volume_retires_the_series_file() {
     let back = std::fs::read_to_string(&series_file).unwrap();
     assert!(back.contains(r#""anilist":98416"#), "{back}");
     assert!(back.contains(r#""spine_offset":-40"#), "{back}");
+    env.runtime.stop().await;
+}
+
+/// A series file in another spelling (`Series.json`, made outside Bunko) is the
+/// series file: the compiler reads and writes it there and never puts a second
+/// `series.json` beside it, so a reader's GET of `series.json` (which reaches
+/// `Series.json`) gets the compiled one. The same on every host; `catalog.json` too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_series_file_in_another_spelling_is_the_one_compiled() {
+    let env = Env::new(|_| {});
+    let dir = env.series_dir("Kingdom");
+    write_cbz(&dir.join("V.cbz"), 1);
+    std::fs::write(dir.join("Series.json"), "{}").unwrap();
+    std::fs::write(env.library.join("Catalog.json"), "{}").unwrap();
+    env.runtime.recompile_all_now().await;
+    let names = |d: &std::path::Path| -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(d)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| !n.starts_with('.'))
+            .collect();
+        v.sort();
+        v
+    };
+    assert_eq!(names(&dir), ["Series.json", "V.cbz"]);
+    let compiled = std::fs::read_to_string(dir.join("Series.json")).unwrap();
+    assert!(compiled.contains("\"volumes\""), "{compiled}");
+    assert!(
+        !names(&env.library).iter().any(|n| n == "catalog.json"),
+        "{:?}",
+        names(&env.library)
+    );
+    let catalog = std::fs::read_to_string(env.library.join("Catalog.json")).unwrap();
+    assert!(catalog.contains("Kingdom"), "{catalog}");
     env.runtime.stop().await;
 }

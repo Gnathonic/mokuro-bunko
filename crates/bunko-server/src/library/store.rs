@@ -170,13 +170,14 @@ impl MetadataStore for DbMetadataStore {
             Value::Object(map) => map,
             _ => Map::new(),
         };
-        self.db.put_cached_volume_entry(
+        // No identity from the library side: none to keep (the same rule), or a volume
+        // in a frozen case-variant group, whose record stays as it is.
+        self.db.put_cached_volume_entry_with(
             write.volume_key,
             write.series_key,
             &entry,
-            write.cbz_size,
-            write.cbz_mtime,
-            write.sidecar_key,
+            (write.cbz_size, write.cbz_mtime, write.sidecar_key),
+            write.identity.is_some(),
         )?;
         Ok(())
     }

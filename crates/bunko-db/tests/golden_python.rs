@@ -581,9 +581,10 @@ fn a_case_merged_library_reads_back_as_python_053_left_it() {
     let m = manifest("py053.json");
     let (_dir, path) = copy_fixture("py053.db");
     let db = open(&path);
+    // The rows as stored (a lookup by another spelling folds to the kept one).
     for (p, owner) in m["kingdom_owners"].as_object().unwrap() {
         assert_eq!(
-            db.get_volume_owner(p).unwrap().as_deref(),
+            db.get_volume_owner_exact(p).unwrap().as_deref(),
             owner.as_str(),
             "{p}"
         );
@@ -597,7 +598,17 @@ fn a_case_merged_library_reads_back_as_python_053_left_it() {
     }
     for c in m["kingdom_can_delete"].as_array().unwrap() {
         let got = db.can_user_delete_library_path(s(&c[0]), s(&c[1])).unwrap();
-        assert_eq!(got, c[2].as_bool().unwrap(), "{c}");
+        // 0.8 (deliberate): another spelling of a stored key is that volume, where
+        // Python matched byte-exact (`kingdom/` after the merge into `Kingdom/`).
+        let rel = s(&c[1]).strip_prefix("/mokuro-reader/").unwrap_or("");
+        let want = if db.get_volume_owner_exact(rel).unwrap().is_none()
+            && let Some(owner) = db.get_volume_owner(rel).unwrap()
+        {
+            owner == s(&c[0])
+        } else {
+            c[2].as_bool().unwrap()
+        };
+        assert_eq!(got, want, "{c}");
     }
     for c in m["kingdom_can_edit"].as_array().unwrap() {
         let got = db.can_user_edit_series(s(&c[0]), s(&c[1])).unwrap();

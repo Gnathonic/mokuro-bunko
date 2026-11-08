@@ -266,18 +266,82 @@ impl Roots {
         reader_tree::user_base(&self.library, &self.users, caller)
     }
 
-    /// The physical path of the per-user `rel` (`goals.json`, `history/dev/x`) for
-    /// `caller`, existing or not. A root file is its name under the base; anything in
-    /// `history` must resolve (symlinks followed) inside the base's `history`.
+    /// The physical path of the per-user `rel` (`goals.json`, `history/dev/x`, in any
+    /// case) for `caller`, existing or not. Built from the canonical per-user name, never
+    /// from the raw `rel`: `History/x` is `history/x`. Under `users/<u>/` the per-user
+    /// name is the entry its folder lists in any spelling (a `Goals.json` made there
+    /// outside Bunko is the account's `goals.json`, read and written under its own
+    /// spelling, on every host), decided from the listing; in the cloud-root owner's
+    /// folder it is the canonical name (an entry spelled otherwise there is refused,
+    /// [`crate::methods`]). Inside `history` every segment that names an existing entry
+    /// takes its listed spelling (one device folder per device, whatever case the reader
+    /// sends), and the result must resolve (symlinks followed) inside the base's
+    /// `history`.
     pub fn user_path(&self, caller: Caller<'_>, rel: &str) -> Option<PathBuf> {
         let base = self.user_base(caller)?;
         match reader_tree::per_user(rel)? {
-            PerUser::File(name) => Some(base.join(name)),
-            PerUser::Dir(dir) | PerUser::InDir { dir, .. } => {
-                let resolved = paths::resolve_under(&base, rel.trim_matches('/'))?;
-                resolved.starts_with(base.join(dir)).then_some(resolved)
+            PerUser::File(name) => Some(base.join(self.per_user_name(&base, name))),
+            PerUser::Dir(dir) => {
+                let dir = self.per_user_name(&base, dir);
+                let resolved = paths::resolve_under(&base, &dir)?;
+                resolved.starts_with(base.join(&dir)).then_some(resolved)
+            }
+            PerUser::InDir { dir, rest } => {
+                let dir = self.per_user_name(&base, dir);
+                let rest = crate::path_case::resolve_existing(&base.join(&dir), rest, false);
+                let resolved = paths::resolve_under(&base, &format!("{dir}/{rest}"))?;
+                resolved.starts_with(base.join(&dir)).then_some(resolved)
             }
         }
+    }
+
+    /// The spelling of the per-user root name `canonical` under `base`: `canonical`
+    /// itself when `users/<u>/` lists it so (the file Bunko has always written; a stray
+    /// `Goals.json` made beside it outside Bunko is left alone), else the listed entry
+    /// that folds like it (the one a request reaches, when several do), else
+    /// `canonical`. Always `canonical` in the library root (the cloud-root owner's
+    /// base). From the listing: the same on every host. Blocking (one listing).
+    fn per_user_name(&self, base: &Path, canonical: &str) -> String {
+        if base == self.library {
+            return canonical.to_string();
+        }
+        let Some((entries, _)) = crate::path_case::listed_groups(base, false) else {
+            return canonical.to_string();
+        };
+        if entries.iter().any(|(n, _)| n == canonical) {
+            return canonical.to_string();
+        }
+        crate::path_case::on_disk_name(base, canonical, false)
+            .unwrap_or_else(|| canonical.to_string())
+    }
+
+    /// Is the per-user path `phys` (below `caller`'s base) listed exactly as spelled:
+    /// its per-user name the one [`Self::per_user_name`] picks, and every segment below
+    /// it the entry its folder lists ([`crate::path_case::reachable_as_spelled`])?
+    /// Whether a per-user file exists, decided from the listings: the cloud-root owner's
+    /// `goals.json` beside a listed `Goals.json` does not exist on any host.
+    fn per_user_listed(&self, caller: Caller<'_>, phys: &Path) -> bool {
+        let Some(base) = self.user_base(caller) else {
+            return false;
+        };
+        let Some(rel) = paths::relative_posix(phys, &base) else {
+            return false;
+        };
+        let (first, rest) = rel.split_once('/').unwrap_or((rel.as_str(), ""));
+        if base == self.library {
+            return crate::path_case::reachable_as_spelled(&base, &rel, false);
+        }
+        let Some(canonical) = reader_tree::canonical_per_user_rel(first) else {
+            return false;
+        };
+        let canonical = canonical.trim_matches('/');
+        if self.per_user_name(&base, canonical) != first
+            || !crate::path_case::listed_groups(&base, false)
+                .is_some_and(|(entries, _)| entries.iter().any(|(n, _)| n == first))
+        {
+            return false;
+        }
+        crate::path_case::reachable_as_spelled(&base.join(first), rest, false)
     }
 
     /// Library-relative `/`-path of a physical path, or `None` when outside the library
@@ -295,7 +359,11 @@ impl Roots {
         match paths::classify(&norm) {
             Target::Root | Target::ReaderRoot => Some(Resource::Virtual { path: norm }),
             Target::Progress(rel) => {
-                let phys = self.user_path(caller?, &rel)?;
+                let caller = caller?;
+                let phys = self.user_path(caller, &rel)?;
+                if !self.per_user_listed(caller, &phys) {
+                    return None;
+                }
                 let meta = fs::metadata(&phys).ok()?;
                 Some(Self::resource(
                     norm,
@@ -307,6 +375,9 @@ impl Roots {
             Target::Library(rel) => {
                 if let Some(file) = self.personal(&rel) {
                     let phys = self.personal_path(&file.rel, caller?)?;
+                    if !self.listed_as_spelled(&phys) {
+                        return None;
+                    }
                     let meta = fs::metadata(&phys).ok().filter(|m| !m.is_dir())?;
                     return Some(Self::resource(
                         norm,
@@ -316,6 +387,9 @@ impl Roots {
                     ));
                 }
                 let phys = self.library_member(&self.library, &rel)?;
+                if !self.listed_as_spelled(&phys) {
+                    return None;
+                }
                 let meta = fs::metadata(&phys).ok()?;
                 Some(Self::resource(
                     norm,
@@ -325,6 +399,19 @@ impl Roots {
                 ))
             }
             Target::Inbox | Target::Other => None,
+        }
+    }
+
+    /// Does a library path exist as spelled: is each of its segments listed exactly so,
+    /// as the entry a request reaches ([`crate::path_case::reachable_as_spelled`])? A
+    /// path outside the library (an overlay, found through its listings already) is
+    /// taken as it is. Never decided by opening the name: `Vol 2.cbz` beside a listed
+    /// `vol 2.cbz` does not exist on APFS, NTFS and casefold either, and a hidden case
+    /// variant's own files are not there for anyone. Blocking.
+    fn listed_as_spelled(&self, phys: &Path) -> bool {
+        match paths::relative_posix(phys, &self.library) {
+            Some(rel) => crate::path_case::reachable_as_spelled(&self.library, &rel, true),
+            None => true,
         }
     }
 
@@ -375,7 +462,7 @@ impl Roots {
         if caller.owns_cloud_root {
             self.library_member(&self.library, rel)
         } else {
-            personal::overlay_path(&self.users, caller.username, rel)
+            personal::overlay_path(&self.library, &self.users, caller.username, rel)
         }
     }
 
@@ -409,8 +496,9 @@ impl Roots {
     /// Is `phys` inside `caller`'s history tree (where a Progress folder's members must
     /// stay)?
     fn in_user_history(&self, caller: Caller<'_>, phys: &Path) -> bool {
-        self.user_base(caller)
-            .is_some_and(|base| phys.starts_with(base.join(reader_tree::HISTORY_DIR)))
+        self.user_base(caller).is_some_and(|base| {
+            phys.starts_with(base.join(self.per_user_name(&base, reader_tree::HISTORY_DIR)))
+        })
     }
 
     /// The physical path a member `name` of the collection `parent` would have (0.5.2
@@ -437,7 +525,11 @@ impl Roots {
                 kind: FileKind::Progress,
                 ..
             } => {
-                let resolved = paths::resolve_under(phys, name)?;
+                // An existing member in any spelling is that member (one device folder
+                // per device on every host).
+                let name = crate::path_case::on_disk_name(phys, name, false)
+                    .unwrap_or_else(|| name.to_string());
+                let resolved = paths::resolve_under(phys, &name)?;
                 self.in_user_history(caller?, &resolved)
                     .then_some((resolved, FileKind::Progress))
             }
@@ -615,45 +707,71 @@ impl Roots {
         if let Some(caller) = caller.filter(|c| !c.owns_cloud_root)
             && let Some(folder_rel) = self.library_rel(dir)
         {
-            out.extend(self.overlays_in(caller, &folder_rel, vpath, &stems));
+            out.extend(self.overlays_in(caller, &folder_rel, vpath, dir));
             out.sort_by(|a, b| a.path().cmp(b.path()));
         }
         out
     }
 
-    /// `caller`'s overlays of the library folder `folder_rel` (virtual folder `vpath`)
-    /// whose archive is among `stems`.
+    /// `caller`'s overlays of the library folder `folder_rel` (virtual folder `vpath`,
+    /// physical `folder`) that rule v1, over the folder's whole listing, gives to an
+    /// archive a request reaches: never a hidden case variant's (named by its exact
+    /// stem), nor one beside no archive.
     fn overlays_in(
         &self,
         caller: Caller<'_>,
         folder_rel: &str,
         vpath: &str,
-        stems: &std::collections::HashSet<String>,
+        folder: &Path,
     ) -> Vec<Resource> {
-        let Some(dir) = personal::overlay_path(&self.users, caller.username, folder_rel) else {
+        let Some(dir) =
+            personal::overlay_path(&self.library, &self.users, caller.username, folder_rel)
+        else {
             return Vec::new();
         };
         let Ok(entries) = fs::read_dir(&dir) else {
             return Vec::new();
         };
+        let overlays: Vec<(String, PathBuf)> = entries
+            .flatten()
+            .map(|e| (e.file_name().to_string_lossy().into_owned(), e.path()))
+            .filter(|(name, _)| personal::personal_name(name).is_some())
+            .collect();
+        if overlays.is_empty() {
+            return Vec::new();
+        }
+        let (listed, hidden) = crate::path_case::listed_with_hidden(folder);
+        let files: Vec<&str> = listed
+            .iter()
+            .filter(|(n, d)| !d && !paths::is_staging_name(n))
+            .map(|(n, _)| n.as_str())
+            .collect();
+        let archives: Vec<&str> = files
+            .iter()
+            .copied()
+            .filter(|n| sidecar_names::cbz_stem(n).is_some() && !hidden.contains(*n))
+            .collect();
+        let mut names = files.clone();
+        names.extend(overlays.iter().map(|(n, _)| n.as_str()));
+        let rule = sidecar_names::Folder::new(&names);
+        let shown: std::collections::HashSet<&str> = archives
+            .iter()
+            .flat_map(|archive| rule.volume_files(archive))
+            .filter_map(|(n, file)| {
+                matches!(file, sidecar_names::VolumeFile::Layer { .. }).then_some(n)
+            })
+            .collect();
         let mut out = Vec::new();
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if personal::personal_name(&name).is_none()
-                || !matches!(
-                    sidecar_names::classify(&name, stems),
-                    SidecarClass::Layer { .. }
-                )
-            {
+        for (name, phys) in &overlays {
+            if !shown.contains(name.as_str()) {
                 continue;
             }
-            let phys = entry.path();
-            if let Ok(meta) = fs::metadata(&phys)
+            if let Ok(meta) = fs::metadata(phys)
                 && !meta.is_dir()
             {
                 out.push(Self::resource(
-                    paths::join_uri(vpath, &name),
-                    phys,
+                    paths::join_uri(vpath, name),
+                    phys.clone(),
                     Stat::from_meta(&meta),
                     FileKind::Personal,
                 ));
@@ -668,9 +786,12 @@ impl Roots {
     /// Blocking.
     pub fn overlays_under(&self, caller: Caller<'_>, folder_rel: &str) -> Vec<Resource> {
         let mut out = Vec::new();
+        let mut folders = std::collections::BTreeSet::new();
         let mut stack = vec![folder_rel.trim_matches('/').to_string()];
         while let Some(rel) = stack.pop() {
-            let Some(dir) = personal::overlay_path(&self.users, caller.username, &rel) else {
+            let Some(dir) =
+                personal::overlay_path(&self.library, &self.users, caller.username, &rel)
+            else {
                 continue;
             };
             let Ok(entries) = fs::read_dir(&dir) else {
@@ -692,16 +813,24 @@ impl Roots {
             if !has_files {
                 continue;
             }
+            // The overlay folder's library folder, in the spelling the listing shows (a
+            // folder respelled outside Bunko or in the cloud included; a shadowed
+            // folder's overlays are its own, never shown), each listed once.
+            let Some(library_rel) = crate::path_case::listed_entry(&self.library, &rel) else {
+                continue;
+            };
+            folders.insert(library_rel);
+        }
+        for rel in folders {
             let Some(folder) = self.library_member(&self.library, &rel) else {
                 continue;
             };
-            let stems = personal::stems_of(&personal::names_in(&folder));
             let vpath = if rel.is_empty() {
                 format!("/{READER_ROOT}")
             } else {
                 format!("/{READER_ROOT}/{rel}")
             };
-            out.extend(self.overlays_in(caller, &rel, &vpath, &stems));
+            out.extend(self.overlays_in(caller, &rel, &vpath, &folder));
         }
         out.sort_by(|a, b| a.path().cmp(b.path()));
         out
@@ -717,12 +846,29 @@ impl Roots {
         let Ok(entries) = fs::read_dir(dir) else {
             return Vec::new();
         };
+        let entries: Vec<_> = entries.flatten().collect();
+        // Another spelling of a listed name (only a case-sensitive disk or a remote
+        // store holds one) is shadowed, and so are the files rule v1 gives to a
+        // shadowed archive: no request reaches them, so they are not listed.
+        let names: Vec<(String, bool)> = entries
+            .iter()
+            .filter_map(|e| {
+                let name = e.file_name().to_str()?.to_string();
+                Some((name, e.file_type().is_ok_and(|t| t.is_dir())))
+            })
+            .filter(|(n, _)| !(reader_root && reader_tree::is_per_user_root_name(n)))
+            .collect();
+        let shadowed = crate::path_case::hidden(dir, &names);
         let mut out: Vec<Resource> = Vec::new();
-        for entry in entries.flatten() {
+        for entry in entries {
             let name = entry.file_name().to_string_lossy().into_owned();
-            // The per-user names at the library root are never the library's: a stray
-            // copy, or the cloud-root owner's own files, which no one else may see.
+            // The per-user names at the library root (in any spelling) are never the
+            // library's: a stray copy, or the cloud-root owner's own files, which no one
+            // else may see.
             if reader_root && reader_tree::is_per_user_root_name(&name) {
+                continue;
+            }
+            if shadowed.contains(&name) {
                 continue;
             }
             if paths::is_staging_name(&name) {
@@ -846,11 +992,16 @@ mod tests {
         // The owner's own files at the library root are no library path.
         assert_eq!(roots.library_rel(&base.join("library/history/d/x")), None);
         assert_eq!(roots.library_rel(&base.join("library/goals.json")), None);
+        // A per-user name in any case is reserved: never a library path, and the
+        // physical path is built from the canonical name.
+        assert_eq!(roots.library_rel(&base.join("library/History/v.cbz")), None);
         assert_eq!(
-            roots
-                .library_rel(&base.join("library/History/v.cbz"))
-                .as_deref(),
-            Some("History/v.cbz")
+            roots.user_path(alice, "Goals.json"),
+            Some(base.join("users/alice/goals.json"))
+        );
+        assert_eq!(
+            roots.user_path(owner, "History/d/x.events"),
+            Some(base.join("library/history/d/x.events"))
         );
         // A history that leads out of the account's tree is not the account's history.
         #[cfg(unix)]

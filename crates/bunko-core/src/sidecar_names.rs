@@ -3,7 +3,7 @@
 //!
 //! 1. The suffixes `.cbz`, `.mokuro` and `.mokuro.gz` match in any ASCII case.
 //! 2. Only `.cbz` archives define volume stems.
-//! 3. Stems are compared folded: NFC, then Unicode lowercase ([`fold`]).
+//! 3. Stems are compared folded: NFC, then Unicode lowercase ([`stem_fold`]).
 //! 4. A primary sidecar wins over a layer reading of the same name
 //!    (`Vol 1.5.mokuro` is volume 1.5's when `Vol 1.5.cbz` is listed).
 //! 5. A layer id is matched exactly as written against `^[a-z0-9-]{1,32}$`
@@ -16,6 +16,12 @@
 //! A bare file name cannot tell a decimal volume's primary from a layer, so every
 //! decision here takes the folder listing. Both sides run the vectors in
 //! `interop/contract/sidecar-names.json`.
+//!
+//! Rule v1's stem fold is narrower than the filename fold every host joins names by
+//! ([`fold`]): `STRASSE.mokuro` is one name with `Straße.mokuro` on every host, yet not
+//! `Straße.cbz`'s by rule v1. Bunko fails closed where the two differ: authorization
+//! takes the governors of both ([`governing_archives_by_either_fold`]), and such a name
+//! is never written ([`fold_disputed`]). What rule v1 attributes is unchanged.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
@@ -29,10 +35,63 @@ use crate::generations::is_layer_id;
 /// where a volume is all that is asked (the storage Check, failure records).
 pub const ARCHIVE_EXTENSIONS: [&str; 4] = [".cbz", ".cbr", ".zip", ".rar"];
 
-/// The spelling-insensitive form two stems collide under: NFC, then a full Unicode
-/// lowercase.
-pub fn fold(name: &str) -> String {
+/// The one filename fold: which names are one entry ([`crate::names::fold_name`]).
+/// Every comparison of names as paths (PathCase, the case variants, the owner records,
+/// the write locks, a cloud index) folds with it.
+pub use crate::names::fold_name as fold;
+
+/// Rule v1's stem fold (rule 3), the contract with mokuro-reader: NFC, then a full
+/// Unicode lowercase. Only which archive a sidecar belongs to is decided with it; which
+/// names are one entry is [`fold`]'s.
+pub fn stem_fold(name: &str) -> String {
     name.nfc().collect::<String>().to_lowercase()
+}
+
+/// The names among `names` that another listed name shadows: in each group of two or
+/// more names that [`fold`] alike, every name but the winner. The winner is
+/// `preferred(fold)` when that name is listed (a remote store's case winner, the
+/// spelling its case merge keeps), else the byte-smallest. This is the rule PathCase
+/// resolves every request spelling by, so a shadowed name is one no request reaches:
+/// listings, the catalog and the library walks leave it out.
+pub fn case_losers<'a>(
+    names: impl IntoIterator<Item = &'a str>,
+    preferred: impl Fn(&str) -> Option<String>,
+) -> HashSet<String> {
+    let mut groups: HashMap<String, Vec<&str>> = HashMap::new();
+    for name in names {
+        groups.entry(fold(name)).or_default().push(name);
+    }
+    let mut out = HashSet::new();
+    for (folded, group) in groups {
+        if group.len() < 2 {
+            continue;
+        }
+        let winner = preferred(&folded)
+            .filter(|w| group.contains(&w.as_str()))
+            .or_else(|| group.iter().min().map(|n| n.to_string()));
+        out.extend(
+            group
+                .into_iter()
+                .filter(|n| Some(*n) != winner.as_deref())
+                .map(str::to_string),
+        );
+    }
+    out
+}
+
+/// The names of a folder listing no request reaches, `entries` being every listed
+/// `(name, is_dir)`: the [`case_losers`], and every file rule v1 gives to a shadowed
+/// `.cbz` archive ([`Folder::volume_files`] over the whole listing: the sidecars, cover,
+/// no-cover marker and layers named by its exact stem). A hidden archive's own files
+/// stay its own: never shown, read, written, moved or deleted through the archive that
+/// shadows it, until the case variants are merged by hand.
+pub fn hidden_names<'a>(
+    entries: impl IntoIterator<Item = (&'a str, bool)>,
+    preferred: impl Fn(&str) -> Option<String>,
+) -> HashSet<String> {
+    crate::fold_groups::FoldGroups::new(entries, preferred)
+        .hidden()
+        .clone()
 }
 
 /// `name` minus `suffix`, the suffix matched in any ASCII case.
@@ -81,7 +140,11 @@ pub enum SidecarClass<'a> {
 
 /// The folded stems of the `.cbz` archives among `names` (rule 2).
 pub fn volume_stems<'a>(names: impl IntoIterator<Item = &'a str>) -> HashSet<String> {
-    names.into_iter().filter_map(cbz_stem).map(fold).collect()
+    names
+        .into_iter()
+        .filter_map(cbz_stem)
+        .map(stem_fold)
+        .collect()
 }
 
 /// Rule v1 for one name, given the folder's [`volume_stems`].
@@ -89,11 +152,11 @@ pub fn classify<'a>(name: &'a str, folded_cbz_stems: &HashSet<String>) -> Sideca
     let Some((base, gz)) = split_mokuro(name) else {
         return SidecarClass::Orphan;
     };
-    if folded_cbz_stems.contains(&fold(base)) {
+    if folded_cbz_stems.contains(&stem_fold(base)) {
         return SidecarClass::Primary { stem: base, gz };
     }
     match split_layer(name) {
-        Some((stem, id, gz)) if folded_cbz_stems.contains(&fold(stem)) => {
+        Some((stem, id, gz)) if folded_cbz_stems.contains(&stem_fold(stem)) => {
             SidecarClass::Layer { stem, id, gz }
         }
         _ => SidecarClass::Orphan,
@@ -191,9 +254,9 @@ impl<'a> Folder<'a> {
             {
                 archive_stems.push(stem);
             } else if let Some((base, _)) = split_mokuro(name) {
-                sidecar_folds.insert(fold(base));
+                sidecar_folds.insert(stem_fold(base));
                 if let Some((stem, _, _)) = split_layer(name) {
-                    sidecar_folds.insert(fold(stem));
+                    sidecar_folds.insert(stem_fold(stem));
                 }
             }
         }
@@ -210,7 +273,7 @@ impl<'a> Folder<'a> {
             let exact: HashSet<&str> = self.archive_stems.iter().copied().collect();
             let mut folded: HashMap<String, usize> = HashMap::new();
             for stem in &exact {
-                *folded.entry(fold(stem)).or_default() += 1;
+                *folded.entry(stem_fold(stem)).or_default() += 1;
             }
             (exact, folded)
         })
@@ -232,10 +295,10 @@ impl<'a> Folder<'a> {
             return Vec::new();
         };
         let (exact, folded) = self.stems();
-        let anchor_fold = fold(anchor);
+        let anchor_fold = stem_fold(anchor);
         let alone = folded.get(&anchor_fold).is_none_or(|&n| n <= 1);
         let owns = |stem: &str| {
-            stem == anchor || (alone && !exact.contains(stem) && fold(stem) == anchor_fold)
+            stem == anchor || (alone && !exact.contains(stem) && stem_fold(stem) == anchor_fold)
         };
         let mut out = Vec::new();
         for &name in &self.names {
@@ -251,7 +314,7 @@ impl<'a> Folder<'a> {
             if owns(base) {
                 out.push((name, file));
             } else if matches!(file, VolumeFile::Primary { .. })
-                && !folded.contains_key(&fold(base))
+                && !folded.contains_key(&stem_fold(base))
                 && let Some((stem, id, gz)) = split_layer(name)
                 && owns(stem)
             {
@@ -264,7 +327,7 @@ impl<'a> Folder<'a> {
     /// No `.mokuro` here can be `cbz_name`'s, in any spelling: checked without walking
     /// the listing.
     fn no_sidecars_for(&self, cbz_name: &str) -> bool {
-        cbz_stem(cbz_name).is_none_or(|anchor| !self.sidecar_folds.contains(&fold(anchor)))
+        cbz_stem(cbz_name).is_none_or(|anchor| !self.sidecar_folds.contains(&stem_fold(anchor)))
     }
 
     /// The primary sidecar of `cbz_name`: an exact stem before a folded one,
@@ -330,7 +393,7 @@ pub fn primary_of<'a>(cbz_name: &str, names: &[&'a str]) -> Option<&'a str> {
 /// Kelvin sign, NFC `K`) still turn `V.edit.mokuro` and `V.kanji.mokuro` into their
 /// primaries.
 fn is_nested_id(id: &str) -> bool {
-    let id = fold(id);
+    let id = stem_fold(id);
     is_layer_id(&id) && id.bytes().any(|b| b.is_ascii_lowercase())
 }
 
@@ -378,11 +441,11 @@ pub fn governing_archives<'a>(name: &str, names: &[&'a str]) -> Vec<&'a str> {
         return Vec::new();
     }
     let listed = |stem: &str| -> Vec<(&'a str, &'a str)> {
-        let want = fold(stem);
+        let want = stem_fold(stem);
         archives
             .iter()
             .copied()
-            .filter(|(s, _)| fold(s) == want)
+            .filter(|(s, _)| stem_fold(s) == want)
             .collect()
     };
     let mut candidates: Vec<&str> = Vec::new();
@@ -424,9 +487,15 @@ pub fn governing_archives<'a>(name: &str, names: &[&'a str]) -> Vec<&'a str> {
 /// `s` when an archive stem is `<s>.<id>` with `<id>` (folded) a layer id of a
 /// reserved class: the archive whose primary would be `s`'s layer `<id>`.
 fn hidden_layer_of(stem: &str) -> Option<&str> {
+    hidden_layer_class(stem).map(|(s, _)| s)
+}
+
+/// [`hidden_layer_of`], with the reserved class of the layer the archive would hide.
+fn hidden_layer_class(stem: &str) -> Option<(&str, LayerClass)> {
     let (s, id) = stem.rsplit_once('.')?;
-    let id = fold(id);
-    (!s.is_empty() && is_layer_id(&id) && layer_class(&id) != LayerClass::Other).then_some(s)
+    let id = stem_fold(id);
+    let class = layer_class(&id);
+    (!s.is_empty() && is_layer_id(&id) && class != LayerClass::Other).then_some((s, class))
 }
 
 /// Would a NEW archive `name` hide a layer of a listed volume? `V.edit.cbz` beside
@@ -438,11 +507,461 @@ fn hidden_layer_of(stem: &str) -> Option<&str> {
 pub fn hides_reserved_layer(name: &str, names: &[&str]) -> bool {
     cbz_stem(name)
         .and_then(hidden_layer_of)
-        .is_some_and(|s| volume_stems(names.iter().copied()).contains(&fold(s)))
+        .is_some_and(|s| volume_stems(names.iter().copied()).contains(&stem_fold(s)))
+}
+
+/// Every name of `names` run through the filename fold ([`fold`]), in order.
+fn folded_all(names: &[&str]) -> Vec<String> {
+    names.iter().map(|n| fold(n)).collect()
+}
+
+/// [`governing_archives`] for authorization, by BOTH folds: the archives rule v1 says
+/// govern `name` (and govern each listed spelling of it, the one a write reaches), plus
+/// every listed archive [`governing_archives`] finds when every name, `name` included,
+/// is first run through the filename fold ([`fold`]): `S/STRASSE.mokuro`,
+/// `S/strasse.webp`, `S/Stra\u{df}e\u{200B}.nocover` are governed by a listed
+/// `S/Stra\u{df}e.cbz`, though rule v1 tells `STRASSE` and `Stra\u{df}e` apart. Where
+/// the folds agree (every ASCII name) this is [`governing_archives`]; where they do
+/// not, it is never laxer: the account must control all of them. Sorted, each once.
+///
+/// Rule v1's own attribution (which files ARE a volume's, the contract with Mokuro
+/// Reader) is unchanged by it; where the two folds part ways, the name is not written
+/// at all ([`fold_disputed`]).
+///
+/// Except for a listed archive in a volume name tie ([`volume_name_ties`]: made before
+/// this release, or outside Bunko, since Bunko creates none): its own name is governed
+/// by rule v1 alone, so the account that controls it keeps replacing and deleting it
+/// (`X\u{200B}.curated.cbz`, its uploader's, beside another account's `X.cbz`, which
+/// the filename fold alone would hand it up to). Every other file of either volume is
+/// written by nobody while the tie is listed.
+pub fn governing_archives_by_either_fold<'a>(name: &str, names: &[&'a str]) -> Vec<&'a str> {
+    let mut out = governing_archives(name, names);
+    let target = fold(name);
+    for &listed in names {
+        if listed != name && fold(listed) == target {
+            out.extend(governing_archives(listed, names));
+        }
+    }
+    let tied_archive = cbz_stem(name).is_some()
+        && names
+            .iter()
+            .any(|n| fold(n) == target && !volume_name_ties(n, names).is_empty());
+    if tied_archive {
+        out.sort_unstable();
+        out.dedup();
+        return out;
+    }
+    let folded = folded_all(names);
+    let refs: Vec<&str> = folded.iter().map(String::as_str).collect();
+    let by_fold: HashSet<&str> = governing_archives(&target, &refs).into_iter().collect();
+    if !by_fold.is_empty() {
+        out.extend(
+            names
+                .iter()
+                .zip(&folded)
+                .filter(|(_, f)| by_fold.contains(f.as_str()))
+                .map(|(n, _)| *n),
+        );
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// [`hides_reserved_layer`] by either fold: also when `name` and the listing, run
+/// through the filename fold, would (`V.ed\u{200B}it.cbz` beside `V.cbz`: one name with
+/// `V.edit.cbz` on every host).
+pub fn hides_reserved_layer_by_either_fold(name: &str, names: &[&str]) -> bool {
+    if hides_reserved_layer(name, names) {
+        return true;
+    }
+    let folded = folded_all(names);
+    let refs: Vec<&str> = folded.iter().map(String::as_str).collect();
+    hides_reserved_layer(&fold(name), &refs)
+}
+
+/// The rule v1 suffix a name ends in (any ASCII case): `.cbz`, `.mokuro.gz`,
+/// `.mokuro`, `.webp`, `.nocover`, or none.
+fn v1_suffix(name: &str) -> Option<&'static str> {
+    [".cbz", ".mokuro.gz", ".mokuro", ".webp", ".nocover"]
+        .into_iter()
+        .find(|s| strip_suffix_ci(name, s).is_some())
+}
+
+/// Where the filename fold ([`fold`]) and rule v1 part ways about `name`, a file or
+/// folder about to be created or written in a folder whose listed FILES are `names`
+/// (`name` spelled as the folder lists it, when it does): what the fold joins `name`
+/// with that rule v1 does not, sorted; empty when they agree. Bunko writes no such name
+/// (a WebDAV write of one answers 409), so nothing ends up joined, on any host, with a
+/// volume's files without being that volume's:
+///
+/// * `name` folds to a name with a rule v1 suffix it does not have itself
+///   (`V.mo\u{212A}uro`, a Kelvin sign; `V.cb\u{200B}z`): `[name]`;
+/// * the fold joins `name` with a file of a listed archive (its sidecars, layers,
+///   cover, `.nocover`: [`Folder::volume_files`] over the folded listing) that rule v1
+///   does not give it to (`STRASSE.mokuro`, `Vol\u{200B}1.webp`, `V.EDIT.mokuro` beside
+///   `Stra\u{df}e.cbz`, `Vol1.cbz`, `V.cbz`): that archive.
+///
+/// An archive is never disputed for the names already listed beside it: a new or
+/// replaced `Stra\u{df}e.cbz` beside a `STRASSE.mokuro` (made before it, by hand, by
+/// 0.7 or before 0.8) is written. Such a name is the archive's for authorization
+/// ([`governing_archives_by_either_fold`]: its controller may delete it), never its
+/// file by rule v1, and Bunko writes nothing for the volume in its place
+/// (`bunko_library::sidecar::listed_sibling_in`): the volume is owed that file until
+/// the name is renamed or deleted (doctor names it).
+///
+/// Where the folds agree (ASCII names but for a layer id's case) nothing is disputed.
+pub fn fold_disputed(name: &str, names: &[&str]) -> Vec<String> {
+    let target = fold(name);
+    if v1_suffix(name) != v1_suffix(&target) {
+        return vec![name.to_string()];
+    }
+    // A name with no dot is no archive's file and no archive.
+    if !target.contains('.') {
+        return Vec::new();
+    }
+    let mut listing: Vec<&str> = names.to_vec();
+    if !listing.contains(&name) {
+        listing.push(name);
+    }
+    let folded = folded_all(&listing);
+    // `b` could be a file of the archive `a` (both folded): it starts with `a`'s stem
+    // and a dot.
+    let related = |a: &str, b: &str| {
+        cbz_stem(a).is_some_and(|stem| {
+            b.len() > stem.len() && b.starts_with(stem) && b[stem.len()..].starts_with('.')
+        })
+    };
+    if !folded.iter().any(|f| *f != target && related(f, &target)) {
+        return Vec::new();
+    }
+    let refs: Vec<&str> = folded.iter().map(String::as_str).collect();
+    let by_fold = Folder::new(&refs);
+    let by_v1 = Folder::new(&listing);
+    let joined = |archive_fold: &str, file_fold: &str| {
+        by_fold
+            .volume_files(archive_fold)
+            .iter()
+            .any(|(n, _)| *n == file_fold)
+    };
+    let given = |archive: &str, file: &str| {
+        cbz_stem(archive).is_some() && by_v1.volume_files(archive).iter().any(|(n, _)| *n == file)
+    };
+    let mut out: Vec<String> = Vec::new();
+    for (other, other_fold) in listing.iter().zip(&folded) {
+        if *other == name {
+            continue;
+        }
+        // `name` joined with the files of the archive `other`.
+        if related(other_fold, &target) && joined(other_fold, &target) && !given(other, name) {
+            out.push(other.to_string());
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// The reserved layer class (personal `edit`/`edit-<n>`, `curated`, `curated-<n>`) the
+/// name `name` itself carries, exactly as written (rule 5), in a folder whose listed
+/// FILES are `names`; `None` for any other name: an `Other` layer, no layer at all, or
+/// a listed archive's own primary (rule 4: `V.edit.mokuro` beside `V.edit.cbz`).
+pub fn reserved_layer_of(name: &str, names: &[&str]) -> Option<LayerClass> {
+    let (_, id, _) = split_layer(name)?;
+    let class = layer_class(id);
+    if class == LayerClass::Other {
+        return None;
+    }
+    match classify(name, &volume_stems(names.iter().copied())) {
+        SidecarClass::Primary { .. } => None,
+        _ => Some(class),
+    }
+}
+
+/// The reserved layer class (personal, curated, `curated-<n>`) the filename fold
+/// ([`fold`]) gives `name` while `name` itself is not that layer ([`reserved_layer_of`]),
+/// in a folder whose listed FILES are `names`; `None` otherwise. `V.ed\u{200B}it.mokuro`,
+/// `V.ed\u{131}t.mokuro`, `V.EDIT.mokuro`, `V.Curated.mokuro` are one name with
+/// `V.edit.mokuro` or `V.curated.mokuro` on every host, though rule v1 (ids exact) reads
+/// no such layer in them, for every stem, an archive of it listed or not. Such a file
+/// can only ever shadow those layers: a request for an account's own correction, or for
+/// the shared curated layer, would reach it. Bunko creates no such name (a WebDAV write
+/// of one answers 409), and a request for the layer itself is never sent to one
+/// (`bunko_dav::PathCase`). A listed archive's own primary is that volume's file, never
+/// such a name, when rule v1 itself reads the layer in it (`V.EDIT.mokuro` beside
+/// `V.EDIT.cbz`, rule 4); not when only the filename fold does (`V.ed\u{200B}it.mokuro`
+/// beside a `V.ed\u{200B}it.cbz` made by hand).
+///
+/// The same for an archive ([`shadowing_archive`]): `V.ed\u{200B}it.cbz`, whose primary
+/// could only be such a name.
+pub fn shadows_reserved_layer(name: &str, names: &[&str]) -> Option<LayerClass> {
+    if let Some(class) = shadowing_archive(name) {
+        return Some(class);
+    }
+    let target = fold(name);
+    let (_, id, _) = split_layer(&target)?;
+    let class = layer_class(id);
+    if class == LayerClass::Other {
+        return None;
+    }
+    if split_layer(name).is_some_and(|(_, id, _)| layer_class(id) == class) {
+        return None;
+    }
+    if matches!(
+        classify(name, &volume_stems(names.iter().copied())),
+        SidecarClass::Primary { .. }
+    ) && split_layer(&stem_fold(name)).is_some_and(|(_, id, _)| layer_class(id) == class)
+    {
+        return None;
+    }
+    Some(class)
+}
+
+/// The reserved layer class (personal, curated, `curated-<n>`) an archive `name` would
+/// hide by the filename fold ([`fold`]) only: `<s>.<id>.cbz` once folded, `<id>` a layer
+/// id of a reserved class, while rule v1's stem fold reads no such id in it
+/// (`V.ed\u{200B}it.cbz`, `V.ed\u{131}t.cbz`, `V.e\u{34F}dit.cbz`, `V.edit-\u{200B}2.cbz`,
+/// `V.cura\u{200B}ted.cbz`), for every stem, `<s>.cbz` listed or not. Its primary would
+/// be one name with `<s>`'s layer on every host, without being it: Bunko creates no such
+/// archive. Where rule v1 reads the layer too (`V.EDIT.cbz`, rule 4) this is `None`:
+/// that archive is governed by [`hides_reserved_layer`], as it always was.
+pub fn shadowing_archive(name: &str) -> Option<LayerClass> {
+    let stem = cbz_stem(name)?;
+    if hidden_layer_class(stem).is_some() {
+        return None;
+    }
+    let target = fold(name);
+    cbz_stem(&target)
+        .and_then(hidden_layer_class)
+        .map(|(_, class)| class)
+}
+
+/// The base stem of an archive stem: the stem of the volume it belongs to, its own
+/// unless it is nested as a reserved layer of a shorter one (`<s>.curated`,
+/// `<s>.edit-2`): every trailing `.<id>` whose id, run through the filename fold
+/// ([`fold`]) and rule v1's stem fold, is a personal, curated or `curated-<n>` id, cut
+/// off, the rest as spelled. `X.curated` and `X.ed\u{200B}it` are `X`'s, `Vol 1.5` and
+/// `V.fast` their own.
+fn volume_base(stem: &str) -> &str {
+    let mut base = stem;
+    while let Some((up, id)) = base.rsplit_once('.') {
+        let id = stem_fold(&fold(id));
+        if up.is_empty() || !is_layer_id(&id) || layer_class(&id) == LayerClass::Other {
+            break;
+        }
+        base = up;
+    }
+    base
+}
+
+/// One `.cbz` archive of a listing, as [`volume_name_ties`] compares it.
+struct ArchiveName<'a> {
+    name: &'a str,
+    /// The stem, as spelled.
+    stem: &'a str,
+    /// The whole name, filename-folded.
+    folded: String,
+    /// [`volume_base`], as spelled and filename-folded.
+    base: &'a str,
+    base_fold: String,
+    /// The stem, filename-folded and folded by rule v1.
+    stem_fold_wide: String,
+    stem_fold_v1: String,
+}
+
+impl<'a> ArchiveName<'a> {
+    fn new(name: &'a str) -> Option<Self> {
+        let stem = cbz_stem(name)?;
+        let base = volume_base(stem);
+        Some(ArchiveName {
+            name,
+            stem,
+            folded: fold(name),
+            base,
+            base_fold: fold(base),
+            stem_fold_wide: fold(stem),
+            stem_fold_v1: stem_fold(stem),
+        })
+    }
+
+    /// Do the two archives' volume names collide ([`volume_name_ties`])?
+    fn tied(&self, other: &ArchiveName<'_>) -> bool {
+        // One name: case variants of one entry (the freeze's).
+        if self.folded == other.folded {
+            return false;
+        }
+        // One volume name, spelled two ways.
+        if self.base != other.base && self.base_fold == other.base_fold {
+            return true;
+        }
+        self.primary_is_fold_layer_of(other) || other.primary_is_fold_layer_of(self)
+    }
+
+    /// Is this archive's OCR file `<stem>.mokuro`, by the filename fold, the other's
+    /// layer `<r>` (`<other stem>.<r>.mokuro`), while rule v1 reads that layer's name,
+    /// spelled from the other's stem as a client writes it, as no file of this archive?
+    /// Rule v1 reads it as this archive's primary (rule 4) when `<other stem>.<r>`
+    /// folds by rule v1's stem fold like this stem: `V.5.cbz` beside `V.cbz`,
+    /// `\u{39F}\u{394}\u{39F}\u{3A3}.gcv.cbz` beside `\u{39F}\u{394}\u{39F}\u{3A3}.cbz`.
+    /// It does not for `X\u{200B}.5.cbz`, `Q.cura\u{200B}ted.curated.cbz` or
+    /// `\u{39F}\u{394}\u{39F}\u{3C2}.gcv.cbz` (a final sigma: rule v1 lowercases a
+    /// sigma by its place in the whole stem) beside `X.cbz`, `Q.curated.cbz` or
+    /// `\u{39F}\u{394}\u{39F}\u{3A3}.cbz`. Two archives of one base stem as spelled are
+    /// asked too (`Q.cura\u{200B}ted.curated.cbz` and `Q.curated.cbz` are both `Q`'s).
+    /// A personal layer (`edit`, `edit-<n>`) is never a file of the library: each
+    /// account's correction is kept in its own copy, so `X.ed\u{200B}it.cbz` beside
+    /// `X.cbz` is no tie (its OCR file only shadows that layer's name, which Bunko
+    /// writes nowhere: [`shadowing_archive`], [`shadows_reserved_layer`]).
+    fn primary_is_fold_layer_of(&self, other: &ArchiveName<'_>) -> bool {
+        self.stem_fold_wide
+            .strip_prefix(other.stem_fold_wide.as_str())
+            .and_then(|rest| rest.strip_prefix('.'))
+            .filter(|r| is_layer_id(r) && layer_class(r) != LayerClass::Personal)
+            .is_some_and(|r| stem_fold(&format!("{}.{r}", other.stem)) != self.stem_fold_v1)
+    }
+}
+
+/// One volume name per filename fold: the listed `.cbz` archives of `names` (a
+/// folder's listed FILES) whose volume names collide with the archive `name`'s by the
+/// filename fold ([`fold`]) while they are spelled differently, sorted. Two archives
+/// collide when
+///
+/// * their base stems ([`volume_base`]: the stem of the volume an archive belongs to,
+///   `<s>` of a nested `<s>.curated.cbz` or `<s>.edit.cbz`) fold alike but are not
+///   spelled alike: `STRASSE.curated.cbz`, `Vol\u{17F}.curated.cbz`,
+///   `\u{131}X.curated.cbz`, `X\u{200B}.edit.cbz`, `x.curated.cbz` beside
+///   `Stra\u{df}e.cbz`, `Vols.cbz`, `iX.cbz`, `X.cbz` and `X.cbz`;
+/// * or the OCR file of one, `<s>.mokuro`, is one name by the fold with a layer of the
+///   other, `<t>.<r>.mokuro` (`<r>` a layer id), and rule v1 gives that layer's name,
+///   as a client spells it from `<t>`, to the other archive, not to this one:
+///   `X\u{200B}.cbz` beside `X.5.cbz` (`X\u{200B}.5.mokuro`, layer `5` of the first by
+///   rule v1, is `X.5.mokuro`, the second's primary, on every host),
+///   `Q.cura\u{200B}ted.curated.cbz` beside `Q.curated.cbz` (whose curated layer
+///   `Q.curated.curated.mokuro` it is), `\u{39F}\u{394}\u{39F}\u{3C2}.gcv.cbz` beside
+///   `\u{39F}\u{394}\u{39F}\u{3A3}.cbz` (a final sigma: `\u{39F}\u{394}\u{39F}\u{3A3}.gcv.mokuro`
+///   is the second's layer `gcv` by rule v1), and `V.cura\u{200B}ted.cbz` beside
+///   `V.cbz`; never by a personal layer (`V.ed\u{200B}it.cbz` beside `V.cbz`), which is
+///   no library file.
+///
+/// Two spellings the fold joins are one volume name, as on a case-insensitive disk:
+/// Bunko creates no archive with a tie (409 `ambiguous-name`, whichever came first),
+/// and a tie already listed (made before this release, or outside Bunko) leaves the
+/// files of both volumes unwritten until one archive is renamed or deleted. Archives
+/// rule v1 itself relates (`V.curated.cbz`, `V.EDIT.cbz`, `V.5.cbz` beside `V.cbz`,
+/// governed by rule v1 as ever) and spellings of one whole name (a case-variant group,
+/// frozen: [`crate::fold_groups`]) are no ties. `name` is never its own.
+pub fn volume_name_ties<'a>(name: &str, names: &[&'a str]) -> Vec<&'a str> {
+    let Some(archive) = ArchiveName::new(name) else {
+        return Vec::new();
+    };
+    let mut out: Vec<&'a str> = names
+        .iter()
+        .filter(|n| **n != name)
+        .filter_map(|n| ArchiveName::new(n))
+        .filter(|other| archive.tied(other))
+        .map(|other| other.name)
+        .collect();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// Every pair of listed archives of `names` whose volume names collide
+/// ([`volume_name_ties`]), each pair once, sorted.
+pub fn volume_name_tie_pairs<'a>(names: &[&'a str]) -> Vec<(&'a str, &'a str)> {
+    let archives: Vec<ArchiveName<'a>> = names.iter().filter_map(|n| ArchiveName::new(n)).collect();
+    // Only archives whose folded stems start with one segment can collide.
+    let mut by_head: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (i, a) in archives.iter().enumerate() {
+        let head = a.stem_fold_wide.split('.').next().unwrap_or_default();
+        by_head.entry(head).or_default().push(i);
+    }
+    let mut out = Vec::new();
+    for group in by_head.values() {
+        for (k, &i) in group.iter().enumerate() {
+            for &j in &group[k + 1..] {
+                let (a, b) = (&archives[i], &archives[j]);
+                if a.tied(b) {
+                    out.push(if a.name < b.name {
+                        (a.name, b.name)
+                    } else {
+                        (b.name, a.name)
+                    });
+                }
+            }
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
 }
 
 #[cfg(test)]
 mod tests {
+    /// Hidden: every spelling of a name but the winner, and the files rule v1 gives to a
+    /// shadowed archive (named by its exact stem), never the winner's own or a folder.
+    #[test]
+    fn a_shadowed_archives_own_files_are_hidden_too() {
+        let none = |_: &str| None;
+        let entries = [
+            ("V.cbz", false),
+            ("v.cbz", false),
+            ("v.mokuro", false),
+            ("v.webp", false),
+            ("v.edit.mokuro", false),
+            ("V.mokuro", false),
+            ("W.cbz", false),
+            ("w.webp", false),
+            ("v.nocover", true),
+        ];
+        let mut hidden: Vec<String> = hidden_names(entries, none).into_iter().collect();
+        hidden.sort();
+        assert_eq!(hidden, ["v.cbz", "v.edit.mokuro", "v.mokuro", "v.webp"]);
+        // Names one by the full case folding only (`STRASSE`, `Straße`): rule v1 tells
+        // their stems apart, so the hidden archive's sidecars are its folded ones.
+        let entries = [
+            ("STRASSE.cbz", false),
+            ("Stra\u{df}e.cbz", false),
+            ("strasse.mokuro", false),
+            ("stra\u{df}e.mokuro", false),
+        ];
+        let mut hidden: Vec<String> = hidden_names(entries, none).into_iter().collect();
+        hidden.sort();
+        assert_eq!(hidden, ["Stra\u{df}e.cbz", "stra\u{df}e.mokuro"]);
+        assert!(hidden_names([("a.cbz", false), ("a.mokuro", false)], none).is_empty());
+    }
+
+    #[test]
+    fn case_losers_leave_one_spelling_per_fold() {
+        let none = |_: &str| None;
+        let names = [
+            "Kingdom",
+            "kingdom",
+            "KINGDOM",
+            "Other",
+            "Pok\u{e9}mon",
+            "POKE\u{301}MON",
+        ];
+        let losers = case_losers(names, none);
+        let mut got: Vec<&str> = losers.iter().map(String::as_str).collect();
+        got.sort();
+        // The byte-smallest wins: `KINGDOM` and `POKÉMON` (decomposed) sort first.
+        assert_eq!(got, ["Kingdom", "Pok\u{e9}mon", "kingdom"]);
+        assert!(case_losers(["a", "b"], none).is_empty());
+        // A preferred winner counts only when it is listed.
+        let oldest = |f: &str| (f == "kingdom").then(|| "kingdom".to_string());
+        let mut got: Vec<String> = case_losers(["Kingdom", "kingdom"], oldest)
+            .into_iter()
+            .collect();
+        got.sort();
+        assert_eq!(got, ["Kingdom"]);
+        let gone = |_: &str| Some("KINGDOM".to_string());
+        let got: Vec<String> = case_losers(["Kingdom", "kingdom"], gone)
+            .into_iter()
+            .collect();
+        assert_eq!(got, ["kingdom"]);
+    }
+
     use super::*;
     use serde_json::Value;
 
@@ -733,6 +1252,380 @@ mod tests {
         }
         // Only `.cbz` archives define stems (rule 2).
         assert!(!hides("V.edit.cbz", &["V.zip"]));
+        // By either fold: one name with `V.edit.cbz` on every host.
+        let either = hides_reserved_layer_by_either_fold;
+        for name in [
+            "V.ed\u{200B}it.cbz",
+            "V.edit\u{AD}.cbz",
+            "\u{17F}.curated.cbz",
+        ] {
+            let stem = if name.starts_with('\u{17F}') {
+                "s.cbz"
+            } else {
+                "V.cbz"
+            };
+            assert!(!hides(name, &[stem]), "{name}: rule v1 alone misses it");
+            assert!(either(name, &[stem]), "{name}");
+        }
+        assert!(!either("V.hayai.cbz", &v));
+    }
+
+    /// The names the wider filename fold joins with a volume's files, but rule v1 does
+    /// not give to it: governed by that volume for authorization, at least as strictly
+    /// as rule v1, whatever spelling the request used.
+    #[test]
+    fn either_fold_governs_what_the_wider_fold_joins_with_a_volume() {
+        let gov = governing_archives;
+        let either = governing_archives_by_either_fold;
+        let listing = [
+            "Stra\u{df}e.cbz",
+            "Vol1.cbz",
+            "\u{39f}\u{394}\u{39f}\u{3a3}.cbz",
+            "i.cbz",
+        ];
+        for (name, archive) in [
+            ("STRASSE.mokuro", "Stra\u{df}e.cbz"),
+            ("strasse.webp", "Stra\u{df}e.cbz"),
+            ("STRASSE.nocover", "Stra\u{df}e.cbz"),
+            ("Stra\u{17F}\u{17F}e.mokuro.gz", "Stra\u{df}e.cbz"),
+            ("STRASSE.hayai.mokuro", "Stra\u{df}e.cbz"),
+            ("Vol\u{200B}1.mokuro", "Vol1.cbz"),
+            ("Vol1\u{FE0F}.webp", "Vol1.cbz"),
+            (
+                "\u{3bf}\u{3b4}\u{3bf}\u{3c3}.mokuro",
+                "\u{39f}\u{394}\u{39f}\u{3a3}.cbz",
+            ),
+            ("\u{131}.webp", "i.cbz"),
+        ] {
+            assert!(
+                gov(name, &listing).is_empty(),
+                "{name}: rule v1 alone misses it"
+            );
+            assert_eq!(either(name, &listing), [archive], "{name}");
+        }
+        // Where the folds agree, rule v1's answer.
+        let ascii = ["V.cbz", "V.v01.cbz", "W.cbz"];
+        for name in [
+            "v.mokuro",
+            "V.WEBP",
+            "V.v01.mokuro",
+            "V.edit.cbz",
+            "X.mokuro",
+        ] {
+            assert_eq!(either(name, &ascii), gov(name, &ascii), "{name}");
+        }
+        // A listed spelling a write reaches governs as rule v1 reads it too.
+        let listed = ["Stra\u{df}e.cbz", "Stra\u{df}e.mokuro"];
+        assert_eq!(either("STRASSE.MOKURO", &listed), ["Stra\u{df}e.cbz"]);
+    }
+
+    /// Where the two folds part ways about a name, it is disputed: Bunko writes it for
+    /// nobody. Where they agree, nothing is.
+    #[test]
+    fn a_name_the_folds_part_ways_about_is_disputed() {
+        let d = fold_disputed;
+        let s = |v: &[&str]| v.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        // A file of a volume by the wider fold only.
+        assert_eq!(
+            d("STRASSE.mokuro", &["Stra\u{df}e.cbz"]),
+            s(&["Stra\u{df}e.cbz"])
+        );
+        assert_eq!(d("Vol\u{200B}1.webp", &["Vol1.cbz"]), s(&["Vol1.cbz"]));
+        assert_eq!(d("\u{131}.nocover", &["i.cbz"]), s(&["i.cbz"]));
+        assert_eq!(
+            d(
+                "\u{3bf}\u{3b4}\u{3bf}\u{3c2}.mokuro",
+                &["\u{39f}\u{394}\u{39f}\u{3a3}.cbz"]
+            ),
+            Vec::<String>::new(),
+            "rule v1 lowercases a final capital sigma to the final small one"
+        );
+        assert_eq!(
+            d(
+                "\u{3bf}\u{3b4}\u{3bf}\u{3c3}.mokuro",
+                &["\u{39f}\u{394}\u{39f}\u{3a3}.cbz"]
+            ),
+            s(&["\u{39f}\u{394}\u{39f}\u{3a3}.cbz"]),
+            "a non-final small sigma: one name by the fold, not by rule v1"
+        );
+        // A layer id only the fold reads (rule v1 matches ids exactly).
+        assert_eq!(d("V.EDIT.mokuro", &["V.cbz"]), s(&["V.cbz"]));
+        assert_eq!(d("V.edit\u{200B}.mokuro", &["V.cbz"]), s(&["V.cbz"]));
+        // An archive is never disputed for the names listed beside it, new or
+        // replaced: whoever made `STRASSE.mokuro` or `V.EDIT.mokuro` first does not
+        // keep `Stra\u{df}e.cbz` or `V.cbz` out.
+        for (archive, listing) in [
+            ("Stra\u{df}e.cbz", &["STRASSE.mokuro"][..]),
+            (
+                "Stra\u{df}e.cbz",
+                &["Stra\u{df}e.cbz", "STRASSE.mokuro"][..],
+            ),
+            ("V.cbz", &["V.EDIT.mokuro", "V.Fast.mokuro"][..]),
+            ("V.cbz", &["V.cbz", "V.Fast.mokuro"][..]),
+            ("Vol1.cbz", &["Vol\u{200B}1.webp"][..]),
+            ("C\u{200D}.cbz", &["C.mokuro", "C.webp"][..]),
+        ] {
+            assert!(d(archive, listing).is_empty(), "{archive:?} {listing:?}");
+        }
+        // A rule v1 suffix only the fold sees.
+        assert_eq!(d("V.mo\u{212A}uro", &[]), s(&["V.mo\u{212A}uro"]));
+        assert_eq!(d("V.cb\u{200B}z", &["V.mokuro"]), s(&["V.cb\u{200B}z"]));
+        // Agreement: nothing disputed.
+        let ascii = ["V.cbz", "V.mokuro", "V.5.cbz", "W.cbz"];
+        for name in [
+            "v.MOKURO",
+            "V.edit.mokuro",
+            "V.hayai.mokuro.gz",
+            "V.5.mokuro",
+            "V.webp",
+            "V.cbz",
+            "V.edit.cbz",
+            "X.mokuro",
+            "Notes.txt",
+            "Stra\u{df}e.mokuro",
+            "Folder",
+        ] {
+            assert!(d(name, &ascii).is_empty(), "{name}");
+        }
+        assert!(d("Stra\u{df}e.mokuro", &["Stra\u{df}e.cbz"]).is_empty());
+        assert!(d("stra\u{df}e.WEBP", &["Stra\u{df}e.cbz"]).is_empty());
+        assert!(d("Stra\u{df}e.cbz", &["Stra\u{df}e.mokuro"]).is_empty());
+        assert!(
+            d(
+                "\u{39f}\u{394}\u{39f}\u{3a3}.cbz",
+                &["\u{3bf}\u{3b4}\u{3bf}\u{3c2}.mokuro"]
+            )
+            .is_empty()
+        );
+    }
+
+    /// One volume name per filename fold: two archives whose base stems fold alike
+    /// while spelled apart, or whose sidecar names the fold alone joins, collide in
+    /// either order; one base stem as spelled, one whole name, and unrelated names do
+    /// not.
+    #[test]
+    fn archives_the_fold_makes_one_volume_name_collide() {
+        let tied = [
+            ("X\u{200B}.curated.cbz", "X.cbz"),
+            ("STRASSE.curated.cbz", "Stra\u{df}e.cbz"),
+            ("Vol\u{17F}.curated.cbz", "Vols.cbz"),
+            ("\u{131}X.curated.cbz", "iX.cbz"),
+            ("X\u{200B}.edit.cbz", "X.cbz"),
+            ("X\u{200B}.edit-2.cbz", "X.cbz"),
+            ("STRASSE.EDIT.cbz", "Stra\u{df}e.cbz"),
+            ("x.curated.cbz", "X.cbz"),
+            ("X\u{200B}.curated.cbz", "X.edit.cbz"),
+            ("Cafe\u{301}.curated.cbz", "Caf\u{e9}.cbz"),
+            // A sidecar name the fold alone joins (layer `5` of one, primary of the
+            // other; a layer id only the fold reads).
+            ("X\u{200B}.cbz", "X.5.cbz"),
+            ("X.cbz", "X.5\u{200B}.cbz"),
+            ("Vol.cbz", "Vol\u{200B}.extra.cbz"),
+            // One base stem as spelled, while the fold alone makes the primary of one a
+            // reserved layer of the other (`Q.curated.curated.mokuro`,
+            // `Q.edit.curated.mokuro`, `X.edit.mokuro`).
+            ("Q.cura\u{200B}ted.curated.cbz", "Q.curated.cbz"),
+            ("Q.ed\u{200B}it.curated.cbz", "Q.edit.cbz"),
+            ("Q.ed\u{131}t.curated.cbz", "Q.edit.cbz"),
+            ("X.cura\u{200B}ted.cbz", "X.cbz"),
+            ("X.curated-\u{200B}2.cbz", "X.cbz"),
+            // A final sigma: rule v1 lowercases `\u{3A3}` by its place in the stem, so
+            // `\u{39F}\u{394}\u{39F}\u{3A3}.gcv.mokuro` is layer `gcv` of the second
+            // by rule v1, and one name with the first's primary on every host.
+            (
+                "\u{39F}\u{394}\u{39F}\u{3C2}.gcv.cbz",
+                "\u{39F}\u{394}\u{39F}\u{3A3}.cbz",
+            ),
+        ];
+        for (a, b) in tied {
+            assert_eq!(volume_name_ties(a, &[b]), [b], "{a:?} beside {b:?}");
+            assert_eq!(volume_name_ties(b, &[a]), [a], "{b:?} beside {a:?}");
+            let mut pair = [a, b];
+            pair.sort_unstable();
+            assert_eq!(
+                volume_name_tie_pairs(&[a, b, "Other.cbz", "X.mokuro"]),
+                [(pair[0], pair[1])]
+            );
+        }
+        let apart = [
+            // One base stem as spelled: rule v1 decides, as ever.
+            ("X.curated.cbz", "X.cbz"),
+            ("X.EDIT.cbz", "X.cbz"),
+            ("Q.curated.curated.cbz", "Q.curated.cbz"),
+            ("Q.edit.curated.cbz", "Q.edit.cbz"),
+            // The fold alone makes the primary of one the other's personal layer, which
+            // is never a library file.
+            ("X.ed\u{200B}it.cbz", "X.cbz"),
+            ("X.ed\u{131}t.cbz", "X.cbz"),
+            ("X.edit-\u{200B}2.cbz", "X.cbz"),
+            // Rule v1 ties them too (rule 4: the longer stem's primary).
+            ("V.cbz", "V.5.cbz"),
+            ("V.cbz", "v.5.cbz"),
+            ("V.cbz", "V.Fast.cbz"),
+            ("Berserk.cbz", "Berserk.v01.cbz"),
+            (
+                "\u{39F}\u{394}\u{39F}\u{3A3}.gcv.cbz",
+                "\u{39F}\u{394}\u{39F}\u{3A3}.cbz",
+            ),
+            (
+                "\u{39F}\u{394}\u{39F}\u{3C3}.gcv.cbz",
+                "\u{39F}\u{394}\u{39F}\u{3A3}.cbz",
+            ),
+            // One whole name: a case-variant group.
+            ("X\u{200B}.cbz", "X.cbz"),
+            ("v.cbz", "V.cbz"),
+            // Unrelated.
+            ("Vol 1.cbz", "Vol 2.cbz"),
+            ("Stra\u{df}e.cbz", "Strasse 2.cbz"),
+            ("X.cbz", "X.mokuro"),
+            ("X.cbz", "X\u{200B}.curated.mokuro"),
+        ];
+        for (a, b) in apart {
+            assert!(volume_name_ties(a, &[b]).is_empty(), "{a:?} beside {b:?}");
+            assert!(volume_name_ties(b, &[a]).is_empty(), "{b:?} beside {a:?}");
+            assert!(volume_name_tie_pairs(&[a, b]).is_empty(), "{a:?} {b:?}");
+        }
+        assert!(volume_name_ties("X.cbz", &["X.cbz"]).is_empty());
+        assert!(volume_name_ties("X.mokuro", &["X\u{200B}.cbz"]).is_empty());
+        assert_eq!(
+            volume_name_ties(
+                "X.cbz",
+                &["X\u{200B}.curated.cbz", "X\u{200C}.edit.cbz", "Y.cbz"]
+            ),
+            ["X\u{200B}.curated.cbz", "X\u{200C}.edit.cbz"]
+        );
+    }
+
+    /// A listed archive in a volume name tie is governed by rule v1 alone, so its
+    /// controller keeps it; every other name is governed by either fold, as ever.
+    #[test]
+    fn an_archive_in_a_volume_name_tie_is_governed_by_rule_v1() {
+        let names = ["X\u{200B}.curated.cbz", "X.cbz"];
+        assert_eq!(
+            governing_archives_by_either_fold("X\u{200B}.curated.cbz", &names),
+            ["X\u{200B}.curated.cbz"]
+        );
+        assert_eq!(
+            governing_archives_by_either_fold("x\u{200B}.CURATED.cbz", &names),
+            ["X\u{200B}.curated.cbz"]
+        );
+        assert_eq!(
+            governing_archives_by_either_fold("X.cbz", &names),
+            ["X.cbz"]
+        );
+        // Alone, the filename fold hands it up to `X.cbz` too.
+        assert_eq!(
+            governing_archives_by_either_fold("X\u{200B}.curated.cbz", &["X.cbz"]),
+            ["X.cbz"]
+        );
+        // Rule v1's own hand-up stays: `x.curated.cbz` is `X.cbz`'s.
+        assert_eq!(
+            governing_archives_by_either_fold("x.curated.cbz", &["x.curated.cbz", "X.cbz"]),
+            ["X.cbz"]
+        );
+        let mut sidecar = governing_archives_by_either_fold("X.curated.mokuro", &names);
+        sidecar.sort_unstable();
+        assert!(sidecar.contains(&"X.cbz"), "{sidecar:?}");
+    }
+
+    /// A name the filename fold makes one with a personal or curated layer name, of any
+    /// stem, while rule v1 reads no such layer in it, shadows that layer; the layer
+    /// names themselves, other ids and a listed archive's own primary do not.
+    #[test]
+    fn names_the_fold_joins_with_a_reserved_layer_shadow_it() {
+        let personal = Some(LayerClass::Personal);
+        let curated = Some(LayerClass::Curated);
+        let reserved = Some(LayerClass::Reserved);
+        for (name, class) in [
+            ("X.ed\u{200B}it.mokuro", personal),
+            ("X.ed\u{131}t.mokuro", personal),
+            ("X.edit\u{200B}.mokuro", personal),
+            ("X.e\u{34F}dit.mokuro", personal),
+            ("X.EDIT.mokuro", personal),
+            ("X.Edit.mokuro.gz", personal),
+            ("X.edit-\u{200B}2.mokuro", personal),
+            ("X.cura\u{200B}ted.mokuro", curated),
+            ("X.Curated.mokuro", curated),
+            ("X.CURATED-2.mokuro", reserved),
+        ] {
+            assert_eq!(shadows_reserved_layer(name, &[]), class, "{name:?}");
+            assert_eq!(shadows_reserved_layer(name, &["X.cbz"]), class, "{name:?}");
+        }
+        for name in [
+            "X.edit.mokuro",
+            "X.edit-2.mokuro",
+            "X.curated.mokuro",
+            "X.curated-3.mokuro",
+            "STRASSE.edit.mokuro",
+            "X.Fast.mokuro",
+            "X.gcv.mokuro",
+            "X.tr-en.mokuro",
+            "X.ORIGINAL.mokuro",
+            "X.mokuro",
+            "X.edit.cbz",
+            "Notes.txt",
+        ] {
+            assert_eq!(shadows_reserved_layer(name, &["X.cbz"]), None, "{name:?}");
+        }
+        // A dotted volume's own primary, when rule v1 reads the layer in it too (rule 4);
+        // not one only the filename fold ties to the layer.
+        assert_eq!(
+            shadows_reserved_layer("V.EDIT.mokuro", &["V.EDIT.cbz"]),
+            None
+        );
+        assert_eq!(
+            shadows_reserved_layer("V.Edit.mokuro.gz", &["V.Edit.cbz", "V.cbz"]),
+            None
+        );
+        for (stray, archive, class) in [
+            ("V.ed\u{200B}it.mokuro", "V.ed\u{200B}it.cbz", personal),
+            ("V.ed\u{131}t.mokuro", "V.ed\u{131}t.cbz", personal),
+            ("V.cura\u{200B}ted.mokuro", "V.cura\u{200B}ted.cbz", curated),
+        ] {
+            assert_eq!(
+                shadows_reserved_layer(stray, &[archive]),
+                class,
+                "{stray:?}"
+            );
+            assert_eq!(
+                shadows_reserved_layer(stray, &[archive, "V.cbz"]),
+                class,
+                "{stray:?}"
+            );
+        }
+        // An archive only the filename fold makes `<s>.<reserved id>.cbz`: its primary
+        // could only shadow `<s>`'s layer, `<s>.cbz` listed or not. Rule v1's own reading
+        // (`V.EDIT.cbz`, rule 4) is governed as it always was.
+        for (name, class) in [
+            ("X.ed\u{200B}it.cbz", personal),
+            ("X.ed\u{131}t.cbz", personal),
+            ("X.e\u{34F}dit.cbz", personal),
+            ("X.edit\u{200B}.CBZ", personal),
+            ("X.edit-\u{200B}2.cbz", personal),
+            ("X.cura\u{200B}ted.cbz", curated),
+            ("X.curated-\u{200B}2.cbz", reserved),
+        ] {
+            assert_eq!(shadowing_archive(name), class, "{name:?}");
+            assert_eq!(shadows_reserved_layer(name, &[]), class, "{name:?}");
+            assert_eq!(shadows_reserved_layer(name, &["X.cbz"]), class, "{name:?}");
+        }
+        for name in [
+            "X.cbz",
+            "X.edit.cbz",
+            "X.EDIT.cbz",
+            "X.Curated-2.cbz",
+            "X.gcv.cbz",
+            "X.ed\u{200B}it.zip",
+            "X.ed\u{200B}itor.cbz",
+            "Stra\u{df}e.cbz",
+        ] {
+            assert_eq!(shadowing_archive(name), None, "{name:?}");
+        }
+        assert_eq!(reserved_layer_of("V.edit.mokuro", &["V.edit.cbz"]), None);
+        assert_eq!(reserved_layer_of("V.edit.mokuro", &["V.cbz"]), personal);
+        assert_eq!(reserved_layer_of("V.curated.mokuro", &[]), curated);
+        assert_eq!(reserved_layer_of("V.ed\u{200B}it.mokuro", &["V.cbz"]), None);
+        assert_eq!(reserved_layer_of("V.gcv.mokuro", &["V.cbz"]), None);
     }
 
     #[test]

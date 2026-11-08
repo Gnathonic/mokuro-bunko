@@ -433,6 +433,11 @@ fn metadata_paths_and_watcher_routing_match_python() {
         let path = s(get(case, "path"));
         let actual = paths::classify_change(Path::new("/lib"), Path::new(path));
         let expected = match s(get(case, "kind")) {
+            // 0.8 (deliberate): no `thumbnails/` cover folder is kept in the library, so
+            // `thumbnails` is a series name like any (one rule on every store).
+            "ignore" if path.starts_with("/lib/thumbnails/") => {
+                paths::LibraryChange::Series("thumbnails".to_owned())
+            }
             "series" => paths::LibraryChange::Series(s(get(case, "name")).to_owned()),
             "library" => paths::LibraryChange::Library,
             "ignore" => paths::LibraryChange::Ignore,

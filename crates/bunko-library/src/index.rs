@@ -93,6 +93,9 @@ fn scan_dir(
     let Ok(entries) = fsutil::list_dir(dir) else {
         return Vec::new();
     };
+    // Folders and archives another listed spelling shadows are never reached: not
+    // walked, not volumes. Their sidecars stay in the listing rule v1 reads.
+    let losers = fsutil::case_losers(dir, entries.iter().map(|(n, _)| n.as_str()));
     let mut subdirs = Vec::new();
     let mut filenames: HashSet<String> = HashSet::new();
     for (name, path) in entries {
@@ -102,7 +105,7 @@ fn scan_dir(
             filenames.insert(name);
         }
     }
-    subdirs.retain(|(name, _)| !name.starts_with('.'));
+    subdirs.retain(|(name, _)| !name.starts_with('.') && !losers.contains(name));
     subdirs.sort_by(|a, b| a.0.cmp(&b.0));
     if series_name.starts_with('.') {
         return subdirs;
@@ -112,7 +115,7 @@ fn scan_dir(
     sorted_names.sort();
     let volume_names: BTreeSet<String> = sorted_names
         .iter()
-        .filter(|name| crate::pyunicode::lower(name).ends_with(".cbz"))
+        .filter(|name| crate::pyunicode::lower(name).ends_with(".cbz") && !losers.contains(**name))
         .map(|name| name.chars().take(name.chars().count() - 4).collect())
         .collect();
     let mut layers_by_stem: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
@@ -132,10 +135,18 @@ fn scan_dir(
     // Stems with an archive, its extension in any case (`Vol 1.CBZ`), to its name.
     let archive_stems: HashMap<&str, &str> = filenames
         .iter()
-        .filter(|name| crate::sidecar::is_cbz_name(name))
+        .filter(|name| crate::sidecar::is_cbz_name(name) && !losers.contains(*name))
         .map(|name| (&name[..name.len() - 4], name.as_str()))
         .collect();
-    let listed: Vec<&str> = sorted_names.iter().map(|name| name.as_str()).collect();
+    // What rule v1 reads: the names a request reaches, and every shadowed archive. A
+    // shadowed archive is no volume here, but the files its exact stem names stay its
+    // own (as the OCR walk and the writers read them), never the volume's that shadows
+    // it.
+    let listed: Vec<&str> = sorted_names
+        .iter()
+        .map(|name| name.as_str())
+        .filter(|name| !losers.contains(*name) || crate::sidecar::is_cbz_name(name))
+        .collect();
     let folder = Folder::new(&listed);
     let mut volumes = Vec::new();
     let mut series_cover = None;
@@ -156,8 +167,29 @@ fn scan_dir(
                 _ => has_mokuro = true,
             }
         }
-        let has_webp = has(".webp");
-        let cover = has_webp.then(|| format!("{series_name}/{volume_name}.webp"));
+        // The cover and the marker in any spelling of the stem (rule v1: `V.WEBP`), as
+        // the thumbnail worker finds them: listed under their own names.
+        let files = archive
+            .map(|name| folder.volume_files(name))
+            .unwrap_or_default();
+        let listed_as = |wanted: fn(&sidecar_names::VolumeFile) -> bool, suffix: &str| {
+            let exact = format!("{volume_name}{suffix}");
+            if filenames.contains(&exact) {
+                return Some(exact);
+            }
+            files
+                .iter()
+                .find(|(_, f)| wanted(f))
+                .map(|(n, _)| (*n).to_string())
+        };
+        let cover_name = listed_as(|f| matches!(f, sidecar_names::VolumeFile::Cover), ".webp");
+        let has_webp = cover_name.is_some();
+        let has_nocover = listed_as(
+            |f| matches!(f, sidecar_names::VolumeFile::NoCover),
+            ".nocover",
+        )
+        .is_some();
+        let cover = cover_name.map(|name| format!("{series_name}/{name}"));
         if series_cover.is_none() {
             series_cover.clone_from(&cover);
         }
@@ -166,7 +198,7 @@ fn scan_dir(
                 .pending_ocr
                 .push((series_name.to_owned(), volume_name.clone()));
         }
-        if has_cbz && !has_webp && !has(".nocover") {
+        if has_cbz && !has_webp && !has_nocover {
             snapshot.pending_thumbnails += 1;
         }
         volumes.push(VolumeSnapshot {
@@ -193,7 +225,9 @@ fn scan_dir(
 
 /// Scan the whole library tree once (`_scan_library`): a top-down walk,
 /// sibling directories by name, hidden directories (and their subtrees)
-/// skipped, symlinked directories listed but not descended.
+/// skipped, symlinked directories listed but not descended. A top-level folder spelled
+/// like a per-user name (`history/`, `History/`: the cloud-root owner's own tree, or a
+/// legacy folder) is never a series, as in the compiled catalog.
 pub fn scan_library(library_path: &Path) -> LibrarySnapshot {
     let mut snapshot = LibrarySnapshot::default();
     if !fsutil::is_dir(library_path) {
@@ -204,6 +238,9 @@ pub fn scan_library(library_path: &Path) -> LibrarySnapshot {
     while let Some((dir, name)) = stack.pop() {
         let subdirs = scan_dir(&dir, &name, &mut snapshot);
         for (child, path) in subdirs.into_iter().rev() {
+            if name == "." && bunko_core::reader_tree::is_per_user_root_name(&child) {
+                continue;
+            }
             if bunko_store::fs::symlink_metadata(&path)
                 .is_ok_and(|meta| meta.file_type().is_symlink())
             {
@@ -225,6 +262,9 @@ pub fn scan_library(library_path: &Path) -> LibrarySnapshot {
 /// folder on the way) or would not list it (no volumes).
 fn scan_one_series(library_path: &Path, name: &str) -> Option<SeriesSnapshot> {
     let mut dir = library_path.to_path_buf();
+    if bunko_core::reader_tree::is_per_user_root_name(name.split('/').next().unwrap_or("")) {
+        return None;
+    }
     for part in name.split('/') {
         if part.is_empty() || part == "." || part == ".." || part.starts_with('.') {
             return None;
@@ -276,6 +316,9 @@ struct Inner {
     scanning: Mutex<()>,
     /// A background walk is queued or running (at most one at a time).
     refreshing: AtomicBool,
+    /// Before the first walk lands: the library root's names a request reaches, from one
+    /// listing taken by the first [`LibraryIndexCache::lists_series`] that needs it.
+    root_names: Mutex<Option<Arc<HashSet<String>>>>,
 }
 
 impl LibraryIndexCache {
@@ -298,6 +341,7 @@ impl LibraryIndexCache {
             }),
             scanning: Mutex::new(()),
             refreshing: AtomicBool::new(false),
+            root_names: Mutex::new(None),
         }))
     }
 
@@ -364,6 +408,22 @@ impl LibraryIndexCache {
         scan_one_series(&self.0.library_path, name)
     }
 
+    /// Is `name` spelled as the series folder a request for it reaches? Never walks.
+    /// The walk leaves out every spelling another listed one shadows
+    /// ([`fsutil::case_losers`], the rule requests are resolved by), so a series the
+    /// last walk lists is spelled so. Before the first walk lands, a top-level name is
+    /// looked up in one listing of the library root ([`fsutil::listed_groups`], the
+    /// same rule), taken once and kept until the walk replaces it: a request right
+    /// after a start lists the root once, not once per request. False for anything
+    /// else: the caller resolves the spelling from the listings itself.
+    pub fn lists_series(&self, name: &str) -> bool {
+        let last = self.0.state.lock().last.clone();
+        if let Some(snapshot) = last {
+            return snapshot.series_by_name(name).is_some();
+        }
+        !name.contains('/') && self.0.root_names().contains(name)
+    }
+
     /// The last snapshot, however old, without ever scanning.
     pub fn cached_snapshot(&self) -> Option<Arc<LibrarySnapshot>> {
         self.0.state.lock().snapshot.clone()
@@ -394,6 +454,29 @@ impl LibraryIndexCache {
 }
 
 impl Inner {
+    /// The library root's names a request reaches (folders and files alike: what is
+    /// asked for is a spelling): every listed name no other spelling shadows. Taken on
+    /// first use and kept until a walk lands; empty when the root cannot be listed.
+    fn root_names(&self) -> Arc<HashSet<String>> {
+        let mut cached = self.root_names.lock();
+        if let Some(names) = cached.as_ref() {
+            return Arc::clone(names);
+        }
+        let names = Arc::new(
+            fsutil::listed_groups(&self.library_path, true)
+                .map(|(entries, groups)| {
+                    entries
+                        .into_iter()
+                        .map(|(name, _)| name)
+                        .filter(|name| !groups.is_hidden(name))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        );
+        *cached = Some(Arc::clone(&names));
+        names
+    }
+
     /// Walk the library (one walk at a time) and keep the result. A walk that finished
     /// while this one waited for the lock serves it instead: one that may be served
     /// (`fresh_only` false) or one with every change seen (`fresh_only` true).
@@ -428,6 +511,8 @@ impl Inner {
         state.snapshot = (!state.stale || duration >= SLOW_SCAN).then(|| Arc::clone(&snapshot));
         state.last = Some(Arc::clone(&snapshot));
         state.scans += 1;
+        // The walk answers from now on.
+        *self.root_names.lock() = None;
         (snapshot, state.scans)
     }
 
@@ -455,7 +540,8 @@ mod tests {
     use super::*;
 
     /// Sidecar names rule v1: a primary in another spelling of the stem (`V.MOKURO`,
-    /// `v.mokuro.gz` on a case-sensitive disk) means the volume is not pending OCR.
+    /// `v.mokuro.gz`) means the volume is not pending OCR. (Two archives whose stems fold
+    /// alike are bunko-core's synthetic-listing vectors.)
     #[test]
     fn a_primary_in_any_spelling_is_not_pending() {
         let dir = tempfile::tempdir().unwrap();
@@ -469,9 +555,6 @@ mod tests {
             "C.cbz",
             "D.cbz",
             "D.mokuro",
-            "Ee.cbz",
-            "eE.cbz",
-            "ee.Mokuro",
         ] {
             bunko_store::fs::write(series.join(name), b"{}").unwrap();
         }
@@ -481,8 +564,7 @@ mod tests {
             .iter()
             .map(|(_, v)| v.as_str())
             .collect();
-        // `ee.Mokuro` could be `Ee`'s or `eE`'s: it is neither's.
-        assert_eq!(pending, ["C", "Ee", "eE"]);
+        assert_eq!(pending, ["C"]);
         let volumes = &snapshot.series[0].volumes;
         let flags = |name: &str| {
             let v = volumes.iter().find(|v| v.name == name).unwrap();
@@ -492,6 +574,28 @@ mod tests {
         assert_eq!(flags("B"), (false, true));
         assert_eq!(flags("C"), (false, false));
         assert_eq!(flags("D"), (true, false));
+    }
+
+    /// A cover or a no-cover marker in another spelling of the stem (`a.WEBP`) is the
+    /// volume's on every host: the catalog shows it under its listed name, and the volume
+    /// is not waiting for a thumbnail the worker will never make.
+    #[test]
+    fn a_cover_in_any_spelling_is_the_volumes() {
+        let dir = tempfile::tempdir().unwrap();
+        let series = dir.path().join("S");
+        bunko_store::fs::create_dir(&series).unwrap();
+        for name in ["A.cbz", "a.WEBP", "B.cbz", "b.NOCOVER", "C.cbz"] {
+            bunko_store::fs::write(series.join(name), b"x").unwrap();
+        }
+        let snapshot = scan_library(dir.path());
+        assert_eq!(snapshot.pending_thumbnails, 1);
+        let covers: Vec<Option<&str>> = snapshot.series[0]
+            .volumes
+            .iter()
+            .map(|v| v.cover.as_deref())
+            .collect();
+        assert_eq!(covers, [Some("S/a.WEBP"), None, None]);
+        assert_eq!(snapshot.series[0].cover.as_deref(), Some("S/a.WEBP"));
     }
 
     /// D27: a personal correction is one account's own, never a layer of the volume.

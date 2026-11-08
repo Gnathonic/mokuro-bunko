@@ -223,26 +223,147 @@ with a system unit is updated by re-running `install.sh`; a binary under
 `/usr/bin`, Homebrew or `/nix/store` by its package manager. Docker installs are
 told which image to pull.
 
-### Library paths are case-insensitive (as since 0.5.3)
+### Library paths are case-insensitive (as since 0.5.3), on every host
 
 As on Windows, `kingdom/` and `Kingdom/` are one folder: a request in any case
 reaches the spelling already on disk, an upload spelled in another case lands in the
-existing folder, and a folder or file can be renamed to fix its case. Coming straight
-from 0.5.2 on a case-sensitive host (Linux, Docker), check the library for folders
-and files whose names differ only in case: `ls library | sort -f | uniq -Di` lists
-such series folders; run it in each series folder too (`Vol 1.cbz` / `vol 1.cbz`).
-It folds ASCII letters only; the server also folds other letters' case and Unicode
-normalization. Both spellings stay
-listed in the catalog, but a request in a third spelling reaches only one of them,
-and the library cannot be copied to Windows or macOS as it is. Merge them while the
-server is stopped: move each volume with all its files (`<stem>.cbz`, its
-`.mokuro[.gz]` and layer files `<stem>.<layer>.mokuro[.gz]`, `<stem>.webp`, any
-`<stem>.nocover`) into one folder; the next metadata pass picks it up. Upload
-ownership and OCR records are keyed by exact path, so a merged volume needs its
-`volume_uploads`, `ocr_sidecars` and `volume_identities` rows renamed too. Its
+existing folder, and a folder or file can be renamed to fix its case (0.8 also on a
+Linux casefold disk). Two names are one whenever any supported host would make them
+one: full Unicode case folding and canonical normalization (`Straße` and `STRASSE`,
+`ſ` and `s`, `ı` and `i`, a decomposed and a composed `é`), and the invisible
+default-ignorable characters do not count (`Vol 1` with a zero width space, a joiner,
+a direction mark or a variation selector in it is `Vol 1`, as Linux casefold has it).
+0.8 behaves the same on every host and probes none: whether a name exists, and which
+entry it addresses, is decided from folder listings, never by opening the name and
+seeing what the host answers. Bunko makes no second spelling of a name: a write to a
+name its folder lists only in another spelling (made by a concurrent request, or one
+of your own corrections) answers 409 (`case-variant`; MKCOL 405) on every host. A
+volume or series folder renamed to another case outside Bunko stays its uploader's.
+
+Coming straight from 0.5.2 on a case-sensitive host (Linux, Docker), the library may
+hold folders or files whose names differ only in case (or only by such invisible
+characters). Run `mokuro-bunko doctor` (or read the server's startup log): its "Case
+variants" rows name each set, the spelling in use, the hidden ones and the files held
+with them. Only one spelling is listed and read, the byte-smallest (`Kingdom/` before
+`kingdom/`), in DAV, the catalog, OCR and covers; the others are hidden, and so are the
+files of a hidden archive (`v.mokuro`, its layers, `v.webp`, `v.nocover` and the
+cloud-root owner's `v.edit.mokuro` for a hidden `v.cbz`) and its accounts' corrections.
+Each set is **frozen** until you merge it: nothing changes in it, through any spelling.
+Every member, the one in use included, every file the reader's naming rule gives (or
+would give) to an archive of the set, and everything inside a member folder: a PUT,
+DELETE, MKCOL, COPY, MOVE (from or onto), PROPPATCH or LOCK of any of them answers 409
+with the set's names, however the path is spelled (`S/./V.mokuro` too), and so does a
+DELETE, COPY or MOVE of a folder holding a set, or onto one, and an upload of a new
+volume whose name would take one of the set's files as its own (`V.edit.cbz` beside a
+held `V.edit.mokuro`). Reads still work: the spelling in use is served as before. Bunko itself does
+no OCR, no upgrade, no cover, `.nocover` or orphan clean-up there, deletes no corrupt
+sidecar there, moves no old correction out of it, writes no `series.json` into a member
+folder (and a `series.json` update for one answers 409), gives no member series folder
+an owner at the first 0.8 start (a series split across `Kingdom/` and `kingdom/` stays
+shared, as one with volumes from several accounts does) and changes none of its upload,
+OCR, identity or owner records. So `Kingdom/` beside
+`kingdom/` gets no new volumes, OCR or corrections until the merge, and `Vol.cbz`
+beside `VOL.mokuro` and `vol.mokuro` is held too (deleting it would delete one of
+them). Merge them while the server is stopped: move each volume with all its files
+(`<stem>.cbz`, its `.mokuro[.gz]` and layer files `<stem>.<layer>.mokuro[.gz]`,
+`<stem>.webp`, any `<stem>.nocover`) into the folder in use, or rename the duplicates
+apart; the next metadata pass picks them up. Upload ownership and OCR records are keyed
+by path, so a merged volume needs its `volume_uploads`, `ocr_sidecars` and
+`volume_identities` rows renamed too (an ownership lookup that misses follows a row of
+another spelling only once that spelling is no longer listed as an entry of its own,
+and the OCR and identity rows do not follow at all). Merging series folders, reconcile
+their `series_folder_owners` rows as well: rows are keyed by the series' lowercase name
+(`series_key`), so `Kingdom/` and `kingdom/` share one, but `Straße/` and `STRASSE/`
+have one each. Keep at most one row for the merged folder, with its `folder_name` the
+spelling you kept and its `owner_username` the account that should own it (delete the
+row to leave the series shared, as adoption left it), and delete the row of the
+spelling that went. Move each account's corrections
+from `users/<u>/edits/<hidden spelling>/` to the folder in use the same way. Its
 uploader cannot fix that by uploading it again if they have only the Uploader role
-(the upload over the merged file is refused) unless an admin, editor or inviter
-deletes the merged copy first.
+(the upload over the merged file is refused) unless an admin, editor or inviter deletes
+the merged copy first. Doctor also names any hidden `.bunko-case-<token>-<name>` entry a
+case-only rename left when it was interrupted, with the rename that finishes it.
+
+Sidecar names rule v1 (which files are a volume's, shared with Mokuro Reader) is
+unchanged: stems compare up to NFC and lowercase, layer ids exactly. A file that is
+one name with a volume's OCR, cover or layer file only by the wider fold
+(`STRASSE.mokuro` beside `Straße.cbz`; `Vol1.webp` with a zero width space after
+`Vol`, beside `Vol1.cbz`) or only by the case of the layer id (`Vol.FAST.mokuro`) is not that
+volume's; Bunko writes no such file beside it either (it would be a second spelling),
+so that volume is owed none. 0.8 no longer makes such a file: a PUT, MKCOL, PROPPATCH
+or LOCK of one, or a COPY or MOVE onto one, answers 409 (`ambiguous-name`) for every
+account, and so does a name that only the wider fold gives a `.cbz`, `.mokuro`,
+`.webp` or `.nocover` ending. The archive itself is never refused for one already
+listed beside it: a new or replaced `Straße.cbz` beside a `STRASSE.mokuro` (made by
+hand, before 0.8, or before the volume existed) is written as in 0.7. For who may
+write or delete such a file it counts as the volume's: an uploader needs control of
+that volume, as for its own files. One already there stays readable and deletable,
+and on a local library doctor names it ("Ambiguous name") with its volume. Rename such
+a file to the volume's exact stem and a lowercase id to have it count: a WebDAV MOVE
+that only respells it so (`S/STRASSE.mokuro` to `S/Straße.mokuro`) is done, by an
+admin or editor, on every host.
+
+A file the wider fold makes one name with an account's correction or the curated layer
+of any volume (`V.EDIT.mokuro`, `V.Curated.mokuro`, `V.edit.mokuro` with a zero width
+space or a dotless `ı` in the id), while rule v1 reads no such layer in it, is no
+longer written either, its volume listed or not (409 `ambiguous-name`), nor an archive
+whose OCR file could only be such a file (`V.edit.cbz` with a zero width space or a
+dotless `ı` in `edit`, `V.curated.cbz` with a zero width space), `V.cbz` listed or not.
+One made by hand or by an earlier release is never what a request for `V.edit.mokuro`
+or `V.curated.mokuro` reaches: each account's correction goes to its own copy and is
+never refused for it, while a curated publish beside it (and, on a cloud library, the
+progress user's correction, which is the cloud folder's own file) answers 409 naming
+it. On a local library doctor names it; delete it (or rename it apart). A dotted
+volume's own primary (`V.EDIT.mokuro` beside `V.EDIT.cbz`) is not such a file.
+
+**One volume name per fold.** An archive's volume name is its stem without the
+trailing `.edit`, `.edit-<n>`, `.curated` or `.curated-<n>` ids the wider fold reads in
+it (`STRASSE.curated.cbz` belongs to a volume `STRASSE`). Two archives of a folder are
+one volume name, as a case-insensitive disk would have it, when their volume names
+the wider fold joins while they are spelled differently (`STRASSE.curated.cbz` and
+`Straße.cbz`, `Volſ.curated.cbz` and `Vols.cbz`, `ıX.curated.cbz` and `iX.cbz`,
+`X.edit.cbz` with a zero width space after `X` and `X.cbz`, `v.curated.cbz` and
+`V.cbz`), or when the OCR file of one is, only by the wider fold, one name with a
+layer of the other that rule v1 gives to that other archive (the layer named from the
+other's stem as spelled): `X.cbz` with a zero width space after `X` and `X.5.cbz`;
+`Q.curated.curated.cbz` with a zero width space inside the first `curated` beside
+`Q.curated.cbz`, or `Q.edıt.curated.cbz` beside `Q.edit.cbz` (the OCR file of the
+first is the curated layer of the second); `ΟΔΟς.gcv.cbz` with a final sigma and `ΟΔΟΣ.cbz` (rule v1 makes
+`ΟΔΟΣ.gcv.mokuro` the second's `gcv` layer). Personal layers (`edit`, `edit-<n>`)
+make no pair, since corrections are kept in each account's own copy. 0.8 keeps the
+archive that landed first and refuses the other (an upload, or a COPY or MOVE onto
+it, answers 409 `ambiguous-name`, whichever came first, for every account that may
+add it). This is checked again from the folder right before an archive lands, one
+archive per folder at a time, so an upload still in progress when another archive of
+that volume name lands is refused when it finishes. Where a library already holds
+such a pair (made by hand, or by an earlier release), both archives stay readable,
+and every other write to either volume's files (OCR files, layers, covers,
+`.nocover`, a curated publish) answers 409 `ambiguous-name` naming the pair; each
+account's own correction still goes to its own copy. Each archive of the pair is
+governed by rule v1 alone, so the account that controls it by rule v1 may still
+replace, move or delete it. On a local library doctor names each pair ("Ambiguous
+volume names"). To clear one, rename one archive with its sidecars, cover and layers
+so that both spell the volume name alike (`STRASSE.curated.cbz` to
+`Straße.curated.cbz`) or the names differ, or delete the one that should not be
+there.
+
+Series folders spelled like a reader's per-user name (`history`, `History`,
+`goals.json`, `Goals.json`, `volume-data.json`, ...) are hidden in 0.8, from WebDAV
+and the catalog alike: those names are each account's own files in every spelling.
+Nothing is done to them either (no OCR, covers, clean-up or correction adoption).
+Doctor names them; rename them (for example to `History (series)`). An account's own
+`Goals.json` or `History/` under `users/<u>/` (made there by hand) is its `goals.json`
+or `history/`, kept in its spelling, while it is the only spelling there; beside the
+`goals.json` or `history/` Bunko wrote, it is a stray Bunko leaves alone (delete it). In a cloud
+library the progress user's reading history and settings are the cloud folder's
+`history/`, `goals.json`, ...; while the folder holds one only in another spelling (a
+`History/` from 0.7), the progress user's writes to it answer 409 until it is renamed.
+
+The empty `library/thumbnails/` folder every earlier start made is removed at the
+first 0.8 start, once (the storage folder then holds `.legacy-thumbnails-checked`);
+one that holds anything, or sits beside another spelling of it, stays as an ordinary
+folder. `thumbnails`/`Thumbnails` is an ordinary series name in 0.8: an empty
+`thumbnails/` series made later stays.
 
 ### First-run setup from another computer
 

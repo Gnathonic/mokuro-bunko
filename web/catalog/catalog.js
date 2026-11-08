@@ -620,6 +620,12 @@ function renderVolumes() {
         const pendingBadge = (v.ocr_pending && !isActiveVolume)
             ? '<span class="volume-card__badge">OCR pending</span>'
             : '';
+        // OCR keeps failing: the server sends what kind of failure it is, in words fit
+        // for anyone, as the badge's hover text.
+        const failedBadge = (v.ocr_failed && !isActiveVolume)
+            ? '<span class="volume-card__badge volume-card__badge--failed" title="'
+                + escapeAttr(v.ocr_failure || 'OCR failed') + '">OCR failed</span>'
+            : '';
         const missingPages = typeof v.missing_pages === 'number' ? v.missing_pages : 0;
         const damageBadge = missingPages > 0
             ? '<span class="volume-card__badge volume-card__badge--damage" title="'
@@ -644,7 +650,7 @@ function renderVolumes() {
             '<div class="volume-card__cover">' + coverImg(coverUrl, v.name) + '</div>' +
             '<div class="volume-card__info">' +
             '<div class="volume-card__title">' + escapeHtml(v.name) + '</div>' +
-            progressBadge + damageBadge + pendingBadge +
+            progressBadge + damageBadge + failedBadge + pendingBadge +
             '</div></div>';
     }).join('');
 }

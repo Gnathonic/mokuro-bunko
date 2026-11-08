@@ -416,7 +416,8 @@ fn series_folders(
 /// The listed archives `username` controls in the series folders it does not own (D1),
 /// by series then stem: those auth lets it publish the curated layer of. A volume is
 /// controlled when every archive governing its `<stem>.curated.mokuro` (the nearest
-/// listed one, `sidecar_names::governing_archives`) is its recorded upload; in a series
+/// listed one, by either fold: `sidecar_names::governing_archives_by_either_fold`, as
+/// auth asks) is its recorded upload; in a series
 /// another account owns, only while that layer is listed (a new one there is refused).
 /// `owned` and `closed` are the series keys of its own and other accounts' records,
 /// `live` those listed at the root. Archives directly in a series folder only; a folder
@@ -429,8 +430,10 @@ fn curated_volumes(
     owned: &HashSet<String>,
     closed: &HashSet<String>,
 ) -> Vec<CuratedVolume> {
-    use bunko_core::sidecar_names::{cbz_stem, governing_archives};
+    use bunko_core::sidecar_names::{cbz_stem, governing_archives_by_either_fold};
     use bunko_db::uploads::fold_series_title_key;
+    use bunko_library::fsutil::ListedPath;
+    use std::collections::BTreeSet;
     let uploads = match db.volume_uploads_by(username) {
         Ok(rows) => rows,
         Err(e) => {
@@ -438,21 +441,29 @@ fn curated_volumes(
             return Vec::new();
         }
     };
-    let mut by_folder: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    // Each record is read where it leads through the listings (a series or volume
+    // renamed to another case outside Bunko included, a shadowed case variant never),
+    // and each governing archive's owner is asked exactly as auth asks it.
+    let walk = bunko_library::fsutil::ListedWalk::new(library);
+    let mut by_folder: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for rel in &uploads {
-        if let Some((folder, name)) = rel.split_once('/')
+        if let Ok(ListedPath::Reaches(listed)) = walk.walk(rel)
+            && let Some((folder, name)) = listed.split_once('/')
             && !name.contains('/')
         {
-            by_folder.entry(folder).or_default().push(name);
+            by_folder
+                .entry(folder.to_string())
+                .or_default()
+                .insert(name.to_string());
         }
     }
     let mut out = Vec::new();
     for (folder, archives) in by_folder {
-        let key = fold_series_title_key(folder);
+        let key = fold_series_title_key(&folder);
         if !live.contains(&key) || owned.contains(&key) {
             continue;
         }
-        let Ok(entries) = bunko_store::fs::read_dir(library.join(folder)) else {
+        let Ok(entries) = bunko_store::fs::read_dir(library.join(&folder)) else {
             continue;
         };
         let names: Vec<String> = entries
@@ -461,23 +472,25 @@ fn curated_volumes(
             .filter_map(|e| e.file_name().into_string().ok())
             .collect();
         let listed: Vec<&str> = names.iter().map(String::as_str).collect();
-        for archive in archives {
-            let Some(stem) = cbz_stem(archive).filter(|_| listed.contains(&archive)) else {
+        for archive in &archives {
+            let Some(stem) = cbz_stem(archive) else {
                 continue;
             };
             let layer = format!("{stem}.curated.mokuro");
             if closed.contains(&key) && !listed.contains(&layer.as_str()) {
                 continue;
             }
-            let governors = governing_archives(&layer, &listed);
+            let governors = governing_archives_by_either_fold(&layer, &listed);
             let mine = !governors.is_empty()
                 && governors.iter().all(|g| {
-                    let rel = format!("{folder}/{g}");
-                    uploads.binary_search(&rel).is_ok()
+                    crate::backend::volume_owner_in(db, &walk, &format!("{folder}/{g}"))
+                        .ok()
+                        .flatten()
+                        .is_some_and(|owner| owner.eq_ignore_ascii_case(username))
                 });
             if mine {
                 out.push(CuratedVolume {
-                    series: folder.to_string(),
+                    series: folder.clone(),
                     volume: stem.to_string(),
                 });
             }
@@ -752,6 +765,45 @@ mod tests {
             .unwrap();
         let p = reported(&db, &library, &bob);
         assert_eq!(p["curated"], json!({"scope": "owned", "volumes": []}));
+    }
+
+    /// A series folder renamed to another case outside Bunko is read through the
+    /// listings, as auth reads it, the same on every host: its uploads stay offered
+    /// under the listed spelling. A shadowed case variant's uploads (both spellings
+    /// listed, a case-sensitive disk) are never offered for the winner.
+    #[test]
+    fn curated_volumes_follow_the_listings_on_every_host() {
+        let (_dir, db, library, bob) = owners_library();
+        bunko_store::fs::create_dir_all(library.join("shared")).unwrap();
+        bunko_store::fs::write(library.join("shared/Vol 3.cbz"), b"x").unwrap();
+        db.record_volume_upload("shared/Vol 3.cbz", "bob").unwrap();
+        bunko_store::fs::rename(library.join("shared"), library.join("Shared")).unwrap();
+        let p = reported(&db, &library, &bob);
+        assert_eq!(
+            p["curated"],
+            json!({"scope": "owned", "volumes": [{"series": "Shared", "volume": "Vol 3"}]})
+        );
+        // Another `shared/` made beside it outside Bunko, where the store keeps both:
+        // bob's rows now spell that hidden folder, and give him nothing in `Shared/`.
+        bunko_store::fs::create_dir_all(library.join("shared")).unwrap();
+        bunko_store::fs::write(library.join("shared/Vol 4.cbz"), b"x").unwrap();
+        bunko_store::fs::write(library.join("Shared/Vol 4.cbz"), b"x").unwrap();
+        db.record_volume_upload("shared/Vol 4.cbz", "bob").unwrap();
+        let two = bunko_library::fsutil::list_dir(&library)
+            .unwrap()
+            .iter()
+            .any(|(n, _)| n == "shared");
+        let want = if two {
+            json!([])
+        } else {
+            // One folder: `shared/Vol 4.cbz` is bob's upload in `Shared/`.
+            json!([
+                {"series": "Shared", "volume": "Vol 3"},
+                {"series": "Shared", "volume": "Vol 4"},
+            ])
+        };
+        let p = reported(&db, &library, &bob);
+        assert_eq!(p["curated"], json!({"scope": "owned", "volumes": want}));
     }
 
     /// Owner records that cannot be read are no empty list: /me still answers (a reader

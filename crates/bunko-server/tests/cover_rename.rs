@@ -49,6 +49,17 @@ impl Env {
     fn new() -> Env {
         let dir = tempfile::tempdir().unwrap();
         let storage = dir.path().join("storage");
+        // The storage as configured is not the path the disk names: WebDAV resolves
+        // the library root (links, and on Windows the `\\?\` final path) while the
+        // cover worker walks it as configured. macOS temp folders are under a link
+        // (`/var` -> `/private/var`) and Windows always differs; a link here makes
+        // every host see two spellings of one library.
+        #[cfg(unix)]
+        {
+            let real = dir.path().join("real-storage");
+            std::fs::create_dir_all(&real).unwrap();
+            std::os::unix::fs::symlink(&real, &storage).unwrap();
+        }
         std::fs::create_dir_all(storage.join("library/S")).unwrap();
         let mut config = Config::default();
         config.storage.base_path = storage.clone();

@@ -646,11 +646,11 @@ async fn corrections_follow_a_folder_move() {
 }
 
 /// A deleted archive or folder takes every account's corrections of it along; those
-/// of another volume (rule 6: an exact stem wins over a folded one) stay.
+/// of another volume stay. A correction PUT in another spelling of the volume reaches
+/// the one the account already has: one file per account and volume on every host.
 #[tokio::test]
 async fn corrections_go_with_their_volume() {
     let env = Env::new();
-    std::fs::write(env.lib("series/VOL1.cbz"), b"x").unwrap();
     std::fs::write(env.lib("series/vol2.cbz"), b"x").unwrap();
     for user in ["alice", "bob"] {
         env.put_correction(user, EDIT, user).await;
@@ -659,6 +659,21 @@ async fn corrections_go_with_their_volume() {
         .await;
     env.put_correction("alice", "/mokuro-reader/series/vol2.edit.mokuro", "two")
         .await;
+    let listed = |user: &str| {
+        let dir = env.base.join("users").join(user).join("edits/series");
+        let mut v: Vec<String> = std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    };
+    assert_eq!(listed("alice"), ["vol1.edit.mokuro", "vol2.edit.mokuro"]);
+    assert_eq!(
+        std::fs::read(env.overlay("alice", "series/vol1.edit.mokuro")).unwrap(),
+        layer("upper")
+    );
     let r = env
         .req(
             Some("editor"),
@@ -669,10 +684,8 @@ async fn corrections_go_with_their_volume() {
         )
         .await;
     assert_eq!(r.code(), 204);
-    assert!(!env.overlay("alice", "series/vol1.edit.mokuro").exists());
-    assert!(!env.overlay("bob", "series/vol1.edit.mokuro").exists());
-    assert!(env.overlay("alice", "series/VOL1.edit.mokuro").exists());
-    assert!(env.overlay("alice", "series/vol2.edit.mokuro").exists());
+    assert_eq!(listed("alice"), ["vol2.edit.mokuro"]);
+    assert!(listed("bob").is_empty());
 
     let r = env
         .req(Some("editor"), "DELETE", "/mokuro-reader/series/", &[], b"")
@@ -836,4 +849,133 @@ async fn a_folder_lock_never_blocks_an_account_s_own_correction() {
         )
         .await;
     assert_eq!(put.code(), 201, "{}", put.text());
+}
+
+/// A library folder respelled outside Bunko (or in the cloud): a `Depth: infinity`
+/// listing shows the caller's correction under the folder's listed spelling, exactly as
+/// `Depth: 1` of that folder does, on every host.
+#[tokio::test]
+async fn a_respelled_folders_corrections_list_under_its_spelling() {
+    let env = Env::new();
+    let r = env.req(Some("alice"), "PUT", EDIT, &[], &layer("a")).await;
+    assert_eq!(r.code(), 201, "{}", r.text());
+    bunko_store::fs::rename(env.lib("series"), env.lib("Series")).unwrap();
+    let hrefs = |depth: &'static str, path: &'static str| {
+        let env = &env;
+        async move {
+            let r = env
+                .req(Some("alice"), "PROPFIND", path, &[("depth", depth)], b"")
+                .await;
+            assert_eq!(r.code(), 207);
+            let text = r.text();
+            let mut out: Vec<String> = text
+                .split("<D:href>")
+                .skip(1)
+                .filter_map(|s| s.split("</D:href>").next())
+                .filter(|h| h.contains("edit.mokuro"))
+                .map(str::to_string)
+                .collect();
+            out.sort();
+            out
+        }
+    };
+    let want = ["/mokuro-reader/Series/vol1.edit.mokuro"];
+    assert_eq!(hrefs("infinity", "/mokuro-reader/").await, want);
+    assert_eq!(hrefs("1", "/mokuro-reader/Series/").await, want);
+}
+
+/// A shadowed series' corrections are its own (a case-sensitive disk holding `Kingdom/`
+/// and `kingdom/`): nothing reads, overwrites, moves or deletes `edits/kingdom/`.
+/// The two folders are a frozen case-variant group: every write into either, the
+/// winner included, answers 409 until they are merged.
+#[tokio::test]
+async fn a_shadowed_series_keeps_its_corrections() {
+    let env = Env::new();
+    std::fs::create_dir_all(env.lib("kingdom")).unwrap();
+    std::fs::write(env.lib("kingdom/v.cbz"), b"hidden").unwrap();
+    std::fs::create_dir_all(env.overlay("alice", "kingdom")).unwrap();
+    let hidden = env.overlay("alice", "kingdom/v.edit.mokuro");
+    std::fs::write(&hidden, layer("hidden")).unwrap();
+    let _ = std::fs::create_dir_all(env.lib("Kingdom"));
+    if !holds_two_spellings(&env.lib(""), "Kingdom", "kingdom") {
+        return; // one folder: the correction is that folder's (the other tests)
+    }
+    std::fs::write(env.lib("Kingdom/v.cbz"), b"winner").unwrap();
+    std::fs::write(env.lib("Kingdom/w.cbz"), b"winner").unwrap();
+    let got = env
+        .req(
+            Some("alice"),
+            "GET",
+            "/mokuro-reader/Kingdom/v.edit.mokuro",
+            &[],
+            b"",
+        )
+        .await;
+    assert_eq!(got.code(), 404, "{}", got.text());
+    let put = env
+        .req(
+            Some("alice"),
+            "PUT",
+            "/mokuro-reader/Kingdom/v.edit.mokuro",
+            &[],
+            &layer("winner"),
+        )
+        .await;
+    assert_eq!(put.code(), 409, "{}", put.text());
+    assert_eq!(std::fs::read(&hidden).unwrap(), layer("hidden"));
+    let overlays: Vec<String> = std::fs::read_dir(env.overlay("alice", ""))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(overlays, ["kingdom"]);
+    let r = env
+        .req(
+            Some("admin"),
+            "DELETE",
+            "/mokuro-reader/Kingdom/v.cbz",
+            &[],
+            b"",
+        )
+        .await;
+    assert_eq!(r.code(), 409, "{}", r.text());
+    assert_eq!(
+        env.mv("admin", "/mokuro-reader/Kingdom/", "/mokuro-reader/Other/")
+            .await,
+        409
+    );
+    assert_eq!(std::fs::read(env.lib("Kingdom/v.cbz")).unwrap(), b"winner");
+    assert_eq!(std::fs::read(&hidden).unwrap(), layer("hidden"));
+}
+
+/// The cloud-root owner's per-user entries keep their canonical names in the cloud
+/// folder, and Bunko never writes one beside another spelling of it (a 0.7 `History/`,
+/// a `Goals.json`): the write is refused until that entry is renamed, the same on
+/// every host. Without such an entry the owner writes as usual.
+#[tokio::test]
+async fn the_cloud_owner_never_writes_a_second_spelling_of_a_per_user_name() {
+    let env = Env::new();
+    std::fs::create_dir_all(env.lib("History/dev")).unwrap();
+    std::fs::write(env.lib("Goals.json"), b"{}").unwrap();
+    for (method, path) in [
+        ("MKCOL", "/mokuro-reader/history"),
+        ("MKCOL", "/mokuro-reader/history/dev2"),
+        ("PUT", "/mokuro-reader/history/dev/x.events"),
+        ("PUT", "/mokuro-reader/goals.json"),
+        ("PUT", "/mokuro-reader/Goals.json"),
+    ] {
+        let r = env.as_owner("owner", method, path, b"{}").await;
+        assert_eq!(r.code(), 409, "{method} {path}: {}", r.text());
+    }
+    let mut root: Vec<String> = std::fs::read_dir(env.lib(""))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.eq_ignore_ascii_case("history") || n.eq_ignore_ascii_case("goals.json"))
+        .collect();
+    root.sort();
+    assert_eq!(root, ["Goals.json", "History"]);
+    assert_eq!(std::fs::read(env.lib("Goals.json")).unwrap(), b"{}");
+    let r = env
+        .as_owner("owner", "PUT", "/mokuro-reader/profiles.json", b"{}")
+        .await;
+    assert_eq!(r.code(), 201, "{}", r.text());
 }

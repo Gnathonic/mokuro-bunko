@@ -44,8 +44,8 @@ pub use analytics::{
 };
 pub use bunko_core::reader_tree::Caller;
 pub use cache::{CacheConfig, PropfindCache};
-pub use hooks::{AuditEvent, DavHooks, NoHooks, PutFollowUp};
-pub use path_case::{LibraryPathCanonicalizer, PathCase, fold_name, is_case_sensitive};
+pub use hooks::{AuditEvent, DavHooks, HookGuard, NoHooks, PutFollowUp};
+pub use path_case::{LibraryPathCanonicalizer, PathCase, fold_name};
 pub use personal::{EDITS_DIR, MAX_LAYER_BYTES, PersonalOverlays};
 pub use upload::{DamageMemory, DigestAlgo, parse_content_digest};
 pub use write_locks::{AccountWriteGuard, AccountWriteLocks, PathWriteLocks, WriteLockGuard};
@@ -172,6 +172,11 @@ pub(crate) struct Inner {
     pub roots: Roots,
     pub write_locks: PathWriteLocks,
     pub history_writers: AccountWriteLocks,
+    /// One archive publish per library folder at a time, from the last check of its
+    /// name against the folder's archives to the publish
+    /// ([`methods::archive_name_check`]): two archives the filename fold makes one
+    /// volume name never both land. Keyed by the folder's physical path, folded.
+    pub archive_publishes: AccountWriteLocks,
     pub locks: LockManager,
     pub dead: DeadProps,
     pub damage: DamageMemory,
@@ -203,8 +208,7 @@ pub enum DavInitError {
 }
 
 impl Dav {
-    /// Build the handler over `layout` (creates `library/`, `inbox/`, `users/` and
-    /// `library/thumbnails/` like 0.5.2). Call inside a tokio runtime so the PROPFIND cache
+    /// Build the handler over `layout` (creates `library/`, `inbox/` and `users/`). Call inside a tokio runtime so the PROPFIND cache
     /// can schedule background refreshes.
     pub fn new(layout: &StorageLayout, config: DavConfig) -> Result<Dav, DavInitError> {
         layout.ensure_directories()?;
@@ -214,12 +218,13 @@ impl Dav {
             history: config.history,
         };
         let cache = PropfindCache::new(config.propfind_cache, roots.clone());
-        let path_case = PathCase::new(LibraryPathCanonicalizer::new(roots.library.clone(), None));
+        let path_case = PathCase::new(LibraryPathCanonicalizer::new(roots.library.clone()));
         Ok(Dav {
             inner: Arc::new(Inner {
                 roots,
                 write_locks: PathWriteLocks::new(),
                 history_writers: AccountWriteLocks::default(),
+                archive_publishes: AccountWriteLocks::default(),
                 locks: LockManager::new(),
                 dead: DeadProps::default(),
                 damage: DamageMemory::default(),
@@ -346,7 +351,7 @@ pub enum LibraryChange {
     Library,
     /// Inside the series folder of this name.
     Series(String),
-    /// Under `thumbnails/`, or the cloud-root owner's per-user tree.
+    /// The cloud-root owner's per-user tree.
     Ignore,
 }
 
@@ -367,9 +372,6 @@ pub fn classify_change(library_root: &Path, path: &Path) -> LibraryChange {
     }
     if parts.len() < 2 {
         return LibraryChange::Library;
-    }
-    if parts[0] == "thumbnails" {
-        return LibraryChange::Ignore;
     }
     LibraryChange::Series(parts[0].clone())
 }
@@ -409,10 +411,6 @@ mod tests {
             LibraryChange::Library
         );
         assert_eq!(
-            classify_change(root, Path::new("/lib/thumbnails/a.webp")),
-            LibraryChange::Ignore
-        );
-        assert_eq!(
             classify_change(root, Path::new("/lib/S/v.cbz")),
             LibraryChange::Series("S".into())
         );
@@ -428,10 +426,19 @@ mod tests {
             classify_change(root, Path::new("/lib/history")),
             LibraryChange::Ignore
         );
+        // Reserved in any spelling.
         assert_eq!(
             classify_change(root, Path::new("/lib/History/v.cbz")),
-            LibraryChange::Series("History".into())
+            LibraryChange::Ignore
         );
+        // `thumbnails` is no reserved name in any spelling (covers live beside their
+        // archives; 0.5.2's cover cache folder is gone): a series like any, everywhere.
+        for name in ["thumbnails", "Thumbnails"] {
+            assert_eq!(
+                classify_change(root, &Path::new("/lib").join(name).join("a.webp")),
+                LibraryChange::Series(name.into())
+            );
+        }
         assert!(is_relevant_change(Path::new("/lib/S/v.mokuro.gz"), false));
         assert!(is_relevant_change(Path::new("/lib/S/v.webp"), false));
         assert!(!is_relevant_change(Path::new("/lib/S/series.json"), false));

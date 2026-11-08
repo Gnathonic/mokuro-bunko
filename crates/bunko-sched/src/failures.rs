@@ -85,6 +85,9 @@ pub enum Eligibility {
     Retry,
     /// Still in backoff: skipped.
     BackedOff,
+    /// A failure of the volume itself that nothing since could have changed: not
+    /// retried by time ([`FailureKind::parks`]).
+    Parked,
 }
 
 impl Eligibility {
@@ -113,6 +116,69 @@ pub fn eligibility(
     }
 }
 
+/// What a failure record's error means, as far as anyone browsing the library needs to
+/// know: the catalog shows [`FailureKind::public_text`], never the error itself (it can
+/// name a processor's paths, devices and settings).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FailureKind {
+    /// The archive holds no page the OCR could decode.
+    NoReadablePages,
+    /// The archive could not be opened as a zip.
+    DamagedArchive,
+    /// A machine's trouble (out of memory, a timeout, a lost connection or download).
+    Machine,
+    /// Anything else.
+    Other,
+}
+
+impl FailureKind {
+    /// The kind of a record's `error`, from the messages the OCR reports.
+    pub fn of(error: &str) -> FailureKind {
+        let e = error.trim();
+        if e.starts_with("no page images found") || e == "every page failed" {
+            FailureKind::NoReadablePages
+        } else if e.starts_with("archive ") || e.contains("not a zip file") {
+            FailureKind::DamagedArchive
+        } else {
+            let lower = e.to_ascii_lowercase();
+            let machine = [
+                "out of memory",
+                "timed out",
+                "timeout",
+                "connection",
+                "disconnect",
+                "download",
+            ];
+            if machine.iter().any(|m| lower.contains(m)) {
+                FailureKind::Machine
+            } else {
+                FailureKind::Other
+            }
+        }
+    }
+
+    /// A failure of the volume itself: waiting cannot help, so it is parked until the
+    /// archive, the library's release or a release that has not tried it could change
+    /// the outcome (see [`machine_may_retry`]).
+    pub fn parks(self) -> bool {
+        matches!(
+            self,
+            FailureKind::NoReadablePages | FailureKind::DamagedArchive
+        )
+    }
+
+    /// One sentence for the catalog's hover text.
+    pub fn public_text(self) -> &'static str {
+        match self {
+            FailureKind::NoReadablePages => "This volume has no pages that could be decoded.",
+            FailureKind::DamagedArchive => "The archive is damaged or is not a valid zip file.",
+            FailureKind::Machine | FailureKind::Other => {
+                "OCR failed; it will be tried again later."
+            }
+        }
+    }
+}
+
 /// `_pending_entry`'s `attempts`: shown only for a record not made void by
 /// a replaced archive.
 pub fn pending_attempts(record: Option<&Object>, archive_mtime: Option<f64>) -> Option<i64> {
@@ -121,6 +187,126 @@ pub fn pending_attempts(record: Option<&Object>, archive_mtime: Option<f64>) -> 
         None
     } else {
         Some(attempts(record, 1))
+    }
+}
+
+/// Record field: the library's release when the record was last written.
+pub const LIBRARY_VERSION: &str = "library_version";
+/// Record field: the releases of the machines that failed it, once each, in order.
+pub const TRIED_BY: &str = "tried_by";
+
+/// The retry delay for a failure of `kind` after `attempts`: a machine's trouble keeps
+/// [`retry_delay_seconds`] (capped at an hour); an error nobody recognizes backs off
+/// further once it reached the cap: 6 h at the 7th attempt, a day at the 8th, a week
+/// from the 9th on. (A parked failure is not retried by time at all.)
+pub fn retry_delay_for(kind: FailureKind, poll_interval: f64, attempts: i64) -> f64 {
+    let base = retry_delay_seconds(poll_interval, attempts);
+    match (kind, attempts) {
+        (FailureKind::Machine, _) | (_, ..=6) => base,
+        (_, 7) => 6.0 * 3600.0,
+        (_, 8) => 24.0 * 3600.0,
+        _ => 7.0 * 86400.0,
+    }
+}
+
+/// Stamp a record the server just wrote with the library's release and add the failing
+/// machine's to `tried_by` (once).
+pub fn stamp_versions(record: &mut Object, library_version: &str, machine_version: &str) {
+    record.insert(LIBRARY_VERSION.into(), Value::from(library_version));
+    let mut tried = tried_by(record);
+    if !tried.iter().any(|v| v == machine_version) {
+        tried.push(machine_version.to_string());
+    }
+    record.insert(
+        TRIED_BY.into(),
+        Value::Array(tried.into_iter().map(Value::from).collect()),
+    );
+}
+
+fn tried_by(record: &Object) -> Vec<String> {
+    record
+        .get(TRIED_BY)
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn error_kind(record: &Object) -> FailureKind {
+    FailureKind::of(record.get("error").and_then(Value::as_str).unwrap_or(""))
+}
+
+/// Whether a machine of release `machine_version` may try a volume again, given its
+/// failure record (none: yes). A machine's trouble: once its backoff is over. Otherwise
+/// a machine may when the library's release changed since the record was written, or
+/// its own release has not tried it; an unrecognized error also once its (growing)
+/// backoff is over. A parked failure never comes back by time.
+pub fn machine_may_retry(
+    record: Option<&Object>,
+    machine_version: &str,
+    now: f64,
+    poll_interval: f64,
+    library_version: &str,
+) -> bool {
+    let Some(record) = record else {
+        return true;
+    };
+    let kind = error_kind(record);
+    let delay = retry_delay_for(kind, poll_interval, attempts(record, 1));
+    let timed = now >= last_attempt_at(record) + delay;
+    if kind == FailureKind::Machine {
+        return timed;
+    }
+    let library_changed =
+        record.get(LIBRARY_VERSION).and_then(Value::as_str) != Some(library_version);
+    let untried = !tried_by(record).iter().any(|v| v == machine_version);
+    library_changed || untried || (!kind.parks() && timed)
+}
+
+/// The releases a failed volume could be retried by: the library's and those of the
+/// machines connected now.
+#[derive(Clone, Debug, Default)]
+pub struct Fleet<'a> {
+    pub library_version: &'a str,
+    /// The connected machines' releases (none connected: judged as the library's).
+    pub machine_versions: Vec<String>,
+}
+
+/// [`eligibility`] for a fleet: a record is retried when some connected machine may
+/// retry it ([`machine_may_retry`]); else a failure of the volume itself is
+/// [`Eligibility::Parked`] and any other [`Eligibility::BackedOff`].
+pub fn eligibility_in(
+    record: Option<&Object>,
+    archive_mtime: Option<f64>,
+    now: f64,
+    poll_interval: f64,
+    fleet: &Fleet<'_>,
+) -> Eligibility {
+    let Some(record) = record else {
+        return Eligibility::Fresh;
+    };
+    if replaced_since_failure(archive_mtime, record) {
+        return Eligibility::Replaced;
+    }
+    let lone = [fleet.library_version.to_string()];
+    let versions: &[String] = if fleet.machine_versions.is_empty() {
+        &lone
+    } else {
+        &fleet.machine_versions
+    };
+    if versions
+        .iter()
+        .any(|v| machine_may_retry(Some(record), v, now, poll_interval, fleet.library_version))
+    {
+        Eligibility::Retry
+    } else if error_kind(record).parks() {
+        Eligibility::Parked
+    } else {
+        Eligibility::BackedOff
     }
 }
 
@@ -224,6 +410,18 @@ pub fn keep_record(
 
 /// `archive_still_there` against a real library directory.
 pub fn archive_exists_in(library: &Path, series: &str, volume: &str) -> bool {
+    archive_exists_with(library, series, volume, Path::is_file)
+}
+
+/// `archive_still_there` with the file test given: a library on a store (a cloud
+/// library's root is a mount that never exists on disk) answers through the store,
+/// which this crate does not know.
+pub fn archive_exists_with(
+    library: &Path,
+    series: &str,
+    volume: &str,
+    is_file: impl Fn(&Path) -> bool,
+) -> bool {
     let folder = if series.is_empty() {
         library.to_path_buf()
     } else {
@@ -231,7 +429,7 @@ pub fn archive_exists_in(library: &Path, series: &str, volume: &str) -> bool {
     };
     ARCHIVE_EXTENSIONS
         .iter()
-        .any(|ext| folder.join(format!("{volume}{ext}")).is_file())
+        .any(|ext| is_file(&folder.join(format!("{volume}{ext}"))))
 }
 
 /// `<storage>/.ocr-failures.json`.
@@ -372,7 +570,13 @@ pub fn failure_log_line(
     poll_interval: f64,
     error: &str,
 ) -> String {
-    let delay = retry_delay_seconds(poll_interval, attempts).trunc() as i64;
+    let kind = FailureKind::of(error);
+    if kind.parks() {
+        return format!(
+            "OCR ({row_name}) failed for {rel_cbz} (attempt {attempts}, not retried until the archive is replaced or a release changes): {error}"
+        );
+    }
+    let delay = retry_delay_for(kind, poll_interval, attempts).trunc() as i64;
     format!(
         "OCR ({row_name}) failed for {rel_cbz} (attempt {attempts}, next retry in ~{delay}s): {error}"
     )
@@ -381,6 +585,164 @@ pub fn failure_log_line(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What the catalog may show anyone: the kind of failure only, never the error text
+    /// (which names a processor's paths).
+    #[test]
+    fn failure_kinds_and_their_public_text() {
+        use FailureKind::*;
+        for (error, kind) in [
+            ("no page images found in Vol 1.cbz", NoReadablePages),
+            ("every page failed", NoReadablePages),
+            (
+                "archive /proc/self/fd/7: no end of central directory",
+                DamagedArchive,
+            ),
+            ("File is not a zip file", DamagedArchive),
+            ("CUDA out of memory", Machine),
+            ("download of the archive timed out", Machine),
+            ("the models would not load", Other),
+            ("", Other),
+        ] {
+            assert_eq!(FailureKind::of(error), kind, "{error:?}");
+        }
+        assert_eq!(
+            NoReadablePages.public_text(),
+            "This volume has no pages that could be decoded."
+        );
+        assert_eq!(
+            DamagedArchive.public_text(),
+            "The archive is damaged or is not a valid zip file."
+        );
+        assert_eq!(
+            Other.public_text(),
+            "OCR failed; it will be tried again later."
+        );
+        assert_eq!(Machine.public_text(), Other.public_text());
+    }
+
+    /// A record as the server writes it: failed at `at` with `error`, by a machine of
+    /// release `machine` while the library ran `library`.
+    fn failed(error: &str, at: f64, attempts: i64, library: &str, machine: &str) -> Object {
+        let mut failures = Map::new();
+        let new = NewFailure {
+            series: "S",
+            volume: "V",
+            generation: "g",
+            engine: "e",
+            detector: None,
+            error: Some(error),
+            log_file: None,
+        };
+        for i in 0..attempts {
+            record_failure(
+                &mut failures,
+                "S/V.cbz",
+                &new,
+                at - (attempts - 1 - i) as f64,
+            );
+        }
+        let mut record = failures["S/V.cbz"].as_object().unwrap().clone();
+        stamp_versions(&mut record, library, machine);
+        record
+    }
+
+    fn fleet<'a>(library: &'a str, machines: &[&str]) -> Fleet<'a> {
+        Fleet {
+            library_version: library,
+            machine_versions: machines.iter().map(|m| m.to_string()).collect(),
+        }
+    }
+
+    /// A failure of the volume itself is parked: no amount of waiting brings it back,
+    /// only a replaced archive, another library release, or a machine of a release that
+    /// has not tried it (and then only that machine).
+    #[test]
+    fn volume_failures_park_until_something_could_change_the_outcome() {
+        let r = failed("no page images found in V.cbz", 1000.0, 3, "0.7.7", "0.7.6");
+        assert_eq!(r["tried_by"], serde_json::json!(["0.7.6"]));
+        let later = 1000.0 + 365.0 * 86400.0;
+        let el = |f: &Fleet| eligibility_in(Some(&r), Some(900.0), later, 30.0, f);
+        assert_eq!(el(&fleet("0.7.7", &["0.7.6"])), Eligibility::Parked);
+        assert_eq!(el(&fleet("0.7.7", &["0.7.6", "0.7.8"])), Eligibility::Retry);
+        assert!(machine_may_retry(Some(&r), "0.7.8", later, 30.0, "0.7.7"));
+        assert!(!machine_may_retry(Some(&r), "0.7.6", later, 30.0, "0.7.7"));
+        // The library's release changed: once more, by any machine.
+        assert_eq!(el(&fleet("0.7.8", &["0.7.6"])), Eligibility::Retry);
+        assert!(machine_may_retry(Some(&r), "0.7.6", later, 30.0, "0.7.8"));
+        // A replaced archive, as before.
+        let f = fleet("0.7.7", &["0.7.6"]);
+        assert_eq!(
+            eligibility_in(Some(&r), Some(5000.0), later, 30.0, &f),
+            Eligibility::Replaced
+        );
+        // A record an older server wrote (no versions): tried once more.
+        let mut old = r.clone();
+        old.remove("library_version");
+        old.remove("tried_by");
+        assert_eq!(
+            eligibility_in(Some(&old), Some(900.0), later, 30.0, &f),
+            Eligibility::Retry
+        );
+        // A second failure by another release adds it, once.
+        let mut both = r.clone();
+        stamp_versions(&mut both, "0.7.7", "0.7.8");
+        stamp_versions(&mut both, "0.7.7", "0.7.8");
+        assert_eq!(both["tried_by"], serde_json::json!(["0.7.6", "0.7.8"]));
+        let f2 = fleet("0.7.7", &["0.7.6", "0.7.8"]);
+        assert_eq!(
+            eligibility_in(Some(&both), Some(900.0), later, 30.0, &f2),
+            Eligibility::Parked
+        );
+    }
+
+    /// A machine's trouble keeps the hourly cap; an error nobody recognizes backs off
+    /// further: an hour, then 6 h, a day, and a week from then on.
+    #[test]
+    fn machine_failures_keep_the_hourly_cap_and_unknown_ones_back_off_further() {
+        assert_eq!(retry_delay_for(FailureKind::Machine, 30.0, 1), 30.0);
+        assert_eq!(retry_delay_for(FailureKind::Machine, 30.0, 50), 3600.0);
+        let other = |n| retry_delay_for(FailureKind::Other, 30.0, n);
+        assert_eq!(other(1), 30.0);
+        assert_eq!(other(6), 3600.0);
+        assert_eq!(other(7), 6.0 * 3600.0);
+        assert_eq!(other(8), 24.0 * 3600.0);
+        assert_eq!(other(9), 7.0 * 86400.0);
+        assert_eq!(other(500), 7.0 * 86400.0);
+        // An unknown error 2 h after its 7th attempt still waits (6 h)…
+        let r = failed("the models would not load", 1000.0, 7, "0.7.7", "0.7.6");
+        let f = fleet("0.7.7", &["0.7.6"]);
+        let el = |now: f64, f: &Fleet| eligibility_in(Some(&r), Some(900.0), now, 30.0, f);
+        assert_eq!(el(1000.0 + 7200.0, &f), Eligibility::BackedOff);
+        assert_eq!(el(1000.0 + 6.0 * 3600.0 + 1.0, &f), Eligibility::Retry);
+        // …unless a release that has not tried it is here.
+        assert_eq!(
+            el(1000.0 + 7200.0, &fleet("0.7.7", &["0.7.6", "0.7.8"])),
+            Eligibility::Retry
+        );
+        // A machine's trouble: the hourly cap, whoever is here.
+        let m = failed("CUDA out of memory", 1000.0, 9, "0.7.7", "0.7.6");
+        assert_eq!(
+            eligibility_in(Some(&m), Some(900.0), 1000.0 + 3601.0, 30.0, &f),
+            Eligibility::Retry
+        );
+    }
+
+    #[test]
+    fn the_log_line_says_when_it_comes_back() {
+        assert!(
+            failure_log_line("g", "S/V.cbz", 3, 30.0, "every page failed")
+                .contains("not retried until the archive is replaced or a release changes")
+        );
+        assert!(
+            failure_log_line("g", "S/V.cbz", 7, 30.0, "the models would not load")
+                .contains("next retry in ~21600s")
+        );
+        assert!(
+            failure_log_line("g", "S/V.cbz", 7, 30.0, "CUDA out of memory")
+                .contains("next retry in ~3600s")
+        );
+    }
 
     #[test]
     fn archive_extensions_match_the_shared_list() {
