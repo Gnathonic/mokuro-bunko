@@ -364,6 +364,33 @@
     }
 }
 
+/* Phone widths: the search box takes its own row and the selects share the next one
+   with the settings button, so the toolbar never scrolls the page sideways. */
+@media (max-width: 560px) {
+    .catalog-toolbar {
+        flex-wrap: wrap;
+    }
+
+    .catalog-toolbar .search-bar {
+        flex: 1 1 100%;
+        min-width: 0;
+    }
+
+    .catalog-toolbar .title-lang-select {
+        flex: 1 1 0;
+        min-width: 0;
+    }
+
+    .search-bar__input {
+        min-width: 0;
+    }
+
+    .reader-popover {
+        min-width: 0;
+        width: min(300px, calc(100vw - 2rem));
+    }
+}
+
 @media (max-width: 480px) {
     .volume-grid {
         grid-template-columns: repeat(2, 1fr);

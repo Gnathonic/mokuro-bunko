@@ -604,6 +604,9 @@
 - **Dependency updates**: zip 9, rcgen 0.14, windows 0.62, windows-sys 0.61.
 
 ### Fixed
+- **The catalog toolbar fits a phone screen.** Below 560 px wide the search box takes
+  its own row and the sort and title-language selects share the next with the reader
+  settings button; the toolbar was 553 px wide, so the page scrolled sideways at 375 px.
 - **The numbered-OCR clean-up decides from the folder listing whether a name is free.**
   It asked the disk whether `<Vol>.<layer>.mokuro` existed: beside a `Vol.FAST.mokuro`
   a case-insensitive disk said yes and the numbered `Vol.fast_1.mokuro` was deleted
