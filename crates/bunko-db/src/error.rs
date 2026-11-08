@@ -44,6 +44,20 @@ impl DbError {
         DbError::Invalid(msg.into())
     }
 
+    /// True when the file itself is damaged or is no database (`SQLITE_CORRUPT`,
+    /// `SQLITE_NOTADB`): the one case where moving a file aside is right. A locked,
+    /// read-only or unreachable file is healthy and must stay where it is.
+    pub fn is_corrupt(&self) -> bool {
+        matches!(
+            self,
+            DbError::Sqlite(rusqlite::Error::SqliteFailure(e, _))
+                if matches!(
+                    e.code,
+                    rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase
+                )
+        )
+    }
+
     /// True for SQLite's "database is locked" (`SQLITE_BUSY` and its extended codes).
     pub fn is_busy(&self) -> bool {
         matches!(self, DbError::Sqlite(e) if crate::database::is_busy(e))

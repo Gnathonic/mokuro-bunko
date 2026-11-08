@@ -63,6 +63,9 @@ pub(super) async fn get(s: &AdminState) -> Response {
         m.entry("update").or_insert_with(|| {
             json!({"check": cfg.update.check, "channel": cfg.update.channel, "manifest_url": cfg.update.manifest_url})
         });
+        // Saved only once it differs from the default; shown either way.
+        m.entry("analytics")
+            .or_insert_with(|| cfg.analytics.to_value());
         m.insert("ocr_runtime".into(), runtime);
         if let Some(Value::Object(o)) = m.get_mut("ocr") {
             o.insert("upgrade".into(), upgrade_value(&cfg.ocr.upgrade));
@@ -466,4 +469,79 @@ pub(super) async fn dyndns(s: &AdminState, req: &ApiRequest) -> Response {
         "interval": d.interval,
         "token": if d.token.is_empty() { "" } else { TOKEN_MASK },
     }}))
+}
+
+/// A JSON value as the text `config set` takes (`AnalyticsConfig::set_field` parses and
+/// range-checks it).
+fn setting_text(key: &str, v: &Value) -> Result<String, String> {
+    match v {
+        Value::Bool(b) => Ok(b.to_string()),
+        Value::Number(n) => Ok(n.to_string()),
+        Value::String(t) => Ok(t.clone()),
+        _ => Err(format!(
+            "analytics.{key} must be a boolean, a number or a string"
+        )),
+    }
+}
+
+/// `PUT /api/settings/analytics`: any of the section's keys, nested as in
+/// `config.yaml` (`{"retention": {"ip_days": 14}}`). The whole change is checked
+/// before any of it applies; unknown keys are ignored, as the other editors do.
+pub(super) async fn analytics(s: &AdminState, req: &ApiRequest) -> Response {
+    let data = match req.json() {
+        Ok(d) => d.clone(),
+        Err(r) => return r,
+    };
+    let s2 = s.clone();
+    let saved = blocking(
+        move || -> Result<bunko_core::config::AnalyticsConfig, Response> {
+            let _guard = s2.config_lock.lock();
+            let mut next = s2.core().config.read().analytics.clone();
+            let mut fields: Vec<(String, &Value)> = Vec::new();
+            for key in ["enabled", "flush_seconds"] {
+                if let Some(v) = data.get(key) {
+                    fields.push((key.to_string(), v));
+                }
+            }
+            for section in ["retention", "crawl", "library_scan", "geo"] {
+                match data.get(section) {
+                    None | Some(Value::Null) => {}
+                    Some(Value::Object(m)) => {
+                        for (k, v) in m {
+                            let field = format!("{section}.{k}");
+                            if bunko_core::config::ANALYTICS_FIELDS.contains(&field.as_str()) {
+                                fields.push((field, v));
+                            }
+                        }
+                    }
+                    Some(_) => {
+                        return Err(error(400, format!("analytics.{section} must be an object")));
+                    }
+                }
+            }
+            for (field, v) in fields {
+                let text = setting_text(&field, v).map_err(|m| error(400, m))?;
+                next.set_field(&field, &text)
+                    .map_err(|e| error(400, e.to_string()))?;
+            }
+            next.validate().map_err(|e| error(400, e.to_string()))?;
+            let before = std::mem::replace(&mut s2.core().config.write().analytics, next);
+            if let Err(r) = save_config(&s2) {
+                // Not saved, not applied: the layer's cached flag, the settings view
+                // and the config keep agreeing.
+                s2.core().config.write().analytics = before;
+                return Err(r);
+            }
+            Ok(s2.core().config.read().analytics.clone())
+        },
+    )
+    .await;
+    let cfg = match saved {
+        Ok(Ok(c)) => c,
+        Ok(Err(r)) | Err(r) => return r,
+    };
+    if let Some(a) = &s.deps.analytics {
+        a.settings_changed();
+    }
+    ok(json!({"success": true, "analytics": cfg.to_value()}))
 }

@@ -30,7 +30,7 @@ fn copy_fixture(name: &str) -> (tempfile::TempDir, PathBuf) {
     (dir, path)
 }
 
-/// The tables and the index 0.8 adds (schema version 7), which no Python build made:
+/// The tables and the indexes 0.8 adds (schema version 7), which no Python build made:
 /// kept out of the rows compared with the Python manifests and checked on their own
 /// ([`series_folder_owner_tables`]).
 fn is_v7_row(row: &Value) -> bool {
@@ -38,6 +38,7 @@ fn is_v7_row(row: &Value) -> bool {
         .as_str()
         .is_some_and(|t| t.starts_with("series_folder_"))
         || row[1].as_str() == Some("idx_volume_uploads_uploader_nocase")
+        || row[1].as_str() == Some("idx_volume_identities_uuid")
 }
 
 /// [`all_schema_rows`] without the version 7 tables: what Python 0.5.3 compares.
@@ -143,10 +144,10 @@ fn version_of(path: &Path) -> i64 {
         .unwrap()
 }
 
-/// Version 7 (0.8) adds the series folder owners and the NOCASE uploader index, after
-/// everything 0.5.3 has. A new database is adopted at once (it tracks no volume); a
-/// Python one that tracks volumes waits for the server's adoption, and opening it again
-/// changes nothing.
+/// Version 7 (0.8) adds the series folder owners, the NOCASE uploader index and the
+/// volume uuid index, after everything 0.5.3 has. A new database is adopted at once (it
+/// tracks no volume); a Python one that tracks volumes waits for the server's adoption,
+/// and opening it again changes nothing.
 #[test]
 fn series_folder_owner_tables() {
     let names = |path: &Path| -> Vec<String> {
@@ -163,6 +164,7 @@ fn series_folder_owner_tables() {
         "sqlite_autoindex_series_folder_owners_1",
         "series_folder_adoption",
         "idx_volume_uploads_uploader_nocase",
+        "idx_volume_identities_uuid",
     ];
     let dir = tempfile::tempdir().unwrap();
     let fresh = dir.path().join("mokuro.db");

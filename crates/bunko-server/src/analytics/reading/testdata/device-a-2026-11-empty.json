@@ -1,0 +1,11 @@
+{
+ "header": {
+  "format": 1,
+  "device": "device-a",
+  "month": "2026-11",
+  "first_seq": 0,
+  "last_seq": 0,
+  "count": 0
+ },
+ "events": []
+}

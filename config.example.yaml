@@ -118,6 +118,39 @@ database:
   # First retry backoff delay in seconds; doubles on each subsequent retry
   retry_initial_delay_seconds: 0.05
 
+analytics:
+  # Server-side usage analytics for the admin panel's Analytics tab: downloads,
+  # reading, bandwidth (WebDAV and web alike, by category, protocol and method),
+  # errors, latency, crawlers. Kept in analytics.sqlite beside mokuro.db (delete
+  # it to start over). Off: requests are not counted; what is stored stays
+  # viewable.
+  enabled: true
+  # How often the in-memory counters are written (a crash loses at most this).
+  flush_seconds: 60
+  retention:
+    # Raw client IPs (per-IP rows, anonymous visitors' IPs, failed sign-ins,
+    # the slowest requests). Afterwards only pseudonymous ids remain.
+    ip_days: 30
+    # Hourly traffic and latency rows (daily totals are kept forever).
+    hourly_days: 90
+    host_minute_days: 7
+    crawl_days: 90
+  crawl:
+    # An IP "crawls" when, within window_hours, it touches at least min_series
+    # series AND at least min_coverage of the catalog. Reported only, never blocked.
+    window_hours: 6
+    min_series: 20
+    min_coverage: 0.25
+  library_scan:
+    interval_hours: 6
+    # Count page image formats inside archives (local libraries only).
+    page_formats: true
+  geo:
+    # Country per IP from DB-IP's free "IP to Country Lite" database (CC BY 4.0),
+    # downloaded monthly when enabled. Off by default.
+    enabled: false
+    url: "https://download.db-ip.com/free/dbip-country-lite-{year}-{month}.mmdb.gz"
+
 update:
   # Look for new releases in the background (every 12 hours) and show them in
   # the admin panel's Updates card.
