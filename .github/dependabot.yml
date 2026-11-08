@@ -25,6 +25,14 @@ updates:
       - dependency-name: ort
       - dependency-name: tch
       - dependency-name: torch-sys
+      # bunko-tray's own zbus (the `doctor` check) follows the zbus major that
+      # ksni uses, so the tray links one copy. Move it when ksni moves.
+      - dependency-name: zbus
+        update-types: ["version-update:semver-major"]
+      # bunko-android stays on jni 0.21 (see its Cargo.toml): 0.22 reworks the
+      # API, and the Android build is opt-in.
+      - dependency-name: jni
+        update-types: ["version-update:semver-major"]
     groups:
       cargo-minor-patch:
         update-types: [minor, patch]
@@ -36,6 +44,10 @@ updates:
       day: monday
     cooldown:
       default-days: 7
+    ignore:
+      # The msrv job pins this action's ref to the workspace rust-version
+      # (the ref is the toolchain), so it moves with Cargo.toml, not by bot.
+      - dependency-name: dtolnay/rust-toolchain
     groups:
       actions:
         patterns: ["*"]
