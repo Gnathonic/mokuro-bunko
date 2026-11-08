@@ -12,11 +12,11 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 /// A one-route HTTPS server with a self-signed certificate for `localhost`; its port
 /// and the certificate's PEM.
 async fn https_server() -> (u16, String) {
-    let rcgen::CertifiedKey { cert, key_pair } =
+    let rcgen::CertifiedKey { cert, signing_key } =
         rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
     let pem = cert.pem();
     let certs = vec![CertificateDer::from(cert.der().to_vec())];
-    let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_pair.serialize_der()));
+    let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(signing_key.serialize_der()));
     let config = rustls::ServerConfig::builder_with_provider(Arc::new(
         rustls::crypto::ring::default_provider(),
     ))
