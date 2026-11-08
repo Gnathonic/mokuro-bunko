@@ -819,7 +819,7 @@ impl Detector {
         let folded: HashSet<String> = snapshot
             .series
             .iter()
-            .map(|s| bunko_db::fold_series_title_key(&s.name))
+            .map(|s| crate::analytics::classify::series_key(&s.name))
             .collect();
         let keys: HashSet<u32, Fx> = folded.iter().map(|k| hash32(k)).collect();
         self.catalog.store(folded.len() as u64, Ordering::Relaxed);

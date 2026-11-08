@@ -7,6 +7,7 @@
 //!
 //! Everything here blocks (the main database): call it from `spawn_blocking`.
 
+use crate::analytics::classify::series_key;
 use bunko_db::Database;
 use bunko_db::analytics::reading::Attribution;
 use parking_lot::Mutex;
@@ -52,13 +53,13 @@ pub fn volume_stem(volume_key: &str) -> &str {
 pub fn series_of_key(volume_key: &str) -> Option<(String, String)> {
     let (parent, _) = volume_key.trim_matches('/').rsplit_once('/')?;
     let title = parent.trim_matches('/');
-    (!title.is_empty()).then(|| (bunko_db::fold_series_title_key(title), title.to_string()))
+    (!title.is_empty()).then(|| (series_key(title), title.to_string()))
 }
 
 /// A volume's identity within its series, the same for every spelling of it:
 /// `fold(series folder / stem)`.
 pub fn volume_fold(series_title: &str, stem: &str) -> String {
-    bunko_db::fold_series_title_key(&format!("{}/{}", series_title.trim_matches('/'), stem))
+    series_key(&format!("{}/{}", series_title.trim_matches('/'), stem))
 }
 
 /// Where a library archive's reading goes.

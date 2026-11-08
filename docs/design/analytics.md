@@ -75,7 +75,12 @@ any change to what the reader sends.
 - **Library = NTFS semantics.** Series attribution uses
   `bunko_db::uploads::fold_series_title_key` on the series folder path, so every
   spelling of one series (case, Unicode form, whitespace) is one series. Store the fold
-  as `series_key` and an on-disk spelling as `series_title`.
+  as `series_key` and an on-disk spelling as `series_title`. **Built:**
+  `analytics::classify::series_key` folds the path by the filename fold
+  (`bunko_core::names::fold_name`) first, so every spelling a host takes for one
+  folder (`Straße/` and `STRASSE/`, `ſ`, ignorables) is one series too, as the
+  base's owner records group them; an ASCII title keys exactly as
+  `fold_series_title_key` does.
 - **No deployment names.** Tests and fixtures use `192.0.2.x`, `198.51.100.x`,
   `203.0.113.x`, `example.com`, `*.test`, `localhost` only.
 - **Time.** All buckets are UTC: `hour` = epoch seconds / 3600, `day` = epoch seconds /
@@ -260,7 +265,11 @@ of the file (or the folder itself), library-relative, on-disk spelling from
 `DavInfo.rel` when present, folded with `fold_series_title_key`. Nested series folders
 are `/` paths. `/catalog/api/series?name=` and `/catalog/api/manifest?series=` attribute
 to that series too. `volume_key`: the archive's library-relative path (on-disk
-spelling).
+spelling). **Built:** stored as the archive's identity
+(`analytics::classify::volume_identity`: the folder by `series_key`, the file name by
+the filename fold), so a case-only rename of a volume or its folder never splits its
+downloads; the funnel and reading views take a volume's spelling from the library
+index, and only a volume no longer in the library shows the folded name.
 
 ### 4.4 The collector (`analytics/collector.rs`)
 
@@ -533,7 +542,7 @@ account. Skipped and refused files are counted (`reading.worker` in the API).
 - **uuid → series**: resolve `volume_uuid` to a library `volume_key` through the main
   DB's `volume_identities` (add an index on `volume_uuid` in the main schema; index
   only, no version bump needed beyond what the main schema already does), then the
-  series folder of that key. Fall back to `fold_series_title_key(series_title)` from
+  series folder of that key. Fall back to `series_key(series_title)` from
   `volume-data.json` when the uuid is unknown. Cache the uuid map in memory, refreshed
   every 10 min. **Built:** the map also takes `volume_uuid` from the compiled
   `series_entry_cache` (a volume without a sidecar has the reader's deterministic id
@@ -752,7 +761,7 @@ equal counts share a rank and the catalog orders them by title) to each series i
 that has any; a series without downloads has no field and sorts after the ranked ones,
 by title. Ranks are dense over the listed series only, so they say nothing of folders
 the listing leaves out, and no count ever leaves the server. Series are matched by
-`fold_series_title_key` of the folder name, so every spelling of a folder is one series.
+`series_key` of the folder name (see §2), so every spelling of a folder is one series.
 The counts are kept in memory (`analytics::popular::Popularity`, an `Arc` swapped whole)
 and computed on a blocking thread from `analytics.sqlite`: at start, after each flush
 that wrote downloads, when the UTC day turns, and with the hourly upkeep; the catalog

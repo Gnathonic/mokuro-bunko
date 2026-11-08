@@ -230,7 +230,7 @@ impl Walk {
             return subdirs;
         }
         let stems = sidecar_names::volume_stems(files.iter().map(|f| f.0.as_str()));
-        let folder_key = (!root).then(|| bunko_db::fold_series_title_key(rel));
+        let folder_key = (!root).then(|| crate::analytics::classify::series_key(rel));
         let mut acc = SeriesAcc {
             title: rel.to_string(),
             ..SeriesAcc::default()

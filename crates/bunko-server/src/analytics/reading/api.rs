@@ -216,7 +216,7 @@ pub async fn funnel(a: &Analytics, q: &ApiQuery) -> Response {
     let a2 = a.clone();
     let series = q.param("series");
     let body = query("analytics funnel", move || match series {
-        Some(s) => series_funnel(&a2, &bunko_db::fold_series_title_key(&s)),
+        Some(s) => series_funnel(&a2, &crate::analytics::classify::series_key(&s)),
         None => library_funnel(&a2),
     })
     .await;
@@ -296,7 +296,7 @@ fn series_funnel(a: &Analytics, key: &str) -> bunko_db::Result<Value> {
         for s in snapshot
             .series
             .iter()
-            .filter(|s| bunko_db::fold_series_title_key(&s.name) == key)
+            .filter(|s| crate::analytics::classify::series_key(&s.name) == key)
         {
             folder.get_or_insert_with(|| s.name.clone());
             for v in &s.volumes {

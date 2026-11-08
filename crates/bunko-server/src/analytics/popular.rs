@@ -8,8 +8,8 @@
 //! never queries the analytics database; it hands out only each listed series' rank
 //! ([`ranks`]), never a count.
 
+use crate::analytics::classify::series_key;
 use bunko_db::analytics::AnalyticsDb;
-use bunko_db::uploads::fold_series_title_key;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -47,7 +47,7 @@ impl Popularity {
         for (key, n) in db.series_download_counts(today - (POPULAR_DAYS - 1), today)? {
             // Stored keys are folded already; folding again keeps an older row's
             // spelling with today's catalog.
-            *counts.entry(fold_series_title_key(&key)).or_default() += n;
+            *counts.entry(series_key(&key)).or_default() += n;
         }
         *self.0.write() = Snapshot {
             counts: Arc::new(counts),
@@ -64,12 +64,7 @@ impl Popularity {
 pub fn ranks(counts: &HashMap<String, u64>, series: &[&str]) -> Vec<Option<u32>> {
     let found: Vec<u64> = series
         .iter()
-        .map(|name| {
-            counts
-                .get(&fold_series_title_key(name))
-                .copied()
-                .unwrap_or(0)
-        })
+        .map(|name| counts.get(&series_key(name)).copied().unwrap_or(0))
         .collect();
     let mut distinct: Vec<u64> = found.iter().copied().filter(|n| *n > 0).collect();
     distinct.sort_unstable_by(|a, b| b.cmp(a));
@@ -111,5 +106,46 @@ mod tests {
         assert_eq!(got, [Some(2), Some(1), Some(1), None, Some(3)]);
         assert_eq!(ranks(&HashMap::new(), &["a", "b"]), [None, None]);
         assert!(ranks(&counts, &[]).is_empty());
+    }
+
+    /// The catalog lists a series under whatever spelling its folder has now; its
+    /// downloads count under every spelling one host takes for that folder, rows
+    /// written under an older key included.
+    #[test]
+    fn a_series_ranks_under_every_spelling_of_its_folder() {
+        use bunko_db::analytics::traffic::DownloadRow;
+        let db = AnalyticsDb::open_in_memory().unwrap();
+        let day = 20_000i64;
+        let row = |principal, series_key, series_title| DownloadRow {
+            day,
+            principal,
+            volume_key: "v.cbz",
+            series_key,
+            series_title,
+            bytes: 100,
+            size: 100,
+        };
+        // Before the rename, under the catalog's key of the time; after it; another.
+        let (old, new, other) = (
+            bunko_db::fold_series_title_key("Straße"),
+            series_key("STRASSE"),
+            series_key("Other"),
+        );
+        db.write(|tx| {
+            tx.add_download(&row("u:a", &old, "Straße"))?;
+            tx.add_download(&row("u:b", &new, "STRASSE"))?;
+            tx.add_download(&row("u:c", &other, "Other"))
+        })
+        .unwrap();
+        let p = Popularity::default();
+        p.refresh(&db, day * 86400 + 60).unwrap();
+        let counts = p.counts();
+        for listed in ["STRASSE", "Straße", "strasse"] {
+            assert_eq!(
+                ranks(&counts, &[listed, "Other"]),
+                [Some(1), Some(2)],
+                "{listed}"
+            );
+        }
     }
 }

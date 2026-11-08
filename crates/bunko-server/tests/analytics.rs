@@ -1464,6 +1464,51 @@ async fn non_canonical_paths_are_one_download_of_one_series() {
     assert_eq!(rows, ["u:reader|series/vol1.cbz|series|series"]);
 }
 
+/// Paths are case-insensitive on every host: a case-only rename of a volume and of
+/// its series folder (then a download by its new name), or a client asking in other
+/// case, is the same download of the same volume and series, not a second one.
+#[tokio::test]
+async fn every_spelling_of_a_volume_is_one_download() {
+    let env = Env::new();
+    let get = |path: &'static str| {
+        let env = &env;
+        async move {
+            let (status, _, body) = env.call(Some("reader"), "GET", path, &[], b"", IP_A).await;
+            assert_eq!((status, body.len()), (StatusCode::OK, SIZE), "{path}");
+        }
+    };
+    get(VOL).await;
+    get("/mokuro-reader/SERIES/VOL1.CBZ").await;
+    for (from, to) in [
+        (VOL, "/mokuro-reader/series/VOL1.cbz"),
+        ("/mokuro-reader/series", "/mokuro-reader/Series"),
+    ] {
+        let (status, _, _) = env
+            .call(
+                Some("boss"),
+                "MOVE",
+                from,
+                &[("destination", to)],
+                b"",
+                IP_A,
+            )
+            .await;
+        assert!(status.is_success(), "MOVE {from} -> {to}: {status}");
+    }
+    assert!(env.storage.join("library/Series/VOL1.cbz").exists());
+    get("/mokuro-reader/Series/VOL1.cbz").await;
+    env.flush().await;
+    let rows: Vec<String> = env.text_rows(
+        "SELECT principal || '|' || volume_key || '|' || series_key || '|' || completed \
+         FROM volume_downloads",
+    );
+    assert_eq!(rows, ["u:reader|series/vol1.cbz|series|1"]);
+    let s = env.admin("/_admin/api/analytics/series?range=24h").await;
+    assert_eq!(s["rows"].as_array().unwrap().len(), 1, "{}", s["rows"]);
+    assert_eq!(s["rows"][0]["downloads"], 1, "{}", s["rows"]);
+    assert_eq!(s["rows"][0]["volumes"], 1, "{}", s["rows"]);
+}
+
 /// Anonymous ids: every address of one IPv6 /64 is one visitor, and a day keeps rows
 /// of their own for at most its cap of anonymous visitors; the rest still count, as
 /// `a:other`, with no row (nor address-to-id link) each.

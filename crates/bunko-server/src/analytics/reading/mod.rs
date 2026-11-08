@@ -769,7 +769,7 @@ fn volume_data(a: &Analytics, username: &str, bytes: &[u8]) -> bunko_db::Result<
                     Attribution {
                         volume_key: None,
                         series_key: title
-                            .map(bunko_db::fold_series_title_key)
+                            .map(crate::analytics::classify::series_key)
                             .unwrap_or_default(),
                         series_title: title.map(str::to_string),
                         volume_title: r.volume_title.clone(),

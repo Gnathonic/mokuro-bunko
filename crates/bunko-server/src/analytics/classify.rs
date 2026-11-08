@@ -98,10 +98,35 @@ pub fn method_name(method: &str) -> &'static str {
         .unwrap_or("OTHER")
 }
 
+/// A series' identity in the analytics: one key for every spelling of its folder
+/// that the catalog takes for one series (`bunko_db::fold_series_title_key`: case,
+/// whitespace runs, NFC) or that any host takes for one folder (the filename fold,
+/// [`bunko_core::names::fold_name`]: `Straße/` and `STRASSE/`, `ſ`, ignorables), so a
+/// case-only rename never splits a series' numbers. An ASCII title keys exactly as
+/// `fold_series_title_key` does.
+pub fn series_key(title: &str) -> String {
+    bunko_db::fold_series_title_key(&bunko_core::names::fold_name(title))
+}
+
+/// A library archive's identity (`Series/Vol 1.cbz`): its folder by [`series_key`],
+/// its file name by the filename fold, so every spelling of one archive (a case-only
+/// rename, a client asking in another case) is one volume.
+pub fn volume_identity(rel: &str) -> String {
+    let rel = rel.trim_matches('/');
+    match rel.rsplit_once('/') {
+        Some((parent, name)) => format!(
+            "{}/{}",
+            series_key(parent),
+            bunko_core::names::fold_name(name)
+        ),
+        None => bunko_core::names::fold_name(rel),
+    }
+}
+
 /// A series a request is attributed to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SeriesRef {
-    /// `fold_series_title_key` of the folder path: one key for every spelling.
+    /// [`series_key`] of the folder path: one key for every spelling.
     pub key: String,
     /// The folder as spelled on disk (or as the request named it).
     pub title: String,
@@ -114,7 +139,7 @@ impl SeriesRef {
             return None;
         }
         Some(SeriesRef {
-            key: bunko_db::fold_series_title_key(title),
+            key: series_key(title),
             title: title.to_string(),
         })
     }
@@ -364,7 +389,7 @@ fn classify_library_rel(i: &Input<'_>, c: &mut Class, get: bool, rel: &str) {
             c.category = category::VOLUME;
             c.detail = if ranged { "range" } else { "full" };
             c.series = SeriesRef::of(parent);
-            c.volume_key = Some(rel.to_string());
+            c.volume_key = Some(volume_identity(rel));
         } else if is_sidecar(name) {
             c.category = category::SIDECAR;
             c.detail = if bunko_db::layer_sidecar_volume_path(rel).is_some() {
@@ -468,6 +493,46 @@ mod tests {
         (c.protocol, c.category, c.detail)
     }
 
+    /// One series and one volume for every spelling a host takes for one folder or
+    /// file (a case-only rename, the filename fold's wider joins), and for every
+    /// spelling the catalog takes for one series; ASCII keys as the catalog's.
+    #[test]
+    fn one_identity_per_spelling() {
+        for (a, b) in [
+            ("Kingdom", "KINGDOM"),
+            ("Kingdom", "kingdom"),
+            ("Dr Stone", "dr  stone"),
+            ("Straße", "STRASSE"),
+            ("ſeries", "Series"),
+            ("ΟΔΟΣ", "οδοσ"),
+            ("Vol\u{200B}ume", "VOLUME"),
+            ("Cafe\u{301}", "CAFÉ"),
+        ] {
+            assert_eq!(series_key(a), series_key(b), "{a:?} {b:?}");
+        }
+        for t in ["Kingdom", "Dr  Stone ", "The KINGDOM/Arc 2"] {
+            assert_eq!(series_key(t), bunko_db::fold_series_title_key(t), "{t:?}");
+        }
+        assert_ne!(series_key("Kingdom"), series_key("Kingdoms"));
+        for (a, b) in [
+            ("Kingdom/Vol 1.cbz", "KINGDOM/VOL 1.CBZ"),
+            ("Straße/Straße 01.cbz", "STRASSE/STRASSE 01.cbz"),
+            ("/Kingdom/ſ.cbz", "kingdom/S.CBZ"),
+        ] {
+            assert_eq!(volume_identity(a), volume_identity(b), "{a:?} {b:?}");
+        }
+        assert_eq!(volume_identity("Kingdom/Vol 1.cbz"), "kingdom/vol 1.cbz");
+        // Two names no host joins stay two volumes.
+        assert_ne!(
+            volume_identity("Kingdom/Vol 1.cbz"),
+            volume_identity("Kingdom/Vol  1.cbz")
+        );
+        assert_ne!(
+            volume_identity("Kingdom/Vol 1.cbz"),
+            volume_identity("Kingdom/Vol 2.cbz")
+        );
+    }
+
     #[test]
     fn methods() {
         assert_eq!(method_name("propfind"), "PROPFIND");
@@ -483,7 +548,8 @@ mod tests {
             ..input("GET", "/mokuro-reader/kingdom/Kingdom 01.CBZ")
         });
         assert_eq!(pcd(&c), ("dav", "volume", "full"));
-        assert_eq!(c.volume_key.as_deref(), Some("Kingdom/Kingdom 01.CBZ"));
+        // The archive's identity, one for every spelling of it.
+        assert_eq!(c.volume_key.as_deref(), Some("kingdom/kingdom 01.cbz"));
         let s = c.series.unwrap();
         assert_eq!((s.key.as_str(), s.title.as_str()), ("kingdom", "Kingdom"));
         let c = classify(&Input {

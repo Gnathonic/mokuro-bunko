@@ -67,7 +67,9 @@ pub(super) async fn get(a: &Analytics, q: &ApiQuery) -> Response {
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(LIMIT_DEFAULT)
         .clamp(1, LIMIT_MAX);
-    let needle = q.param("q").map(|s| bunko_db::fold_series_title_key(&s));
+    let needle = q
+        .param("q")
+        .map(|s| crate::analytics::classify::series_key(&s));
     let db = a.db().clone();
     let range = q.range;
     let body = query("analytics series", move || {
@@ -85,7 +87,7 @@ pub(super) async fn get(a: &Analytics, q: &ApiQuery) -> Response {
             .filter(|(key, r)| {
                 needle.as_ref().is_none_or(|n| {
                     key.contains(n.as_str())
-                        || bunko_db::fold_series_title_key(&r.title).contains(n.as_str())
+                        || crate::analytics::classify::series_key(&r.title).contains(n.as_str())
                 })
             })
             .collect();
