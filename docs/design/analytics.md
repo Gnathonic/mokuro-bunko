@@ -121,11 +121,12 @@ any change to what the reader sends.
   cross-origin request and never with credentials, so a signed-in hosted reader's
   preflights would otherwise make every IP it syncs from one more anonymous visitor.
   It still counts as traffic (`traffic_*`, `latency_*`, `errors_*`, `ip_daily`
-  requests and bytes, `clients_daily`, `geo_daily`, `metadata`/`options`), but writes
-  no `principal_daily`, `principal_seen`, `anon_ips` or `client_principals` /
-  `client_mix_principals` row, adds no principal to its `ip_daily` row, counts toward
-  no visitor (dau/wau/mau, users, clients) and is no crawl signal; a slow one is listed
-  with an empty principal (the Health view says `preflight`).
+  requests and bytes, `clients_daily`, `geo_daily`, under the category of the path it
+  addresses: §4), but writes no `principal_daily`, `principal_seen`, `anon_ips` or
+  `client_principals` / `client_mix_principals` row, adds no principal to its
+  `ip_daily` row, counts toward no visitor (dau/wau/mau, users, clients) and is no
+  crawl signal; a slow one is listed with an empty principal (the Health view says
+  `preflight`).
 - **A successful sign-in** (`POST /login/api/token` or `/login/api/check` answering
   200) is attributed to the **account that signed in**. **Built:** its password is in
   the body, so the request resolves no identity of its own; the login endpoint puts a
@@ -252,7 +253,9 @@ The server may be mounted under a sub-path: classify on the path as the router s
 PROPFIND of `/` or `/mokuro-reader` carries the caller's injected per-user entries;
 it stays `metadata` (the reader's whole listing is navigation).
 
-An `OPTIONS` is `metadata` / `options`, a CORS preflight included; a preflight is
+An `OPTIONS` is `metadata` / `options`, a CORS preflight included, except to a per-user
+file: there it takes that file's category (`progress_sync`, `profile_sync`,
+`personal`), so a sync's totals include the preflights it caused. A preflight is
 classified like any other request but attributed to no principal (§3).
 
 `method`: the upper-case method; anything outside the 14 known methods (GET, HEAD,

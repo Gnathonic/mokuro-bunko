@@ -701,7 +701,9 @@ mod tests {
             ("/mokuro-reader/profiles.json", "profile_sync", "profiles"),
             ("/mokuro-reader/goals.json", "profile_sync", "goals"),
         ] {
-            for method in ["GET", "PUT", "PROPFIND", "DELETE"] {
+            // An OPTIONS (a sync's CORS preflight) counts with the sync it precedes,
+            // not under `metadata` / `options` (§4).
+            for method in ["GET", "PUT", "PROPFIND", "DELETE", "OPTIONS"] {
                 let c = classify(&input(method, path));
                 assert_eq!(pcd(&c), ("dav", cat, detail), "{method} {path}");
                 assert_eq!(c.target, DavTarget::Progress);
@@ -713,6 +715,19 @@ mod tests {
             ..input("PUT", "/mokuro-reader/S/v.edit.mokuro")
         });
         assert_eq!(pcd(&c), ("dav", "personal", ""));
+        // A preflight to a personal file (no DAV info: answered before WebDAV) counts
+        // there too; one to a shared library file is `metadata` / `options`.
+        assert_eq!(
+            pcd(&classify(&input(
+                "OPTIONS",
+                "/mokuro-reader/S/v.edit.mokuro"
+            ))),
+            ("dav", "personal", "")
+        );
+        assert_eq!(
+            pcd(&classify(&input("OPTIONS", "/mokuro-reader/S/v.cbz"))),
+            ("dav", "metadata", "options")
+        );
     }
 
     #[test]
