@@ -394,10 +394,11 @@ fn series_funnel(a: &Analytics, key: &str) -> bunko_db::Result<Value> {
             .values()
             .filter_map(|k| series_of_key(k).map(|(_, title)| title)),
     );
+    // Sorted, so when two spellings' entries share a fold the same one wins every time.
     let catalog_keys: Vec<String> = folders
         .iter()
         .map(|f| bunko_library::compat::normalize_volume_title_key(f))
-        .collect::<HashSet<_>>()
+        .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
         .collect();
     let mut fold_pages: HashMap<String, i64> = HashMap::new();

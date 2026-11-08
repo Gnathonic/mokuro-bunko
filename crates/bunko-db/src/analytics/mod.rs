@@ -408,7 +408,6 @@ pub(crate) fn uint(v: i64) -> u64 {
     u64::try_from(v).unwrap_or(0)
 }
 
-/// A pooled reader out of [`AnalyticsDb::read`]'s pool, put back when dropped.
 /// The writer's open transaction: rolled back when dropped unless it committed, so an
 /// error and a panic in the closure end the same way.
 struct OpenWrite<'a> {
@@ -425,6 +424,7 @@ impl Drop for OpenWrite<'_> {
     }
 }
 
+/// A pooled reader out of [`AnalyticsDb::read`]'s pool, put back when dropped.
 struct Lent<'a> {
     db: &'a AnalyticsDb,
     conn: Option<Connection>,
