@@ -1339,6 +1339,30 @@ impl Database {
         })
     }
 
+    /// `(volume_key, page_count)` of every compiled entry of the series folders whose
+    /// catalog key (`series_entry_cache.series_key`) is one of `series_keys`, whatever
+    /// the archives' spelling: the caller matches them to its volumes by their fold.
+    pub fn analytics_page_counts_of_series(
+        &self,
+        series_keys: &[String],
+    ) -> Result<Vec<(String, i64)>> {
+        self.read(|c| {
+            let mut stmt = c.prepare_cached(
+                "SELECT volume_key, json_extract(entry_json, '$.page_count') \
+                 FROM series_entry_cache WHERE series_key = ?1 AND json_valid(entry_json) \
+                 AND json_type(entry_json, '$.page_count') = 'integer' ORDER BY volume_key",
+            )?;
+            let mut out = Vec::new();
+            for k in series_keys {
+                let rows = stmt.query_map([k], |r| Ok((r.get::<_, String>(0)?, r.get(1)?)))?;
+                for row in rows {
+                    out.push(row?);
+                }
+            }
+            Ok(out)
+        })
+    }
+
     /// Page counts of the compiled entries of `volume_keys` (`None`: every entry).
     pub fn analytics_page_counts(
         &self,
@@ -1908,5 +1932,10 @@ mod tests {
             .analytics_page_counts(Some(&["S/v2.cbz".to_string()]))
             .unwrap();
         assert_eq!(some.len(), 1);
+        assert_eq!(
+            db.analytics_page_counts_of_series(&["s".to_string(), "none".to_string()])
+                .unwrap(),
+            [("S/v1.cbz".to_string(), 80), ("S/v2.cbz".to_string(), 120)]
+        );
     }
 }

@@ -595,6 +595,73 @@ async fn reader_sync_files_over_webdav_become_reads_devices_and_progress() {
     assert_eq!(s["rows"][0]["readers"], 1);
 }
 
+/// Every library volume of a series shows its page count in the funnel, matched by
+/// its folded identity: one the reader has no id for (not in the resolver's uuid map)
+/// used to have none, and so did one whose only other key was a (folded) download.
+#[tokio::test]
+async fn every_library_volume_shows_its_page_count_in_the_series_funnel() {
+    let env = Env::new();
+    // The compiled entries, keyed as the library spells them; Kingdom 02 has no
+    // volume id anywhere (no sidecar id, none in its entry).
+    for (folder, file, pages, uuid) in [
+        ("The Kingdom", "Kingdom 01", 40, Some(U1)),
+        ("The Kingdom", "Kingdom 02", 12, None),
+        ("the  kingdom", "Kingdom 10", 30, Some(U2)),
+    ] {
+        let key = bunko_library::compiler::volume_key_for(folder, file);
+        let series_key = bunko_library::compat::normalize_volume_title_key(folder);
+        let mut entry = serde_json::Map::new();
+        entry.insert("page_count".into(), json!(pages));
+        if let Some(u) = uuid {
+            entry.insert("volume_uuid".into(), json!(u));
+        }
+        env.services
+            .db
+            .put_cached_volume_entry(&key, &series_key, &entry, 4096, 1.0, "")
+            .unwrap();
+    }
+    let page_counts = |f: &Value| -> Vec<(String, Value)> {
+        f["volumes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| {
+                (
+                    v["title"].as_str().unwrap().to_string(),
+                    v["page_count"].clone(),
+                )
+            })
+            .collect()
+    };
+    let expected = vec![
+        ("Kingdom 01".to_string(), json!(40)),
+        ("Kingdom 02".to_string(), json!(12)),
+        ("Kingdom 10".to_string(), json!(30)),
+    ];
+    let f = env
+        .admin("/_admin/api/analytics/funnel?series=the%20kingdom")
+        .await;
+    assert_eq!(page_counts(&f), expected, "{f}");
+    // A download of it, by another spelling: its key is the folded identity.
+    let (status, _) = env
+        .call(
+            Some("reader"),
+            "GET",
+            "/mokuro-reader/THE%20KINGDOM/kingdom%2002.cbz",
+            &[("origin", READER_ORIGIN)],
+            b"",
+            IP_READER,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    env.flush().await;
+    let f = env
+        .admin("/_admin/api/analytics/funnel?series=the%20kingdom")
+        .await;
+    assert_eq!(f["volumes"][1]["downloads"], 1, "{f}");
+    assert_eq!(page_counts(&f), expected, "{f}");
+}
+
 #[tokio::test]
 async fn a_generic_webdav_client_counts_the_same_as_the_reader() {
     let env = Env::new();

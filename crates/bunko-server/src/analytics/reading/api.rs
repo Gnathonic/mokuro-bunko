@@ -288,6 +288,7 @@ fn series_funnel(a: &Analytics, key: &str) -> bunko_db::Result<Value> {
     let main = a.main_db();
     // The library's volumes of every folder spelling of the series, in library order.
     let mut folder: Option<String> = None;
+    let mut folders: HashSet<String> = HashSet::new();
     let mut order: Vec<String> = Vec::new();
     let mut vols: HashMap<String, FunnelVolume> = HashMap::new();
     if let Some(rt) = a.library_runtime() {
@@ -299,6 +300,7 @@ fn series_funnel(a: &Analytics, key: &str) -> bunko_db::Result<Value> {
             .filter(|s| crate::analytics::classify::series_key(&s.name) == key)
         {
             folder.get_or_insert_with(|| s.name.clone());
+            folders.insert(s.name.clone());
             for v in &s.volumes {
                 let fold = volume_fold(&s.name, &v.name);
                 if lib.iter().any(|(f, _, _)| *f == fold) {
@@ -383,9 +385,39 @@ fn series_funnel(a: &Analytics, key: &str) -> bunko_db::Result<Value> {
         }
         fold_key.entry(fold).or_insert(volume_key);
     }
+    // Page counts by the volumes' fold, never their spelling: the compiled entries of
+    // every folder spelling of the series (each library volume, whether the reader has
+    // an id for it or not, and whatever spelling a download keyed it by), then the
+    // entries of the exact keys the views know.
+    folders.extend(
+        fold_key
+            .values()
+            .filter_map(|k| series_of_key(k).map(|(_, title)| title)),
+    );
+    let catalog_keys: Vec<String> = folders
+        .iter()
+        .map(|f| bunko_library::compat::normalize_volume_title_key(f))
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    let mut fold_pages: HashMap<String, i64> = HashMap::new();
+    for (volume_key, n) in main.analytics_page_counts_of_series(&catalog_keys)? {
+        if let Some((series, title)) = series_of_key(&volume_key)
+            && series == key
+        {
+            fold_pages
+                .entry(volume_fold(&title, volume_stem(&volume_key)))
+                .or_insert(n);
+        }
+    }
     let keys: Vec<String> = fold_key.values().cloned().collect();
     let page_counts = main.analytics_page_counts(Some(&keys))?;
-    let pages_of = |fold: &str| fold_key.get(fold).and_then(|k| page_counts.get(k)).copied();
+    for (fold, volume_key) in &fold_key {
+        if let Some(n) = page_counts.get(volume_key) {
+            fold_pages.entry(fold.clone()).or_insert(*n);
+        }
+    }
+    let pages_of = |fold: &str| fold_pages.get(fold).copied();
     let mut stages = Stages::default();
     for (p, fold) in progress.iter().zip(&folds) {
         stages.add(p, pages_of(fold));
