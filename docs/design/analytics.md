@@ -580,9 +580,10 @@ account. Skipped and refused files are counted (`reading.worker` in the API).
   axis starts at the first snapshot when that is inside the range: before it the
   library's size is unknown, not zero.
 - **Built:** volumes are archives of the four archive extensions in series folders;
-  archives in the library root are `loose_archives`, not a series; the root
-  `thumbnails/`, hidden and symlinked folders and the cloud-root owner's per-user files
-  are skipped, as the library index skips them.
+  archives in the library root are `loose_archives`, not a series; hidden and
+  symlinked folders and the cloud-root owner's per-user files (in any spelling) are
+  skipped, as the library index skips them. A `thumbnails/` folder is an ordinary
+  series folder.
 - **Uploads per day per uploader**: `uploads_daily` (from the collector) for days on or
   after `tracking_since`, plus the main DB's `volume_uploads(uploaded_at,
   uploader_username)` for days before analytics existed (those have no size). The API's

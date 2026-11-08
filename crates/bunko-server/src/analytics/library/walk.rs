@@ -172,8 +172,9 @@ impl Walk {
 
     /// Count the files of `dir` (library-relative `rel`, `""` for the root) and return
     /// the sub-folders to walk: hidden and symlinked folders are skipped, as the library
-    /// index skips them, and so are the root's `thumbnails/` and the cloud-root owner's
-    /// per-user tree (`history/`, `volume-data.json`, ...), which are no library files.
+    /// index skips them, and so is the cloud-root owner's per-user tree (`history/`,
+    /// `volume-data.json`, ..., in any spelling), which are no library files. A
+    /// `thumbnails/` folder is an ordinary series folder, as it is everywhere else.
     /// `db` answers which archives already have current page formats.
     pub fn folder(
         &mut self,
@@ -193,7 +194,7 @@ impl Walk {
             let Ok(name) = entry.file_name().into_string() else {
                 continue;
             };
-            if root && (reader_tree::is_per_user_root_name(&name) || name == "thumbnails") {
+            if root && reader_tree::is_per_user_root_name(&name) {
                 continue;
             }
             let Ok(ft) = entry.file_type() else { continue };
@@ -476,6 +477,7 @@ mod tests {
             ("loose.cbz", 1),
             ("catalog.json", 4),
             (".hidden/x.cbz", 1000),
+            // An ordinary folder, as every other library walk sees it.
             ("thumbnails/a.webp", 1000),
             ("history/dev/2026-01.events", 1000),
             ("volume-data.json", 1000),
@@ -485,7 +487,7 @@ mod tests {
         let s = w.summary();
         assert_eq!(
             s["totals"],
-            json!({"series": 2, "volumes": 3, "bytes": 391, "files": 12})
+            json!({"series": 2, "volumes": 3, "bytes": 1391, "files": 13})
         );
         let kinds: BTreeMap<String, (u64, u64)> = s["by_kind"]
             .as_array()
@@ -505,7 +507,7 @@ mod tests {
         assert_eq!(kinds["nocover"], (1, 0));
         assert_eq!(kinds["series_json"], (1, 2));
         assert_eq!(kinds["catalog_json"], (1, 4));
-        assert_eq!(kinds["other"], (2, 16));
+        assert_eq!(kinds["other"], (3, 1016));
         assert_eq!(
             s["archive_mix"],
             json!([{"mix": "cbr", "series": 1}, {"mix": "cbz+zip", "series": 1}])
@@ -518,6 +520,18 @@ mod tests {
         let k = &w.series["kingdom"];
         assert_eq!((k.volumes, k.bytes, k.sidecars), (2, 320, 2));
         assert!(w.queue.is_empty(), "page formats off");
+    }
+
+    #[test]
+    fn a_thumbnails_folder_is_a_series_in_any_spelling() {
+        // The library has no folder of Bunko's own: the catalog lists this series.
+        let d = tree(&[("thumbnails/v1.cbz", 10), ("Thumbnails/v2.cbz", 20)]);
+        let w = walk(d.path(), false);
+        assert_eq!(
+            w.summary()["totals"],
+            json!({"series": 1, "volumes": 2, "bytes": 30, "files": 2})
+        );
+        assert_eq!(w.series["thumbnails"].volumes, 2);
     }
 
     #[test]

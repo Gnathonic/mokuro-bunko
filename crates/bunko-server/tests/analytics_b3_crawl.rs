@@ -56,7 +56,7 @@ fn series_name(i: usize) -> String {
 }
 
 fn seed_library(storage: &std::path::Path) {
-    // A folder that is no series (the server makes `thumbnails/` itself).
+    // A folder that is no series (loose files, no archive).
     std::fs::create_dir_all(storage.join("library/Extras")).unwrap();
     std::fs::write(storage.join("library/Extras/readme.txt"), b"not a series").unwrap();
     for i in 0..SERIES {

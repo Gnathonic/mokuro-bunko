@@ -25,7 +25,7 @@
 //! client (Mokuro Reader) or the failed listing just before; neither is used yet.
 //! Once the catalog's series are known ([`Detector::refresh_catalog_from`], each minute
 //! from the host sampler) only a touch of one of them counts: listing a folder that is
-//! no series (the server's own `thumbnails/`, a made-up path) does not.
+//! no series (a folder of loose files, a made-up path) does not.
 //!
 //! **Window.** `window_hours` is approximated by two rotating half-window buckets: a
 //! touch is stamped with its half (`at / (window / 2)`) and counts while its half is
@@ -352,7 +352,7 @@ pub(crate) struct State {
     /// Rows of episodes whose trackers went (evicted), still to be closed.
     orphans: Vec<Pending>,
     /// The catalog's series (hashes of their folded keys), when known: a touch of
-    /// anything else (a folder that is no series, such as `thumbnails/`, or a path the
+    /// anything else (a folder that is no series, such as one of loose files, or a path the
     /// index does not have) counts toward requests and bytes only.
     catalog_keys: Option<HashSet<u32, Fx>>,
     /// Touches not kept for lack of room (all time).
@@ -1664,7 +1664,7 @@ mod tests {
         let mut s = State::new(&TH);
         s.catalog_keys = Some((0..40).map(|i| hash32(&format!("series {i}"))).collect());
         let ip = "192.0.2.60";
-        // Listing folders that are no series (the server's thumbnails/, made-up paths).
+        // Listing folders that are no series (made-up paths, in any spelling).
         for name in ["thumbnails", "not a series", "series 999"] {
             req(T0, ip, "PROPFIND", "metadata", "propfind_1")
                 .status(207)
