@@ -375,19 +375,9 @@
   / **Keep that copy**; the tab also lists the **Recent merges**. Upload owners, OCR
   records and volume ids follow every moved volume. A folder Mokuro Reader keeps
   recreating is left alone after the fourth merge in a day.
-- **positions.json is kept per account.** Mokuro Reader's position index (the newest
-  page per volume) joins volume-data.json, profiles.json and goals.json, so it syncs
-  per account instead of into the shared library. `/login/api/me` lists these files as
-  `per_user_files`, signed in or not, and a reader uses a per-account file only once the
-  server lists it.
-- **Reading history is kept per account.** Mokuro Reader's history files
-  (`/mokuro-reader/history/<device>/<file>`) are each account's own, stored under
-  `users/<name>/history/` and never shown to anyone else. Any account that can save
-  progress, `registered` included, creates its `history` and device folders and writes
-  its files there; a file is limited to 16 MiB and an account's history to 256 MiB.
-  History files are never moved, copied or locked, and saving progress or history no
-  longer drops the cached library listing. `/login/api/me` lists `history/` among the
-  `per_user_files`.
+- **positions.json and reading history per account, and `/login/api/me`'s `version`,**
+  came early in 0.7.8 (see there). 0.8 carries them to cloud libraries (next entry) and
+  reserves the per-user names in any spelling (see Breaking).
 - **Per-account files on a cloud library's folder.** The account named as the readers'
   progress account (Storage tab) now really shares its files with a reader that reads
   the cloud folder directly: its volume-data, profiles, goals, positions and reading
@@ -396,9 +386,6 @@
   applies at once. The cloud folder's `.mokuro-bunko.json` lists the per-account files
   (`per_user_files`), so a reader reading the cloud directly can sync its reading
   history there too.
-- **`/login/api/me` reports the server version** (`version`), signed in or not. A reader
-  turns reading-history sync on from 0.8.0, the first version that keeps history per
-  account.
 - **`/login/api/me` says where a reader's OCR corrections go.** It lists
   `per_user_layers: ["edit"]` (each account keeps its own `edit` layer, so a reader
   may push it) and `permissions.curated.scope`: `all` (editors, inviters, admins),
@@ -843,6 +830,90 @@
 - **Mokuro Reader tells WebDAV servers apart only by type.** Its protection for
   edited OCR from a server counts every WebDAV server as one provider, so a second
   WebDAV server (another Bunko included) is taken for the first.
+
+## [0.7.11] - 2026-11-07
+
+A crafted WebDAV request, OCR file or archive can no longer stop the server, and
+processors no longer trust distrusted certificate authorities.
+
+### Security
+- **Deeply nested DAV request bodies are refused.** A PROPFIND, PROPPATCH or LOCK body
+  nested tens of thousands of elements deep (a few hundred KiB, within the 1 MiB body
+  limit) overflowed the stack and stopped the whole server. With anonymous browsing on (the
+  default), one request from anyone could do it. Bodies nested deeper than 256 elements
+  are now a `400 Bad Request`. Real DAV clients nest a few levels.
+- **A deeply nested `.mokuro` file no longer stops the server at startup.** The startup
+  sweep of damaged OCR files reads a file serde cannot (one holding `NaN`, which Python
+  allows) with a second parser that recursed once per level. An account that can upload
+  could put a file there that overflowed the stack and stopped the server at every start
+  until it was removed by hand. That parser now refuses nesting deeper than 512, as the
+  library's own reader does, and the sweep removes such a file as damaged.
+- **A damaged or crafted archive no longer stops OCR.** The OCR page reader trusted an
+  archive's own zip64 entry count and record offsets. An archive claiming billions of
+  entries, or placing its zip64 records where none can be, made a memory allocation fail,
+  which ends the process. The full build runs OCR inside the server, so an account that
+  can upload could stop the server whenever OCR reached that volume, and a remote
+  processor the same way. Such archives are now refused as damaged, and a page declaring
+  more than 256 MiB is skipped like any other unreadable page.
+- **Distrusted emSign certificate authorities are no longer trusted.** The bundled root
+  store (webpki-roots 1.0.11) drops the emSign root whose intermediate keys were
+  compromised, and rustls-webpki 0.103.16 stops accepting distrusted intermediates.
+  Processors check the library's certificate against these roots by
+  default and sign in with their account password, so before this release someone on the
+  network path could have posed as the library. If your processors connect over networks
+  you don't trust, change their account passwords after updating.
+- **Dependency updates**: rustls 0.23.46, tokio 1.54.1, zstd 0.13.4 (zstd-safe 7.4.0,
+  zstd-sys 2.1.2).
+- **Docker image**: the runtime image installs Debian's security updates (it had a zlib
+  with two fixed CVEs).
+
+## [0.7.10] - 2026-11-07
+
+Covers uploaded with a volume are kept again; the catalog shows a changed cover at once.
+
+### Fixed
+- **Uploaded covers are kept.** 0.7.9 made a cover again whenever it was older than its
+  archive. A client uploads a volume's cover before the archive, so every uploaded cover
+  is older than its archive, and 0.7.9 would have replaced them all with made ones. The
+  rule is gone: as in 0.7.8, an archive with a cover or a `.nocover` marker beside it is
+  not covered again. Replacing a volume means deleting it, which deletes its cover and
+  marker too, so the new archive is covered as any new one.
+- **Catalog covers are revalidated** (from 0.7.9). The catalog served covers as fresh for
+  an hour with nothing to check them against, so a changed cover stayed old for up to an
+  hour and was then downloaded again in full. Covers now carry an `ETag` and
+  `Last-Modified` with `Cache-Control: no-cache`: a changed cover shows at once, and an
+  unchanged one costs a `304`.
+
+## [0.7.9] - 2026-11-07
+
+Withdrawn before publishing: it would have replaced uploaded covers (see 0.7.10).
+
+## [0.7.8] - 2026-11-05
+
+Reading history and positions.json are kept per account, as in 0.8: Mokuro Reader
+syncs its reading history and opens volumes where another device stopped.
+
+### Added
+- **positions.json is kept per account.** Mokuro Reader's position index (the newest
+  page per volume) joins volume-data.json, profiles.json and goals.json, so it syncs
+  per account instead of into the shared library. `/login/api/me` lists these files as
+  `per_user_files`, signed in or not, and a reader uses a per-account file only once the
+  server lists it.
+- **Reading history is kept per account.** Mokuro Reader's history files
+  (`/mokuro-reader/history/<device>/<file>`) are each account's own, stored under
+  `users/<name>/history/` and never shown to anyone else. Any account that can save
+  progress, `registered` included, creates its `history` and device folders and writes
+  its files there; a file is limited to 16 MiB and an account's history to 256 MiB.
+  History files are never moved, copied or locked, and saving progress or history no
+  longer drops the cached library listing. `/login/api/me` lists `history/` among the
+  `per_user_files`.
+- **`history` is a reserved series name.** `/mokuro-reader/history` is each account's
+  reading history now, so a series folder named exactly `history` at the library root
+  can no longer be reached; the server logs a warning at startup with the rename to
+  make, and the library scan skips it (`History/` stays an ordinary series).
+- **`/login/api/me` reports the server's `version`** (signed in or not), and lists
+  `history/` in `per_user_files`. Mokuro Reader turns reading-history sync on for
+  mokuro-bunko from this release.
 
 ## [0.7.7] - 2026-11-05
 
