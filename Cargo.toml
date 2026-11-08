@@ -52,7 +52,7 @@ hex = "0.4"
 base64 = "0.22"
 time = { version = "0.3", features = ["formatting", "parsing", "macros", "serde"] }
 parking_lot = "0.12"
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif", "bmp"] }
 # JPEG XL pages: jxl-rs, the decoder Chromium and Firefox ship, hooked into `image`.
 jxl = "0.8"
@@ -62,7 +62,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 rustls-pemfile = "2"
-rcgen = "0.13"
+rcgen = "0.14"
 rust-embed = { version = "8", features = ["include-exclude"] }
 mime_guess = "2"
 percent-encoding = "2"

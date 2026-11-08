@@ -1729,7 +1729,7 @@ mod tests {
         let mut zip = zip::ZipArchive::new(std::fs::File::open(sample).unwrap()).unwrap();
         let mut out: Vec<String> = (0..zip.len())
             .map(|i| {
-                let name = zip.by_index(i).unwrap().name().to_string();
+                let name = zip.by_index(i).unwrap().name().unwrap().into_owned();
                 name[name.rfind('.').unwrap()..].to_string()
             })
             .collect();

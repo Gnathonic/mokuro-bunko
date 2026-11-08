@@ -106,8 +106,12 @@ pub fn ensure_unpacked(zip: &Path, cache: &Path) -> Result<PathBuf, TorchError> 
     let names: Vec<PathBuf> = (0..archive.len())
         .map(|i| {
             let e = archive.by_index_raw(i).map_err(|e| err(e.to_string()))?;
-            e.enclosed_name()
-                .ok_or_else(|| err(format!("unsafe entry name {:?}", e.name())))
+            e.enclosed_name().ok_or_else(|| {
+                err(format!(
+                    "unsafe entry name {:?}",
+                    String::from_utf8_lossy(e.name_raw())
+                ))
+            })
         })
         .collect::<Result<_, _>>()?;
     let top = common_top(&names);
