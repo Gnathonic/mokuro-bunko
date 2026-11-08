@@ -3,6 +3,7 @@
 //! work on the path as the router saw it (a reverse proxy strips any mount prefix),
 //! plus what the DAV layer said it resolved ([`DavInfo`]).
 
+use bunko_core::names::is_fixed_name;
 use bunko_core::sidecar_names::ARCHIVE_EXTENSIONS;
 use bunko_dav::{DavDepth, DavInfo, DavTarget};
 
@@ -375,10 +376,10 @@ fn classify_library_rel(i: &Input<'_>, c: &mut Class, get: bool, rel: &str) {
         } else if is_cover(name) {
             c.category = category::COVER;
             c.series = SeriesRef::of(parent);
-        } else if name.eq_ignore_ascii_case("series.json") && !parent.is_empty() {
+        } else if is_fixed_name(name, "series.json") && !parent.is_empty() {
             (c.category, c.detail) = (category::METADATA, "series_json");
             c.series = SeriesRef::of(parent);
-        } else if rel.eq_ignore_ascii_case("catalog.json") {
+        } else if is_fixed_name(rel, "catalog.json") {
             (c.category, c.detail) = (category::METADATA, "catalog_json");
         }
         return;
@@ -390,7 +391,7 @@ fn classify_library_rel(i: &Input<'_>, c: &mut Class, get: bool, rel: &str) {
             "archive"
         } else if is_sidecar(name) {
             "sidecar"
-        } else if name.eq_ignore_ascii_case("series.json") {
+        } else if is_fixed_name(name, "series.json") {
             "series_json"
         } else if folder {
             "folder"
@@ -515,7 +516,19 @@ mod tests {
             ("/mokuro-reader/S/v.webp", "cover", ""),
             ("/mokuro-reader/S/v.nocover", "cover", ""),
             ("/mokuro-reader/S/series.json", "metadata", "series_json"),
+            // Every spelling the filename fold joins, as the server treats them.
+            (
+                "/mokuro-reader/S/\u{17f}eries.json",
+                "metadata",
+                "series_json",
+            ),
+            (
+                "/mokuro-reader/S/SERIES\u{200B}.json",
+                "metadata",
+                "series_json",
+            ),
             ("/mokuro-reader/catalog.json", "metadata", "catalog_json"),
+            ("/mokuro-reader/Catalog.JSON", "metadata", "catalog_json"),
             (
                 "/mokuro-reader/.mokuro-queue.json",
                 "metadata",
@@ -642,6 +655,12 @@ mod tests {
             ("PUT", "/mokuro-reader/S/v.cbz", "archive", "S"),
             ("PUT", "/mokuro-reader/S/v.mokuro", "sidecar", "S"),
             ("PUT", "/mokuro-reader/S/series.json", "series_json", "S"),
+            (
+                "PUT",
+                "/mokuro-reader/S/\u{17f}eries.json",
+                "series_json",
+                "S",
+            ),
             ("MKCOL", "/mokuro-reader/S", "folder", "S"),
             ("MKCOL", "/mokuro-reader/S/Sub", "folder", "S/Sub"),
             ("DELETE", "/mokuro-reader/Vol. 1", "folder", "Vol. 1"),

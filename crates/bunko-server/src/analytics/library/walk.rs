@@ -4,6 +4,7 @@
 //! `fold_series_title_key` of the folder's library-relative path, so every spelling of
 //! one series (case, Unicode form, whitespace) is one series.
 
+use bunko_core::names;
 use bunko_core::reader_tree;
 use bunko_core::sidecar_names::{self, SidecarClass};
 use bunko_db::analytics::AnalyticsDb;
@@ -252,9 +253,9 @@ impl Walk {
                             COVER
                         } else if sidecar_names::strip_suffix_ci(name, ".nocover").is_some() {
                             NOCOVER
-                        } else if !root && name.eq_ignore_ascii_case("series.json") {
+                        } else if !root && names::is_fixed_name(name, "series.json") {
                             SERIES_JSON
-                        } else if root && name.eq_ignore_ascii_case("catalog.json") {
+                        } else if root && names::is_fixed_name(name, "catalog.json") {
                             CATALOG_JSON
                         } else {
                             OTHER
@@ -532,6 +533,26 @@ mod tests {
             json!({"series": 1, "volumes": 2, "bytes": 30, "files": 2})
         );
         assert_eq!(w.series["thumbnails"].volumes, 2);
+    }
+
+    #[test]
+    fn fixed_names_by_the_filename_fold() {
+        let d = tree(&[
+            ("S/v1.cbz", 10),
+            ("S/\u{17f}eries.json", 2),
+            ("Catalog\u{200B}.json", 3),
+        ]);
+        let s = walk(d.path(), false).summary();
+        let kind = |k: &str| {
+            s["by_kind"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|x| x["kind"] == k)
+                .map(|x| x["files"].as_u64().unwrap())
+        };
+        assert_eq!(kind("series_json"), Some(1));
+        assert_eq!(kind("catalog_json"), Some(1));
     }
 
     #[test]
