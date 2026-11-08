@@ -423,6 +423,17 @@
     // Rendering frame
     // ------------------------------------------------------------------
 
+    // The current view's function in a table of views (CONTROLS, RENDER), taken only
+    // as the table's own function: state.view comes from the URL hash (checked
+    // against VIEWS on the way in), and an inherited name such as `constructor`
+    // must never be called.
+    function viewEntry(table) {
+        const name = state.view;
+        if (!Object.prototype.hasOwnProperty.call(table, name)) return null;
+        const fn = table[name];
+        return typeof fn === 'function' ? fn : null;
+    }
+
     // Re-render the current view. A refetch of the view on screen holds the
     // previous render, dimmed, until the answer is in: no flash, no jump.
     async function render() {
@@ -435,7 +446,8 @@
         // across its refetches, so a select keeps focus while it reloads.
         if (!same) {
             clear(els.controls);
-            const controls = CONTROLS[state.view] ? CONTROLS[state.view]() : null;
+            const makeControls = viewEntry(CONTROLS);
+            const controls = makeControls ? makeControls() : null;
             if (controls) els.controls.appendChild(controls);
             els.controls.hidden = !controls;
         }
@@ -449,7 +461,8 @@
         state.renderedView = state.view;
         let node;
         try {
-            node = await RENDER[state.view]();
+            const draw = viewEntry(RENDER) || RENDER.overview;
+            node = await draw();
         } catch (err) {
             node = errorState(err, () => render());
         }
