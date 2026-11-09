@@ -66,7 +66,7 @@ rcgen = "0.14"
 rust-embed = { version = "8", features = ["include-exclude"] }
 mime_guess = "2"
 percent-encoding = "2"
-quick-xml = "0.37"
+quick-xml = "0.42"
 natord = "1"
 uuid = { version = "1", features = ["v4"] }
 semver = "1"
