@@ -130,6 +130,8 @@ byte, as an asset of the GitHub release `upstream-models-v1`
 sha256) and the GPL-3.0 text beside it. A later mirrored file, or another revision of
 this one, is a new asset name or a new release, never a changed asset.
 
+How it was made, for the next file:
+
 ```sh
 cd <the folder with animetext_yolo12x.onnx, NOTICE.md, LICENSE-GPL-3.0.txt, RELEASE-NOTES.md>
 gh release create upstream-models-v1 --repo Gnathonic/mokuro-bunko \
@@ -137,9 +139,11 @@ gh release create upstream-models-v1 --repo Gnathonic/mokuro-bunko \
    --prerelease --latest=false animetext_yolo12x.onnx NOTICE.md LICENSE-GPL-3.0.txt
 ```
 
-Until the release exists a generation on `animetext-blocks` fails to start with the
-download error; `MOKURO_MODELS_MIRROR=<folder>` (the file under its flat name
-`animetext_yolo12x.onnx`) serves it locally.
+**Published** 2026-11-10 as a pre-release (never "latest"), with those three assets. An
+anonymous download gives back the sha256 above, and a build with empty storage and no
+mirror fetched the file from it and read a volume. The tag starts no release build
+(`release.yml` runs on `v*`). An air-gapped host serves the file itself with
+`MOKURO_MODELS_MIRROR=<folder>`, under its flat name `animetext_yolo12x.onnx`.
 
 Checked 2026-11-09 against the model cards and licence files at those revisions. The
 Rust host of the two recognizers was compared with their own Python packages on 200
