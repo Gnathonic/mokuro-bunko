@@ -8,6 +8,7 @@ A self-hosted manga library server with WebDAV, built-in OCR processing, and mul
 ## What it does
 
 - Serves a shared manga library over WebDAV so Mokuro Reader can connect directly
+- Keeps the library on its own disk, or in your own cloud storage (Google Drive, OneDrive, MEGA or any WebDAV server): it finds the volumes there, runs OCR and writes the results back next to them, with no server to host (see [Cloud library](#cloud-library))
 - Tracks per-user reading progress (each user gets their own progress files transparently)
 - Compiles the reader's metadata files (`series.json`, `catalog.json`) server-side from the library itself, merging in client-submitted series facts (titles, links, tags), and recompiles within seconds of an upload
 - Runs OCR automatically on uploaded manga with [hayai-nova](https://huggingface.co/JustANormalTinkerer/hayai-ocr-v2.5-nova) by default, plus optional extra OCR layers from PaddleOCR-VL (`paddle-manga`) and PP-OCRv6 (`ppocr-manga`, which also reads scanned novels)
@@ -17,7 +18,7 @@ A self-hosted manga library server with WebDAV, built-in OCR processing, and mul
 - Checks for new releases (signed) and shows them in the admin panel; self-managed installs update in one click, Docker and package installs get a notice (see [Updates](#updates))
 - Asks search engines and crawlers to stay out (`X-Robots-Tag: noindex` on every response, deny-all `robots.txt`)
 
-See [CHANGELOG.md](CHANGELOG.md) for release history and [ROADMAP.md](ROADMAP.md) for what comes next (0.8 remote storage, 0.9 streaming, 1.0 books).
+See [CHANGELOG.md](CHANGELOG.md) for release history and [ROADMAP.md](ROADMAP.md) for what comes next (0.9 streaming, 1.0 books).
 
 ## Download
 
@@ -163,6 +164,7 @@ Copy [`config.example.yaml`](config.example.yaml) for a documented starting poin
 | `server.threads` | `0` | Async worker threads (`0` = `min(cores, 4)`) |
 | `server.cache_mb` | `32` | Memory budget of the in-memory caches |
 | `storage.base_path` | `~/.local/share/mokuro-bunko` | Library and database location |
+| `storage.library.backend` | `local` | Where the library is: `local`, `gdrive`, `onedrive`, `mega` or `webdav` (see [Cloud library](#cloud-library)) |
 | `registration.mode` | `self` | `disabled`, `self`, `invite`, or `approval` |
 | `ocr.backend` | `auto` | `auto`, `cuda`, `rocm`, `cpu`, or `skip` (no OCR on this machine) |
 | `ocr.generations` | one `hayai-nova` row | The OCR recipes every volume gets a layer from, in run order |
@@ -171,6 +173,25 @@ Copy [`config.example.yaml`](config.example.yaml) for a documented starting poin
 | `catalog.enabled` | `false` | Web-based library browser |
 
 Most keys can also be set from the environment (`MOKURO_<SECTION>_<KEY>`, e.g. `MOKURO_OCR_BACKEND`; not `cors.allowed_origins`, the `database.*` keys, `ocr.upgrade.*` or `update.public_key`, which only the config file sets), plus the shortcuts `MOKURO_HOST`, `MOKURO_PORT`, `MOKURO_STORAGE` and `MOKURO_CONFIG`. The full reference is [docs/configuration.md](docs/configuration.md).
+
+## Cloud library
+
+New in 0.8. The library can be the `mokuro-reader` folder of a cloud account instead of a folder on Bunko's disk: **Google Drive**, **OneDrive**, **MEGA** or any **WebDAV** server. Bunko finds the volumes Mokuro Reader put there, runs OCR, and writes the OCR files, covers and the reader's metadata back next to them. Mokuro Reader keeps connecting to the cloud storage as it does today, so Bunko needs no address on the internet and does not have to run while you read. It can still serve readers itself, from the cloud library as from a local one.
+
+Choose the storage in the setup wizard or in the admin panel's Storage tab, or from a terminal:
+
+```
+mokuro-bunko library connect gdrive|onedrive|mega|webdav
+mokuro-bunko library status
+mokuro-bunko library disconnect     # deletes nothing in the cloud
+```
+
+- **Google Drive and OneDrive** sign in through the browser. On a machine without one (Docker, a NAS, SSH) the sign-in is finished from any other device.
+- **Google Drive**: Bunko signs in through Mokuro Reader's Google project and, like the reader, sees only the files made through it. The wizard asks which reader you use (release or beta).
+- **MEGA** asks for the account's email and password; the password is not kept. **WebDAV** takes the folder's URL, a user and an app password.
+- No password or token is written to `config.yaml`.
+
+Every setting is in [docs/configuration.md](docs/configuration.md#library-location).
 
 ## OCR
 
@@ -247,6 +268,7 @@ mokuro-bunko admin          # users and invites: add-user, delete-user, list-use
                             #   set-password, disable-user, approve-user, restore-user,
                             #   generate-invite, list-invites, delete-invite
 mokuro-bunko config         # show, set, path, init, cors-add, cors-remove
+mokuro-bunko library        # status, connect <gdrive|onedrive|mega|webdav>, disconnect (a cloud library)
 mokuro-bunko ssl            # enable, disable, status, generate
 mokuro-bunko tunnel         # status, cloudflare (a Cloudflare quick tunnel)
 mokuro-bunko dyndns         # setup, status, update, enable, disable

@@ -34,10 +34,21 @@ storage:
   # Default: ~/.local/share/mokuro-bunko (Linux/macOS)
   #          %LOCALAPPDATA%\mokuro-bunko (Windows)
   #          data\ next to mokuro-bunko.exe (Windows portable zip)
-  # Holds library/ (with thumbnails/), inbox/, users/, logs/, models/,
-  # backends/ (OCR backend packs, several GB; MOKURO_BACKENDS_DIR moves
-  # them), processors/, mokuro.db and a few .ocr-*.json state files.
+  # Holds library/, inbox/, users/, logs/, models/, backends/ (OCR backend
+  # packs, several GB; MOKURO_BACKENDS_DIR moves them), processors/,
+  # cloud/ (a cloud library's local state), mokuro.db and a few
+  # .ocr-*.json state files.
   base_path: "/var/lib/mokuro-bunko"
+
+  # Where the library is. Default: local (base_path/library/). A cloud
+  # library is the Mokuro Reader folder of a cloud account; connect it in
+  # the setup wizard, the admin panel's Storage tab or with
+  # `mokuro-bunko library connect`, which also does the sign-in. Passwords
+  # and tokens are never kept in this file. All keys:
+  # docs/configuration.md, "Library location".
+  # library:
+  #   backend: local          # local | gdrive | onedrive | mega | webdav
+  #   folder: mokuro-reader   # the library folder in the cloud account
 
 registration:
   # Registration mode:
