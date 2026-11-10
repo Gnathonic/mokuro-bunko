@@ -92,6 +92,10 @@ fn start(
     let root = cfg.root.clone();
     let store = RemoteStore::open(cfg, fake).unwrap();
     assert!(store.wait_steady(WAIT), "{:?}", store.engine_state());
+    // The engine reports Steady before its first poll and before the first adoption.
+    // A change made now could still be in that poll's page, and health is Syncing
+    // while the adoption runs: wait until that page is cut and the adoption is done.
+    wait_until(|| store.backend().change_pages() >= 1 && store.adopted());
     let mount = bunko_store::mount(store.clone() as Arc<dyn LibraryStore>);
     T {
         _tmp: tmp,
