@@ -604,6 +604,14 @@
 - **Dependency updates**: zip 9, rcgen 0.14, windows 0.62, windows-sys 0.61.
 
 ### Fixed
+- **Windows: no console window flashes while the app runs.** The app
+  (`mokuro-bunko.exe`) and the server and processor it starts have no console, so
+  every console program they ran was given a window of its own: `nvidia-smi`, which
+  the load reading runs every five seconds on a machine with an NVIDIA driver, flashed
+  one each time. The same went for hardware detection, for `whoami` and `icacls` when a
+  processor is paired, for the `cloudflared` a server starts (its window stayed for as
+  long as the tunnel was up) and for an update being fetched. These programs now run
+  without a window (#79).
 - **A WebDAV library no longer loses files to a listing the server cut short.** rclone's
   `serve webdav`, like most servers built on Go's WebDAV package, gives up on a folder
   listing when a file vanishes while it walks the folder, and still answers 207 with the

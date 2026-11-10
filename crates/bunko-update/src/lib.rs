@@ -14,6 +14,7 @@
 pub mod auto;
 pub mod backend;
 pub mod layout;
+pub mod tools;
 
 use base64::Engine as _;
 use ed25519_dalek::{Signature, VerifyingKey};
