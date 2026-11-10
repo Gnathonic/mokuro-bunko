@@ -838,6 +838,13 @@
   copy no longer matched the name, upload verification refused the whole archive as "not
   a readable zip", although the library reads it. A copy that does not match is now
   ignored, as the library's own reader does.
+- **Running the tests no longer replaces your own `config.yaml`.** A server built
+  without a config file, as most tests build one, saved an admin edit to the default
+  config path: on a developer's machine, the config of their own install. One test
+  that changes a storage setting left that file pointing at a temporary folder that
+  was deleted moments later, so the installed server then started on an empty
+  library. Such a server now keeps its settings in memory. If you have run the tests
+  on a machine where you also use Bunko, check `storage.base_path` in your config.
 
 ### Known limits
 - **Merging duplicate folders on Google Drive can trash files Bunko cannot see.**
