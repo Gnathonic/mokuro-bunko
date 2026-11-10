@@ -67,11 +67,13 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.ref }}
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo test --workspace --locked
 
   build:
@@ -105,19 +107,20 @@ jobs:
       FLAVOR: ${{ matrix.flavor }}
       ZIG: ${{ matrix.zig }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.ref }}
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
+          toolchain: stable
           targets: ${{ matrix.target }}
       - if: matrix.zig
-        uses: mlugg/setup-zig@v2
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
       - if: matrix.zig
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: cargo-zigbuild
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: ${{ matrix.name }}
       - name: xtask dist
@@ -188,7 +191,7 @@ jobs:
           if ($gui -ne 2 -or $cli -ne 3) { throw "expected GUI (2) and console (3)" }
           & (Join-Path $top.FullName "mokuro-bunko-cli.exe") --version
           if ($LASTEXITCODE -ne 0) { exit 1 }
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.artifact }}-${{ matrix.name }}
           path: |
@@ -212,12 +215,12 @@ jobs:
       RUSTUP_HOME: /github/home/.rustup
       OUT: dist
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.ref }}
       - name: build (xtask dist, then show the glibc/GLIBCXX versions the binary needs)
         run: packaging/manylinux/build.sh full
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dist-linux-x64
           path: dist/*.tar.gz
@@ -248,13 +251,14 @@ jobs:
     env:
       BUNKO_PACK_CACHE: ${{ github.workspace }}/pack-cache
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.ref }}
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
+          toolchain: stable
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: pack-${{ matrix.name }}
       # torch-sys 0.26 compiles libtch against libtorch 2.13's headers with /std:c++17:
@@ -298,7 +302,7 @@ jobs:
           "$xtask" torch-pack --locked --variant "$VARIANT" --target "$TARGET" --sample-from-manifest --out dist
           rm -rf "$BUNKO_PACK_CACHE"
           ls -l dist
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: pack-${{ matrix.name }}
           path: dist/*.tar.zst*
@@ -323,7 +327,7 @@ jobs:
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           df -h .
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.ref }}
       - name: xtask torch-pack (manylinux_2_28)
@@ -334,7 +338,7 @@ jobs:
             quay.io/pypa/manylinux_2_28_x86_64 packaging/manylinux/build.sh "${{ matrix.variant }}"
           sudo rm -rf .mb
           ls -l dist
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: pack-linux-x64-${{ matrix.variant }}
           path: dist/*.tar.zst*
@@ -357,7 +361,7 @@ jobs:
           - { platform: windows, os: windows-latest }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.ref }}
       - name: xtask vulkan-pack (manylinux_2_28)
@@ -369,9 +373,11 @@ jobs:
             quay.io/pypa/manylinux_2_28_x86_64 packaging/manylinux/build.sh vulkan
           sudo rm -rf .mb
           ls -l dist
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
         if: matrix.platform == 'windows'
-      - uses: ilammy/msvc-dev-cmd@v1
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
         if: matrix.platform == 'windows'
       - name: xtask vulkan-pack (Windows)
         if: matrix.platform == 'windows'
@@ -386,7 +392,7 @@ jobs:
           cargo run --release --locked -p xtask -- vulkan-pack --locked \
             --target x86_64-pc-windows-msvc --ncnn-dir "$RUNNER_TEMP/ncnn/install" --out dist
           ls -l dist
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: pack-${{ matrix.platform }}-vulkan
           path: dist/*.tar.zst*
@@ -411,20 +417,21 @@ jobs:
       CARGO_LOCKED: "1"
       NDK_VERSION: "29.0.14206865"
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.ref }}
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
+          toolchain: stable
           targets: aarch64-linux-android,x86_64-linux-android
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: cargo-ndk
-      - uses: actions/setup-java@v6
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           distribution: temurin
           java-version: "21"
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: android
       - name: Android SDK packages (platform 36, build-tools, NDK)
@@ -465,7 +472,7 @@ jobs:
           "$bt/zipalign" -c -P 16 4 "$apk"
           unzip -l "$apk" | grep -E 'lib/(arm64-v8a|x86_64)/libbunko_android.so'
           unzip -l "$apk" | grep -E 'assets/THIRD-PARTY-LICENSES.md'
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: android-apk
           path: dist-android/*
