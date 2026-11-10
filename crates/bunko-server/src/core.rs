@@ -17,6 +17,8 @@ pub struct Core(Arc<CoreInner>);
 
 pub struct CoreInner {
     pub config: Arc<RwLock<Config>>,
+    /// The file admin edits are saved to; `None` for a server with no file (tests):
+    /// see [`Core::save_config`].
     pub config_path: Option<PathBuf>,
     pub layout: StorageLayout,
     pub proxies: RwLock<TrustedProxies>,
@@ -95,10 +97,18 @@ impl Core {
             })
     }
 
-    /// Persist the live config (admin edits).
+    /// Persist the live config (admin edits) to this server's config file.
+    ///
+    /// A server built without one keeps its settings in memory and writes nothing. It
+    /// must not fall back to the default path as `bunko_core::config::save_config`
+    /// does for the command line: that is the user's own `config.yaml`, and the
+    /// servers built without a file are the tests'.
     pub fn save_config(&self) -> Result<(), bunko_core::ConfigError> {
+        let Some(path) = self.config_path.as_deref() else {
+            return Ok(());
+        };
         let snapshot = self.config.read().clone();
-        bunko_core::config::save_config(&snapshot, self.config_path.as_deref())
+        bunko_core::config::save_config(&snapshot, Some(path))
     }
 }
 
