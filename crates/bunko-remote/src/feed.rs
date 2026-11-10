@@ -11,7 +11,12 @@
 //! [`FeedConfig::chunk`] nodes that commit (and emit their events) as the listing
 //! streams in, so a large first sync never holds the tree in memory; older-generation
 //! nodes are swept only after a complete enumeration, skipping what
-//! [`FeedState::keep_on_sweep`] keeps.
+//! [`FeedState::keep_on_sweep`] keeps. On a path-id provider (WebDAV) a pid names a
+//! place, and a server can answer a listing it gave up on part-way as if it were
+//! whole: before a sweep applies, the top of each subtree it would remove is asked
+//! for ([`Backend::stat`]), and one that is still there fails the sync as transient
+//! with nothing swept (the driver confirms the removals of its change pages the same
+//! way).
 //!
 //! **STEADY**: each change page and its new cursor apply in one transaction
 //! (delivery is at least once, idempotent by pid). Within a page only the last item
@@ -831,6 +836,26 @@ impl<B: Backend> Core<B> {
             }
         }
         Ok(stashed)
+    }
+
+    /// A path-id provider only: `stale` is what a full listing no longer shows and a
+    /// sweep is about to remove. Ask the provider for the top of each such subtree
+    /// ([`Index::removal_tops`]), one call at a time; one that is still there means
+    /// the listing was not the whole tree (a server that cut it short), and nothing
+    /// may be swept on its word.
+    async fn confirm_sweep(&self, stale: &HashSet<Pid>) -> Result<(), BErr> {
+        if stale.is_empty() {
+            return Ok(());
+        }
+        let tops = self.index.lock().removal_tops(stale);
+        for pid in tops {
+            if self.backend.stat(&pid).await?.is_some_and(|n| !n.trashed) {
+                return Err(BErr::Transient(format!(
+                    "the full listing left out {pid:?}, which is still there; nothing is swept"
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Commit one FULL_SYNC chunk and deliver what it produced.
@@ -1717,7 +1742,6 @@ impl<B: Backend> Engine<B> {
         }
         self.core.ingest(&mut buf, generation)?;
         self.sync_done = done;
-        self.ok();
 
         let fstate = self.core.fstate.clone();
         let (stale, visible, total) = {
@@ -1738,6 +1762,12 @@ impl<B: Backend> Engine<B> {
             SyncMode::Normal => !self.core.trips(visible, total),
             SyncMode::Relist => self.prev_relist.as_ref() == Some(&set),
         };
+        if apply && self.core.caps.path_ids {
+            self.core
+                .confirm_sweep(&stale.iter().cloned().collect())
+                .await?;
+        }
+        self.ok();
         let mut out = Vec::new();
         {
             let idx = self.core.index.lock();

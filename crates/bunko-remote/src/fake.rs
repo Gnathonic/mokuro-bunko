@@ -10,7 +10,7 @@
 //! The `reader_*` helpers act as Mokuro Reader would on that provider; they bypass call
 //! counting and fault injection.
 
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -140,6 +140,9 @@ struct State {
     /// A misbehaving provider: this many next uploads store their bytes with the
     /// last one dropped.
     mangle_uploads: usize,
+    /// A misbehaving provider: `list_all` leaves these nodes and what is below them
+    /// out, and still answers `Ok`.
+    unlisted: HashSet<Pid>,
 }
 
 /// The in-memory provider.
@@ -355,6 +358,20 @@ impl FakeBackend {
     /// Items per change page (default 500).
     pub fn set_page_size(&self, n: usize) {
         self.state.lock().page_size = n.max(1);
+    }
+
+    /// Full listings (`list_all`) leave out the nodes at `paths` and everything below
+    /// them, and still succeed: a server that cut its listing short. Every other call
+    /// (`stat`, `changes`) answers for them as before. An empty `paths` ends it.
+    pub fn leave_out_of_listings(&self, paths: &[&str]) {
+        let mut st = self.state.lock();
+        st.unlisted = paths
+            .iter()
+            .map(|p| {
+                st.resolve(&self.profile, p)
+                    .unwrap_or_else(|| panic!("no node at {p}"))
+            })
+            .collect();
     }
 
     /// `list_all` calls `hook` after every node it streams (to observe the consumer
@@ -1315,6 +1332,9 @@ impl Backend for FakeBackend {
                 stack.extend(st.live_children(r).into_iter().rev());
             }
             while let Some(p) = stack.pop() {
+                if st.unlisted.contains(&p) {
+                    continue;
+                }
                 stack.extend(st.live_children(&p).into_iter().rev());
                 out.push(st.rnode(&self.profile, &p));
             }

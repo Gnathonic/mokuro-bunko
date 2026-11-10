@@ -585,6 +585,76 @@ async fn lose_cursor_resyncs_without_spurious_removed() {
     assert!(r.drain().is_empty());
 }
 
+/// A WebDAV server can answer a listing it gave up on part-way as if it were whole.
+/// A full sync sweeps nothing on the word of a listing that leaves out what is still
+/// there: it fails as transient and lists again.
+#[tokio::test(start_paused = true)]
+async fn webdav_full_listing_cut_short_sweeps_nothing() {
+    let f = FakeBackend::webdav_plain();
+    seed(&f, &["A/v1.cbz", "A/v1.mokuro", "B/v2.cbz", "C/v3.cbz"]);
+    let mut r = rig(f);
+    r.ready().await;
+    // One file is gone for real; the listing also leaves out a file and a folder
+    // that are not.
+    r.fake.reader_delete("mokuro-reader/C/v3.cbz");
+    r.fake
+        .leave_out_of_listings(&["mokuro-reader/A/v1.mokuro", "mokuro-reader/B"]);
+    let lists = r.fake.calls(FakeOp::ListAll);
+    r.fake.lose_cursor();
+    r.feed.poll_now();
+    r.feed
+        .wait_for(|s| *s == EngineState::Offline, LONG)
+        .await
+        .unwrap();
+    assert!(r.fake.calls(FakeOp::ListAll) >= lists + 3);
+    tokio::time::sleep(Duration::from_secs(1200)).await;
+    assert_eq!(r.drain(), vec![]);
+    assert!(r.hooks_now().is_empty());
+    for p in ["A/v1.mokuro", "B", "B/v2.cbz", "C/v3.cbz"] {
+        assert!(r.has(p), "{p}");
+    }
+
+    // The listing is whole again: only what is gone goes.
+    r.fake.leave_out_of_listings(&[]);
+    let evs = r.until(|e| *e == WatchEvent::Rescan).await;
+    assert_eq!(evs, vec![removed("C/v3.cbz", false), WatchEvent::Rescan]);
+    r.steady().await;
+    for p in ["A/v1.mokuro", "B", "B/v2.cbz"] {
+        assert!(r.has(p), "{p}");
+    }
+}
+
+/// The sweep asks once per removed subtree, and only where a pid is a path.
+#[tokio::test(start_paused = true)]
+async fn full_sync_sweep_asks_for_the_top_of_each_removed_subtree() {
+    for (f, asked) in [
+        (FakeBackend::webdav_plain(), 2),
+        (FakeBackend::drive_like(), 0),
+    ] {
+        seed(&f, &["A/v1.cbz", "A/v1.mokuro", "B/v2.cbz", "B/v2.mokuro"]);
+        let mut r = rig(f);
+        r.ready().await;
+        r.fake.reader_delete("mokuro-reader/B");
+        r.fake.reader_delete("mokuro-reader/A/v1.mokuro");
+        let stats = r.fake.calls(FakeOp::Stat);
+        r.fake.lose_cursor();
+        r.feed.poll_now();
+        let evs = r.until(|e| *e == WatchEvent::Rescan).await;
+        let gone: BTreeSet<PathBuf> = evs
+            .iter()
+            .filter_map(|e| match e {
+                WatchEvent::Removed { path, .. } => Some(path.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            gone.contains(&abs("B")) && gone.contains(&abs("A/v1.mokuro")),
+            "{evs:?}"
+        );
+        assert_eq!(r.fake.calls(FakeOp::Stat) - stats, asked);
+    }
+}
+
 #[tokio::test(start_paused = true)]
 async fn restart_resumes_from_the_persisted_cursor() {
     let f = Arc::new(FakeBackend::drive_like());
