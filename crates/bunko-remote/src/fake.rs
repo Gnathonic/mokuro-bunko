@@ -123,6 +123,8 @@ struct State {
     next_ver: u64,
     last_ms: i64,
     calls: HashMap<FakeOp, usize>,
+    /// Change pages answered, counted as each one copies the log.
+    change_pages: usize,
     fail: HashMap<FakeOp, VecDeque<BErr>>,
     latency: Duration,
     throttle_until: Option<Instant>,
@@ -417,6 +419,14 @@ impl FakeBackend {
     /// How many times `op` was called through the [`Backend`] trait.
     pub fn calls(&self, op: FakeOp) -> usize {
         self.state.lock().calls.get(&op).copied().unwrap_or(0)
+    }
+
+    /// How many change pages [`Backend::changes`] has answered. A page holds the
+    /// log as it was when it was counted here: a change made after that is in a
+    /// later page. [`FakeBackend::calls`] counts a call when it starts, before its
+    /// page is cut. [`FakeBackend::reset_calls`] leaves this count alone.
+    pub fn change_pages(&self) -> usize {
+        self.state.lock().change_pages
     }
 
     /// Reset every call counter and the read log.
@@ -1398,6 +1408,7 @@ impl Backend for FakeBackend {
             items = items.into_iter().flat_map(|i| [i.clone(), i]).collect();
         }
         st.issued(end);
+        st.change_pages += 1;
         Ok(ChangePage::Page {
             items,
             next: Cursor(end.to_string()),
