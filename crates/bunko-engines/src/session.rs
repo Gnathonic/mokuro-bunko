@@ -32,6 +32,8 @@ use crate::stages::{PanicFn, Pipeline, StageDef, StageFn};
 /// Everything a session needs to write sidecars besides its pages.
 pub struct SessionInfo {
     pub engine: String,
+    /// The line detector the pages were read with (`ocr_engine.detector`).
+    pub detector: String,
     pub patch_budget: u32,
     pub generator: String,
     /// Insertion-ordered `ocr_engine.weights`.
@@ -181,6 +183,7 @@ impl EngineRunner {
             Some(&self.info.generator),
             i64::from(self.info.patch_budget),
         );
+        engine.detector = self.info.detector.clone();
         engine.weights = self.info.weights.clone();
         engine.precision = self.info.precision.clone();
         let header = VolumeHeader {

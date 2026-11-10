@@ -42,6 +42,9 @@ jobs:
       # The full build (default features, links ONNX Runtime) and the lite build.
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo clippy -p mokuro-bunko --all-targets --locked --no-default-features -- -D warnings
+      # The full build without the restricted-licence models (`gpl-models`, `nc-models`),
+      # as `xtask dist --permissive-models` builds it.
+      - run: cargo clippy -p mokuro-bunko --all-targets --locked --no-default-features --features ocr,tray -- -D warnings
       # The ONNX Runtime GPU execution providers are not released in 0.7 but must keep compiling.
       - run: cargo clippy -p mokuro-bunko --locked --features cuda,webgpu -- -D warnings
       - run: cargo clippy --locked --manifest-path packaging/docker-init/Cargo.toml -- -D warnings

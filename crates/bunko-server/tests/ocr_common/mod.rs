@@ -29,6 +29,27 @@ pub fn t0() -> f64 {
     (now + 100.0).floor()
 }
 
+/// The `engine_revisions` map of a processor that is up to date: each of `engines` at
+/// this library's current output revision (`bunko_layout::sidecar::engine_revision`).
+/// A catalog without the map announces revision 1 of every engine, and the scheduler
+/// offers a processor none of the work of an engine it runs at an older revision, so
+/// every catalog that stands for a current processor carries this.
+pub fn current_revisions<'a>(engines: impl IntoIterator<Item = &'a str>) -> serde_json::Value {
+    engines
+        .into_iter()
+        .map(|e| {
+            (
+                e.to_string(),
+                json!(bunko_layout::sidecar::engine_revision(e)),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>()
+        .into()
+}
+
+/// The engines the harness's processors run and announce.
+pub const ENGINES: [&str; 3] = ["hayai-nova", "paddle-manga", "ppocr-manga"];
+
 /// `content` as Bunko's OCR install leaves it: sealed (`bunko_layout::seal`).
 pub fn sealed(content: &str) -> String {
     let mut v = bunko_layout::json::Value::parse(content).unwrap();
@@ -232,32 +253,38 @@ impl H {
 
     /// Register + open the socket of a processor that runs every engine.
     pub fn connect(&mut self, name: &str, sessions: u32) -> Proc {
-        self.connect_with(
-            name,
-            sessions,
-            json!(["hayai-nova", "paddle-manga", "ppocr-manga"]),
-        )
+        self.connect_with(name, sessions, json!(ENGINES))
     }
 
+    /// A processor that runs `engines` (a JSON array of ids), each at its current
+    /// revision.
     pub fn connect_with(&mut self, name: &str, sessions: u32, engines: serde_json::Value) -> Proc {
-        let catalog = json!({"engines": engines, "detectors": ["ppocr-manga"], "devices": [{"id": "cpu", "label": "CPU"}]});
+        let revisions = current_revisions(
+            engines
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str),
+        );
+        let catalog = json!({"engines": engines, "detectors": ["ppocr-manga"], "devices": [{"id": "cpu", "label": "CPU"}], "engine_revisions": revisions});
         self.connect_catalog(name, sessions, catalog)
     }
 
     /// A processor with a GPU computing in `formats`, running every engine.
     pub fn connect_gpu(&mut self, name: &str, formats: &[&str]) -> Proc {
         let catalog = json!({
-            "engines": ["hayai-nova", "paddle-manga", "ppocr-manga"],
+            "engines": ENGINES,
             "detectors": ["ppocr-manga"],
             "devices": [{"id": "cpu", "label": "CPU"},
                         {"id": "gpu:0", "label": "GPU 0", "formats": formats, "provider": "cuda", "arch": "sm_89"}],
+            "engine_revisions": current_revisions(ENGINES),
         });
         self.connect_catalog(name, 1, catalog)
     }
 
     /// A processor that runs every engine and says it is mokuro-bunko `version`.
     pub fn connect_version(&mut self, name: &str, sessions: u32, version: &str) -> Proc {
-        let catalog = json!({"engines": ["hayai-nova", "paddle-manga", "ppocr-manga"], "detectors": ["ppocr-manga"], "devices": [{"id": "cpu", "label": "CPU"}]});
+        let catalog = json!({"engines": ENGINES, "detectors": ["ppocr-manga"], "devices": [{"id": "cpu", "label": "CPU"}], "engine_revisions": current_revisions(ENGINES)});
         let host = json!({"cpu": "Test CPU (8 cores)", "gpu": "Test GPU", "backend": "cuda", "version": version});
         self.connect_host(name, sessions, catalog, host)
     }

@@ -1,5 +1,6 @@
 //! Cloudflare quick tunnel via the external `cloudflared` binary (0.5.2 `tunnel/`).
 
+use bunko_update::tools::Windowless;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use std::process::Stdio;
@@ -63,6 +64,8 @@ impl TunnelService {
         let scheme = if https { "https" } else { "http" };
         let mut child = Command::new(bin)
             .args(["tunnel", "--url", &format!("{scheme}://localhost:{port}")])
+            // It runs for as long as the tunnel is up: its window would stay.
+            .windowless()
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .kill_on_drop(true)

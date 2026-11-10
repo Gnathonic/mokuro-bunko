@@ -1289,10 +1289,11 @@ fn a_mismatched_result_name_removes_only_its_claim_directory() {
 fn local_up(h: &mut H, formats: &[&str]) -> tokio::sync::mpsc::UnboundedReceiver<Op> {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let catalog: bunko_proto::Catalog = serde_json::from_value(serde_json::json!({
-        "engines": ["hayai-nova", "paddle-manga", "ppocr-manga"],
+        "engines": ENGINES,
         "detectors": ["ppocr-manga"],
         "devices": [{"id": "cpu", "label": "CPU"},
                     {"id": "gpu:0", "label": "GPU 0", "formats": formats, "provider": "rocm", "arch": "gfx1201"}],
+        "engine_revisions": current_revisions(ENGINES),
     }))
     .unwrap();
     let host = bunko_proto::HostInfo {
@@ -1488,9 +1489,10 @@ fn fp32_device_autobenches_once(device: serde_json::Value) {
     h.add("A/V2.cbz", 4);
     h.at(0.0);
     let catalog = serde_json::json!({
-        "engines": ["hayai-nova", "paddle-manga", "ppocr-manga"],
+        "engines": ENGINES,
         "detectors": ["ppocr-manga"],
         "devices": [{"id": "cpu", "label": "CPU", "formats": ["fp32", "bf16"], "provider": "cpu", "arch": "x86_64"}, device.clone()],
+        "engine_revisions": current_revisions(ENGINES),
     });
     let mut p = h.connect_catalog("box", 1, catalog);
     h.at(0.0);
@@ -1578,6 +1580,7 @@ fn forced_bf16_still_runs_where_a_package_exists() {
     let mut h = h;
     let rdna2 = serde_json::json!({
         "engines": ["hayai-nova", "ppocr-manga"], "detectors": ["ppocr-manga"],
+        "engine_revisions": current_revisions(["hayai-nova", "ppocr-manga"]),
         "devices": [{"id": "cpu", "label": "CPU", "provider": "cpu", "arch": "x86_64", "formats": ["fp32"]},
                     {"id": "gpu:0", "label": "GPU 0", "formats": ["fp32", "fp16", "bf16"], "provider": "rocm", "arch": "gfx1030"}],
     });
@@ -1593,6 +1596,7 @@ fn forced_bf16_still_runs_where_a_package_exists() {
     );
     let turing = serde_json::json!({
         "engines": ["hayai-nova", "ppocr-manga"], "detectors": ["ppocr-manga"],
+        "engine_revisions": current_revisions(["hayai-nova", "ppocr-manga"]),
         "devices": [{"id": "gpu:0", "label": "GPU 0", "formats": ["fp32", "fp16"], "provider": "cuda", "arch": "sm_75"}],
     });
     let _q = h.connect_catalog("turing", 1, turing);
@@ -1601,6 +1605,7 @@ fn forced_bf16_still_runs_where_a_package_exists() {
     // A CPU with a bf16 package runs a forced bf16 row (the engines allow it there).
     let cpu = serde_json::json!({
         "engines": ["hayai-nova", "ppocr-manga"], "detectors": ["ppocr-manga"],
+        "engine_revisions": current_revisions(["hayai-nova", "ppocr-manga"]),
         "devices": [{"id": "cpu", "label": "CPU", "formats": ["fp32", "bf16"], "provider": "cpu", "arch": "x86_64"},
                     {"id": "gpu:0", "label": "no package", "formats": [], "provider": "cuda", "arch": "sm_89"}],
     });
@@ -1612,11 +1617,14 @@ fn forced_bf16_still_runs_where_a_package_exists() {
 
 /// A processor whose build of the row's engine is older than this library's revision
 /// is offered none of its work: its output would be outdated the moment it landed, and
-/// the upgrade would queue the volume again. One announcing the current revision (or,
-/// as every 0.7 processor, none: revision 1) is.
+/// the upgrade would queue the volume again. One announcing the current revision is. A
+/// 0.7 processor announces none, which counts as revision 1: refused like any other
+/// older build once the engine is past its first revision.
 #[test]
 fn a_processor_with_an_older_engine_revision_gets_no_work() {
     let engine = primary().engine;
+    let now = bunko_layout::sidecar::engine_revision(&engine);
+    let older = now - 1;
     let mut h = harness(vec![primary()]);
     h.add("A/V1.cbz", 2);
     h.at(0.0);
@@ -1628,16 +1636,34 @@ fn a_processor_with_an_older_engine_revision_gets_no_work() {
             "engine_revisions": {&engine: revision},
         })
     };
-    let mut stale = h.connect_catalog("stale", 1, catalog(0));
-    assert!(opened(&stale.drain()).is_empty(), "offered to revision 0");
+    let mut stale = h.connect_catalog("stale", 1, catalog(older));
+    assert!(
+        opened(&stale.drain()).is_empty(),
+        "offered to revision {older}"
+    );
     let why = h.s.refusal(&stale.pid, &primary()).expect("a refusal");
-    assert!(why.contains("revision 0"), "{why}");
-    let mut current = h.connect_catalog("current", 1, catalog(1));
+    assert!(why.contains(&format!("revision {older},")), "{why}");
+    let mut current = h.connect_catalog("current", 1, catalog(now));
     assert_eq!(opened(&current.drain()).len(), 1);
     assert!(h.s.refusal(&current.pid, &primary()).is_none());
-    // A 0.7 processor announces no revisions: revision 1, current today.
-    let old = h.connect_with("old", 1, serde_json::json!([&engine]));
-    assert!(h.s.refusal(&old.pid, &primary()).is_none());
+    // A 0.7 processor announces no revisions: that is revision 1, whatever the engine
+    // is at today. Refused when 1 is older than the library's, with those words.
+    let old = h.connect_catalog(
+        "old",
+        1,
+        serde_json::json!({
+            "engines": [&engine],
+            "detectors": ["ppocr-manga"],
+            "devices": [{"id": "cpu", "label": "CPU"}],
+        }),
+    );
+    let why = h.s.refusal(&old.pid, &primary());
+    if now > 1 {
+        let why = why.expect("a refusal of a 0.7 processor");
+        assert!(why.contains("revision 1,"), "{why}");
+    } else {
+        assert!(why.is_none(), "{why:?}");
+    }
 }
 
 /// An installed sidecar carries its install time, its revision (1 where the runner

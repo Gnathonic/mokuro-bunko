@@ -4,8 +4,11 @@ Run with an interpreter that has onnxruntime 1.30, opencv-python-headless 5.0,
 numpy, pillow 12.3 and natsort 8.4 (see the crate's tests/golden/README note in
 gen script header), e.g.::
 
+    GOLDEN_PPOCR_MODELS=<links to the pinned files> \
     ~/.cache/mokuro-bunko-demo/ref052-ocr/bin/python \
-        crates/bunko-ocr/tests/golden/gen_ppocr_golden.py
+        crates/bunko-ocr/tests/golden/gen_ppocr_golden.py [page id ...]
+
+With page ids only those pages are written and the listings are left alone.
 
 Reads the sample archives in ~/Downloads (never writes there). Writes, per page in
 ppocr_pages.json, ``ppocr/<id>.json`` with:
@@ -30,11 +33,14 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[3]
-OCR_SRC = ROOT / "src" / "mokuro_bunko" / "ocr"
-SNAPSHOT = Path.home() / (
-    ".cache/huggingface/hub/models--Kellenok--PP-OCRv6_manga/snapshots/"
-    "ba1d479e8a61a20e8318c9758c73fbbbd290b98d"
-)
+# The Python reader: a 0.5.2 checkout (MOKURO_REF_052, as tools/onnx_export uses it).
+OCR_SRC = Path(os.environ.get("MOKURO_REF_052", ROOT.parent / "ref-0.5.2")) / "src" / "mokuro_bunko" / "ocr"
+# The pinned PP-OCR files (v0.3, revision d65838996a00ef6b1c73ca3a700d7a8c5fbbef8a)
+# under the names the 0.5.2 reader looks for: `det/manga_det_v0.2.onnx`,
+# `rec/manga_rec_v0.2.onnx`, `ppocrv6_dict.txt`. The repo names the v0.3 files
+# `det/manga_det.onnx` and `rec/manga_rec.onnx`, so GOLDEN_PPOCR_MODELS is a directory
+# of links to a snapshot of that revision.
+SNAPSHOT = Path(os.environ["GOLDEN_PPOCR_MODELS"])
 DOWNLOADS = Path.home() / "Downloads"
 THREADS = int(os.environ.get("GOLDEN_THREADS", "4"))
 

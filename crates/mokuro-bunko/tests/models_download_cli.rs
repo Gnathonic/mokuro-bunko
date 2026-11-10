@@ -21,7 +21,7 @@ fn hayai_only_config_fetches_no_paddle_files_and_fails_late() {
     let text = stdout(&out);
     assert!(!out.status.success(), "{text}");
     assert!(text.contains("hayai-nova/tokenizer"), "{text}");
-    assert!(text.contains("ppocr-manga/det-v0.2"), "{text}");
+    assert!(text.contains("ppocr-manga/det-v0.3"), "{text}");
     assert!(
         !text.contains("paddle-manga"),
         "a hayai-only config fetches no paddle file:\n{text}"

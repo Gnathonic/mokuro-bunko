@@ -242,9 +242,13 @@ impl T {
     }
 
     fn sync_feed(&self) {
-        let n = self.fake.calls(FakeOp::Changes);
-        self.s().feed().poll_now();
-        wait_until("a feed poll", || self.fake.calls(FakeOp::Changes) > n);
+        // The poll that starts now has been applied when the one asked for after
+        // it starts: a poll starts only when the one before it has ended.
+        for _ in 0..2 {
+            let n = self.fake.calls(FakeOp::Changes);
+            self.s().feed().poll_now();
+            wait_until("a feed poll", || self.fake.calls(FakeOp::Changes) > n);
+        }
         std::thread::sleep(Duration::from_millis(100));
     }
 

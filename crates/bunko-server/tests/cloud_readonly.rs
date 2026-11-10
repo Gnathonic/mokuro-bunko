@@ -918,9 +918,10 @@ fn run_local_claim(refuse: bool) {
 
     let (tx, mut ops) = tokio::sync::mpsc::unbounded_channel();
     let catalog: bunko_proto::Catalog = serde_json::from_value(serde_json::json!({
-        "engines": ["hayai-nova", "paddle-manga", "ppocr-manga"],
+        "engines": ocr_common::ENGINES,
         "detectors": ["ppocr-manga"],
         "devices": [{"id": "cpu", "label": "CPU"}],
+        "engine_revisions": ocr_common::current_revisions(ocr_common::ENGINES),
     }))
     .unwrap();
     sched.handle(Msg::LocalUp {
@@ -981,6 +982,9 @@ fn run_local_claim(refuse: bool) {
     assert!(sched.claims[&job].spool.is_some(), "pinned while claimed");
 
     if refuse {
+        // The store stops at STAGED, where the op is already in the outbox: the gate
+        // is shut first, so the worker cannot send it before the store has stopped.
+        remote.set_lease_gate(Arc::new(|| false));
         remote.set_failpoint(Some(Arc::new(|at: &str| at == "STAGED")));
     }
     // The runner finishes.
@@ -1064,7 +1068,7 @@ fn connect(
         "protocol": 3,
         "name": name,
         "host": {"cpu": "Test CPU", "gpu": "Test GPU", "backend": "cuda", "version": version},
-        "catalog": {"engines": ["hayai-nova", "paddle-manga", "ppocr-manga"], "detectors": ["ppocr-manga"], "devices": [{"id": "cpu", "label": "CPU"}]},
+        "catalog": {"engines": ocr_common::ENGINES, "detectors": ["ppocr-manga"], "devices": [{"id": "cpu", "label": "CPU"}], "engine_revisions": ocr_common::current_revisions(ocr_common::ENGINES)},
         "max_sessions": sessions,
     });
     sched.handle(Msg::Register {

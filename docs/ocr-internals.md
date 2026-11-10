@@ -482,12 +482,14 @@ rare kanji the small recognizer gets wrong.
 
 ## Models, provenance and pins
 
-The recognizers are compiled libtorch packages of Apache-2.0 weights, one
+hayai-nova and paddle-manga are compiled libtorch packages of Apache-2.0 weights, one
 per engine, precision and device type, produced by `tools/torch_export/` (a
 Python development tool that never runs on a user's machine) and published
 as the `torch-models-v1` release assets with a manifest of sha256 hashes and
-the source model revisions; the PP-OCR files and the recognizers' host files
-are in the `models-v1` release. A full build downloads what it needs into
+the source model revisions; the recognizers' host files are in the `models-v1`
+release. The PP-OCR files, and the opt-in models (`ctd-lines`, `charspot-small`,
+`nar-small`), are fetched from their authors' repositories at a pinned revision
+and checked against the hashes compiled into the program. A full build downloads what it needs into
 `<storage>/models/`, verifies it and unpacks the packages there (see
 [configuration](configuration.md#ocr-models) and
 [`rust-port/TORCH-BACKEND.md`](rust-port/TORCH-BACKEND.md)). Every source
@@ -501,6 +503,7 @@ this is how a reader tells server OCR from a layer a person edited:
 ```json
 "ocr_engine": {
   "id": "hayai-nova",
+  "revision": 2,
   "recognizer": "JustANormalTinkerer/hayai-ocr-v2.5-nova",
   "detector": "ppocr-manga",
   "generator": "mokuro-bunko 0.7.0",
