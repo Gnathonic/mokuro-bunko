@@ -6,6 +6,7 @@ use crate::cli::TunnelCmd;
 use crate::out::{CmdResult, Fail, exit_with, runtime};
 use crate::prompt;
 use bunko_server::ops::tunnel::{INSTALL_URL, cloudflared_path, find_tunnel_url};
+use bunko_update::tools::Windowless;
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -28,7 +29,11 @@ fn status() -> CmdResult {
     let out = rt.block_on(async {
         tokio::time::timeout(
             Duration::from_secs(10),
-            tokio::process::Command::new(&path).arg("version").output(),
+            // The app runs this command from a process without a console.
+            tokio::process::Command::new(&path)
+                .arg("version")
+                .windowless()
+                .output(),
         )
         .await
     });

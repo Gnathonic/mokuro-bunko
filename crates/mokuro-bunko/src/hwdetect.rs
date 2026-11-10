@@ -19,6 +19,7 @@
 //! [`preferred`] applies the owner's `ocr.backend` preference (`cpu`, `cuda`, `rocm`,
 //! `auto`) on top of what was found.
 
+use bunko_update::tools::Windowless;
 use std::path::Path;
 
 /// CUDA 13.0 needs this NVIDIA driver (Linux 580.65.06, Windows 580.88).
@@ -232,6 +233,7 @@ pub fn detect() -> Hardware {
         // nvidia-smi gives names and (on Windows) the version; absent: not fatal.
         if let Ok(out) = std::process::Command::new("nvidia-smi")
             .args(["--query-gpu=name,driver_version", "--format=csv,noheader"])
+            .windowless()
             .output()
             && out.status.success()
         {
