@@ -120,6 +120,9 @@ async function loadStorage() {
         stText('so-oldest', ob.oldest ? ob.oldest.path + ' (' + ob.oldest.state.toLowerCase() + ', ' + ob.oldest.attempts + ' tries)' : '');
         stText('so-error', ob.last_error);
         stText('so-held', ob.held + ' / ' + ob.failed);
+        const why = stEl('so-held-why');
+        why.textContent = ob.held_because || '';
+        why.hidden = !ob.held_because;
         const ops = stEl('so-ops');
         ops.replaceChildren(...[...(ob.failed_ops || []), ...(ob.held_ops || [])].slice(0, 20).map((o) => {
             const li = document.createElement('li');

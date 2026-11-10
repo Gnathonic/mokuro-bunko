@@ -122,6 +122,11 @@ pub enum Msg {
         epoch: u64,
         index: OwedIndex,
     },
+    /// What a running walk has judged so far ([`crate::ocr::owed::walk_in_parts`]).
+    WalkedPart {
+        epoch: u64,
+        part: OwedIndex,
+    },
     /// The paced direct-replace job finished ([`crate::ocr::upgrade::Upgrade::run_direct`]).
     DirectUpgraded {
         done: u64,
@@ -231,6 +236,7 @@ impl std::fmt::Debug for Msg {
         let name = match self {
             Msg::Tick => "Tick",
             Msg::Walked { .. } => "Walked",
+            Msg::WalkedPart { .. } => "WalkedPart",
             Msg::DirectUpgraded { .. } => "DirectUpgraded",
             Msg::OrphansSwept(_) => "OrphansSwept",
             Msg::Event { .. } => "Event",
@@ -613,6 +619,7 @@ impl Scheduler {
         match msg {
             Msg::Tick => self.tick(),
             Msg::Walked { epoch, index } => self.walked(epoch, index),
+            Msg::WalkedPart { epoch, part } => self.walked_part(epoch, part),
             Msg::DirectUpgraded { done, failed } => self.direct_upgraded(done, failed),
             Msg::OrphansSwept(report) => self.orphans_swept(report),
             Msg::Event { pid, event } => self.on_event(&pid, event),
@@ -731,8 +738,14 @@ impl Scheduler {
             .iter()
             .map(|(rel, v)| (rel.clone(), (v.size, v.mtime_ns, v.pages)))
             .collect();
+        // On helper threads the walk hands over its parts as it goes; inline (tests)
+        // it answers once.
+        let parts = match &self.deps.exec {
+            Exec::Threads(tx) => Some(tx.clone()),
+            Exec::Inline => None,
+        };
         self.run_background(Box::new(move || {
-            let index = super::owed::walk(
+            let index = super::owed::walk_in_parts(
                 &library,
                 &rows,
                 facts.as_ref(),
@@ -740,9 +753,40 @@ impl Scheduler {
                     .as_deref()
                     .map(|p| p as &dyn super::owed::UpgradeProbe),
                 &known,
+                super::owed::WALK_PART_EVERY,
+                &mut |part| {
+                    if let Some(tx) = &parts {
+                        let _ = tx.send(Msg::WalkedPart { epoch, part });
+                    }
+                },
             );
             Msg::Walked { epoch, index }
         }));
+    }
+
+    /// A part of the running walk: its volumes join the queue at once (the walk's end
+    /// replaces the whole index as before). A large cloud library's first walk takes
+    /// many minutes of provider reads; OCR starts on what is judged meanwhile instead of
+    /// waiting for all of it.
+    fn walked_part(&mut self, epoch: u64, part: OwedIndex) {
+        if !self.walking || epoch != self.walk_epoch {
+            return;
+        }
+        for (rel, mut v) in part.volumes {
+            if let Some(old) = self.owed.volumes.get(&rel)
+                && let Some((stamp, read)) = &old.page_suffixes
+                && *stamp == (v.size, v.mtime_ns)
+            {
+                v.page_suffixes = Some((*stamp, read.clone()));
+            }
+            self.owed.volumes.insert(rel, v);
+        }
+        for lane in &mut self.lanes {
+            lane.idle_at = None;
+        }
+        self.bump();
+        self.bump_page();
+        self.maybe_start_scan();
     }
 
     fn walked(&mut self, epoch: u64, index: OwedIndex) {
