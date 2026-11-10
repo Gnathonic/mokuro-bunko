@@ -982,6 +982,9 @@ fn run_local_claim(refuse: bool) {
     assert!(sched.claims[&job].spool.is_some(), "pinned while claimed");
 
     if refuse {
+        // The store stops at STAGED, where the op is already in the outbox: the gate
+        // is shut first, so the worker cannot send it before the store has stopped.
+        remote.set_lease_gate(Arc::new(|| false));
         remote.set_failpoint(Some(Arc::new(|at: &str| at == "STAGED")));
     }
     // The runner finishes.
