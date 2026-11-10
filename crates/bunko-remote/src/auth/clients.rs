@@ -18,26 +18,37 @@ use bunko_core::config::{GoogleOAuthOverrides, GoogleProject, MicrosoftOAuthOver
 
 use super::oauth::OAuthClient;
 
+/// A secret from the build environment. A variable that is set but empty is no secret:
+/// that is what a workflow run without the repository secrets (a release dry run, a
+/// fork) hands the compiler.
+const fn build_secret(v: Option<&'static str>) -> Option<&'static str> {
+    match v {
+        Some(s) if !s.is_empty() => Some(s),
+        _ => None,
+    }
+}
+
 /// `mokuro-reader-414418` (release), Desktop client: the loopback flow.
 pub const RELEASE_DESKTOP_CLIENT_ID: &str =
     "668077722590-5u0698aafve2udlcru7i184qrb7m59jv.apps.googleusercontent.com";
 pub const RELEASE_DESKTOP_CLIENT_SECRET: Option<&str> =
-    option_env!("BUNKO_GOOGLE_RELEASE_DESKTOP_SECRET");
+    build_secret(option_env!("BUNKO_GOOGLE_RELEASE_DESKTOP_SECRET"));
 /// `mokuro-reader-414418` (release), TVs and Limited Input client: the device flow.
 pub const RELEASE_DEVICE_CLIENT_ID: &str =
     "668077722590-9pni7na6bv58fgnacdauenfhmg1d58g0.apps.googleusercontent.com";
 pub const RELEASE_DEVICE_CLIENT_SECRET: Option<&str> =
-    option_env!("BUNKO_GOOGLE_RELEASE_DEVICE_SECRET");
+    build_secret(option_env!("BUNKO_GOOGLE_RELEASE_DEVICE_SECRET"));
 
 /// `mokuro-reader-tan` (beta), Desktop client.
 pub const BETA_DESKTOP_CLIENT_ID: &str =
     "868461116957-anvbst1eiq2pbegk578f280mhj3umrbv.apps.googleusercontent.com";
 pub const BETA_DESKTOP_CLIENT_SECRET: Option<&str> =
-    option_env!("BUNKO_GOOGLE_BETA_DESKTOP_SECRET");
+    build_secret(option_env!("BUNKO_GOOGLE_BETA_DESKTOP_SECRET"));
 /// `mokuro-reader-tan` (beta), TVs and Limited Input client.
 pub const BETA_DEVICE_CLIENT_ID: &str =
     "868461116957-b494nfd65jv26p3ii067kkeihvi56m8l.apps.googleusercontent.com";
-pub const BETA_DEVICE_CLIENT_SECRET: Option<&str> = option_env!("BUNKO_GOOGLE_BETA_DEVICE_SECRET");
+pub const BETA_DEVICE_CLIENT_SECRET: Option<&str> =
+    build_secret(option_env!("BUNKO_GOOGLE_BETA_DEVICE_SECRET"));
 
 /// Bunko's Microsoft registration: a public client (no secret), native redirect
 /// `http://localhost/bunko` (D17).
@@ -81,7 +92,7 @@ pub fn google_clients(pairing: GoogleProject, overrides: &GoogleOAuthOverrides) 
     };
     let embedded = |id: &str, secret: Option<&str>| {
         let mut c = OAuthClient::google(id, "");
-        c.client_secret = secret.filter(|s| !s.is_empty()).map(str::to_string);
+        c.client_secret = secret.map(str::to_string);
         c
     };
     GoogleClients {
@@ -145,6 +156,13 @@ mod tests {
             b.loopback.unwrap().client_secret.as_deref(),
             BETA_DESKTOP_CLIENT_SECRET
         );
+    }
+
+    #[test]
+    fn an_empty_build_variable_is_no_secret() {
+        assert_eq!(build_secret(None), None);
+        assert_eq!(build_secret(Some("")), None);
+        assert_eq!(build_secret(Some("s3")), Some("s3"));
     }
 
     #[test]

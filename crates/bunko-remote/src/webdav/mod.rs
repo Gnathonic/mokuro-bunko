@@ -19,6 +19,25 @@
 //! caller moves on to the returned cursor, so a repeated call (delivery is at least
 //! once) diffs from the same base again.
 //!
+//! **Listings cut short.** A server that gives up on a listing part-way has already
+//! sent its 207. Go's `x/net/webdav` (rclone's `serve webdav`, and most Go servers)
+//! does so when an entry vanishes between its readdir and its stat, which Bunko's own
+//! staged uploads make happen: it leaves out everything it had not reached, closes the
+//! multistatus and writes the text of the 500 after it. Two rules keep such an answer
+//! from reading as a folder that lost its contents:
+//! - a body that is not one whole multistatus fails the call (`xml::ParseError`), for
+//!   every listing and every stat;
+//! - an entry a listing no longer shows is a removal only once the server confirms it.
+//!   [`Backend::changes`] asks for the top of each subtree that went missing (PROPFIND
+//!   Depth 0; what went with a missing folder is not asked about, and neither is a
+//!   name the listing shows in another spelling, which a server that folds case would
+//!   still answer for). One that is still there means the listing was cut short: it is
+//!   taken again, and after [`LIST_ATTEMPTS`] the call fails as transient with nothing
+//!   reported and the cursor where it was.
+//!
+//! A full listing ([`Backend::list_all`]) has nothing to compare against here: the
+//! feed confirms what its sweep would remove the same way (`feed.rs`, FULL_SYNC).
+//!
 //! **Writes.** With the probe's blessing, a create sends `If-None-Match: *` and a
 //! replace with `if_cver` sends `If-Match`; otherwise the bytes go to
 //! `.<name>.bunko-<op>.tmp` first and a MOVE (`Overwrite: T` for a replace, `F` for a
@@ -28,7 +47,7 @@
 mod probe;
 mod xml;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -44,6 +63,7 @@ use crate::backend::{
     AccountInfo, BErr, Backend, BackendCaps, ChangeItem, ChangePage, Cursor, OpCtx, Pid, RNode,
     RemoteBody, ServerTime, UploadSource, UploadTarget,
 };
+use crate::names::fold_path_pid;
 
 pub use probe::Probe;
 use xml::DavEntry;
@@ -62,6 +82,26 @@ const SNAPSHOT_FILE: &str = "webdav-snapshot.json";
 
 /// The version of a folder the server gives no ETag.
 const DIR_NO_ETAG: &str = "dir";
+
+/// How often [`Backend::changes`] takes a listing before it gives up on one that keeps
+/// coming back cut short.
+const LIST_ATTEMPTS: u32 = 3;
+/// The pause before the listing is taken again (times the attempt): whatever vanished
+/// under the server's walk, a staged upload of ours say, is usually done by then.
+const LIST_RETRY_PAUSE: Duration = Duration::from_millis(250);
+
+/// How the error for a listing the server cut short starts.
+const CUT_SHORT: &str = "the server cut a listing short";
+
+/// The error for a listing that is not the folder's contents: transient, the next
+/// attempt lists again.
+fn cut_short(why: impl std::fmt::Display) -> BErr {
+    BErr::Transient(format!("{CUT_SHORT}: {why}"))
+}
+
+fn is_cut_short(e: &BErr) -> bool {
+    matches!(e, BErr::Transient(m) if m.starts_with(CUT_SHORT))
+}
 
 /// How to reach the WebDAV library.
 #[derive(Clone, Default)]
@@ -641,9 +681,13 @@ impl WebDavBackend {
             .bytes_stream()
             .map(|r| r.map_err(std::io::Error::other));
         let reader = tokio_util::io::StreamReader::new(Box::pin(stream));
-        xml::parse_multistatus(reader, on)
-            .await
-            .map_err(|e| BErr::Transient(format!("bad multistatus: {}", e.0)))?;
+        xml::parse_multistatus(reader, on).await.map_err(|e| {
+            if e.cut_short {
+                cut_short(e.msg)
+            } else {
+                BErr::Transient(format!("bad multistatus: {}", e.msg))
+            }
+        })?;
         Ok(t)
     }
 
@@ -935,6 +979,73 @@ impl WebDavBackend {
         }
         Ok(entries)
     }
+
+    /// List the roots of `base` and diff against it: the change items and the entries
+    /// of the next generation. Fails with [`cut_short`] when the listing leaves out
+    /// something that is still there.
+    async fn diff(
+        &self,
+        base: &Generation,
+    ) -> Result<(Vec<ChangeItem>, BTreeMap<Pid, (String, bool)>), BErr> {
+        let mut items = Vec::new();
+        let entries = self
+            .snapshot(&base.roots, Some(base), &mut |n| {
+                items.push(ChangeItem::Upsert(n))
+            })
+            .await?;
+        let mut removed: Vec<&Pid> = base
+            .entries
+            .keys()
+            .filter(|p| !entries.contains_key(*p))
+            .collect();
+        self.confirm_removed(base, &entries, &removed).await?;
+        // Children before their folders.
+        removed.sort_by_key(|p| {
+            std::cmp::Reverse(p.matches('/').count() + usize::from(!p.is_empty()))
+        });
+        items.extend(
+            removed
+                .into_iter()
+                .map(|p| ChangeItem::Removed { pid: p.clone() }),
+        );
+        Ok((items, entries))
+    }
+
+    /// `removed` is what `base` held and the listing (`listed`) no longer shows. Ask
+    /// the server about the top of each missing subtree, one request at a time; one
+    /// that answers means the listing was cut short ([`cut_short`]).
+    ///
+    /// Not asked about: what went missing with its folder, and a name the listing
+    /// shows in another spelling (a case-only rename on a server that folds case: the
+    /// old spelling still answers there, and the listing has explained its absence).
+    async fn confirm_removed(
+        &self,
+        base: &Generation,
+        listed: &BTreeMap<Pid, (String, bool)>,
+        removed: &[&Pid],
+    ) -> Result<(), BErr> {
+        if removed.is_empty() {
+            return Ok(());
+        }
+        let shown: HashSet<String> = listed.keys().map(|p| fold_path_pid(p)).collect();
+        let unexplained: BTreeSet<&str> = removed
+            .iter()
+            .map(|p| p.as_str())
+            .filter(|p| !shown.contains(&fold_path_pid(p)))
+            .collect();
+        for pid in &unexplained {
+            if !pid.is_empty() && unexplained.contains(split_pid(pid).0) {
+                continue;
+            }
+            let is_dir = base.entries.get(*pid).is_some_and(|e| e.1);
+            if self.stat_node(pid, is_dir).await?.0.is_some() {
+                return Err(cut_short(format!(
+                    "it left out {pid:?}, which is still there"
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 fn copy_subtree(g: &Generation, root: &str, into: &mut BTreeMap<Pid, (String, bool)>) {
@@ -1115,26 +1226,17 @@ impl Backend for WebDavBackend {
             return Ok(ChangePage::CursorLost);
         }
         let base = snap.base.clone();
-        let mut items = Vec::new();
-        let entries = self
-            .snapshot(&base.roots, Some(&base), &mut |n| {
-                items.push(ChangeItem::Upsert(n))
-            })
-            .await?;
-        let mut removed: Vec<&Pid> = base
-            .entries
-            .keys()
-            .filter(|p| !entries.contains_key(*p))
-            .collect();
-        // Children before their folders.
-        removed.sort_by_key(|p| {
-            std::cmp::Reverse(p.matches('/').count() + usize::from(!p.is_empty()))
-        });
-        items.extend(
-            removed
-                .into_iter()
-                .map(|p| ChangeItem::Removed { pid: p.clone() }),
-        );
+        let mut attempt = 1;
+        let (items, entries) = loop {
+            match self.diff(&base).await {
+                Err(e) if is_cut_short(&e) && attempt < LIST_ATTEMPTS => {
+                    tracing::debug!(attempt, "webdav: {e}; listing again");
+                    tokio::time::sleep(LIST_RETRY_PAUSE * attempt).await;
+                    attempt += 1;
+                }
+                r => break r?,
+            }
+        };
         let next = Generation {
             gen_no: base.gen_no + 1,
             roots: base.roots.clone(),

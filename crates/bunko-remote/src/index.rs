@@ -26,7 +26,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rusqlite::{Connection, OptionalExtension, Row, Transaction, TransactionBehavior, params};
 
 use crate::backend::{HashKind, Pid, RNode};
-use crate::names::{CONTROL_FILES, effective_mtime_ns, fold, is_safe_segment, nfc};
+use crate::names::{CONTROL_FILES, effective_mtime_ns, fold, fold_path_pid, is_safe_segment, nfc};
 
 /// The merged root's entry id.
 pub const ROOT_EID: i64 = 1;
@@ -850,6 +850,48 @@ impl Index {
                     .or_insert_with(|| self.entry_pids(*eid).iter().any(|p| !removing.contains(p)))
             })
             .count() as u64
+    }
+
+    /// For a path-id provider (a pid is the node's path): the top of each subtree that
+    /// would leave with `removing`, by pid, i.e. the nodes of `removing` whose provider
+    /// parent is not one of them. A node whose path another node outside `removing`
+    /// has in another spelling ([`fold_path_pid`]; the old pid of a case-only rename,
+    /// which a server that folds case still answers for) is neither a top nor a
+    /// parent here, so what was really lost below a renamed folder is a top of its
+    /// own.
+    pub fn removal_tops(&self, removing: &HashSet<Pid>) -> Vec<Pid> {
+        if removing.is_empty() {
+            return Vec::new();
+        }
+        let kept: HashSet<String> = soft(
+            self.conn
+                .prepare_cached("SELECT pid FROM node")
+                .and_then(|mut s| {
+                    s.query_map([], |r| r.get::<_, Pid>(0))?
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                }),
+            "removal_tops",
+        )
+        .unwrap_or_default()
+        .iter()
+        .filter(|p| !removing.contains(*p))
+        .map(|p| fold_path_pid(p))
+        .collect();
+        let lost: std::collections::HashMap<&str, Option<Pid>> = removing
+            .iter()
+            .filter(|p| !kept.contains(&fold_path_pid(p)))
+            .filter_map(|p| {
+                let row = self.node_row(&self.conn, p).ok().flatten()?;
+                Some((p.as_str(), row.parent_pid))
+            })
+            .collect();
+        let mut tops: Vec<Pid> = lost
+            .iter()
+            .filter(|(_, parent)| parent.as_deref().is_none_or(|q| !lost.contains_key(q)))
+            .map(|(p, _)| p.to_string())
+            .collect();
+        tops.sort();
+        tops
     }
 
     /// The nodes whose provider parent is `pid`, placed or not.

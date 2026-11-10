@@ -1,5 +1,11 @@
 //! The WebDAV driver against a real WebDAV server in-process: bunko-dav over a temp
 //! directory, behind Basic auth and the server's NTFS-style path-case rewrite.
+//!
+//! One opt-in test runs against rclone's `serve webdav` (whose listings are cut short
+//! when an entry vanishes under them):
+//!
+//! BUNKO_LIVE_RCLONE=rclone \
+//!     cargo test -p bunko-remote --test webdav live_rclone -- --ignored --nocapture
 #![cfg(feature = "webdav")]
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -36,7 +42,25 @@ struct Flags {
     log: Mutex<Vec<String>>,
     /// Answer a PROPFIND of this exact path with this body instead.
     inject: Mutex<Option<(String, String)>>,
+    /// Cut listings (Depth 1 and infinity) short.
+    cut: Mutex<Option<Cut>>,
 }
+
+/// A listing whose walk the server gave up part-way: the response whose href contains
+/// `at` and every one after it are left out, and the multistatus is closed all the same.
+#[derive(Clone)]
+struct Cut {
+    at: &'static str,
+    /// What follows the closing tag. Go's `x/net/webdav` (rclone, and most Go servers)
+    /// writes the text of the 500 it can no longer send; `""` is a document nothing is
+    /// wrong with.
+    trailer: &'static str,
+    /// How many more listings are cut.
+    times: usize,
+}
+
+/// What Go's `x/net/webdav` appends to a multistatus whose walk failed.
+const GO_TRAILER: &str = "Internal Server Error";
 
 #[derive(Clone)]
 struct App {
@@ -71,6 +95,14 @@ async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
         req.uri().path()
     ));
     let propagate = propfind && app.flags.propagate.load(Ordering::SeqCst);
+    let mut cut = None;
+    if propfind && depth_header != "0" {
+        let mut slot = app.flags.cut.lock();
+        if let Some(c) = slot.as_mut().filter(|c| c.times > 0) {
+            c.times -= 1;
+            cut = Some(c.clone());
+        }
+    }
     if propfind {
         let depth = req
             .headers()
@@ -97,7 +129,7 @@ async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
     if app.flags.ignore_range.load(Ordering::SeqCst) {
         parts.headers.remove("range");
     }
-    if propagate {
+    if propagate || cut.is_some() {
         parts.headers.remove("accept-encoding");
     }
     if PathCase::may_rewrite(&parts) {
@@ -110,11 +142,42 @@ async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
         .unwrap();
     }
     let ctx = DavContext::user("admin", Role::Admin, Arc::new(NoHooks));
-    let resp = app.dav.handle(Request::from_parts(parts, body), ctx).await;
+    let mut resp = app.dav.handle(Request::from_parts(parts, body), ctx).await;
     if propagate {
-        return propagate_etags(&app.lib, resp).await;
+        resp = propagate_etags(&app.lib, resp).await;
+    }
+    if let Some(c) = cut {
+        resp = cut_short(resp, &c).await;
     }
     resp
+}
+
+/// Leave out the response naming `cut.at` and every later one; close the document.
+async fn cut_short(resp: Response<Body>, cut: &Cut) -> Response<Body> {
+    if resp.status().as_u16() != 207 {
+        return resp;
+    }
+    let (mut parts, body) = resp.into_parts();
+    let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+    let text = String::from_utf8(bytes.to_vec()).unwrap();
+    let mut chunks = text.split("<D:response>");
+    let mut out = chunks.next().unwrap().to_string();
+    let mut dropped = false;
+    for chunk in chunks {
+        let href = &chunk[..chunk.find("</D:href>").unwrap()];
+        if href.contains(cut.at) {
+            dropped = true;
+            break;
+        }
+        out.push_str("<D:response>");
+        out.push_str(chunk);
+    }
+    if dropped {
+        out.push_str("</D:multistatus>");
+        out.push_str(cut.trailer);
+    }
+    parts.headers.remove("content-length");
+    Response::from_parts(parts, Body::from(out))
 }
 
 /// A digest of everything below `dir` (names, sizes, mtimes), as a folder ETag.
@@ -1097,5 +1160,341 @@ async fn a_folder_without_an_etag_is_not_a_change_every_second() {
     assert_eq!(
         b.locate_roots("mokuro-reader").await.unwrap()[0].version,
         root.version
+    );
+}
+
+/// Every `PROPFIND <path> 0` in the request log, as paths under the folder.
+fn stats(s: &Server) -> Vec<String> {
+    s.flags
+        .log
+        .lock()
+        .iter()
+        .filter_map(|l| {
+            l.strip_prefix("PROPFIND /mokuro-reader/")?
+                .strip_suffix(" 0")
+                .map(str::to_string)
+        })
+        .collect()
+}
+
+fn cut(s: &Server, at: &'static str, trailer: &'static str, times: usize) {
+    *s.flags.cut.lock() = Some(Cut { at, trailer, times });
+}
+
+/// A listing the server cut short (it closed the multistatus early, as Go's
+/// `x/net/webdav` does when an entry vanishes under its walk) is never read as a
+/// folder that lost what the listing left out. `at` is where the listing is cut;
+/// `trailer` what follows the closing tag.
+async fn check_cut_listing_removes_nothing(s: &Server, at: &'static str, trailer: &'static str) {
+    let b = s.connect().await;
+    b.locate_roots("mokuro-reader").await.unwrap();
+    let c1 = b.start_cursor().await.unwrap();
+    // Something new in `series`, so that every way of listing has to list it.
+    s.out_of_band(|lib| std::fs::write(lib.join("series/vol2.cbz"), b"two").unwrap());
+
+    // Every listing is cut: no page, and so no removal.
+    cut(s, at, trailer, usize::MAX);
+    let err = b.changes(&c1).await.err();
+    assert!(
+        matches!(&err, Some(BErr::Transient(m)) if m.contains("cut a listing short")),
+        "{err:?}"
+    );
+
+    // One listing is cut: the driver lists again, and the page is the truth.
+    cut(s, at, trailer, 1);
+    let (items, c2) = page(b.changes(&c1).await.unwrap());
+    let (up, gone) = split(&items);
+    assert!(up.contains("series/vol2.cbz"), "{up:?}");
+    assert_eq!(gone, BTreeSet::new());
+
+    // A real removal next to a cut listing is still reported, alone.
+    s.out_of_band(|lib| {
+        std::fs::write(lib.join("series/vol3.cbz"), b"three").unwrap();
+        std::fs::remove_file(lib.join("Other/a/b.txt")).unwrap();
+    });
+    cut(s, at, trailer, 1);
+    let (items, c3) = page(b.changes(&c2).await.unwrap());
+    let (up, gone) = split(&items);
+    assert!(up.contains("series/vol3.cbz"), "{up:?}");
+    assert_eq!(gone, BTreeSet::from(["Other/a/b.txt".to_string()]));
+    assert_eq!(s.flags.cut.lock().as_ref().map(|c| c.times), Some(0));
+    let (items, _) = page(b.changes(&c3).await.unwrap());
+    assert!(items.is_empty(), "{items:?}");
+}
+
+#[tokio::test]
+async fn a_listing_cut_short_removes_nothing_depth_infinity() {
+    let s = Server::start().await;
+    check_cut_listing_removes_nothing(&s, "/mokuro-reader/series/", "").await;
+    let s = Server::start().await;
+    check_cut_listing_removes_nothing(&s, "/mokuro-reader/series/", GO_TRAILER).await;
+    // Cut inside a folder: its later children are missing, the folder is not.
+    let s = Server::start().await;
+    check_cut_listing_removes_nothing(&s, "/series/vol1.mokuro", "").await;
+}
+
+#[tokio::test]
+async fn a_listing_cut_short_removes_nothing_depth_1() {
+    for trailer in ["", GO_TRAILER] {
+        let s = Server::start().await;
+        s.flags.refuse_infinity.store(true, Ordering::SeqCst);
+        check_cut_listing_removes_nothing(&s, "/series/vol1.mokuro", trailer).await;
+    }
+}
+
+#[tokio::test]
+async fn a_listing_cut_short_removes_nothing_propagating_etags() {
+    let s = Server::start().await;
+    s.flags.refuse_infinity.store(true, Ordering::SeqCst);
+    s.flags.propagate.store(true, Ordering::SeqCst);
+    check_cut_listing_removes_nothing(&s, "/series/vol1.mokuro", "").await;
+}
+
+/// What follows the closing tag of a multistatus says the server gave up: no listing
+/// call takes such an answer for the folder's contents.
+#[tokio::test]
+async fn text_after_the_multistatus_fails_every_listing() {
+    let s = Server::start().await;
+    let b = s.connect().await;
+    let whole = listed(&b).await.len();
+    cut(&s, "/series/vol1.mokuro", GO_TRAILER, usize::MAX);
+    let mut seen = 0;
+    let err = b.list_all(&[String::new()], &mut |_| seen += 1).await.err();
+    assert!(
+        matches!(&err, Some(BErr::Transient(m)) if m.contains("cut a listing short")),
+        "{err:?}"
+    );
+    assert!(seen < whole);
+    let err = b.list_dir("series", &mut |_| {}).await.err();
+    assert!(
+        matches!(&err, Some(BErr::Transient(m)) if m.contains("cut a listing short")),
+        "{err:?}"
+    );
+    assert!(b.start_cursor().await.is_err());
+}
+
+/// A removal is reported once the server confirms it: one PROPFIND Depth 0 for the top
+/// of each removed subtree, none for what went with a removed folder.
+#[tokio::test]
+async fn removals_are_confirmed_at_the_top_of_each_removed_subtree() {
+    let s = Server::start().await;
+    let b = s.connect().await;
+    b.locate_roots("mokuro-reader").await.unwrap();
+    let c1 = b.start_cursor().await.unwrap();
+    s.out_of_band(|lib| {
+        std::fs::remove_dir_all(lib.join("Other")).unwrap();
+        std::fs::remove_file(lib.join("series/vol1.mokuro")).unwrap();
+    });
+    s.flags.log.lock().clear();
+    let (items, c2) = page(b.changes(&c1).await.unwrap());
+    let (_, gone) = split(&items);
+    assert_eq!(
+        gone,
+        ["Other", "Other/a", "Other/a/b.txt", "series/vol1.mokuro"]
+            .map(String::from)
+            .into()
+    );
+    let mut asked = stats(&s);
+    asked.sort();
+    assert_eq!(asked, ["Other/", "series/vol1.mokuro"]);
+
+    // Nothing removed, nothing asked.
+    s.flags.log.lock().clear();
+    s.out_of_band(|lib| std::fs::write(lib.join("series/vol3.cbz"), b"three").unwrap());
+    let (items, _) = page(b.changes(&c2).await.unwrap());
+    assert_eq!(split(&items).1, BTreeSet::new());
+    assert_eq!(stats(&s), Vec::<String>::new());
+}
+
+/// On a server that folds case, the old spelling of a renamed file still answers a
+/// PROPFIND: the listing showing the new spelling is what says the old one is gone.
+#[tokio::test]
+async fn a_case_only_rename_is_a_removal_the_listing_explains() {
+    let s = Server::start().await;
+    let b = s.connect().await;
+    assert_eq!(b.probe().case_sensitive, Some(false));
+    b.locate_roots("mokuro-reader").await.unwrap();
+    let c1 = b.start_cursor().await.unwrap();
+    // The old spelling answers.
+    assert!(b.stat("series/vol1.cbz").await.unwrap().is_some());
+    s.out_of_band(|lib| {
+        std::fs::rename(lib.join("series/vol1.cbz"), lib.join("series/VOL1.cbz")).unwrap();
+        std::fs::rename(lib.join("Other"), lib.join("OTHER")).unwrap();
+        std::fs::remove_file(lib.join("OTHER/a/b.txt")).unwrap();
+    });
+    assert!(b.stat("series/vol1.cbz").await.unwrap().is_some());
+    s.flags.log.lock().clear();
+    let (items, _) = page(b.changes(&c1).await.unwrap());
+    let (up, gone) = split(&items);
+    assert_eq!(
+        gone,
+        ["Other", "Other/a", "Other/a/b.txt", "series/vol1.cbz"]
+            .map(String::from)
+            .into()
+    );
+    for p in ["series/VOL1.cbz", "OTHER", "OTHER/a"] {
+        assert!(up.contains(p), "{p} not upserted: {up:?}");
+    }
+    // Only what no spelling of the listing shows is asked about.
+    assert_eq!(stats(&s), ["Other/a/b.txt"]);
+}
+
+/// rclone's `serve webdav` (Go's `x/net/webdav`) cuts a listing short when an entry
+/// vanishes between its readdir and its stat, and the driver's own staged uploads
+/// (PUT to a temporary name, MOVE into place) make exactly that happen. While one
+/// driver uploads in a loop, another polls: no poll may report a file that was never
+/// touched as removed, and no full listing may come back short.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs BUNKO_LIVE_RCLONE (the rclone binary)"]
+async fn live_rclone_cut_listings_remove_nothing() {
+    let Ok(rclone) = std::env::var("BUNKO_LIVE_RCLONE") else {
+        eprintln!("BUNKO_LIVE_RCLONE not set; skipping");
+        return;
+    };
+    let secs: u64 = std::env::var("BUNKO_LIVE_RCLONE_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(15);
+    let dir = tempfile::tempdir().unwrap();
+    let lib = dir.path().join("served/mokuro-reader");
+    let mut stable = BTreeSet::new();
+    for series in ["Rig Series", "zz Series"] {
+        std::fs::create_dir_all(lib.join(series)).unwrap();
+        stable.insert(series.to_string());
+        for i in 1..=8 {
+            std::fs::write(lib.join(format!("{series}/Vol {i}.cbz")), b"volume").unwrap();
+            stable.insert(format!("{series}/Vol {i}.cbz"));
+        }
+    }
+    std::fs::create_dir_all(lib.join(".bunko")).unwrap();
+    stable.insert(".bunko".to_string());
+    let port = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    };
+    let mut server = std::process::Command::new(&rclone)
+        .args(["serve", "webdav"])
+        .arg(dir.path().join("served"))
+        .args(["--addr", &format!("127.0.0.1:{port}")])
+        .args(["--config", "/dev/null"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("rclone starts");
+    struct Kill<'a>(&'a mut std::process::Child);
+    impl Drop for Kill<'_> {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let _kill = Kill(&mut server);
+    for _ in 0..100 {
+        if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let state = [tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap()];
+    let cfg = |i: usize| WebDavConfig {
+        url: format!("http://127.0.0.1:{port}/"),
+        username: "u".into(),
+        password: "p".into(),
+        folder: "mokuro-reader".into(),
+        allow_http: true,
+        allow_bunko_backend_for_tests: false,
+        state_dir: state[i].path().to_path_buf(),
+        disable_cas: false,
+    };
+    let b = WebDavBackend::connect(cfg(0)).await.unwrap();
+    eprintln!("probe: {:?}", b.probe());
+    // No conditional requests on this server: uploads are staged.
+    assert!(!b.caps().cas_overwrite && !b.caps().cas_create);
+    b.locate_roots("mokuro-reader").await.unwrap();
+    let mut cursor = b.start_cursor().await.unwrap();
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let writer = {
+        let (w, stop) = (WebDavBackend::connect(cfg(1)).await.unwrap(), stop.clone());
+        let tmp = tempfile::tempdir().unwrap();
+        tokio::spawn(async move {
+            let mut n = 0u64;
+            while !stop.load(Ordering::SeqCst) {
+                // A cover in a series, and a status file in the folder listed first.
+                for (parent, name) in [("Rig Series", "Vol 1.webp"), (".bunko", "status.json")] {
+                    let pid = format!("{parent}/{name}");
+                    let to = if n == 0 {
+                        UploadTarget::New { parent, name }
+                    } else {
+                        UploadTarget::Replace {
+                            pid: &pid,
+                            if_cver: None,
+                        }
+                    };
+                    let (path, size, sha256) = source(tmp.path(), "src.bin", &n.to_le_bytes());
+                    let mut op = OpCtx {
+                        op_id: format!("op{n}"),
+                        resume: None,
+                    };
+                    let src = UploadSource::File {
+                        path: &path,
+                        size,
+                        sha256,
+                    };
+                    // rclone replaces by delete-then-rename: a stat right after may miss it.
+                    let _ = w.upload(to, src, &mut op).await;
+                }
+                n += 1;
+            }
+            n
+        })
+    };
+
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    let (mut polls, mut refused_polls, mut lists, mut refused_lists) = (0u32, 0u32, 0u32, 0u32);
+    while std::time::Instant::now() < until {
+        match b.changes(&cursor).await {
+            Ok(p) => {
+                let (items, next) = page(p);
+                let (_, gone) = split(&items);
+                let lost: Vec<&String> = gone.intersection(&stable).collect();
+                assert!(lost.is_empty(), "reported as removed: {lost:?}");
+                cursor = next;
+                polls += 1;
+            }
+            Err(e) => {
+                assert!(
+                    matches!(&e, BErr::Transient(m) if m.contains("cut a listing short")),
+                    "{e:?}"
+                );
+                refused_polls += 1;
+            }
+        }
+        let mut seen = BTreeSet::new();
+        match b
+            .list_all(&[String::new()], &mut |n| {
+                seen.insert(n.pid);
+            })
+            .await
+        {
+            Ok(()) => {
+                let lost: Vec<&String> = stable.difference(&seen).collect();
+                assert!(lost.is_empty(), "left out of a full listing: {lost:?}");
+                lists += 1;
+            }
+            Err(e) => {
+                assert!(
+                    matches!(&e, BErr::Transient(m) if m.contains("cut a listing short")),
+                    "{e:?}"
+                );
+                refused_lists += 1;
+            }
+        }
+    }
+    stop.store(true, Ordering::SeqCst);
+    let uploads = writer.await.unwrap();
+    eprintln!(
+        "{uploads} upload rounds; changes: {polls} pages, {refused_polls} refused; \
+         list_all: {lists} whole, {refused_lists} refused as cut short"
     );
 }

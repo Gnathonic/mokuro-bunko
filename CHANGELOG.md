@@ -604,6 +604,17 @@
 - **Dependency updates**: zip 9, rcgen 0.14, windows 0.62, windows-sys 0.61.
 
 ### Fixed
+- **A WebDAV library no longer loses files to a listing the server cut short.** rclone's
+  `serve webdav`, like most servers built on Go's WebDAV package, gives up on a folder
+  listing when a file vanishes while it walks the folder, and still answers 207 with the
+  part it had. Bunko's own uploads to such a server (written under a temporary name,
+  then moved into place) made that happen, and Bunko read every file the listing left
+  out as deleted: volumes left the catalog and answered 404 until the next poll, a
+  running OCR job was cancelled, writes still waiting to upload into those folders
+  could be dropped, and a short listing during a full sync could leave them out until
+  their files changed. Now an answer that is not one whole listing is refused, and a
+  file leaves the index only once the server, asked for it by name, says it is gone;
+  otherwise Bunko lists again.
 - **The catalog toolbar fits a phone screen.** Below 560 px wide the search box takes
   its own row and the sort and title-language selects share the next with the reader
   settings button; the toolbar was 553 px wide, so the page scrolled sideways at 375 px.

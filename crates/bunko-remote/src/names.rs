@@ -67,6 +67,13 @@ pub fn is_windows_device_name(name: &str) -> bool {
 /// the same rule as bunko-dav's `fold_name`).
 pub use bunko_core::names::fold_name as fold;
 
+/// A path-id provider's pid (a `/`-separated path, WebDAV) as a server that folds
+/// spelling would compare it: every segment under [`fold`]. Two pids that fold alike
+/// may be one resource there (the old and the new spelling of a case-only rename).
+pub fn fold_path_pid(pid: &str) -> String {
+    pid.split('/').map(fold).collect::<Vec<_>>().join("/")
+}
+
 /// `H(pid‖cver)`: the first 8 bytes (big-endian) of `sha256(pid ‖ 0x00 ‖ cver)`.
 pub fn version_salt(pid: &str, cver: &str) -> u64 {
     let mut h = Sha256::new();
