@@ -442,6 +442,26 @@ impl StoreHandle {
                 &s.instance_id(),
             )
         });
+        // Why the held uploads wait, when it is the library as a whole that holds them.
+        let outbox = match (outbox, &self.store, &submissions) {
+            (Some(mut ob), Some(s), Some(sub)) => {
+                let held = ob["held"].as_u64().unwrap_or(0) > 0;
+                let why = held_because(
+                    self.adopted(),
+                    (
+                        sub["waiting"].as_u64().unwrap_or(0),
+                        sub["total"].as_u64().unwrap_or(0),
+                    ),
+                    s.lease_event(),
+                    s.lease_claiming_left(),
+                );
+                if let (true, Some(why)) = (held, why) {
+                    ob["held_because"] = json!(why);
+                }
+                Some(ob)
+            }
+            (ob, _, _) => ob,
+        };
         let problems = storage_problems(self, &health, conflicts.len());
         json!({
             "backend": self.backend.as_str(),
@@ -536,6 +556,49 @@ fn outbox_json(ops: &[bunko_remote::outbox::OpSummary]) -> Value {
         "held_ops": ops.iter().filter(|o| o.state == "HELD").take(20).map(op).collect::<Vec<_>>(),
         "failed_ops": ops.iter().filter(|o| o.state == "FAILED").take(20).map(op).collect::<Vec<_>>(),
     })
+}
+
+/// Why nothing reaches the cloud library yet, while that is so for every upload (§5.3:
+/// the series.json files are read, then this Bunko claims the library, then it writes).
+/// `None` once this Bunko holds the library: an upload still held then waits for the
+/// earlier ones of its series.
+fn held_because(
+    adopted: bool,
+    (waiting, total): (u64, u64),
+    lease: Option<bunko_remote::status::LeaseEvent>,
+    claiming_left: Option<Duration>,
+) -> Option<String> {
+    use bunko_remote::status::LeaseEvent;
+    if !adopted {
+        return Some(format!(
+            "Nothing is written to the library before its series.json files are read \
+             ({waiting} of {total} still to read) and this Bunko has claimed it."
+        ));
+    }
+    match lease {
+        None => Some(
+            "Nothing is written to the library before this Bunko has claimed it: the claim \
+             starts once the library's first sync is done."
+                .into(),
+        ),
+        Some(LeaseEvent::Claiming) => Some(match claiming_left {
+            Some(left) => format!(
+                "This Bunko is claiming the library (about {} left): nothing is written to \
+                 it until then.",
+                bunko_remote::status::about(left)
+            ),
+            None => {
+                "This Bunko is claiming the library: nothing is written to it until then.".into()
+            }
+        }),
+        Some(LeaseEvent::Standby { .. } | LeaseEvent::Lost { .. }) => {
+            Some("Another Bunko manages this library: nothing is written to it from here.".into())
+        }
+        Some(LeaseEvent::Released) => {
+            Some("This Bunko released the library: nothing is written to it.".into())
+        }
+        Some(LeaseEvent::Acquired | LeaseEvent::HeartbeatFailed { .. }) => None,
+    }
 }
 
 /// The lease as the Storage panel shows it (holder, epoch, last seen).
@@ -1187,6 +1250,32 @@ mod tests {
 
     /// Regression: the Storage panel's Lease showed Epoch and Last seen as "-" while
     /// this Bunko held the lease: they came only from another holder's marker.
+    #[test]
+    fn held_uploads_say_what_they_wait_for() {
+        use bunko_remote::status::LeaseEvent;
+        let why = |adopted, lease, left| super::held_because(adopted, (78, 133), lease, left);
+        assert!(
+            why(false, None, None)
+                .unwrap()
+                .contains("78 of 133 still to read")
+        );
+        assert!(
+            why(true, None, None)
+                .unwrap()
+                .contains("first sync is done")
+        );
+        assert!(
+            why(
+                true,
+                Some(LeaseEvent::Claiming),
+                Some(Duration::from_secs(360))
+            )
+            .unwrap()
+            .contains("claiming the library (about 6 min left)")
+        );
+        assert_eq!(why(true, Some(LeaseEvent::Acquired), None), None);
+    }
+
     #[test]
     fn a_held_lease_shows_our_epoch_and_last_confirmation() {
         use bunko_remote::status::{LeaseEvent, LeaseRecord, LeaseRecordState};

@@ -906,6 +906,20 @@
   automatic retry found nothing left to install, cleared the failure and stopped
   there: its OCR kept waiting for a backend until the server was restarted. The retry
   now starts the OCR with what is installed.
+- **OCR starts at once on a large cloud library.** The OCR queue was filled by one
+  walk over the whole library, and on Google Drive, OneDrive or MEGA that walk read
+  each volume's zip directory (and, with extra generations, its sidecar) before it
+  queued anything: on a library of 700 volumes no OCR started for about 25 minutes
+  after connecting it. The walk now hands over each series as soon as it is judged, so
+  OCR runs on the first series while the rest is still looked at, and on a cloud
+  library it no longer opens an archive only to count its pages (the count comes from
+  the library's metadata once that has been read). The benchmark a new generation runs
+  first opened every volume of the library to choose its sample pages, a read of each
+  on a cloud library; it now opens volumes only until the sample is full.
+- **The Storage panel says why uploads are held.** Bunko writes nothing to a cloud
+  library before it has read the library's series.json files and claimed the library;
+  until then its uploads showed only as HELD. The panel now says what they wait for,
+  with how many series.json files are left to read or how long the claim has left.
 
 ### Known limits
 - **Merging duplicate folders on Google Drive can trash files Bunko cannot see.**

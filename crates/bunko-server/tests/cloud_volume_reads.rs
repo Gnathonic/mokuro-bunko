@@ -486,3 +486,40 @@ fn a_copied_in_nocover_file_does_not_hide_a_jpeg_xl_volume() {
     // The cloud's file is left where it is.
     assert!(bunko_store::fs::is_file(t.root.join("S/j.nocover")));
 }
+
+/// The OCR queue's first walk of a cloud library opens no archive. A volume's page
+/// count only feeds the queue's estimates, and on a first start the metadata cache is
+/// still empty (its pass waits for the series.json files): reading every archive's
+/// directory for it held up the first OCR job for as long as that took on a large
+/// library. The count comes from the metadata cache once it has one.
+#[test]
+fn the_ocr_walk_of_a_cloud_library_opens_no_archive() {
+    use bunko_server::ocr::owed;
+    use bunko_server::ocr::types::{FileFacts, LibraryFacts};
+
+    let (a, _) = volume(400);
+    let (b, _) = volume(500);
+    let t = T::start(&[("S/a.cbz", &a), ("T/b.cbz", &b)]);
+    let rows = vec![bunko_core::generations::default_generation("g-1")];
+
+    let (index, log) =
+        t.measure(|| owed::walk(&t.root, &rows, &FileFacts, None, &Default::default()));
+    assert!(log.is_empty(), "the walk read the archives: {log:?}");
+    let owed: Vec<_> = index.volumes.keys().cloned().collect();
+    assert_eq!(owed, ["S/a.cbz", "T/b.cbz"], "both volumes are owed");
+    assert!(index.volumes.values().all(|v| v.pages.is_none()));
+
+    // A count the metadata cache has is taken, still without a read.
+    struct Cached;
+    impl LibraryFacts for Cached {
+        fn missing_pages(&self, _: &std::path::Path) -> i64 {
+            0
+        }
+        fn page_count(&self, _: &std::path::Path) -> Option<i64> {
+            Some(40)
+        }
+    }
+    let (index, log) = t.measure(|| owed::walk(&t.root, &rows, &Cached, None, &Default::default()));
+    assert!(log.is_empty(), "{log:?}");
+    assert!(index.volumes.values().all(|v| v.pages == Some(40)));
+}
