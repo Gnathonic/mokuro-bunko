@@ -60,6 +60,7 @@ impl Road {
         match engine {
             "ppocr-manga" => Some(Road::Line),
             "hayai-nova" | "paddle-manga" => Some(Road::Reconciled),
+            e if crate::models::textbox_engine(e) => Some(Road::Reconciled),
             _ => None,
         }
     }
@@ -93,6 +94,9 @@ fn stage_seconds(engine: &str, key: &str, declared: f64, gpu: bool) -> f64 {
         ("hayai-nova", STAGE_ENGINE, true) => 0.177,
         ("paddle-manga", STAGE_ENGINE, false) => 27.0,
         ("hayai-nova", STAGE_ENGINE, false) => 3.6,
+        // The text-box recognizers, CPU only (16-core desktop, 8 threads).
+        ("charspot-small", STAGE_ENGINE, _) => 0.5,
+        ("nar-small", STAGE_ENGINE, _) => 1.5,
         _ => declared,
     }
 }

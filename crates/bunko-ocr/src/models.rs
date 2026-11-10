@@ -56,7 +56,7 @@ pub struct ModelFile {
     /// For ONNX external data: the `.onnx` file (manifest id) that loads it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub part_of: Option<String>,
-    /// Stable id, e.g. `ppocr-manga/det-v0.2`.
+    /// Stable id, e.g. `ppocr-manga/det-v0.3`.
     pub id: String,
     /// Path under `<storage>/models/`.
     pub path: String,
@@ -90,13 +90,50 @@ pub struct Manifest {
     pub files: Vec<ModelFile>,
 }
 
-/// Pinned PP-OCRv6 manga repository and revision ("v0.2", 2026-09-28).
+/// Pinned PP-OCRv6 manga repository and revision ("v0.3", 2026-11-05). The repo names
+/// its files without a version (`det/manga_det.onnx`); the store and the manifest ids
+/// carry it, so a models folder shared with an older build keeps both sets apart.
 pub const PPOCR_REPO: &str = "Kellenok/PP-OCRv6_manga";
-pub const PPOCR_REVISION: &str = "ba1d479e8a61a20e8318c9758c73fbbbd290b98d";
+pub const PPOCR_REVISION: &str = "d65838996a00ef6b1c73ca3a700d7a8c5fbbef8a";
 /// Manifest ids of the PP-OCR manga files (fp32).
-pub const PPOCR_DETECTOR: &str = "ppocr-manga/det-v0.2";
-pub const PPOCR_RECOGNIZER: &str = "ppocr-manga/rec-v0.2";
-pub const PPOCR_DICTIONARY: &str = "ppocr-manga/dict-v6";
+pub const PPOCR_DETECTOR: &str = "ppocr-manga/det-v0.3";
+pub const PPOCR_RECOGNIZER: &str = "ppocr-manga/rec-v0.3";
+pub const PPOCR_DICTIONARY: &str = "ppocr-manga/dict-v0.3";
+
+/// comic-text-detector's ONNX export as its authors published it (GPL-3.0): the asset
+/// of that name in the manga-image-translator release it was first shipped with. The
+/// Hugging Face copy is the same file.
+#[cfg(feature = "gpl-models")]
+pub const CTD_DETECTOR: &str = "ctd/detector";
+#[cfg(feature = "gpl-models")]
+pub const CTD_REPO: &str = "zyddnys/manga-image-translator";
+#[cfg(feature = "gpl-models")]
+pub const CTD_REVISION: &str = "beta-0.2.1";
+#[cfg(feature = "gpl-models")]
+const CTD_FILE: &str = "comictextdetector.pt.onnx";
+#[cfg(feature = "gpl-models")]
+const CTD_COPY: (&str, &str, &str) = (
+    "mayocream/comic-text-detector-onnx",
+    "a5d67ec772adef819ef5b0e7aa701fcf4c8bf74a",
+    "comic-text-detector.onnx",
+);
+
+/// AnimeText YOLO12-x (deepghs; GPL-3.0): `yolo12x_animetext/model.onnx` of the repo
+/// at this revision. The repo is gated (a download needs an account that accepted its
+/// terms), so the program fetches the same file from our release of mirrored models.
+#[cfg(feature = "gpl-models")]
+pub const ANIMETEXT_DETECTOR: &str = "animetext/yolo12x";
+#[cfg(feature = "gpl-models")]
+pub const ANIMETEXT_SOURCE: (&str, &str) = (
+    "deepghs/AnimeText_yolo",
+    "a180c191bfdb9f0e31b57e7de567e7b6bac50f84",
+);
+#[cfg(feature = "gpl-models")]
+const ANIMETEXT_FILE: &str = "animetext_yolo12x.onnx";
+
+/// The release that carries upstream model files as they are, for the ones their own
+/// repository does not hand out freely.
+pub const MIRROR_RELEASE: &str = "upstream-models-v1";
 
 /// The upstream repo an exported engine's weights come from (the sidecar's
 /// `ocr_engine.weights` names every source; this is the primary one).
@@ -114,68 +151,148 @@ fn release_source(engine: &str) -> (&'static str, &'static str) {
     }
 }
 
+/// The text-box recognizers (muscgab; weights CC BY-NC-SA 4.0), fetched from their
+/// repos at these revisions: `(repo, revision)` and the manifest ids of the graph and
+/// the vocabulary.
+#[cfg(feature = "nc-models")]
+pub const CHARSPOT_SOURCE: (&str, &str) = (
+    "muscgab/manga-ocr-charspot-small",
+    "72ca29202673880ca9c67b1c02c107535be4472b",
+);
+#[cfg(feature = "nc-models")]
+pub const CHARSPOT_MODEL: &str = "charspot-small/model";
+#[cfg(feature = "nc-models")]
+pub const CHARSPOT_VOCABULARY: &str = "charspot-small/vocabulary";
+#[cfg(feature = "nc-models")]
+pub const NAR_SOURCE: (&str, &str) = (
+    "muscgab/manga-ocr-nar-small",
+    "81ff4f3313263d1da349946a9dd20d14e0fb0e66",
+);
+#[cfg(feature = "nc-models")]
+pub const NAR_MODEL: &str = "nar-small/model";
+#[cfg(feature = "nc-models")]
+pub const NAR_VOCABULARY: &str = "nar-small/vocabulary";
+
+/// `(manifest id, engine, role, path in the repo, flat name, sha256, size)`.
+#[cfg(feature = "nc-models")]
+const TEXTBOX_FILES: [(&str, &str, &str, &str, &str, &str, u64); 4] = [
+    (
+        CHARSPOT_MODEL,
+        "charspot-small",
+        "recognizer",
+        "model.onnx",
+        "charspot-small_model.onnx",
+        "05fb79760f8e3dbc989b61f23a34c46b511818a2166573ce7e41d994f4403843",
+        43_992_111,
+    ),
+    (
+        CHARSPOT_VOCABULARY,
+        "charspot-small",
+        "dictionary",
+        "vocab.json",
+        "charspot-small_vocab.json",
+        "9f72fc7852b1432bcb61b3b94b2e4cd8abef52b01e9051550a6a3070e2b314d5",
+        62_244,
+    ),
+    (
+        NAR_MODEL,
+        "nar-small",
+        "recognizer",
+        "onnx/mangaocr_nar_small_fp32.onnx",
+        "nar-small_fp32.onnx",
+        "5ee628dfd40c59c522022d87c31f8f903104198877b9ba4cf795603dc540dcf5",
+        213_095_336,
+    ),
+    (
+        NAR_VOCABULARY,
+        "nar-small",
+        "dictionary",
+        "nar_vocabulary_6817.json",
+        "nar-small_vocabulary_6817.json",
+        "9f1059427b54216c869dbf1244157f86bef74b1a0061c46a6001402c6f0c1dbf",
+        48_538,
+    ),
+];
+
 fn hf(repo: &str, rev: &str, path: &str) -> String {
     format!("https://huggingface.co/{repo}/resolve/{rev}/{path}")
+}
+
+/// The flat name of a file that is fetched from its upstream repo: what a local mirror
+/// (`MOKURO_MODELS_MIRROR`) and an override directory may hold it as. Files of our own
+/// releases are flat-named already.
+fn flat_name(id: &str) -> Option<&'static str> {
+    #[cfg(feature = "gpl-models")]
+    if id == CTD_DETECTOR {
+        return Some("ctd_comictextdetector.pt.onnx");
+    }
+    #[cfg(feature = "gpl-models")]
+    if id == ANIMETEXT_DETECTOR {
+        return Some(ANIMETEXT_FILE);
+    }
+    #[cfg(feature = "nc-models")]
+    if let Some(f) = TEXTBOX_FILES.iter().find(|f| f.0 == id) {
+        return Some(f.4);
+    }
+    crate::models_release::PPOCR_RELEASE_NAMES
+        .iter()
+        .find(|(i, _)| *i == id)
+        .map(|(_, f)| *f)
 }
 
 impl Manifest {
     /// The manifest compiled into this build.
     pub fn builtin() -> Self {
-        let release_name = |id: &str| {
-            crate::models_release::PPOCR_RELEASE_NAMES
-                .iter()
-                .find(|(i, _)| *i == id)
-                .map(|(_, f)| *f)
-        };
-        let ppocr = |id: &str, file: &str, role: &str, sha256: &str, size: u64| ModelFile {
-            engine: "ppocr-manga".into(),
-            role: role.into(),
-            precision: file.ends_with(".onnx").then(|| "fp32".into()),
-            part_of: None,
-            id: id.into(),
-            path: format!("ppocr-manga/{}", file.rsplit('/').next().unwrap_or(file)),
-            url: hf(PPOCR_REPO, PPOCR_REVISION, file),
-            // The models-v1 release carries the same bytes under a flat name.
-            mirrors: release_name(id)
-                .map(|f| {
-                    let mut m = local_mirror(f);
-                    m.push(format!("{}/{f}", crate::models_release::RELEASE_BASE_URL));
-                    m
-                })
-                .unwrap_or_default(),
-            sha256: sha256.into(),
-            size,
-            license: "Apache-2.0".into(),
-            source: Source {
-                repo: PPOCR_REPO.into(),
-                revision: PPOCR_REVISION.into(),
-                path: file.into(),
-            },
-            target: None,
-            unpack_to: None,
-            requires: Vec::new(),
-        };
+        // `file` is the path in the pinned repo, `stored` the name under
+        // `<storage>/models/ppocr-manga/`.
+        let ppocr =
+            |id: &str, file: &str, stored: &str, role: &str, sha256: &str, size: u64| ModelFile {
+                engine: "ppocr-manga".into(),
+                role: role.into(),
+                precision: file.ends_with(".onnx").then(|| "fp32".into()),
+                part_of: None,
+                id: id.into(),
+                path: format!("ppocr-manga/{stored}"),
+                url: hf(PPOCR_REPO, PPOCR_REVISION, file),
+                // A local mirror holds the same bytes under a flat name. No release carries
+                // the v0.3 files: they come from the pinned repo.
+                mirrors: flat_name(id).map(local_mirror).unwrap_or_default(),
+                sha256: sha256.into(),
+                size,
+                license: "Apache-2.0".into(),
+                source: Source {
+                    repo: PPOCR_REPO.into(),
+                    revision: PPOCR_REVISION.into(),
+                    path: file.into(),
+                },
+                target: None,
+                unpack_to: None,
+                requires: Vec::new(),
+            };
         let mut files = vec![
             ppocr(
                 PPOCR_DETECTOR,
-                "det/manga_det_v0.2.onnx",
+                "det/manga_det.onnx",
+                "manga_det_v0.3.onnx",
                 "detector",
-                "d132078c46e292b226fb5a2ca52a7612ad319262dfdf493e7d8e3be435295978",
-                1_816_954,
+                "97c434ae8deaad83513fb132b605d5085a3af8ffac2cb15e2aa096815c206172",
+                1_816_958,
             ),
             ppocr(
                 PPOCR_RECOGNIZER,
-                "rec/manga_rec_v0.2.onnx",
+                "rec/manga_rec.onnx",
+                "manga_rec_v0.3.onnx",
                 "recognizer",
-                "de12c84c63e62c80339e882e675983d886670dcb6f0147e1ed041afd6fa81888",
-                21_167_540,
+                "5288bd221a9a047c6b7d1ff56bb98de8c875fb613df98ebe8754946448bda540",
+                21_334_702,
             ),
             ppocr(
                 PPOCR_DICTIONARY,
                 "ppocrv6_dict.txt",
+                "ppocrv6_dict_v0.3.txt",
                 "dictionary",
-                "b5f2bfe2bdd9448429e3e82b51c789775d9b42f2403d082b00662eb77e401c5d",
-                74_947,
+                "4f0f8971ecb95e3a4d278985d6eaac154413e81fda0b4c941db17389580e9e9b",
+                76_327,
             ),
         ];
         for f in crate::models_release::FILES {
@@ -210,6 +327,91 @@ impl Manifest {
         }
         files.extend(torch_release_files());
         files.extend(vulkan_release_files());
+        #[cfg(feature = "gpl-models")]
+        files.push(ModelFile {
+            engine: "ctd-lines".into(),
+            role: "detector".into(),
+            precision: Some("fp32".into()),
+            part_of: None,
+            id: CTD_DETECTOR.into(),
+            path: format!("ctd/{CTD_FILE}"),
+            // The authors' release asset first, then the Hugging Face copy.
+            url: hf(CTD_COPY.0, CTD_COPY.1, CTD_COPY.2),
+            mirrors: {
+                let mut m = flat_name(CTD_DETECTOR)
+                    .map(local_mirror)
+                    .unwrap_or_default();
+                m.push(format!(
+                    "https://github.com/{CTD_REPO}/releases/download/{CTD_REVISION}/{CTD_FILE}"
+                ));
+                m
+            },
+            sha256: "1a86ace74961413cbd650002e7bb4dcec4980ffa21b2f19b86933372071d718f".into(),
+            size: 94_669_756,
+            license: "GPL-3.0".into(),
+            source: Source {
+                repo: CTD_REPO.into(),
+                revision: CTD_REVISION.into(),
+                path: CTD_FILE.into(),
+            },
+            target: None,
+            unpack_to: None,
+            requires: Vec::new(),
+        });
+        #[cfg(feature = "gpl-models")]
+        files.push(ModelFile {
+            engine: "animetext-blocks".into(),
+            role: "detector".into(),
+            precision: Some("fp32".into()),
+            part_of: None,
+            id: ANIMETEXT_DETECTOR.into(),
+            path: "animetext/yolo12x.onnx".into(),
+            url: format!(
+                "https://github.com/Gnathonic/mokuro-bunko/releases/download/{MIRROR_RELEASE}/{ANIMETEXT_FILE}"
+            ),
+            mirrors: local_mirror(ANIMETEXT_FILE),
+            sha256: "5dd2bb9f3bd1562d4a2207e38ccbfa4c81b8161552b3120cd0f7936399fe1fdd".into(),
+            size: 236_662_175,
+            license: "GPL-3.0".into(),
+            source: Source {
+                repo: ANIMETEXT_SOURCE.0.into(),
+                revision: ANIMETEXT_SOURCE.1.into(),
+                path: "yolo12x_animetext/model.onnx".into(),
+            },
+            target: None,
+            unpack_to: None,
+            requires: Vec::new(),
+        });
+        #[cfg(feature = "nc-models")]
+        for (id, engine, role, file, flat, sha256, size) in TEXTBOX_FILES {
+            let (repo, revision) = if engine == "nar-small" {
+                NAR_SOURCE
+            } else {
+                CHARSPOT_SOURCE
+            };
+            files.push(ModelFile {
+                engine: engine.into(),
+                role: role.into(),
+                precision: file.ends_with(".onnx").then(|| "fp32".into()),
+                part_of: None,
+                id: id.into(),
+                path: format!("{engine}/{}", file.rsplit('/').next().unwrap_or(file)),
+                // From the author's repo at the pin: these weights are not rehosted.
+                url: hf(repo, revision, file),
+                mirrors: local_mirror(flat),
+                sha256: sha256.into(),
+                size,
+                license: "CC-BY-NC-SA-4.0".into(),
+                source: Source {
+                    repo: repo.into(),
+                    revision: revision.into(),
+                    path: file.into(),
+                },
+                target: None,
+                unpack_to: None,
+                requires: Vec::new(),
+            });
+        }
         Manifest { files }
     }
 
@@ -313,7 +515,7 @@ impl ModelStore {
     }
 
     /// Where the override directory may hold `file`: the store's layout, the upstream
-    /// repo layout, the bare upstream name, and the release asset name.
+    /// repo layout, the bare upstream name, the release asset name and the flat name.
     fn override_candidates(&self, file: &ModelFile) -> Vec<PathBuf> {
         let Some(dir) = &self.opts.override_dir else {
             return Vec::new();
@@ -326,6 +528,9 @@ impl ModelStore {
             if let Some(name) = url.rsplit('/').next().filter(|n| !n.is_empty()) {
                 out.push(dir.join(name));
             }
+        }
+        if let Some(name) = flat_name(&file.id) {
+            out.push(dir.join(name));
         }
         out.dedup();
         out
@@ -2189,14 +2394,15 @@ mod tests {
         for f in &ppocr {
             assert!(f.url.contains(PPOCR_REVISION));
             assert_eq!(f.sha256.len(), 64);
-            assert!(f.mirrors[0].ends_with(&format!(
-                "/models-v1/{}",
-                crate::models_release::PPOCR_RELEASE_NAMES
-                    .iter()
-                    .find(|(i, _)| *i == f.id)
-                    .unwrap()
-                    .1
-            )));
+            // v0.3 comes from the pinned repo: no release carries it, and the store
+            // keeps it apart from the v0.2 files of an older build.
+            assert!(
+                f.mirrors.iter().all(|m| !m.contains("/models-v1/")),
+                "{:?}",
+                f.mirrors
+            );
+            assert!(f.path.contains("v0.3"), "{}", f.path);
+            assert!(flat_name(&f.id).is_some_and(|n| n.contains("v0.3")));
         }
         let models_v1 = |e: &str| -> Vec<&ModelFile> {
             m.engine_files(e)
@@ -2240,7 +2446,7 @@ mod tests {
     #[test]
     fn override_dir_finds_release_names() {
         let tmp = tempfile::tempdir().unwrap();
-        fs::write(tmp.path().join("ppocr-manga_dict.txt"), b"x").unwrap();
+        fs::write(tmp.path().join("ppocr-manga_dict_v0.3.txt"), b"x").unwrap();
         let store = ModelStore::new(
             StoreOptions {
                 root: tmp.path().join("models"),
@@ -2250,7 +2456,7 @@ mod tests {
             Manifest::builtin(),
         );
         let found = store.locate(PPOCR_DICTIONARY).unwrap();
-        assert_eq!(found, tmp.path().join("ppocr-manga_dict.txt"));
+        assert_eq!(found, tmp.path().join("ppocr-manga_dict_v0.3.txt"));
         assert!(!store.ensure(PPOCR_DICTIONARY).unwrap().verified);
         assert!(store.locate(PPOCR_DETECTOR).is_none());
         assert_eq!(store.verify(PPOCR_DETECTOR).unwrap(), None);

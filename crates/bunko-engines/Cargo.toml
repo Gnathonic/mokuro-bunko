@@ -16,6 +16,12 @@ torch = ["dep:bunko-torch", "dep:libloading"]
 onnx-vlm = ["bunko-vlm/onnx-vlm"]
 # libjpeg-turbo JPEG decoding (bit-identical pages to 0.5.2's Pillow).
 libjpeg = ["bunko-ocr/libjpeg"]
+# Models under licences that are not permissive (`bunko_core::engines::LicenseClass`):
+# a build without the feature neither offers, downloads nor runs them.
+# GPL-3.0 weights: the comic-text-detector line detector (`ctd-lines`).
+gpl-models = ["bunko-ocr/gpl-models"]
+# Non-commercial weights (CC BY-NC-SA 4.0).
+nc-models = ["bunko-ocr/nc-models"]
 # ONNX Runtime GPU execution providers (deferred in 0.7, not built for release):
 # forwarded to both ONNX consumers (and so to ort); they bring the ONNX recognizers.
 cuda = ["onnx-vlm", "bunko-ocr/cuda", "bunko-vlm/cuda"]
@@ -68,3 +74,7 @@ required-features = ["torch"]
 [[example]]
 name = "vulkan_check"
 required-features = ["torch"]
+
+[[example]]
+name = "textbox_read"
+required-features = ["nc-models"]

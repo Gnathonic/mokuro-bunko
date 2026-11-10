@@ -201,9 +201,10 @@ fn precision_label(mode: &str) -> &'static str {
 /// The 0.5.2 `GENERATION_NAME_RE` source the page builds its name check from.
 pub const NAME_PATTERN: &str = "^[a-z0-9][a-z0-9-]{0,31}$";
 
-/// `catalog`: what a row may be set to. Only the engines and detectors 0.7 ships; the
-/// 0.5.2 flags for the mokuro engine (`monolithic`, `served`, `own_environment`) are
-/// always false and kept because `admin.js` reads them.
+/// `catalog`: what a row may be set to: the registry's engines and detectors, each with
+/// its weights' licence and licence class (a processor built without that class's
+/// feature does not offer it). The 0.5.2 flags for the mokuro engine (`monolithic`,
+/// `served`, `own_environment`) are always false and kept because `admin.js` reads them.
 pub fn catalog(devices: Value) -> Value {
     let engines: Vec<Value> = engines::ENGINES
         .iter()
@@ -211,6 +212,9 @@ pub fn catalog(devices: Value) -> Value {
             json!({
                 "id": e.id,
                 "label": e.label,
+                "license": e.license,
+                "license_class": e.class.as_str(),
+                "reads_blocks": e.blocks,
                 "monolithic": false,
                 "served": false,
                 "own_environment": false,
@@ -229,6 +233,9 @@ pub fn catalog(devices: Value) -> Value {
             json!({
                 "id": d.id,
                 "label": d.label,
+                "license": d.license,
+                "license_class": d.class.as_str(),
+                "line_level": d.line_level,
                 "devices": if d.cpu_only_reason.is_empty() { json!("any") } else { json!(["cpu"]) },
             })
         })
@@ -849,14 +856,49 @@ mod tests {
             .iter()
             .map(|e| e["id"].as_str().unwrap())
             .collect();
-        assert_eq!(engines, ["hayai-nova", "paddle-manga", "ppocr-manga"]);
+        assert_eq!(
+            engines,
+            [
+                "hayai-nova",
+                "paddle-manga",
+                "ppocr-manga",
+                "charspot-small",
+                "nar-small"
+            ]
+        );
         let detectors: Vec<&str> = c["detectors"]
             .as_array()
             .unwrap()
             .iter()
             .map(|e| e["id"].as_str().unwrap())
             .collect();
-        assert_eq!(detectors, ["ppocr-manga"]);
+        assert_eq!(detectors, ["ppocr-manga", "ctd-lines", "animetext-blocks"]);
+        // The block detector goes with the engines that read blocks, and no others.
+        assert_eq!(c["detectors"][2]["line_level"], json!(false));
+        assert_eq!(c["detectors"][2]["license"], json!("GPL-3.0"));
+        let readers: Vec<&str> = c["engines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["reads_blocks"] == json!(true))
+            .map(|e| e["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(readers, ["charspot-small", "nar-small"]);
+        // Each entry says what its weights are licensed as: the default stack is
+        // permissive, the text-box recognizers are non-commercial, ctd's weights GPL.
+        for e in &c["engines"].as_array().unwrap()[..3] {
+            assert_eq!(e["license"], json!("Apache-2.0"), "{e}");
+            assert_eq!(e["license_class"], json!("permissive"), "{e}");
+        }
+        for e in &c["engines"].as_array().unwrap()[3..] {
+            assert_eq!(e["license"], json!("CC-BY-NC-SA-4.0"), "{e}");
+            assert_eq!(e["license_class"], json!("non-commercial"), "{e}");
+            assert_eq!(e["devices"], json!(["cpu"]), "{e}");
+            assert_eq!(e["precision_modes"], json!([]), "{e}");
+        }
+        assert_eq!(c["detectors"][0]["license_class"], json!("permissive"));
+        assert_eq!(c["detectors"][1]["license"], json!("GPL-3.0"));
+        assert_eq!(c["detectors"][1]["license_class"], json!("gpl"));
         assert_eq!(c["engines"][2]["precision_modes"], json!([]));
         assert_eq!(c["engines"][2]["devices"], json!(["cpu"]));
         assert_eq!(c["engines"][0]["devices"], json!("any"));

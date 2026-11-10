@@ -13,7 +13,9 @@ path = "src/main.rs"
 
 [features]
 # `lite`: no default features — server only, OCR by remote processors, no tray.
-default = ["ocr", "tray"]
+# The defaults are the release build: local OCR, the tray, and the models of both
+# restricted licence classes.
+default = ["ocr", "tray", "gpl-models", "nc-models"]
 # The desktop tray (`mokuro-bunko tray`; bunko-tray): a StatusNotifierItem over D-Bus on
 # Linux (no GUI toolkit linked), tray-icon/tao on Windows and macOS. Part of the full
 # build; the static lite build (Linux arm64 server, the lite Docker image) has none.
@@ -23,6 +25,15 @@ tray = ["dep:bunko-tray"]
 # never links libtorch, `install-ocr` fetches the pack). JPEG pages decode with
 # libjpeg-turbo, as 0.5.2's Pillow did (bit-identical pages). This is the `full` flavor.
 ocr = ["dep:bunko-engines", "dep:bunko-ocr", "dep:bunko-processor", "dep:bunko-proto", "bunko-ocr/libjpeg", "bunko-engines/libjpeg", "bunko-engines/torch"]
+# Models whose weights are not under a permissive licence (each implies `ocr`). They are
+# opt-in in the admin panel and downloaded only when a row uses them; a build without
+# the feature neither offers, downloads nor runs them (`xtask dist --permissive-models`,
+# or `--no-default-features --features ocr,tray`). The code that runs them is this
+# project's own (MPL-2.0).
+# GPL-3.0 weights: the comic-text-detector line detector (`ctd-lines`).
+gpl-models = ["ocr", "bunko-engines/gpl-models"]
+# Non-commercial weights (CC BY-NC-SA 4.0).
+nc-models = ["ocr", "bunko-engines/nc-models"]
 # ONNX Runtime GPU execution providers (each implies `ocr`): deferred in 0.7. They keep
 # compiling (CI checks them) but no release ships them; see PACKAGING.md §1.
 cuda = ["ocr", "bunko-engines/cuda"]

@@ -30,9 +30,24 @@ use sha2::Digest;
 const ROOT: &str = "mokuro-reader";
 
 const LEGACY: &str = r#"{"version": "0.2.1", "title": "S", "volume": "Vol 1", "pages": [{"img_path": "001.jpg", "blocks": []}, {"img_path": "002.jpg", "blocks": []}, {"img_path": "003.jpg", "blocks": []}]}"#;
+/// A hayai-nova sidecar as 0.7 wrote it: its block carries no `revision` (read as 1).
+/// A test that means the engine's output of today takes [`hayai`].
 const HAYAI: &str = r#"{"version":"0.2.5","title":"S","volume":"Vol 1","volume_uuid":"vu","ocr_engine":{"id":"hayai-nova","detector":"ppocr-manga","patch_budget":512},"pages":[{"img_path":"001.jpg","blocks":[]},{"img_path":"002.jpg","blocks":[]},{"img_path":"003.jpg","blocks":[]}]}"#;
 const HAYAI_UNSTAMPED: &str = r#"{"version":"0.2.5","title":"S","volume":"Vol 1","volume_uuid":"vu","pages":[{"img_path":"001.jpg","blocks":[]},{"img_path":"002.jpg","blocks":[]},{"img_path":"003.jpg","blocks":[]}]}"#;
 const BUNKO_OLD: &str = r#"{"version":"0.2.1","title":"S","volume":"Vol 1","ocr_engine":{"id":"mokuro","generator":"mokuro-bunko 0.5.3"},"pages":[{"img_path":"001.jpg","blocks":[]},{"img_path":"002.jpg","blocks":[]},{"img_path":"003.jpg","blocks":[]}]}"#;
+
+/// [`HAYAI`] from a processor that is up to date: the primary's recipe at the engine's
+/// current revision (`bunko_layout::sidecar::engine_revision`), whatever that is today.
+fn hayai() -> &'static str {
+    static CURRENT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        let revision = bunko_layout::sidecar::engine_revision("hayai-nova");
+        HAYAI.replace(
+            r#""id":"hayai-nova","#,
+            &format!(r#""id":"hayai-nova","revision":{revision},"#),
+        )
+    });
+    &CURRENT
+}
 
 fn cbz(pages: usize) -> Vec<u8> {
     let mut z = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
@@ -229,7 +244,7 @@ impl Cloud {
     }
 
     async fn bunko_layer(&self, rel: &str) {
-        self.bunko_put(rel, HAYAI, "hayai-nova", "ppocr-manga")
+        self.bunko_put(rel, hayai(), "hayai-nova", "ppocr-manga")
             .await;
     }
 }
@@ -274,7 +289,7 @@ async fn a_stamp_less_cloud_sidecar_is_replaced_with_no_copy_and_never_deleted_f
 
     assert_eq!(
         cloud.cloud_bytes("Series/Vol 1.mokuro").as_deref(),
-        Some(sealed(HAYAI).as_str())
+        Some(sealed(hayai()).as_str())
     );
     assert_no_copy(&cloud, &fake, "Vol 1");
     let store = cloud.store().clone();
@@ -305,12 +320,12 @@ async fn a_stamp_less_cloud_sidecar_is_replaced_in_place_with_no_copy() {
         .unwrap();
     let (trashed, deleted) = (fake.trashed_log().len(), fake.deleted_log().len());
     cloud
-        .upgrade_generated("Series/Vol 1.cbz", HAYAI)
+        .upgrade_generated("Series/Vol 1.cbz", hayai())
         .await
         .unwrap();
     assert_eq!(
         cloud.cloud_bytes("Series/Vol 1.mokuro").as_deref(),
-        Some(HAYAI)
+        Some(hayai())
     );
     let now = fake
         .node_at(&format!("{ROOT}/Series/Vol 1.mokuro"))
@@ -349,7 +364,7 @@ async fn a_failed_upload_skips_the_cloud_volume_until_the_next_census() {
     cloud.upgrade_direct("Series/Vol 1.cbz").await.unwrap();
     assert_eq!(
         cloud.cloud_bytes("Series/Vol 1.mokuro").as_deref(),
-        Some(sealed(HAYAI).as_str())
+        Some(sealed(hayai()).as_str())
     );
     assert_no_copy(&cloud, &fake, "Vol 1");
 }
@@ -372,7 +387,7 @@ async fn a_reader_overwrite_in_the_cloud_forgets_the_row_and_is_upgraded() {
             .truncate(true)
             .open(&tmp)
             .unwrap();
-        f.write_all(HAYAI.as_bytes()).unwrap();
+        f.write_all(hayai().as_bytes()).unwrap();
         drop(f);
         let intent = WriteIntent::new(
             Mode::CreateNew,
@@ -384,7 +399,7 @@ async fn a_reader_overwrite_in_the_cloud_forgets_the_row_and_is_upgraded() {
         bunko_store::fs::publish(&tmp, &bare, &intent).unwrap();
     })
     .await;
-    cloud.proof("Series/Vol 1.mokuro", HAYAI, "hayai-nova", "ppocr-manga");
+    cloud.proof("Series/Vol 1.mokuro", hayai(), "hayai-nova", "ppocr-manga");
     assert_eq!(cloud.judge("Series/Vol 1.cbz").await, Verdict::Current);
 
     // The reader re-uploads it from its DB: no stamp.
@@ -398,12 +413,12 @@ async fn a_reader_overwrite_in_the_cloud_forgets_the_row_and_is_upgraded() {
     }
     assert_eq!(cloud.judge("Series/Vol 1.cbz").await, Verdict::NeedsOcr);
     cloud
-        .upgrade_generated("Series/Vol 1.cbz", HAYAI)
+        .upgrade_generated("Series/Vol 1.cbz", hayai())
         .await
         .unwrap();
     assert_eq!(
         cloud.cloud_bytes("Series/Vol 1.mokuro").as_deref(),
-        Some(HAYAI)
+        Some(hayai())
     );
     assert_no_copy(&cloud, &fake, "Vol 1");
 }
@@ -436,7 +451,7 @@ async fn every_outdated_cloud_main_is_replaced_without_a_copy_and_layers_stay() 
     }
     fake.reader_put(
         &format!("{ROOT}/Series/Vol 3.hayai-nova.mokuro"),
-        HAYAI.as_bytes(),
+        hayai().as_bytes(),
     );
     let cloud = Cloud::start(fake.clone()).await;
     cloud
@@ -447,7 +462,7 @@ async fn every_outdated_cloud_main_is_replaced_without_a_copy_and_layers_stay() 
     cloud.upgrade_direct("Series/Vol 1.cbz").await.unwrap();
     assert_eq!(
         cloud.cloud_bytes("Series/Vol 1.mokuro").as_deref(),
-        Some(sealed(HAYAI).as_str())
+        Some(sealed(hayai()).as_str())
     );
     assert_no_copy(&cloud, &fake, "Vol 1");
 
@@ -464,7 +479,7 @@ async fn every_outdated_cloud_main_is_replaced_without_a_copy_and_layers_stay() 
         .unwrap_err();
     assert!(err.contains("not proven"), "{err}");
     cloud
-        .upgrade_generated("Series/Vol 3.cbz", HAYAI)
+        .upgrade_generated("Series/Vol 3.cbz", hayai())
         .await
         .unwrap();
     assert_no_copy(&cloud, &fake, "Vol 3");
@@ -472,7 +487,7 @@ async fn every_outdated_cloud_main_is_replaced_without_a_copy_and_layers_stay() 
         cloud
             .cloud_bytes("Series/Vol 3.hayai-nova.mokuro")
             .as_deref(),
-        Some(HAYAI),
+        Some(hayai()),
         "never deleted"
     );
 
@@ -480,7 +495,7 @@ async fn every_outdated_cloud_main_is_replaced_without_a_copy_and_layers_stay() 
     cloud.proof("Series/Vol 4.mokuro", BUNKO_OLD, "mokuro", "ctd");
     assert_eq!(cloud.judge("Series/Vol 4.cbz").await, Verdict::NeedsOcr);
     cloud
-        .upgrade_generated("Series/Vol 4.cbz", HAYAI)
+        .upgrade_generated("Series/Vol 4.cbz", hayai())
         .await
         .unwrap();
     assert_no_copy(&cloud, &fake, "Vol 4");
@@ -511,7 +526,7 @@ async fn every_outdated_cloud_main_is_replaced_without_a_copy_and_layers_stay() 
     assert!(err.contains("not proven"), "{err}");
     let trashed = fake.trashed_log().len();
     cloud
-        .upgrade_generated("Series/Vol 2.cbz", HAYAI)
+        .upgrade_generated("Series/Vol 2.cbz", hayai())
         .await
         .unwrap();
     assert_no_copy(&cloud, &fake, "Vol 2");

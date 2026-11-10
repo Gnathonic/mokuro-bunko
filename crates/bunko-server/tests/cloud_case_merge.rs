@@ -342,15 +342,17 @@ async fn keep_that_copy_resolves_a_blocked_merge_through_the_admin_api() {
 }
 
 /// Differing main sidecars beside identical archives: the server's policy keeps the
-/// one whose recipe matches the primary row (here the winner's, stamped by Bunko), and
-/// the loser's stock mokuro file goes to the provider's trash, with no layer written.
+/// one whose recipe matches the primary row at its engine's current revision (here the
+/// winner's, stamped by Bunko), and the loser's stock mokuro file goes to the provider's
+/// trash, with no layer written.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_main_sidecar_matching_the_primary_recipe_is_kept() {
     let primary = bunko_core::generations::default_generation("g-1");
     let (engine, detector, budget) = primary.output_affecting();
+    let revision = bunko_layout::sidecar::engine_revision(&engine);
     let stamped = serde_json::to_vec(&serde_json::json!({
         "version": "0.2.1", "pages": [],
-        "ocr_engine": {"id": engine, "detector": detector, "patch_budget": budget},
+        "ocr_engine": {"id": engine, "revision": revision, "detector": detector, "patch_budget": budget},
     }))
     .unwrap();
     let stock =
@@ -441,9 +443,8 @@ async fn a_history_series_is_never_merged_with_the_reading_history() {
     );
 }
 
-/// Two main sidecars of the primary's own recipe: the current revision wins over an
-/// older one (every engine is at revision 1 today, so the loser says 0), which goes to
-/// the provider's trash with no layer written.
+/// Two main sidecars of the primary's own recipe: the engine's current revision wins
+/// over the one before it, which goes to the provider's trash with no layer written.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_lower_revision_main_sidecar_loses_a_case_merge() {
     let primary = bunko_core::generations::default_generation("g-1");
@@ -455,7 +456,8 @@ async fn a_lower_revision_main_sidecar_loses_a_case_merge() {
         }))
         .unwrap()
     };
-    let (current, older) = (at(1), at(0));
+    let now = bunko_layout::sidecar::engine_revision(&engine);
+    let (current, older) = (at(now), at(now - 1));
     let fake = Arc::new(FakeBackend::drive_like());
     fake.reader_put(&format!("{ROOT}/Kingdom/Vol 1.cbz"), b"same");
     fake.reader_put(&format!("{ROOT}/Kingdom/Vol 1.mokuro"), &older);

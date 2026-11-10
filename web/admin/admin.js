@@ -1848,7 +1848,7 @@ function genRowHtml(row, index) {
         '<div class="gen__fields">' +
         genNameFieldHtml(row, index, shown) +
         genSelectFieldHtml(row, index, 'engine', 'Engine',
-            genCatalog.engines.map((e) => ({ value: e.id, label: e.id, title: e.label || e.id })), row.engine,
+            genCatalogOptions(genCatalog.engines), row.engine,
             false, genCatalogLabel(genCatalog.engines, row.engine),
             shown && shown.field === 'engine') +
         genDetectorFieldHtml(row, index, locked, effective, shown) +
@@ -1939,7 +1939,30 @@ function genNameRowHtml(row, index, shown) {
 function genCatalogLabel(list, value) {
     const found = (list || []).find((item) => item.id === value);
     const label = found && found.label ? String(found.label) : '';
-    return label && label !== value ? label : '';
+    const text = label && label !== value ? label : '';
+    const terms = genLicenceNote(found);
+    return text && terms ? text + ' (' + terms + ')' : (text || terms);
+}
+
+// What to know about a model whose weights are not under a permissive licence:
+// the licence, and that the weights are only fetched once a row uses the model.
+// Nothing for the default (permissive) ones.
+function genLicenceNote(item) {
+    if (!item || !item.license || !item.license_class || item.license_class === 'permissive') return '';
+    return item.license + ' weights, downloaded when a row uses it';
+}
+
+// The options of an engine or detector select: the id, with the licence beside
+// it when the weights are not permissively licensed.
+function genCatalogOptions(list) {
+    return (list || []).map((item) => {
+        const restricted = item.license && item.license_class && item.license_class !== 'permissive';
+        return {
+            value: item.id,
+            label: restricted ? item.id + ' (' + item.license + ')' : item.id,
+            title: item.label || item.id,
+        };
+    });
 }
 
 // A field's label with its description as a tooltip, and the hidden text
@@ -1987,8 +2010,13 @@ function genDetectorFieldHtml(row, index, locked, effective, shown) {
         const hint = detectorLabel
             ? detectorLabel + ' — finds the text regions this engine reads.'
             : 'Finds the text regions this engine reads.';
+        // A block detector goes only with an engine that reads blocks; the row's
+        // own detector stays listed so a mismatch can be seen and changed.
+        const engine = genEngine(row.engine);
+        const offered = genCatalog.detectors.filter((d) =>
+            d.line_level !== false || (engine && engine.reads_blocks) || d.id === row.detector);
         return genSelectFieldHtml(row, index, 'detector', 'Detector',
-            genCatalog.detectors.map((d) => ({ value: d.id, label: d.id, title: d.label || d.id })),
+            genCatalogOptions(offered),
             row.detector || '', false, hint,
             !!(shown && shown.field === 'detector'));
     }

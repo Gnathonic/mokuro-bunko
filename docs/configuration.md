@@ -1015,7 +1015,7 @@ ocr:
 | `primary` | `false` | Exactly one enabled row must have it. That row writes the bare `<Volume>.mokuro`, which readers take character counts from. Every OCR file of a volume carries the same volume id: the `.mokuro`'s when one exists, else the id readers already give a volume with no `.mokuro`. Any engine may be the primary one. |
 | `enabled` | `true` | A disabled row queues nothing and writes nothing. Its name stays reserved. |
 | `engine` | — (required) | One of the [engines](#ocr-engines). |
-| `detector` | `ppocr-manga` | The [text detector](#ocr-detectors) for `hayai-nova` and `paddle-manga`. Ignored (and stored as `null`) for `ppocr-manga`, which brings its own. |
+| `detector` | `ppocr-manga` | The [text detector](#ocr-detectors) of every engine but `ppocr-manga`: `ppocr-manga`, `ctd-lines`, or (for the engines that read blocks) `animetext-blocks`. Ignored (and stored as `null`) for the `ppocr-manga` engine, which brings its own. |
 | `patch_budget` | `512` | `256`, `384` or `512`: the resolution `hayai-nova` reads each line at. Reaches no other engine. |
 | `precision` | `auto-accuracy` | The row's [precision mode](#precision-modes), the same on every machine: `auto-accuracy`, `auto-balanced`, `auto-speed`, or `fp32` / `bf16` / `fp16` only. `ppocr-manga` fixes its own and ignores it. |
 | `pools` | `{}` (derive) | Where each stage of this row runs and how wide. See [Pools](#pools-stages-and-devices). |
@@ -1129,14 +1129,36 @@ volume now).
 
 #### OCR engines
 
-All engines are Apache-2.0. hayai-nova and paddle-manga run on libtorch (the backend
-pack), ppocr-manga on ONNX Runtime on the CPU.
+hayai-nova and paddle-manga run on libtorch (the backend pack); the other engines run
+on ONNX Runtime on the CPU and need no backend pack.
 
 | Engine | What it is | Runs on | Use it for |
 |--------|-----------|---------|------------|
 | `hayai-nova` | [hayai-ocr v2.5 "Nova"](https://huggingface.co/JustANormalTinkerer/hayai-ocr-v2.5-nova) | card or CPU | The default. Better text than 0.5's mokuro engine, especially display lettering, sound effects and colour pages. Reads at the row's `patch_budget`. Needs a detector. |
 | `paddle-manga` | [PaddleOCR-VL 1.6 + manga LoRA](https://huggingface.co/sorryhyun/paddleocr-vl-1.6-manga-lora) | card recommended | The most accurate and the slowest; about 1.8 GB of model files in bf16/fp16, 3.6 GB in fp32, which the CPU and the default `auto-accuracy` mode run. Needs a detector. On the CPU about 40 s a page on 16 threads: there hayai-nova is the engine of choice. |
 | `ppocr-manga` | [PP-OCRv6 manga](https://huggingface.co/Kellenok/PP-OCRv6_manga) line detector + CTC recognizer, 23 MB | CPU only | Reads lines rather than bubbles, removes furigana, and reads scanned **novel** pages (as do the other engines on the `ppocr-manga` detector). Brings its own detector. |
+| `charspot-small` | [manga-ocr-charspot-small](https://huggingface.co/muscgab/manga-ocr-charspot-small), 44 MB | CPU only | Detects and classifies each character of a text block; no decoder, so it is fast on a CPU (about five times hayai-nova there), and it leaves furigana out by itself. Japanese only. Needs a detector, a line or a block one. Weights CC BY-NC-SA 4.0. |
+| `nar-small` | [manga-ocr-nar-small](https://huggingface.co/muscgab/manga-ocr-nar-small), 213 MB | CPU only | Writes a text block in one pass (at most 64 characters). Japanese only. Needs a detector, a line or a block one. Weights CC BY-NC-SA 4.0. |
+
+**Licences.** `hayai-nova`, `paddle-manga`, `ppocr-manga` and the `ppocr-manga`
+detector are Apache-2.0 and are what a default configuration uses. The other models
+are opt-in and under other terms:
+
+| Model | Weights | Cargo feature |
+|---|---|---|
+| `ctd-lines` and `animetext-blocks` detectors | GPL-3.0 | `gpl-models` |
+| `charspot-small`, `nar-small` engines | CC BY-NC-SA 4.0: non-commercial use, share alike | `nc-models` |
+
+Nothing of an opt-in model is on the machine until a generation uses it: its files are
+downloaded when the first session on it opens. The admin panel shows the licence
+beside the name. The code that runs these models is part of this project and under its
+licence; only the weights carry the terms above.
+
+Both features are on in the release builds. A build without one (`xtask dist
+--permissive-models`, or `cargo build --no-default-features --features ocr,tray`)
+does not offer, download or run that class's models: a generation that names one is
+held with the reason, on that machine. A server may still list such a generation for
+[remote processors](#remote-ocr-processors) built with the feature.
 
 Sidecars from every engine, and every non-primary layer, carry an
 `ocr_engine` block saying what produced them (engine, detector, generator
@@ -1173,14 +1195,36 @@ hayai-nova about 0.3 GB in bf16/fp16 and 0.6 GB in fp32, ppocr-manga about
 
 #### OCR detectors
 
-`hayai-nova` and `paddle-manga` only read text; a detector finds it. The one
-detector is `ppocr-manga` (Apache-2.0): rotated per-line boxes with furigana
-separated, on the CPU. The page is read first by PP-OCRv6, then the row's
-engine reads every line again and the two reads are merged line by line. It
-is also the pairing to use for **novels**.
+Every engine but `ppocr-manga` only reads text; a detector finds its lines.
+Whichever detector found them, the lines are first read by PP-OCRv6's small
+recognizer, then the row's engine reads every line again and the two reads are
+merged line by line; the same layout groups the lines into blocks and orders them.
+
+| Detector | What it is | Notes |
+|---|---|---|
+| `ppocr-manga` (default) | The PP-OCRv6 manga line detector (Apache-2.0) | Rotated per-line boxes with furigana separated, sound effects included. The pairing to use for **novels**. |
+| `ctd-lines` | The line map of [comic-text-detector](https://github.com/dmMaze/comic-text-detector) (weights GPL-3.0, 95 MB) | Tight boxes on dialogue; leaves most sound effects and furigana out, so it finds fewer lines. Looks at the page at 1024 px, so small text on large pages can be missed. Opt-in; see [Licences](#ocr-engines). |
+| `animetext-blocks` | [AnimeText YOLO12-x](https://huggingface.co/deepghs/AnimeText_yolo) (weights GPL-3.0, 237 MB) | A **block** detector: it boxes whole pieces of text (a balloon's lines together, a sound effect). Only for `charspot-small` and `nar-small`, which read a block at once; see below. The slowest of the three on a CPU (about a third of a second a page). Opt-in. |
+
+All three run on the CPU.
+
+**Lines or blocks.** With a line detector the page is read line by line: PP-OCRv6
+reads each line, the row's engine reads it again and the two reads are merged.
+`charspot-small` and `nar-small` are made to read a whole text block at once and are
+given the layout's blocks rather than single lines; their text is then shared out to
+the block's lines, and it stands as read (PP-OCRv6's read is used only where they read
+nothing). With `animetext-blocks` no lines are detected at all: the detector's boxes are
+the page's blocks, the engine reads each, and the lines are the ones the engine finds
+in it: `charspot-small` knows where every character is and builds real lines;
+`nar-small` does not, and each block becomes one line the size of the block.
 
 The 0.5 detectors `ctd` (GPL-3.0), `animetext` (GPL-3.0) and `rtdetr` were
 removed; a row naming one is switched to `ppocr-manga` when the config loads.
+`ctd-lines` and `animetext-blocks` are not the 0.5 `ctd` and `animetext` under other
+names: 0.5's `ctd` used comic-text-detector's own blocks and reading order, where
+`ctd-lines` takes only its lines; 0.5's `animetext` made one line of every block
+whatever the engine. A row that still says `ctd` or `animetext` therefore keeps reading
+with `ppocr-manga`; choosing one of the new detectors is a new choice.
 
 #### Pools: stages and devices
 
