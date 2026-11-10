@@ -132,6 +132,21 @@ impl T {
 
     fn wait_steady(&self) {
         assert!(self.s().wait_steady(WAIT), "{:?}", self.s().engine_state());
+        // Steady is announced before the first steady poll, which brings what the
+        // provider changed during the first sync. Applied after a test's own write,
+        // that page would put the entry back as it was before the write.
+        self.settle_feed();
+    }
+
+    /// The poll that is running, if one is, has been applied. A poll starts only
+    /// after the one before it ended, so two more are asked for: the first may be
+    /// the running one, the second then starts after it.
+    fn settle_feed(&self) {
+        for _ in 0..2 {
+            let n = self.fake.calls(FakeOp::Changes);
+            self.s().feed().poll_now();
+            wait_until("a feed poll", || self.fake.calls(FakeOp::Changes) > n);
+        }
     }
 
     /// Simulate a crash: the store goes away without any further writes.
