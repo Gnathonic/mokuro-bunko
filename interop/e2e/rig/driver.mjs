@@ -60,11 +60,42 @@ function call(page, name, args) {
     );
 }
 
+/** The reader's driver, of a volume id it has neither a row nor a placeholder for. */
+const NOT_ON_DEVICE = /No volume \S+ on this device/;
+
+/**
+ * `call` for the two methods that look up a volume which may not be installed (`open`,
+ * `pendingOcr`), asked again, once, when the reader answers that it has no such volume.
+ *
+ * The driver of `interop/reader.ref` makes that lookup in two reads of its `volumes`
+ * table: the row by id, then every row, to work out the placeholders. The app makes a
+ * listed volume a row by itself about 100 ms after its catalog first shows it (the
+ * cover service's batch), about when a spec that has just connected opens it. A row
+ * landing between the two reads is missed by the first and hides the placeholder from
+ * the second, so the driver has no volume for an id `library()` gave a moment before.
+ * Asked again, the first read finds the row. Both methods answer this before they do
+ * anything, so the second ask repeats nothing; a volume that is not there fails it too,
+ * with the same words. No user can meet it (a card downloads the volume it shows, with
+ * no lookup by id). It goes once `reader.ref` pins a driver that reads the table once.
+ */
+async function lookUp(page, name, args) {
+    try {
+        return await call(page, name, args);
+    } catch (e) {
+        if (!NOT_ON_DEVICE.test(e?.message ?? '')) throw e;
+        return call(page, name, args);
+    }
+}
+
 export function driver(page) {
     const m =
         (name) =>
         (...args) =>
             call(page, name, args);
+    const lookedUp =
+        (name) =>
+        (...args) =>
+            lookUp(page, name, args);
     return {
         page,
         apiVersion: () => page.evaluate(() => globalThis.__mokuroInterop.apiVersion),
@@ -84,7 +115,7 @@ export function driver(page) {
         /** @returns {Promise<{volumes: {id, series, title, cloudPath, hasOcr, layers: string[]}[]}>} */
         library: m('library'),
         /** (volumeId) → {id}: one not on the device is downloaded first (its card's Download). */
-        open: m('open'),
+        open: lookedUp('open'),
         /** (volumeId, page) */
         setPage: m('setPage'),
         /** (volumeId) → {page, completed} */
@@ -111,7 +142,7 @@ export function driver(page) {
         /** (series) the catalog card's click: the series page, its volume cards shown. */
         showSeries: m('showSeries'),
         /** (volumeId) → what the volume's card shows of the server's OCR queue, or null. */
-        pendingOcr: m('pendingOcr'),
+        pendingOcr: lookedUp('pendingOcr'),
         /** Resolves once no sync and no cloud listing is in flight (the app's own, too). */
         idle: m('idle'),
         /**

@@ -430,6 +430,19 @@ load). The set is v1 from the first `reader.ref` on: a method added after that c
 with `apiVersion` 2, or behind a capability. `providerStatus` reads what the app last
 published (the store the banner and the read-only gates read) and never publishes it
 itself, so a state the app keeps to itself fails the spec as the user would miss it.
+`open` and `pendingOcr` are asked a second time, once, when the reader answers
+`No volume <id> on this device` (`driver.mjs`). The pinned reader's driver finds a
+volume that is not installed by two reads of its `volumes` table: the row by id, then
+every row, to work out the placeholders. The app makes a listed volume a row by itself
+about 100 ms after its catalog first shows it (the cover service's batch), which is
+about when a spec that has just connected opens it. A row that lands between the two
+reads is missed by the first and hides the placeholder from the second, and the driver
+has no volume for an id `library()` gave a moment before (seen once in CI, `bridge` on
+microsoft; reproduced by holding the batch until the first read was answered). Asked
+again, the first read finds the row; a volume that is not there fails both asks, and no
+method that changes anything is asked twice. A user cannot meet it: a card downloads
+the volume it shows, with no lookup by id. The second ask goes once `reader.ref` pins a
+driver that makes one read of the table.
 
 **As built (I3, `dav` and `api`, on `local`).** While any route is on, Playwright
 answers every CORS preflight itself, permissively, so a server whose CORS a browser
