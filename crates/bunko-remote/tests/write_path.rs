@@ -175,11 +175,11 @@ impl T {
         assert!(self.s().wait_outbox_idle(WAIT), "{:?}", self.s().outbox());
     }
 
-    /// One more feed cycle, delivered.
+    /// One more feed cycle, delivered: a poll that starts now has been applied and
+    /// its state published (the poll asked for after it has started), and its events
+    /// have had time to reach the store-events thread.
     fn sync_feed(&self) {
-        let n = self.fake.calls(FakeOp::Changes);
-        self.s().feed().poll_now();
-        wait_until("a feed poll", || self.fake.calls(FakeOp::Changes) > n);
+        self.settle_feed();
         std::thread::sleep(Duration::from_millis(100));
     }
 
