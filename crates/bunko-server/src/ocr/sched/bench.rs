@@ -237,19 +237,17 @@ pub fn build_sample(library: &Path, out: &Path, wanted: i64) -> Result<(i64, i64
     }
     // Every machine benchmarks with this one sample, so it keeps to volumes every 0.7
     // release reads (no page format of `bunko_proto::PAGE_FORMATS_SINCE`); a library of
-    // nothing else benchmarks with what it has.
-    let newer = |cbz: &PathBuf| {
-        bunko_library::Volume::open(cbz).is_ok_and(|v| {
-            v.pages().iter().any(|page| {
-                page.path
-                    .rfind('.')
-                    .is_some_and(|i| !bunko_proto::release_reads_page("0.7.0", &page.path[i..]))
-            })
+    // nothing else benchmarks with what it has. Volumes are opened one at a time as the
+    // sample fills, the others' only when none of those could be read: on a cloud
+    // library opening one is a provider read, and the sample needs a few volumes, not
+    // the library.
+    let newer = |volume: &bunko_library::Volume| {
+        volume.pages().iter().any(|page| {
+            page.path
+                .rfind('.')
+                .is_some_and(|i| !bunko_proto::release_reads_page("0.7.0", &page.path[i..]))
         })
     };
-    let (plain, newer): (Vec<PathBuf>, Vec<PathBuf>) =
-        ordered.into_iter().partition(|cbz| !newer(cbz));
-    let ordered = if plain.is_empty() { newer } else { plain };
     let wanted = wanted.clamp(MIN_SAMPLE_PAGES, MAX_SAMPLE_PAGES);
     let per_archive = 4.max(((wanted as f64) / (ordered.len() as f64)).ceil() as i64);
     // unmounted: the benchmark sample lives in the `.processing` spool.
@@ -262,73 +260,87 @@ pub fn build_sample(library: &Path, out: &Path, wanted: i64) -> Result<(i64, i64
     let mut extracted = 0i64;
     let mut volumes = 0i64;
     let mut readable = false;
-    for cbz in ordered {
-        if extracted >= wanted {
+    let mut later: Vec<PathBuf> = Vec::new();
+    for (first_pass, list) in [(true, ordered), (false, Vec::new())] {
+        let list = if first_pass {
+            list
+        } else if readable {
             break;
-        }
-        let Ok(volume) = bunko_library::Volume::open(&cbz) else {
-            continue;
-        };
-        let total = volume.pages().len() as i64;
-        if total == 0 {
-            continue;
-        }
-        readable = true;
-        let count = per_archive.min(wanted - extracted);
-        let picks: Vec<i64> = if count >= total {
-            (0..total).collect()
         } else {
-            let edge = 2.min((total - count) / 2);
-            let span = total - 2 * edge;
-            let step = span as f64 / count as f64;
-            let mut set: Vec<i64> = (0..count)
-                .map(|i| edge + (span - 1).min(((i as f64 + 0.5) * step) as i64))
-                .collect();
-            set.sort();
-            set.dedup();
-            set
+            std::mem::take(&mut later)
         };
-        let stem: String = cbz
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        // `[^A-Za-z0-9._-]+` → `_`, first 40 characters.
-        let mut safe = String::new();
-        let mut in_run = false;
-        for c in stem.chars() {
-            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
-                safe.push(c);
-                in_run = false;
-            } else if !in_run {
-                safe.push('_');
-                in_run = true;
+        for cbz in list {
+            if extracted >= wanted {
+                break;
             }
-        }
-        let safe: String = safe.chars().take(40).collect();
-        let mut took = false;
-        for index in picks {
-            let page = &volume.pages()[index as usize];
-            let suffix = page
-                .path
-                .rfind('.')
-                .map(|i| page.path[i..].to_lowercase())
-                .unwrap_or_default();
-            let Ok(bytes) = volume.read_page(index as usize) else {
+            let Ok(volume) = bunko_library::Volume::open(&cbz) else {
                 continue;
             };
-            let name = format!("{extracted:04}_{safe}{suffix}");
-            if zip
-                .start_file(name, options)
-                .and_then(|_| zip.write_all(&bytes).map_err(Into::into))
-                .is_err()
-            {
-                return Err("could not write the sample".into());
+            if first_pass && newer(&volume) {
+                later.push(cbz);
+                continue;
             }
-            extracted += 1;
-            took = true;
-        }
-        if took {
-            volumes += 1;
+            let total = volume.pages().len() as i64;
+            if total == 0 {
+                continue;
+            }
+            readable = true;
+            let count = per_archive.min(wanted - extracted);
+            let picks: Vec<i64> = if count >= total {
+                (0..total).collect()
+            } else {
+                let edge = 2.min((total - count) / 2);
+                let span = total - 2 * edge;
+                let step = span as f64 / count as f64;
+                let mut set: Vec<i64> = (0..count)
+                    .map(|i| edge + (span - 1).min(((i as f64 + 0.5) * step) as i64))
+                    .collect();
+                set.sort();
+                set.dedup();
+                set
+            };
+            let stem: String = cbz
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            // `[^A-Za-z0-9._-]+` → `_`, first 40 characters.
+            let mut safe = String::new();
+            let mut in_run = false;
+            for c in stem.chars() {
+                if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                    safe.push(c);
+                    in_run = false;
+                } else if !in_run {
+                    safe.push('_');
+                    in_run = true;
+                }
+            }
+            let safe: String = safe.chars().take(40).collect();
+            let mut took = false;
+            for index in picks {
+                let page = &volume.pages()[index as usize];
+                let suffix = page
+                    .path
+                    .rfind('.')
+                    .map(|i| page.path[i..].to_lowercase())
+                    .unwrap_or_default();
+                let Ok(bytes) = volume.read_page(index as usize) else {
+                    continue;
+                };
+                let name = format!("{extracted:04}_{safe}{suffix}");
+                if zip
+                    .start_file(name, options)
+                    .and_then(|_| zip.write_all(&bytes).map_err(Into::into))
+                    .is_err()
+                {
+                    return Err("could not write the sample".into());
+                }
+                extracted += 1;
+                took = true;
+            }
+            if took {
+                volumes += 1;
+            }
         }
     }
     zip.finish()
@@ -1775,6 +1787,56 @@ mod tests {
         cbz_of(&only.join("B/J1.cbz"), 8, "jxl");
         build_sample(&only, &out, 16).unwrap();
         assert_eq!(sample_suffixes(&out), vec![".jxl"]);
+    }
+
+    /// On a cloud library opening a volume is a provider read: the sample opens the
+    /// volumes it takes pages from, not every volume in the library (it opened all of
+    /// them to sort out page formats first, minutes of reads on a large library).
+    #[test]
+    fn a_cloud_sample_opens_only_the_volumes_it_needs() {
+        use bunko_remote::fake::FakeBackend;
+        use bunko_remote::{RemoteStore, RemoteStoreConfig};
+        use bunko_store::LibraryStore;
+        use std::collections::HashSet;
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let staging = dir.path().join("staging");
+        let fake = FakeBackend::drive_like();
+        fake.reader_mkdir("mokuro-reader");
+        for i in 0..10 {
+            let local = staging.join(format!("S{i}/V1.cbz"));
+            cbz_of(&local, 8, "jpg");
+            fake.reader_put(
+                &format!("mokuro-reader/S{i}/V1.cbz"),
+                &bunko_store::fs::read(&local).unwrap(),
+            );
+        }
+        let mut cfg = RemoteStoreConfig::new(
+            dir.path().join("cloud/s/library"),
+            dir.path().join("cloud/s"),
+            "mokuro-reader",
+        );
+        cfg.poll_active = Duration::from_secs(3600);
+        cfg.poll_idle = Duration::from_secs(3600);
+        cfg.lease = false;
+        let root = cfg.root.clone();
+        let store = RemoteStore::open(cfg, fake).unwrap();
+        assert!(store.wait_steady(Duration::from_secs(20)));
+        let _mount = bunko_store::mount(store.clone() as Arc<dyn LibraryStore>);
+        store.backend().reset_calls();
+
+        let out = dir.path().join("sample.zip");
+        let (pages, volumes) = build_sample(&root, &out, 16).unwrap();
+        assert_eq!((pages, volumes), (16, 4));
+        let opened: HashSet<String> = store
+            .backend()
+            .read_log()
+            .into_iter()
+            .map(|r| r.pid)
+            .collect();
+        assert_eq!(opened.len(), 4, "volumes read: {opened:?}");
     }
 
     #[test]

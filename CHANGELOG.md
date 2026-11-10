@@ -913,7 +913,9 @@
   after connecting it. The walk now hands over each series as soon as it is judged, so
   OCR runs on the first series while the rest is still looked at, and on a cloud
   library it no longer opens an archive only to count its pages (the count comes from
-  the library's metadata once that has been read).
+  the library's metadata once that has been read). The benchmark a new generation runs
+  first opened every volume of the library to choose its sample pages, a read of each
+  on a cloud library; it now opens volumes only until the sample is full.
 - **The Storage panel says why uploads are held.** Bunko writes nothing to a cloud
   library before it has read the library's series.json files and claimed the library;
   until then its uploads showed only as HELD. The panel now says what they wait for,
