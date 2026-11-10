@@ -51,8 +51,25 @@ async fn no_ocr_generations_payload_and_catalog() {
         .iter()
         .map(|e| e["id"].as_str().unwrap())
         .collect();
-    assert_eq!(engines, ["hayai-nova", "paddle-manga", "ppocr-manga"]);
-    assert_eq!(body["catalog"]["detectors"].as_array().unwrap().len(), 1);
+    // The registry, whatever this server was built with: its processors say what
+    // they run.
+    assert_eq!(
+        engines,
+        [
+            "hayai-nova",
+            "paddle-manga",
+            "ppocr-manga",
+            "charspot-small",
+            "nar-small"
+        ]
+    );
+    let detectors: Vec<&str> = body["catalog"]["detectors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(detectors, ["ppocr-manga", "ctd-lines", "animetext-blocks"]);
     let rows = body["generations"].as_array().unwrap();
     let legacy = rows.iter().find(|r| r["id"] == "g-1").unwrap();
     assert!(

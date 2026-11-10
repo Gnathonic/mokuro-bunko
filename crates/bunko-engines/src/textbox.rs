@@ -1,0 +1,937 @@
+//! The text-box recognizers on ONNX Runtime (feature `nc-models`):
+//! **manga-ocr-charspot-small** and **manga-ocr-nar-small** (muscgab). Their weights are
+//! CC BY-NC-SA 4.0; the inference code they are published with is Apache-2.0, and what
+//! is here follows that code's pre- and post-processing.
+//!
+//! Both were trained on whole text blocks and read them better than single lines. On
+//! 1,000 boxes of JMangaBench_Read, with the models' own packages: read as blocks,
+//! charspot got 93.5% of the boxes exactly right and nar-small 92.0%; fed the lines a
+//! line detector found in the same boxes, 86.0% and 87.4%. So they are
+//! [`BlockReader`]s, and the pipeline hands them blocks:
+//!
+//! * with a line detector, each block of the first layout, once; the text is then
+//!   shared out to the block's lines, by where charspot's characters are and for
+//!   nar-small by aligning its text with the line reader's ([`share_characters`],
+//!   [`share_text`]);
+//! * with a block detector, the detector's boxes as they are; the lines are the ones
+//!   the recognizer finds in each ([`lines_of`]; nar-small knows no positions, so its
+//!   block is one line).
+//!
+//! Both read one upright crop of text and take no prompt and no decoder loop:
+//!
+//! * charspot finds every character in the crop, classifies it and puts the characters
+//!   in reading order, all inside its graph: a call returns the characters with their
+//!   boxes ([`CharRead`]). Furigana is left out by the model.
+//! * nar-small writes the whole text in one pass, at most [`NAR_SLOTS`] characters.
+//!
+//! The crop is scaled to fit a grid (aspect kept, Pillow's bicubic), put in the grid's
+//! top-left corner and the rest filled with the median colour of the scaled crop's
+//! border.
+
+use std::path::Path;
+
+use bunko_layout::difflib::SequenceMatcher;
+use bunko_ocr::runtime::{Model, RuntimeOptions, TensorBuf};
+use bunko_vlm::crop::paddle_quad_crop;
+use bunko_vlm::resample::{Filter, resize};
+use bunko_vlm::{
+    Bgr, BlockCrop, BlockReader, CropSet, Device, LineRead, Precision, Quad, Recognizer,
+    RecognizerInfo, Rgb, VlmError, read_flat,
+};
+
+/// How far a line's crop reaches past its quad, in line thicknesses: the models were
+/// trained on tight text boxes.
+pub const LINE_MARGIN_EM: f64 = 0.1;
+
+/// charspot: the side of a grid cell in pixels, and how many cells a crop may take.
+pub const CHARSPOT_CELL: usize = 16;
+pub const CHARSPOT_BUDGET: usize = 256;
+/// charspot's classes: the vocabulary padded to this many, then the `!?` glyphs.
+const CHARSPOT_CLASSES: usize = 6818;
+/// nar-small: the side of a patch, how many patches a crop may take, and the output
+/// positions (the last may be the end mark).
+pub const NAR_PATCH: usize = 14;
+pub const NAR_BUDGET: usize = 324;
+pub const NAR_SLOTS: usize = 65;
+/// The normalisation, digit for digit as the model's package writes it.
+const NAR_MEAN: [f32; 3] = [0.481_454_66, 0.457_827_5, 0.408_210_73];
+#[allow(clippy::excessive_precision)]
+const NAR_STD: [f32; 3] = [0.268_629_54, 0.261_302_58, 0.275_777_11];
+
+fn asset(what: &str, path: &Path, e: impl std::fmt::Display) -> VlmError {
+    VlmError::Asset(format!("{what} {}: {e}", path.display()))
+}
+
+/// The `characters` list of a vocabulary file.
+fn load_characters(path: &Path) -> Result<Vec<String>, VlmError> {
+    let text =
+        std::fs::read_to_string(path).map_err(|e| VlmError::Io(path.display().to_string(), e))?;
+    let value: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| asset("vocabulary", path, e))?;
+    let chars: Option<Vec<String>> = value["characters"].as_array().map(|a| {
+        a.iter()
+            .map(|c| c.as_str().unwrap_or_default().to_string())
+            .collect()
+    });
+    chars
+        .filter(|c| !c.is_empty())
+        .ok_or_else(|| asset("vocabulary", path, "no characters"))
+}
+
+/// The largest scale at which a `height` x `width` crop, cut into 14 px cells, takes
+/// no more than `budget` cells: `(scale, rows, columns)`. Both models size their input
+/// with this search (charspot then draws 16 px cells).
+pub fn fit_grid(height: usize, width: usize, budget: usize) -> (f64, usize, usize) {
+    let cells = |v: usize, s: f64| (v as f64 * s / 14.0).ceil() as usize;
+    let (mut lo, mut hi) = (1e-4f64, 1000.0f64);
+    for _ in 0..60 {
+        let mid = (lo + hi) / 2.0;
+        if cells(height, mid) * cells(width, mid) <= budget {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    (lo, cells(height, lo), cells(width, lo))
+}
+
+/// Scale `crop` to `scaled` and put it in the top-left corner of a `canvas` sized
+/// image filled with the median colour of the scaled crop's border.
+fn on_canvas(crop: &Rgb, scaled: (usize, usize), canvas: (usize, usize)) -> Rgb {
+    let (rw, rh) = scaled;
+    let small = resize(crop, rw, rh, Filter::Bicubic);
+    // The top and bottom rows and the left and right columns, corners twice.
+    let mut fill = [0u8; 3];
+    for (c, out) in fill.iter_mut().enumerate() {
+        let mut border: Vec<u8> = Vec::with_capacity(2 * (rw + rh));
+        for y in [0, rh - 1] {
+            border.extend((0..rw).map(|x| small.data[(y * rw + x) * 3 + c]));
+        }
+        for x in [0, rw - 1] {
+            border.extend((0..rh).map(|y| small.data[(y * rw + x) * 3 + c]));
+        }
+        border.sort_unstable();
+        // An even count: the mean of the two middle values, cut to a whole number.
+        let mid = border.len() / 2;
+        *out = ((u16::from(border[mid - 1]) + u16::from(border[mid])) / 2) as u8;
+    }
+    let (cw, ch) = canvas;
+    let mut data = Vec::with_capacity(cw * ch * 3);
+    for _ in 0..cw * ch {
+        data.extend_from_slice(&fill);
+    }
+    for y in 0..rh {
+        let row = &small.data[y * rw * 3..(y + 1) * rw * 3];
+        data[y * cw * 3..y * cw * 3 + rw * 3].copy_from_slice(row);
+    }
+    Rgb {
+        width: cw,
+        height: ch,
+        data,
+    }
+}
+
+fn round(x: f64) -> usize {
+    x.round_ties_even().max(0.0) as usize
+}
+
+fn empty(crop: &Rgb) -> bool {
+    crop.width == 0 || crop.height == 0
+}
+
+// --- charspot ----------------------------------------------------------------
+
+/// One character charspot found.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CharBox {
+    /// The character; a combined `!?` glyph is two or three.
+    pub text: String,
+    /// `[x0, y0, x1, y1]` in pixels of the crop that was read.
+    pub bbox: [f32; 4],
+    /// The character-centre score.
+    pub score: f32,
+}
+
+/// What charspot read in a crop: its characters in reading order.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CharRead {
+    pub chars: Vec<CharBox>,
+}
+
+impl CharRead {
+    pub fn text(&self) -> String {
+        self.chars.iter().map(|c| c.text.as_str()).collect()
+    }
+}
+
+/// manga-ocr-charspot-small.
+pub struct Charspot {
+    model: Model,
+    /// Class id → what it writes.
+    classes: Vec<String>,
+}
+
+impl std::fmt::Debug for Charspot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Charspot")
+            .field("model", &self.model)
+            .finish()
+    }
+}
+
+/// charspot's input for a crop: the canvas, and the factors that take canvas pixels
+/// back to crop pixels (`x`, `y`).
+fn charspot_canvas(crop: &Rgb) -> (Rgb, (f32, f32)) {
+    let (s, rows, cols) = fit_grid(crop.height, crop.width, CHARSPOT_BUDGET);
+    let s = s * CHARSPOT_CELL as f64 / 14.0;
+    let rw = round(crop.width as f64 * s).clamp(1, cols * CHARSPOT_CELL);
+    let rh = round(crop.height as f64 * s).clamp(1, rows * CHARSPOT_CELL);
+    let canvas = on_canvas(crop, (rw, rh), (cols * CHARSPOT_CELL, rows * CHARSPOT_CELL));
+    let back = (
+        (crop.width as f64 / rw as f64) as f32,
+        (crop.height as f64 / rh as f64) as f32,
+    );
+    (canvas, back)
+}
+
+impl Charspot {
+    pub fn load(model: &Path, vocabulary: &Path, opts: &RuntimeOptions) -> Result<Self, VlmError> {
+        let mut classes = load_characters(vocabulary)?;
+        if classes.len() > CHARSPOT_CLASSES {
+            return Err(asset(
+                "vocabulary",
+                vocabulary,
+                format!("{} characters, more than {CHARSPOT_CLASSES}", classes.len()),
+            ));
+        }
+        classes.resize(CHARSPOT_CLASSES, String::new());
+        // The tate-chu-yoko glyphs: every pair, then every triple, of `!` and `?`.
+        let marks = ['!', '?'];
+        for a in marks {
+            for b in marks {
+                classes.push([a, b].iter().collect());
+            }
+        }
+        for a in marks {
+            for b in marks {
+                for c in marks {
+                    classes.push([a, b, c].iter().collect());
+                }
+            }
+        }
+        let model = Model::load(model, opts).map_err(|e| VlmError::Runtime(e.to_string()))?;
+        Ok(Self { model, classes })
+    }
+
+    /// The characters of one upright crop, in reading order.
+    pub fn read(&self, crop: &Rgb) -> Result<CharRead, VlmError> {
+        if empty(crop) {
+            return Ok(CharRead::default());
+        }
+        let (canvas, (fx, fy)) = charspot_canvas(crop);
+        let (w, h) = (canvas.width, canvas.height);
+        // `[1, 3, H, W]`, red plane first, the bytes as they are (0..255).
+        let plane = w * h;
+        let mut x = vec![0.0f32; 3 * plane];
+        for (i, px) in canvas.data.as_chunks::<3>().0.iter().enumerate() {
+            for c in 0..3 {
+                x[c * plane + i] = f32::from(px[c]);
+            }
+        }
+        let run = |e: bunko_ocr::Error| VlmError::Runtime(format!("charspot: {e}"));
+        let out = self
+            .model
+            .run_named(
+                vec![("img", TensorBuf::f32(&[1, 3, h, w], x))],
+                &["boxes", "scores", "ids", "order"],
+            )
+            .map_err(run)?;
+        let bad = || VlmError::Runtime("charspot returned tensors of another type".into());
+        let boxes = out[0].as_f32().ok_or_else(bad)?;
+        let scores = out[1].as_f32().ok_or_else(bad)?;
+        let ids = out[2].as_i64().ok_or_else(bad)?;
+        let order = out[3].as_i64().ok_or_else(bad)?;
+        let n = scores.len();
+        if boxes.len() != 4 * n || ids.len() != n {
+            return Err(VlmError::Runtime(format!(
+                "charspot returned {} box values and {} ids for {n} characters",
+                boxes.len(),
+                ids.len()
+            )));
+        }
+        let mut chars = Vec::with_capacity(order.len());
+        for &k in order {
+            let k = usize::try_from(k).ok().filter(|k| *k < n).ok_or_else(|| {
+                VlmError::Runtime(format!("charspot orders character {k} of {n}"))
+            })?;
+            let b = &boxes[4 * k..4 * k + 4];
+            chars.push(CharBox {
+                text: usize::try_from(ids[k])
+                    .ok()
+                    .and_then(|id| self.classes.get(id))
+                    .cloned()
+                    .unwrap_or_default(),
+                bbox: [b[0] * fx, b[1] * fy, b[2] * fx, b[3] * fy],
+                score: scores[k],
+            });
+        }
+        Ok(CharRead { chars })
+    }
+}
+
+// --- nar-small ---------------------------------------------------------------
+
+/// manga-ocr-nar-small.
+pub struct NarSmall {
+    model: Model,
+    characters: Vec<String>,
+}
+
+impl std::fmt::Debug for NarSmall {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NarSmall")
+            .field("model", &self.model)
+            .finish()
+    }
+}
+
+/// nar-small's inputs for a crop: the patches `[324, 588]` (each a 14 x 14 patch, red
+/// plane first, normalised), which of them are crop (`V`), their rows and columns, and
+/// the grid's size.
+struct NarInput {
+    patches: Vec<f32>,
+    valid: Vec<f32>,
+    rows: Vec<i32>,
+    cols: Vec<i32>,
+    grid: (usize, usize),
+}
+
+fn nar_input(crop: &Rgb) -> NarInput {
+    let (s, rows, cols) = fit_grid(crop.height, crop.width, NAR_BUDGET);
+    let rw = round(crop.width as f64 * s).clamp(1, cols * NAR_PATCH);
+    let rh = round(crop.height as f64 * s).clamp(1, rows * NAR_PATCH);
+    let canvas = on_canvas(crop, (rw, rh), (cols * NAR_PATCH, rows * NAR_PATCH));
+    let feat = 3 * NAR_PATCH * NAR_PATCH;
+    let mut patches = vec![0.0f32; NAR_BUDGET * feat];
+    let (mut valid, mut prow, mut pcol) = (
+        vec![0.0f32; NAR_BUDGET],
+        vec![0i32; NAR_BUDGET],
+        vec![0i32; NAR_BUDGET],
+    );
+    for r in 0..rows {
+        for c in 0..cols {
+            let n = r * cols + c;
+            valid[n] = 1.0;
+            prow[n] = r as i32;
+            pcol[n] = c as i32;
+            let patch = &mut patches[n * feat..(n + 1) * feat];
+            for ch in 0..3 {
+                for py in 0..NAR_PATCH {
+                    for px in 0..NAR_PATCH {
+                        let v = canvas.data
+                            [((r * NAR_PATCH + py) * canvas.width + c * NAR_PATCH + px) * 3 + ch];
+                        patch[(ch * NAR_PATCH + py) * NAR_PATCH + px] =
+                            (f32::from(v) / 255.0 - NAR_MEAN[ch]) / NAR_STD[ch];
+                    }
+                }
+            }
+        }
+    }
+    NarInput {
+        patches,
+        valid,
+        rows: prow,
+        cols: pcol,
+        grid: (rows, cols),
+    }
+}
+
+impl NarSmall {
+    pub fn load(model: &Path, vocabulary: &Path, opts: &RuntimeOptions) -> Result<Self, VlmError> {
+        let characters = load_characters(vocabulary)?;
+        let model = Model::load(model, opts).map_err(|e| VlmError::Runtime(e.to_string()))?;
+        Ok(Self { model, characters })
+    }
+
+    /// The text of one upright crop.
+    pub fn read(&self, crop: &Rgb) -> Result<String, VlmError> {
+        if empty(crop) {
+            return Ok(String::new());
+        }
+        let input = nar_input(crop);
+        let feat = 3 * NAR_PATCH * NAR_PATCH;
+        let out = self
+            .model
+            .run_named(
+                vec![
+                    ("P", TensorBuf::f32(&[NAR_BUDGET, feat], input.patches)),
+                    ("V", TensorBuf::f32(&[NAR_BUDGET], input.valid)),
+                    ("R", TensorBuf::i32(&[NAR_BUDGET], input.rows)),
+                    ("C", TensorBuf::i32(&[NAR_BUDGET], input.cols)),
+                    ("H", TensorBuf::i32(&[1], vec![input.grid.0 as i32])),
+                    ("W", TensorBuf::i32(&[1], vec![input.grid.1 as i32])),
+                ],
+                &["ids"],
+            )
+            .map_err(|e| VlmError::Runtime(format!("nar-small: {e}")))?;
+        let ids: Vec<i64> = match &out[0].data {
+            bunko_ocr::runtime::Elements::I32(v) => v.iter().map(|&i| i64::from(i)).collect(),
+            bunko_ocr::runtime::Elements::I64(v) => v.clone(),
+            _ => {
+                return Err(VlmError::Runtime(
+                    "nar-small returned ids of another type".into(),
+                ));
+            }
+        };
+        // The end mark is the id after the last character; the text stops there.
+        let end = self.characters.len() as i64;
+        Ok(ids
+            .iter()
+            .take_while(|&&i| i != end)
+            .filter_map(|&i| usize::try_from(i).ok().and_then(|i| self.characters.get(i)))
+            .map(String::as_str)
+            .collect())
+    }
+}
+
+// --- a block's text, line by line ---------------------------------------------
+
+fn cross(o: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {
+    (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+}
+
+/// Whether `p` lies in the convex `quad` (its border included).
+fn inside(quad: &Quad, p: [f64; 2]) -> bool {
+    let turns: Vec<f64> = (0..4)
+        .map(|k| cross(quad[k], quad[(k + 1) % 4], p))
+        .collect();
+    turns.iter().all(|t| *t >= 0.0) || turns.iter().all(|t| *t <= 0.0)
+}
+
+/// The distance from `p` to the border of `quad`.
+fn distance(quad: &Quad, p: [f64; 2]) -> f64 {
+    (0..4)
+        .map(|k| {
+            let (a, b) = (quad[k], quad[(k + 1) % 4]);
+            let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+            let len2 = dx * dx + dy * dy;
+            let t = if len2 > 0.0 {
+                (((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / len2).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            ((p[0] - a[0] - t * dx).powi(2) + (p[1] - a[1] - t * dy).powi(2)).sqrt()
+        })
+        .fold(f64::INFINITY, f64::min)
+}
+
+/// How far outside a line's quad a character's centre may lie and still be the line's,
+/// in line thicknesses: a mark the detector's box cut off, not the next block's text.
+pub const STRAY_REACH_EM: f64 = 0.5;
+
+/// The thickness of a line's quad: its shorter side.
+fn thickness(quad: &Quad) -> f64 {
+    let side = |a: [f64; 2], b: [f64; 2]| ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2)).sqrt();
+    side(quad[0], quad[1]).min(side(quad[0], quad[3]))
+}
+
+/// The characters of a block read, line by line: each character goes to the line whose
+/// quad holds its centre, or else to the nearest one within [`STRAY_REACH_EM`] (a mark
+/// the detector's box cut off), and keeps the model's reading order within its line. A
+/// character further from every line is another block's (crops of neighbouring blocks
+/// overlap) and is left out. One string per quad.
+pub fn share_characters(read: &CharRead, lines: &[Quad]) -> Vec<String> {
+    let mut out = vec![String::new(); lines.len()];
+    for c in &read.chars {
+        let centre = [
+            f64::from(c.bbox[0] + c.bbox[2]) / 2.0,
+            f64::from(c.bbox[1] + c.bbox[3]) / 2.0,
+        ];
+        let line = lines.iter().position(|q| inside(q, centre)).or_else(|| {
+            (0..lines.len())
+                .map(|i| (i, distance(&lines[i], centre)))
+                .filter(|(i, d)| *d <= STRAY_REACH_EM * thickness(&lines[*i]))
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(i, _)| i)
+        });
+        if let Some(line) = line {
+            out[line].push_str(&c.text);
+        }
+    }
+    out
+}
+
+/// A block's text cut into its lines by aligning it with what the line reader read in
+/// each (`hints`, in the block's line order): a line's share ends where the last
+/// character of its hint is matched, and text between two matches is divided in
+/// proportion to the unmatched hint characters on either side of the line break. One
+/// string per hint; with a single line, or no hint text at all, the first line gets it.
+pub fn share_text(text: &str, hints: &[String]) -> Vec<String> {
+    let mut out = vec![String::new(); hints.len()];
+    if hints.is_empty() {
+        return out;
+    }
+    let a: Vec<char> = text.chars().collect();
+    let b: Vec<char> = hints.iter().flat_map(|h| h.chars()).collect();
+    if hints.len() == 1 || b.is_empty() {
+        out[0] = text.to_string();
+        return out;
+    }
+    // Matching runs `(start in text, start in hints, length)`, closed by an empty one
+    // at both ends.
+    let blocks = SequenceMatcher::new(&a, &b).matching_blocks();
+    let mut cuts = Vec::with_capacity(hints.len() + 1);
+    cuts.push(0usize);
+    let mut at = 0usize;
+    for hint in &hints[..hints.len() - 1] {
+        at += hint.chars().count();
+        // The run the break falls in, or the gap it falls in between two runs.
+        let (mut a_end, mut b_end) = (0usize, 0usize);
+        let mut cut = None;
+        for m in &blocks {
+            if at <= m.b {
+                let (a_gap, b_gap) = (m.a - a_end, m.b - b_end);
+                let share = if b_gap == 0 {
+                    0
+                } else {
+                    ((at - b_end) as f64 / b_gap as f64 * a_gap as f64).round() as usize
+                };
+                cut = Some(a_end + share.min(a_gap));
+                break;
+            }
+            if at <= m.b + m.size {
+                cut = Some(m.a + (at - m.b));
+                break;
+            }
+            (a_end, b_end) = (m.a + m.size, m.b + m.size);
+        }
+        let cut = cut.unwrap_or(a.len()).max(*cuts.last().unwrap_or(&0));
+        cuts.push(cut.min(a.len()));
+    }
+    cuts.push(a.len());
+    for (line, span) in out.iter_mut().zip(cuts.windows(2)) {
+        *line = a[span[0]..span[1]].iter().collect();
+    }
+    out
+}
+
+/// How far across its line a character may sit from the one before and still follow it,
+/// and how far back along the line, both in character sizes.
+const LINE_DRIFT: f32 = 0.5;
+const LINE_BACK: f32 = 0.25;
+
+/// The lines of a block read, from where its characters are: in the model's reading
+/// order a character continues the line while it follows the one before along the
+/// line (down a column, or along a row) without leaving it sideways; the first step of
+/// a line says which way it runs. A line's box is the box of its characters.
+pub fn lines_of(read: &CharRead) -> Vec<LineRead> {
+    struct Open {
+        chars: Vec<usize>,
+        vertical: Option<bool>,
+    }
+    let centre = |c: &CharBox| ((c.bbox[0] + c.bbox[2]) / 2.0, (c.bbox[1] + c.bbox[3]) / 2.0);
+    let size = |c: &CharBox| ((c.bbox[2] - c.bbox[0]) + (c.bbox[3] - c.bbox[1])) / 2.0;
+    // Which way `b` follows `a`, if it does: down (`true`) or along (`false`).
+    let step = |a: &CharBox, b: &CharBox| -> Option<bool> {
+        let s = size(a).max(size(b)).max(1.0);
+        let ((ax, ay), (bx, by)) = (centre(a), centre(b));
+        let down = (bx - ax).abs() <= LINE_DRIFT * s && by - ay > -LINE_BACK * s;
+        let along = (by - ay).abs() <= LINE_DRIFT * s && bx - ax > -LINE_BACK * s;
+        match (down, along) {
+            (true, false) => Some(true),
+            (false, true) => Some(false),
+            // Almost on top of each other: whichever way it moved more.
+            (true, true) => Some((by - ay).abs() >= (bx - ax).abs()),
+            (false, false) => None,
+        }
+    };
+    let mut lines: Vec<Open> = Vec::new();
+    for (i, c) in read.chars.iter().enumerate() {
+        let follows = lines.last().and_then(|line| {
+            let prev = &read.chars[*line.chars.last()?];
+            step(prev, c).filter(|way| line.vertical.is_none_or(|v| v == *way))
+        });
+        match (follows, lines.last_mut()) {
+            (Some(way), Some(line)) => {
+                line.vertical = Some(way);
+                line.chars.push(i);
+            }
+            _ => lines.push(Open {
+                chars: vec![i],
+                vertical: None,
+            }),
+        }
+    }
+    // A line of one character runs the way most of the block's lines do, or down.
+    let (down, along) = lines.iter().fold((0, 0), |(d, a), l| match l.vertical {
+        Some(true) => (d + 1, a),
+        Some(false) => (d, a + 1),
+        None => (d, a),
+    });
+    lines
+        .into_iter()
+        .map(|line| {
+            let mut bbox = [f32::INFINITY, f32::INFINITY, 0.0f32, 0.0f32];
+            let (mut text, mut confs) = (String::new(), Vec::new());
+            for &i in &line.chars {
+                let c = &read.chars[i];
+                bbox = [
+                    bbox[0].min(c.bbox[0]),
+                    bbox[1].min(c.bbox[1]),
+                    bbox[2].max(c.bbox[2]),
+                    bbox[3].max(c.bbox[3]),
+                ];
+                text.push_str(&c.text);
+                // A combined `!?` glyph is several characters with one score.
+                confs.extend(std::iter::repeat_n(c.score, c.text.chars().count()));
+            }
+            LineRead {
+                text,
+                bbox,
+                vertical: line.vertical.unwrap_or(down >= along),
+                confs,
+            }
+        })
+        .collect()
+}
+
+impl BlockReader for TextboxRecognizer {
+    fn read_lines(&self, crops: &[Rgb]) -> Result<Vec<Vec<LineRead>>, VlmError> {
+        crops
+            .iter()
+            .map(|crop| {
+                Ok(match &self.reader {
+                    Reader::Charspot(m) => lines_of(&m.read(crop)?),
+                    // No character boxes: the text is one line, the whole crop.
+                    Reader::Nar(m) => {
+                        let text = m.read(crop)?;
+                        if text.is_empty() {
+                            Vec::new()
+                        } else {
+                            vec![LineRead {
+                                text,
+                                bbox: [0.0, 0.0, crop.width as f32, crop.height as f32],
+                                vertical: crop.height >= crop.width,
+                                confs: Vec::new(),
+                            }]
+                        }
+                    }
+                })
+            })
+            .collect()
+    }
+
+    fn read_blocks(&self, blocks: &[BlockCrop]) -> Result<Vec<Vec<String>>, VlmError> {
+        blocks
+            .iter()
+            .map(|block| {
+                Ok(match &self.reader {
+                    Reader::Charspot(m) => share_characters(&m.read(&block.image)?, &block.lines),
+                    Reader::Nar(m) => share_text(&m.read(&block.image)?, &block.hints),
+                })
+            })
+            .collect()
+    }
+}
+
+// --- the recognizer seam -----------------------------------------------------
+
+enum Reader {
+    Charspot(Charspot),
+    Nar(NarSmall),
+}
+
+/// A text-box recognizer behind the pipeline's [`Recognizer`] seam. The pipeline reads
+/// with its [`BlockReader`]; the line methods read one line's upright crop each, for a
+/// caller that has no blocks.
+pub struct TextboxRecognizer {
+    reader: Reader,
+    info: RecognizerInfo,
+}
+
+impl TextboxRecognizer {
+    /// `engine` is `charspot-small` or `nar-small`. `source` is the pinned
+    /// `(repo, revision)` the files came from, when they are the pinned files.
+    pub fn load(
+        engine: &str,
+        model: &Path,
+        vocabulary: &Path,
+        opts: &RuntimeOptions,
+        source: Option<(&'static str, &'static str)>,
+    ) -> Result<Self, VlmError> {
+        let (reader, engine, recognizer) = match engine {
+            "charspot-small" => (
+                Reader::Charspot(Charspot::load(model, vocabulary, opts)?),
+                "charspot-small",
+                "muscgab/manga-ocr-charspot-small",
+            ),
+            "nar-small" => (
+                Reader::Nar(NarSmall::load(model, vocabulary, opts)?),
+                "nar-small",
+                "muscgab/manga-ocr-nar-small",
+            ),
+            other => {
+                return Err(VlmError::Config(format!(
+                    "{other} is no text-box recognizer"
+                )));
+            }
+        };
+        Ok(Self {
+            reader,
+            info: RecognizerInfo {
+                engine,
+                recognizer,
+                repos: source.into_iter().collect(),
+                precision: Precision::Fp32,
+                device: Device::Cpu,
+                token_caps: false,
+                second_read: false,
+                default_max_tokens: 0,
+                batch: 1,
+                patch_budget: None,
+            },
+        })
+    }
+
+    fn read_crop(&self, crop: &Rgb) -> Result<String, VlmError> {
+        match &self.reader {
+            Reader::Charspot(m) => m.read(crop).map(|r| r.text()),
+            Reader::Nar(m) => m.read(crop),
+        }
+    }
+}
+
+impl Recognizer for TextboxRecognizer {
+    fn info(&self) -> &RecognizerInfo {
+        &self.info
+    }
+
+    fn block_reader(&self) -> Option<&dyn BlockReader> {
+        Some(self)
+    }
+
+    fn verbatim(&self) -> bool {
+        true
+    }
+
+    fn crop(&self, page: &Bgr, quad: &Quad, _vertical: bool) -> CropSet {
+        CropSet::one(paddle_quad_crop(page, quad, LINE_MARGIN_EM))
+    }
+
+    fn second_crop(&self, _page: &Bgr, _quad: &Quad, _vertical: bool) -> Option<CropSet> {
+        None
+    }
+
+    fn read(&self, lines: &[CropSet], _caps: Option<&[u32]>) -> Result<Vec<String>, VlmError> {
+        read_flat(lines, None, 0, |crops, _| {
+            crops.iter().map(|c| self.read_crop(c)).collect()
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ch(text: &str, x: f32, y: f32) -> CharBox {
+        CharBox {
+            text: text.into(),
+            bbox: [x - 5.0, y - 5.0, x + 5.0, y + 5.0],
+            score: 0.9,
+        }
+    }
+
+    fn column(x0: f64, x1: f64) -> Quad {
+        [[x0, 0.0], [x1, 0.0], [x1, 100.0], [x0, 100.0]]
+    }
+
+    #[test]
+    fn characters_go_to_the_line_that_holds_them() {
+        // Two columns read right to left, and the model's order runs down the right
+        // one, then down the left one.
+        let lines = [column(60.0, 80.0), column(20.0, 40.0)];
+        let read = CharRead {
+            chars: vec![
+                ch("今", 70.0, 10.0),
+                ch("日", 70.0, 30.0),
+                ch("は", 30.0, 10.0),
+                // A mark just below the left column's box: still that line's.
+                ch("!?", 31.0, 108.0),
+                // Between the columns, nearer the right one.
+                ch("、", 52.0, 50.0),
+                // A column of the next block, further than half a line away: not ours.
+                ch("別", 0.0, 50.0),
+            ],
+        };
+        assert_eq!(share_characters(&read, &lines), ["今日、", "は!?"]);
+        // The right column alone: the left column's characters are too far from it.
+        assert_eq!(share_characters(&read, &lines[..1]), ["今日、"]);
+        assert!(share_characters(&read, &[]).is_empty());
+        assert_eq!(share_characters(&CharRead::default(), &lines), ["", ""]);
+    }
+
+    #[test]
+    fn characters_in_reading_order_make_the_blocks_lines() {
+        // Two columns read right to left (three and two characters), then a row.
+        let read = CharRead {
+            chars: vec![
+                ch("今", 70.0, 10.0),
+                ch("日", 70.0, 22.0),
+                ch("は", 71.0, 34.0),
+                ch("晴", 50.0, 10.0),
+                ch("れ", 50.0, 22.0),
+                ch("O", 10.0, 80.0),
+                ch("K", 22.0, 80.0),
+                ch("!?", 34.0, 81.0),
+            ],
+        };
+        let lines = lines_of(&read);
+        let texts: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(texts, ["今日は", "晴れ", "OK!?"]);
+        assert_eq!(
+            lines.iter().map(|l| l.vertical).collect::<Vec<_>>(),
+            [true, true, false]
+        );
+        assert_eq!(lines[0].bbox, [65.0, 5.0, 76.0, 39.0]);
+        // One confidence per character of the text, a combined glyph's for each.
+        assert_eq!(lines[2].confs.len(), 4);
+        // A single character: a line that runs like the others (here: down).
+        let lone = lines_of(&CharRead {
+            chars: vec![ch("あ", 10.0, 10.0)],
+        });
+        assert_eq!((lone.len(), lone[0].vertical), (1, true));
+        assert!(lines_of(&CharRead::default()).is_empty());
+    }
+
+    fn hints(h: &[&str]) -> Vec<String> {
+        h.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_blocks_text_is_cut_where_its_lines_end() {
+        // The line reader's text is the same: cut at its line ends.
+        assert_eq!(
+            share_text(
+                "今日はいい天気ですね",
+                &hints(&["今日は", "いい天気", "ですね"])
+            ),
+            ["今日は", "いい天気", "ですね"]
+        );
+        // The line reader misread a character inside a line (天 as 夭): the cuts stay.
+        assert_eq!(
+            share_text(
+                "今日はいい天気ですね",
+                &hints(&["今日は", "いい夭気", "ですね"])
+            ),
+            ["今日は", "いい天気", "ですね"]
+        );
+        // It misread the last character of a line (気 as 汽) and missed the next (で):
+        // both unmatched characters lie where the line reader has one, on the earlier
+        // line's side of the break, so the earlier line takes them. Nothing is lost,
+        // and the text reads the same line after line.
+        assert_eq!(
+            share_text(
+                "今日はいい天気ですね",
+                &hints(&["今日は", "いい天汽", "すね"])
+            ),
+            ["今日は", "いい天気で", "すね"]
+        );
+        // It missed one of two equal characters at the start of a line: the match runs
+        // on across the break, and the cut stays where the earlier line's hint ends.
+        assert_eq!(
+            share_text("今日はいい天気", &hints(&["今日は", "い天気"])),
+            ["今日は", "いい天気"]
+        );
+        // Text the line reader has nothing for goes with the lines around it; nothing
+        // is lost.
+        let cut = share_text("あいうえおかきくけこ", &hints(&["あい", "", "けこ"]));
+        assert_eq!(cut.concat(), "あいうえおかきくけこ");
+        assert_eq!(cut[0], "あい");
+        assert_eq!(cut[2], "うえおかきくけこ");
+        // One line, or no hints at all: the first line gets the text.
+        assert_eq!(share_text("あいう", &hints(&["x"])), ["あいう"]);
+        assert_eq!(share_text("あいう", &hints(&["", ""])), ["あいう", ""]);
+        assert!(share_text("あいう", &[]).is_empty());
+        assert_eq!(share_text("", &hints(&["あ", "い"])), ["", ""]);
+    }
+
+    #[test]
+    fn the_grid_is_the_largest_that_fits_the_budget() {
+        // A square crop fills the budget exactly: 16 x 16 cells, 18 x 18 patches.
+        let (_, rows, cols) = fit_grid(100, 100, CHARSPOT_BUDGET);
+        assert_eq!((rows, cols), (16, 16));
+        let (_, rows, cols) = fit_grid(100, 100, NAR_BUDGET);
+        assert_eq!((rows, cols), (18, 18));
+        // A column four times as tall as wide.
+        let (s, rows, cols) = fit_grid(400, 100, CHARSPOT_BUDGET);
+        assert!(
+            rows * cols <= CHARSPOT_BUDGET && rows > 3 * cols,
+            "{rows}x{cols}"
+        );
+        // One step further would not fit.
+        let cells = |v: usize, s: f64| (v as f64 * s / 14.0).ceil() as usize;
+        assert!(cells(400, s * 1.01) * cells(100, s * 1.01) > CHARSPOT_BUDGET);
+    }
+
+    #[test]
+    fn the_canvas_holds_the_crop_in_the_corner_on_its_border_median() {
+        // 4 x 2, all border: red 10/20/30/40 on top, 50/60/70/80 below.
+        let mut data = Vec::new();
+        for v in [10u8, 20, 30, 40, 50, 60, 70, 80] {
+            data.extend_from_slice(&[v, 0, 255]);
+        }
+        let crop = Rgb {
+            width: 4,
+            height: 2,
+            data,
+        };
+        let canvas = on_canvas(&crop, (4, 2), (6, 3));
+        assert_eq!((canvas.width, canvas.height), (6, 3));
+        assert_eq!(canvas.px(0, 0), [10, 0, 255]);
+        assert_eq!(canvas.px(3, 1), [80, 0, 255]);
+        // Rows 10..40 and 50..80, columns 10,50 and 40,80: the two middle values of the
+        // twelve are 40 and 50.
+        assert_eq!(canvas.px(5, 0), [45, 0, 255]);
+        assert_eq!(canvas.px(0, 2), [45, 0, 255]);
+    }
+
+    #[test]
+    fn charspot_boxes_come_back_in_crop_pixels() {
+        let crop = Rgb::new(300, 600);
+        let (canvas, (fx, fy)) = charspot_canvas(&crop);
+        assert_eq!(canvas.width % CHARSPOT_CELL, 0);
+        assert_eq!(canvas.height % CHARSPOT_CELL, 0);
+        assert!(canvas.width / CHARSPOT_CELL * (canvas.height / CHARSPOT_CELL) <= CHARSPOT_BUDGET);
+        // The crop keeps its shape and lies inside the canvas: a canvas pixel is the
+        // same number of crop pixels both ways, within the rounding of the scaled size.
+        assert!((fx / fy - 1.0).abs() < 0.02, "{fx} {fy}");
+        assert!(300.0 / fx <= canvas.width as f32 + 0.5);
+        assert!(600.0 / fy <= canvas.height as f32 + 0.5);
+    }
+
+    #[test]
+    fn nar_patches_are_laid_out_row_by_row_and_padded() {
+        let crop = Rgb::new(140, 70);
+        let input = nar_input(&crop);
+        let (rows, cols) = input.grid;
+        assert!(
+            rows * cols <= NAR_BUDGET && cols == 2 * rows,
+            "{rows}x{cols}"
+        );
+        let n = rows * cols;
+        assert_eq!(input.valid[..n], vec![1.0; n][..]);
+        assert!(input.valid[n..].iter().all(|v| *v == 0.0));
+        assert_eq!((input.rows[cols], input.cols[cols]), (1, 0));
+        assert_eq!(
+            (input.rows[cols - 1], input.cols[cols - 1]),
+            (0, cols as i32 - 1)
+        );
+        // A black pixel, normalised, red first.
+        assert!((input.patches[0] - (0.0 - NAR_MEAN[0]) / NAR_STD[0]).abs() < 1e-6);
+        assert!(
+            (input.patches[2 * NAR_PATCH * NAR_PATCH] - (0.0 - NAR_MEAN[2]) / NAR_STD[2]).abs()
+                < 1e-6
+        );
+        assert!(input.patches[n * 588..].iter().all(|v| *v == 0.0));
+    }
+}

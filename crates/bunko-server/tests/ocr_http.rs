@@ -95,7 +95,7 @@ async fn send(app: &Router, req: Request<Body>) -> (StatusCode, http::HeaderMap,
 /// A fake processor registered straight with the scheduler.
 async fn fake_processor(ocr: &OcrControl, name: &str) -> tokio::sync::mpsc::UnboundedReceiver<Op> {
     let (reply, rx) = tokio::sync::oneshot::channel();
-    let body = json!({"protocol": 3, "name": name, "catalog": {"engines": ["hayai-nova"], "detectors": ["ppocr-manga"], "devices": []}, "max_sessions": 1});
+    let body = json!({"protocol": 3, "name": name, "catalog": {"engines": ["hayai-nova"], "detectors": ["ppocr-manga"], "devices": [], "engine_revisions": ocr_common::current_revisions(["hayai-nova"])}, "max_sessions": 1});
     ocr.send(Msg::Register {
         input: RegisterInput {
             username: format!("acct-{name}"),
@@ -543,7 +543,7 @@ async fn remote_round_trip_over_a_websocket() {
     let reg = http
         .post(format!("{base}/_processor/register"))
         .header("authorization", &auth)
-        .json(&json!({"protocol": 3, "name": "tower", "host": {"gpu": "RTX 4090", "version": "0.6.0"}, "catalog": {"engines": ["hayai-nova"], "detectors": ["ppocr-manga"], "devices": [{"id": "gpu:0", "label": "GPU 0"}]}, "max_sessions": 1}))
+        .json(&json!({"protocol": 3, "name": "tower", "host": {"gpu": "RTX 4090", "version": "0.6.0"}, "catalog": {"engines": ["hayai-nova"], "detectors": ["ppocr-manga"], "devices": [{"id": "gpu:0", "label": "GPU 0"}], "engine_revisions": ocr_common::current_revisions(["hayai-nova"])}, "max_sessions": 1}))
         .send()
         .await
         .unwrap();
@@ -783,7 +783,7 @@ async fn remote_round_trip_over_a_websocket() {
     let reg: Value = http
         .post(format!("{base}/_processor/register"))
         .header("authorization", &auth)
-        .json(&json!({"protocol": 3, "name": "tower", "catalog": {"engines": ["hayai-nova"], "detectors": ["ppocr-manga"]}}))
+        .json(&json!({"protocol": 3, "name": "tower", "catalog": {"engines": ["hayai-nova"], "detectors": ["ppocr-manga"], "engine_revisions": ocr_common::current_revisions(["hayai-nova"])}}))
         .send()
         .await
         .unwrap()
@@ -837,7 +837,7 @@ async fn answer_one_claim(stem: &str, sent: &str) -> (u16, Option<String>) {
     let reg: Value = http
         .post(format!("{base}/_processor/register"))
         .header("authorization", &auth)
-        .json(&json!({"protocol": 3, "name": "box", "catalog": {"engines": ["hayai-nova"], "detectors": ["ppocr-manga"], "devices": []}, "max_sessions": 1}))
+        .json(&json!({"protocol": 3, "name": "box", "catalog": {"engines": ["hayai-nova"], "detectors": ["ppocr-manga"], "devices": [], "engine_revisions": ocr_common::current_revisions(["hayai-nova"])}, "max_sessions": 1}))
         .send()
         .await
         .unwrap()
@@ -1815,7 +1815,7 @@ async fn oversized_and_binary_messages_close_the_socket() {
         let reg: Value = http
             .post(format!("http://{addr}/_processor/register"))
             .header("authorization", &auth)
-            .json(&json!({"protocol": 3, "name": "tower", "catalog": {"engines": ["hayai-nova"], "detectors": ["ppocr-manga"]}}))
+            .json(&json!({"protocol": 3, "name": "tower", "catalog": {"engines": ["hayai-nova"], "detectors": ["ppocr-manga"], "engine_revisions": ocr_common::current_revisions(["hayai-nova"])}}))
             .send()
             .await
             .unwrap()
@@ -1951,7 +1951,7 @@ async fn a_machine_paired_again_under_a_new_account_takes_its_name_back() {
             let r = http
                 .post(format!("http://{addr}/_processor/register"))
                 .header("authorization", basic(user, pass))
-                .json(&json!({"protocol": 3, "name": "tower", "catalog": {"engines": ["hayai-nova"], "detectors": ["ppocr-manga"]}}))
+                .json(&json!({"protocol": 3, "name": "tower", "catalog": {"engines": ["hayai-nova"], "detectors": ["ppocr-manga"], "engine_revisions": ocr_common::current_revisions(["hayai-nova"])}}))
                 .send()
                 .await
                 .unwrap();

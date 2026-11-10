@@ -151,7 +151,7 @@ fn ppocr_volume_with_bad_pages() {
             .weights
             .get("Kellenok/PP-OCRv6_manga")
             .map(String::as_str),
-        Some("ba1d479e8a61a20e8318c9758c73fbbbd290b98d")
+        Some("d65838996a00ef6b1c73ca3a700d7a8c5fbbef8a")
     );
 
     let events = Mutex::new(Vec::new());

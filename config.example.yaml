@@ -221,17 +221,33 @@ ocr:
   #                - ppocr-manga:  PP-OCRv6 manga (Apache-2.0), a small line
   #                                detector + CTC recognizer on the CPU; brings
   #                                its own detector.
-  #                Every engine also reads scanned NOVEL pages.
+  #                Opt-in, with weights under other licences (downloaded only
+  #                when a row uses them; not in a build made without them):
+  #                - charspot-small: manga-ocr-charspot-small (weights CC
+  #                                BY-NC-SA 4.0, non-commercial); CPU, fast
+  #                - nar-small:    manga-ocr-nar-small (weights CC BY-NC-SA
+  #                                4.0, non-commercial); CPU
+  #                The first three engines also read scanned NOVEL pages.
   #                The 0.5 engine `mokuro` was removed. A row that still names
   #                it is kept but retired: it never runs, loses `primary` and
   #                keeps its name reserved. If it was the primary, an enabled
   #                hayai-nova row becomes primary, or a new one is added; see
   #                docs/MIGRATING-0.7.md.
-  #   detector     ppocr-manga (Apache-2.0 rotated line quads, CPU only) is the
-  #                only detector. hayai-nova and paddle-manga re-read every
-  #                line it finds and the two reads are merged. Ignored (and
-  #                stored as null) for the ppocr-manga engine. A row naming the
-  #                removed ctd / animetext / rtdetr is switched to ppocr-manga.
+  #   detector     which lines the engine reads; the engine re-reads every
+  #                line and its read is merged with PP-OCR's own.
+  #                - ppocr-manga: rotated line quads (Apache-2.0, CPU). The
+  #                               default.
+  #                - ctd-lines:   comic-text-detector's lines (weights GPL-3.0,
+  #                               CPU): tight on dialogue, skips most sound
+  #                               effects and furigana. Opt-in, like the
+  #                               engines above.
+  #                - animetext-blocks: AnimeText YOLO12-x (weights GPL-3.0,
+  #                               CPU): whole text blocks, not lines. Only
+  #                               for charspot-small and nar-small, which
+  #                               read a block at once. Opt-in.
+  #                Ignored (and stored as null) for the ppocr-manga engine. A
+  #                row naming the removed ctd / animetext / rtdetr of 0.5 is
+  #                switched to ppocr-manga.
   #   precision    the row's precision MODE, one for every machine:
   #                  auto-accuracy (default) what tested most accurate for the engine
   #                  auto-balanced  each machine benchmarks bf16 (where the

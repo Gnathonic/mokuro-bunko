@@ -23,6 +23,13 @@ webgpu = ["ort/webgpu"]
 directml = ["ort/directml"]
 coreml = ["ort/coreml"]
 nnapi = ["ort/nnapi"]
+# Models whose weights are not under a permissive licence. Each feature adds the model's
+# manifest rows and the code that runs it; a build without it knows neither. The code
+# here is this crate's own (MPL-2.0): it was written against the models' tensor formats.
+# GPL-3.0 weights: the comic-text-detector line detector and the AnimeText block detector.
+gpl-models = []
+# Non-commercial weights (CC BY-NC-SA 4.0).
+nc-models = []
 
 [dependencies]
 ort = { workspace = true, features = ["std", "ndarray", "download-binaries", "copy-dylibs", "tracing", "tls-rustls", "api-24"] }

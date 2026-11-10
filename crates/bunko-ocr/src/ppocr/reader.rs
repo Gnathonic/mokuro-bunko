@@ -145,11 +145,24 @@ pub struct PpocrPageReader {
     engine: PpOcr,
     /// The model files are the pinned upstream revision (the sidecar may claim it).
     pinned: bool,
+    /// `(repo, revision)` of another line detector's pinned file.
+    detector_source: Option<(String, String)>,
 }
 
 impl PpocrPageReader {
     pub fn new(engine: PpOcr, pinned: bool) -> Self {
-        Self { engine, pinned }
+        Self {
+            engine,
+            pinned,
+            detector_source: None,
+        }
+    }
+
+    /// The pinned source of the line detector the engine reads with in place of
+    /// PP-OCR's (`PpOcr::with_line_detector`), for the sidecar.
+    pub fn with_detector_source(mut self, repo: &str, revision: &str) -> Self {
+        self.detector_source = Some((repo.to_string(), revision.to_string()));
+        self
     }
 
     pub fn engine(&self) -> &PpOcr {
@@ -159,14 +172,15 @@ impl PpocrPageReader {
     /// `{repo: revision}` for the sidecar's `ocr_engine.weights`, empty when the files
     /// are not the pinned download.
     pub fn repos(&self) -> Vec<(String, String)> {
+        let mut repos = Vec::new();
         if self.pinned {
-            vec![(
+            repos.push((
                 crate::models::PPOCR_REPO.into(),
                 crate::models::PPOCR_REVISION.into(),
-            )]
-        } else {
-            Vec::new()
+            ));
         }
+        repos.extend(self.detector_source.clone());
+        repos
     }
 
     /// Detect and read a page's lines, then the page-level passes (§5.1).

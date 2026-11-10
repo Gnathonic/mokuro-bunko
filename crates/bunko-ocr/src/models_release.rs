@@ -25,12 +25,14 @@ pub struct ReleaseFile {
     pub sha256: &'static str,
 }
 
-/// PP-OCR files as the release names them (copied as-is from the pinned repo, so their
-/// sha256 is the builtin manifest's): `(manifest id, release file)`.
+/// PP-OCR files under their flat names (copied as-is from the pinned repo, so their
+/// sha256 is the builtin manifest's): `(manifest id, flat file)`. A local mirror
+/// (`MOKURO_MODELS_MIRROR`) and an override directory hold them under these names; the
+/// `models-v1` release carries the v0.2 files, not these.
 pub const PPOCR_RELEASE_NAMES: [(&str, &str); 3] = [
-    ("ppocr-manga/det-v0.2", "ppocr-manga_det_v0.2.onnx"),
-    ("ppocr-manga/rec-v0.2", "ppocr-manga_rec_v0.2.onnx"),
-    ("ppocr-manga/dict-v6", "ppocr-manga_dict.txt"),
+    ("ppocr-manga/det-v0.3", "ppocr-manga_det_v0.3.onnx"),
+    ("ppocr-manga/rec-v0.3", "ppocr-manga_rec_v0.3.onnx"),
+    ("ppocr-manga/dict-v0.3", "ppocr-manga_dict_v0.3.txt"),
 ];
 
 /// Every VLM file of the release.

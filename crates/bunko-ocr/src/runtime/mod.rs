@@ -180,6 +180,58 @@ impl Default for RuntimeOptions {
     }
 }
 
+/// A tensor's elements, by type.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Elements {
+    F32(Vec<f32>),
+    I32(Vec<i32>),
+    I64(Vec<i64>),
+}
+
+/// A tensor going into or coming out of [`Model::run_named`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct TensorBuf {
+    pub shape: Vec<usize>,
+    pub data: Elements,
+}
+
+impl TensorBuf {
+    pub fn f32(shape: &[usize], data: Vec<f32>) -> Self {
+        Self {
+            shape: shape.to_vec(),
+            data: Elements::F32(data),
+        }
+    }
+
+    pub fn i32(shape: &[usize], data: Vec<i32>) -> Self {
+        Self {
+            shape: shape.to_vec(),
+            data: Elements::I32(data),
+        }
+    }
+
+    pub fn i64(shape: &[usize], data: Vec<i64>) -> Self {
+        Self {
+            shape: shape.to_vec(),
+            data: Elements::I64(data),
+        }
+    }
+
+    pub fn as_f32(&self) -> Option<&[f32]> {
+        match &self.data {
+            Elements::F32(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    pub fn as_i64(&self) -> Option<&[i64]> {
+        match &self.data {
+            Elements::I64(v) => Some(v),
+            _ => None,
+        }
+    }
+}
+
 /// A loaded model shared across threads.
 pub struct Model {
     /// One session where concurrent `Run` is relied on; else `copies` sessions.
@@ -344,6 +396,105 @@ impl Model {
         let out_shape: Vec<usize> = out_shape.iter().map(|&d| d.max(0) as usize).collect();
         Ok((out_shape, out.to_vec()))
     }
+
+    /// Run the model on named inputs and return the named outputs, in the order asked
+    /// for. For models with several inputs or outputs, or tensors that are not float32
+    /// (the detectors and recognizers beside PP-OCR); [`Model::run_f32`] stays the path
+    /// of the one-in one-out models.
+    pub fn run_named(
+        &self,
+        inputs: Vec<(&str, TensorBuf)>,
+        outputs: &[&str],
+    ) -> Result<Vec<TensorBuf>> {
+        let cname = |n: &str| {
+            CString::new(n).map_err(|_| Error::ModelOutput(format!("bad tensor name {n:?}")))
+        };
+        let in_names: Vec<CString> = inputs
+            .iter()
+            .map(|(n, _)| cname(n))
+            .collect::<Result<_>>()?;
+        let out_names: Vec<CString> = outputs.iter().map(|n| cname(n)).collect::<Result<_>>()?;
+        let mut values: Vec<DynValue> = Vec::with_capacity(inputs.len());
+        for (_, t) in inputs {
+            let dims: Vec<i64> = t.shape.iter().map(|&d| d as i64).collect();
+            values.push(match t.data {
+                Elements::F32(v) => Tensor::from_array((dims, v))?.into_dyn(),
+                Elements::I32(v) => Tensor::from_array((dims, v))?.into_dyn(),
+                Elements::I64(v) => Tensor::from_array((dims, v))?.into_dyn(),
+            });
+        }
+        let (session, _guard) = match &self.locks {
+            None => (&self.sessions[0], None),
+            Some(locks) => {
+                let (i, guard) = locks
+                    .iter()
+                    .enumerate()
+                    .find_map(|(i, l)| l.try_lock().map(|g| (i, g)))
+                    .unwrap_or_else(|| (0, locks[0].lock()));
+                (&self.sessions[i], Some(guard))
+            }
+        };
+        let in_ptrs: Vec<*const std::ffi::c_char> = in_names.iter().map(|n| n.as_ptr()).collect();
+        let in_vals: Vec<*const ort::sys::OrtValue> = values.iter().map(|v| v.ptr()).collect();
+        let out_ptrs: Vec<*const std::ffi::c_char> = out_names.iter().map(|n| n.as_ptr()).collect();
+        let mut out_vals: Vec<*mut ort::sys::OrtValue> = vec![ptr::null_mut(); out_names.len()];
+        // SAFETY: as in `run_f32`: the names and input values outlive the call, and
+        // `out_vals` has one (null) slot per requested output.
+        let status = unsafe {
+            (ort::api().Run)(
+                session.ptr().cast_mut(),
+                ptr::null(),
+                in_ptrs.as_ptr(),
+                in_vals.as_ptr(),
+                in_vals.len(),
+                out_ptrs.as_ptr(),
+                out_ptrs.len(),
+                out_vals.as_mut_ptr(),
+            )
+        };
+        // Take ownership of whatever came back before looking at the status, so that
+        // nothing leaks when a later output is missing.
+        let owned: Vec<Option<DynValue>> = out_vals
+            .iter()
+            // SAFETY: outputs ONNX Runtime allocated for this call; we own them now and
+            // keep the session alive as long as the values.
+            .map(|p| {
+                NonNull::new(*p).map(|p| unsafe { DynValue::from_ptr(p, Some(session.inner())) })
+            })
+            .collect();
+        // SAFETY: `status` comes straight from the C API.
+        unsafe { ort::Error::result_from_status(status) }?;
+        let mut out = Vec::with_capacity(owned.len());
+        for (value, name) in owned.into_iter().zip(outputs) {
+            let value =
+                value.ok_or_else(|| Error::ModelOutput(format!("run returned no {name}")))?;
+            let dims = |shape: &ort::value::Shape| -> Vec<usize> {
+                shape.iter().map(|&d| d.max(0) as usize).collect()
+            };
+            let buf = if let Ok((shape, data)) = value.try_extract_tensor::<f32>() {
+                TensorBuf {
+                    shape: dims(shape),
+                    data: Elements::F32(data.to_vec()),
+                }
+            } else if let Ok((shape, data)) = value.try_extract_tensor::<i64>() {
+                TensorBuf {
+                    shape: dims(shape),
+                    data: Elements::I64(data.to_vec()),
+                }
+            } else if let Ok((shape, data)) = value.try_extract_tensor::<i32>() {
+                TensorBuf {
+                    shape: dims(shape),
+                    data: Elements::I32(data.to_vec()),
+                }
+            } else {
+                return Err(Error::ModelOutput(format!(
+                    "output {name} is not a float32, int64 or int32 tensor"
+                )));
+            };
+            out.push(buf);
+        }
+        Ok(out)
+    }
 }
 
 #[cfg(test)]
@@ -381,7 +532,7 @@ mod tests {
     #[test]
     fn unavailable_provider_falls_back_to_cpu_with_a_reason() {
         let dir = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
-            .join(".cache/huggingface/hub/models--Kellenok--PP-OCRv6_manga/snapshots/ba1d479e8a61a20e8318c9758c73fbbbd290b98d/det/manga_det_v0.2.onnx");
+            .join(".cache/huggingface/hub/models--Kellenok--PP-OCRv6_manga/snapshots/d65838996a00ef6b1c73ca3a700d7a8c5fbbef8a/det/manga_det.onnx");
         if !dir.is_file() {
             return;
         }

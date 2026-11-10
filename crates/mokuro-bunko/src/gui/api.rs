@@ -1229,7 +1229,9 @@ pub fn job_args(r: &JobRequest, processor_config: &Path) -> Result<(Vec<String>,
         "models-download" => {
             let mut a = s(&["models", "download"]);
             if let Some(e) = r.engine.as_deref().filter(|e| !e.is_empty()) {
-                if !["hayai-nova", "paddle-manga", "ppocr-manga"].contains(&e) {
+                // Any engine of the registry: `models download` itself says when this
+                // build was made without one.
+                if bunko_core::engines::engine(e).is_none() {
                     return Err(format!("engine: {e}?"));
                 }
                 a.extend(s(&["--engine", e]));

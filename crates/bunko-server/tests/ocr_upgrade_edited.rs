@@ -27,9 +27,31 @@ use sha2::Digest;
 use tower::ServiceExt;
 
 const LEGACY: &str = r#"{"version": "0.2.1", "title": "A", "volume": "V1", "pages": [{"img_path": "001.jpg", "blocks": []}, {"img_path": "002.jpg", "blocks": []}, {"img_path": "003.jpg", "blocks": []}]}"#;
+/// A hayai-nova sidecar as 0.7 wrote it: its block carries no `revision` (read as 1).
+/// The tests take [`hayai`], the engine's output of today.
 const HAYAI: &str = r#"{"version":"0.2.5","title":"A","volume":"V1","volume_uuid":"vu","ocr_engine":{"id":"hayai-nova","detector":"ppocr-manga","patch_budget":512},"pages":[{"img_path":"001.jpg","blocks":[]},{"img_path":"002.jpg","blocks":[]},{"img_path":"003.jpg","blocks":[]}]}"#;
-/// HAYAI with a person's correction, its stamp left in.
-const HAYAI_EDITED: &str = r#"{"version":"0.2.5","title":"A","volume":"V1","volume_uuid":"vu","ocr_engine":{"id":"hayai-nova","detector":"ppocr-manga","patch_budget":512},"pages":[{"img_path":"001.jpg","blocks":[{"lines":["fixed"]}]},{"img_path":"002.jpg","blocks":[]},{"img_path":"003.jpg","blocks":[]}]}"#;
+
+/// [`HAYAI`] from a processor that is up to date: the primary's recipe at the engine's
+/// current revision (`bunko_layout::sidecar::engine_revision`), whatever that is today.
+fn hayai() -> &'static str {
+    static CURRENT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        let revision = bunko_layout::sidecar::engine_revision("hayai-nova");
+        HAYAI.replace(
+            r#""id":"hayai-nova","#,
+            &format!(r#""id":"hayai-nova","revision":{revision},"#),
+        )
+    });
+    &CURRENT
+}
+
+/// [`hayai`] with a person's correction, its stamp left in.
+fn hayai_edited() -> &'static str {
+    static EDITED: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        hayai().replacen(r#""blocks":[]"#, r#""blocks":[{"lines":["fixed"]}]"#, 1)
+    });
+    &EDITED
+}
+
 /// HAYAI as a reader pushes a layer back: the same pages, no stamp.
 const HAYAI_UNSTAMPED: &str = r#"{"version":"0.2.5","title":"A","volume":"V1","volume_uuid":"vu","pages":[{"img_path":"001.jpg","blocks":[]},{"img_path":"002.jpg","blocks":[]},{"img_path":"003.jpg","blocks":[]}]}"#;
 /// An old recipe Bunko itself wrote (0.5's served mokuro carries its stamp).
@@ -191,7 +213,7 @@ impl Env {
 
     /// A hayai-nova layer Bunko wrote.
     fn bunko_layer(&self, rel: &str) {
-        self.bunko_wrote(rel, HAYAI, "hayai-nova", "ppocr-manga");
+        self.bunko_wrote(rel, hayai(), "hayai-nova", "ppocr-manga");
     }
 
     fn row(&self, rel: &str, engine: &str, detector: &str) {
@@ -282,7 +304,7 @@ async fn a_stamp_less_main_sidecar_is_upgraded_with_no_copy() {
     env.upgrade_direct("A/V1.cbz").unwrap();
     assert_eq!(
         std::fs::read_to_string(env.lib("A/V1.mokuro")).unwrap(),
-        sealed(HAYAI)
+        sealed(hayai())
     );
     assert_eq!(
         sidecars(&env.lib("A")),
@@ -296,7 +318,7 @@ async fn a_stamp_less_main_sidecar_is_upgraded_with_no_copy() {
     // Stock mokuro output, upgraded by a job: replaced the same way.
     env.volume_on_disk("B", LEGACY);
     assert_eq!(env.judge("B/V1.cbz"), Verdict::NeedsOcr);
-    env.upgrade_generated("B/V1.cbz", HAYAI).unwrap();
+    env.upgrade_generated("B/V1.cbz", hayai()).unwrap();
     assert_eq!(
         json_of(&env.lib("B/V1.mokuro"))["ocr_engine"]["id"],
         "hayai-nova"
@@ -375,14 +397,14 @@ async fn pre_upgrade_and_previous_ocr_layers_are_left_alone_by_an_upgrade() {
     );
     assert_eq!(
         std::fs::read_to_string(env.lib("A/V1.mokuro")).unwrap(),
-        sealed(HAYAI)
+        sealed(hayai())
     );
     assert_no_copy(&env);
 
     // Generated, the same: the job's result replaces the main and nothing else moves.
     env.volume_on_disk("B", CORRECTED);
     std::fs::write(env.lib("B/V1.pre-upgrade.mokuro"), stray).unwrap();
-    env.upgrade_generated("B/V1.cbz", HAYAI).unwrap();
+    env.upgrade_generated("B/V1.cbz", hayai()).unwrap();
     assert_eq!(
         sidecars(&env.lib("B")),
         ["V1.mokuro", "V1.pre-upgrade.mokuro"]
@@ -403,7 +425,7 @@ async fn a_main_sidecar_proven_bunkos_own_is_replaced_without_a_copy() {
     assert_eq!(sidecars(&env.lib("A")), ["V1.mokuro"]);
     assert_eq!(
         std::fs::read_to_string(env.lib("A/V1.mokuro")).unwrap(),
-        sealed(HAYAI)
+        sealed(hayai())
     );
     assert_no_copy(&env);
     assert!(
@@ -413,7 +435,7 @@ async fn a_main_sidecar_proven_bunkos_own_is_replaced_without_a_copy() {
 
     env.volume_on_disk("B", BUNKO_OLD);
     env.bunko_wrote("B/V1.mokuro", BUNKO_OLD, "mokuro", "ctd");
-    env.upgrade_generated("B/V1.cbz", HAYAI).unwrap();
+    env.upgrade_generated("B/V1.cbz", hayai()).unwrap();
     assert_eq!(sidecars(&env.lib("B")), ["V1.mokuro"]);
 }
 
@@ -449,7 +471,7 @@ async fn a_moved_library_is_upgraded_without_any_database_row() {
     assert_eq!(sidecars(&env.lib("B")), ["V1.mokuro"]);
     assert_eq!(
         std::fs::read_to_string(env.lib("B/V1.mokuro")).unwrap(),
-        sealed(HAYAI)
+        sealed(hayai())
     );
     assert_no_copy(&env);
 }
@@ -472,7 +494,7 @@ async fn a_forged_or_kept_stamp_on_an_edited_main_sidecar_is_upgraded_with_no_co
     env.upgrade_direct("A/V1.cbz").unwrap();
     assert_eq!(
         std::fs::read_to_string(env.lib("A/V1.mokuro")).unwrap(),
-        sealed(HAYAI)
+        sealed(hayai())
     );
     assert_eq!(sidecars(&env.lib("A")), ["V1.mokuro"]);
     assert_no_copy(&env);
@@ -486,13 +508,13 @@ async fn a_forged_or_kept_stamp_on_an_edited_main_sidecar_is_upgraded_with_no_co
     env.upgrade_direct("B/V1.cbz").unwrap();
     assert_eq!(
         std::fs::read_to_string(env.lib("B/V1.mokuro")).unwrap(),
-        sealed(HAYAI)
+        sealed(hayai())
     );
     assert_eq!(sidecars(&env.lib("B")), ["V1.mokuro"]);
 
     // C: a stamped file on disk with no row, upgraded by a job: the same.
     env.volume_on_disk("C", BUNKO_OLD);
-    env.upgrade_generated("C/V1.cbz", HAYAI).unwrap();
+    env.upgrade_generated("C/V1.cbz", hayai()).unwrap();
     assert_eq!(sidecars(&env.lib("C")), ["V1.mokuro"]);
     assert_no_copy(&env);
 }
@@ -524,7 +546,7 @@ async fn a_layer_is_swapped_in_only_when_its_own_file_carries_the_stamp() {
         std::fs::read_to_string(env.lib("B/V1.mokuro")).unwrap(),
         LEGACY
     );
-    env.upgrade_generated("B/V1.cbz", HAYAI).unwrap();
+    env.upgrade_generated("B/V1.cbz", hayai()).unwrap();
     assert_eq!(
         sidecars(&env.lib("B")),
         ["V1.hayai-nova.mokuro", "V1.mine.mokuro", "V1.mokuro"]
@@ -559,13 +581,13 @@ async fn a_layer_is_swapped_in_only_when_its_own_file_carries_the_stamp() {
         201
     );
     assert_eq!(
-        env.put("/mokuro-reader/C/V1.hayai-nova.mokuro", HAYAI.as_bytes())
+        env.put("/mokuro-reader/C/V1.hayai-nova.mokuro", hayai().as_bytes())
             .await,
         201
     );
     env.volume_on_disk("D", LEGACY);
     env.bunko_layer("D/V1.hayai-nova.mokuro");
-    std::fs::write(env.lib("D/V1.hayai-nova.mokuro"), HAYAI_EDITED).unwrap();
+    std::fs::write(env.lib("D/V1.hayai-nova.mokuro"), hayai_edited()).unwrap();
     for v in ["C", "D"] {
         let (cbz, layer) = (
             env.lib(&format!("{v}/V1.cbz")),
@@ -592,7 +614,7 @@ async fn an_unknown_main_sidecar_is_never_upgraded() {
     env.bunko_layer("A/V1.hayai-nova.mokuro");
     assert_eq!(env.judge("A/V1.cbz"), Verdict::Current);
     assert_eq!(env.up().census()["families"]["unknown"], 1);
-    let err = env.upgrade_generated("A/V1.cbz", HAYAI).unwrap_err();
+    let err = env.upgrade_generated("A/V1.cbz", hayai()).unwrap_err();
     assert!(err.contains("no longer needs an upgrade"), "{err}");
     assert_eq!(
         std::fs::read_to_string(env.lib("A/V1.mokuro")).unwrap(),
@@ -641,7 +663,7 @@ async fn a_put_during_an_upgrade_is_refused_as_locked_or_makes_the_swap_skip() {
     assert_eq!(*refused.lock(), Some(StatusCode::LOCKED));
     assert_eq!(
         std::fs::read_to_string(env.lib("A/V1.mokuro")).unwrap(),
-        sealed(HAYAI)
+        sealed(hayai())
     );
     assert_eq!(sidecars(&env.lib("A")), ["V1.mokuro"]);
 
@@ -691,7 +713,7 @@ async fn a_put_during_an_upgrade_is_refused_as_locked_or_makes_the_swap_skip() {
     assert_eq!(sidecars(&env.lib("C")), ["V1.mokuro"]);
     assert_eq!(
         std::fs::read_to_string(env.lib("C/V1.mokuro")).unwrap(),
-        sealed(HAYAI)
+        sealed(hayai())
     );
 }
 
@@ -721,7 +743,7 @@ async fn layers_beta3_kept_are_removed_at_startup_and_nothing_else() {
     }
     // A: upgraded; beta.3 kept the old file as a stamped layer, and its unstamped
     // original under `.upgrade-originals`.
-    std::fs::write(env.lib("A/V1.mokuro"), HAYAI).unwrap();
+    std::fs::write(env.lib("A/V1.mokuro"), hayai()).unwrap();
     std::fs::write(env.lib("A/V1.mokuro.mokuro"), KEPT).unwrap();
     let digest = hex::encode(sha2::Sha256::digest(b"A/V1.mokuro.mokuro"));
     let backup = env
@@ -732,7 +754,7 @@ async fn layers_beta3_kept_are_removed_at_startup_and_nothing_else() {
     std::fs::write(&backup, LEGACY).unwrap();
     beta3_upgrade_audit(&env, "A/V1.mokuro", "A/V1.mokuro.mokuro");
     // B: a forced upgrade kept a person's edit unstamped; a person's own layer beside.
-    std::fs::write(env.lib("B/V1.mokuro"), HAYAI).unwrap();
+    std::fs::write(env.lib("B/V1.mokuro"), hayai()).unwrap();
     std::fs::write(env.lib("B/V1.mokuro.mokuro"), CORRECTED).unwrap();
     std::fs::write(env.lib("B/V1.mine.mokuro"), CORRECTED).unwrap();
     beta3_upgrade_audit(&env, "B/V1.mokuro", "B/V1.mokuro.mokuro");
@@ -762,7 +784,7 @@ async fn layers_beta3_kept_are_found_by_the_listings() {
     let env = Env::new();
     env.mkcol("D");
     std::fs::write(env.lib("D/V1.cbz"), cbz(3)).unwrap();
-    std::fs::write(env.lib("D/V1.mokuro"), HAYAI).unwrap();
+    std::fs::write(env.lib("D/V1.mokuro"), hayai()).unwrap();
     std::fs::write(env.lib("D/V1.mokuro.mokuro"), KEPT).unwrap();
     beta3_upgrade_audit(&env, "d/V1.mokuro", "d/V1.mokuro.mokuro");
     if std::fs::create_dir(env.lib("d")).is_err() {
@@ -772,7 +794,7 @@ async fn layers_beta3_kept_are_found_by_the_listings() {
         return;
     }
     std::fs::write(env.lib("d/V1.cbz"), cbz(3)).unwrap();
-    std::fs::write(env.lib("d/V1.mokuro"), HAYAI).unwrap();
+    std::fs::write(env.lib("d/V1.mokuro"), hayai()).unwrap();
     std::fs::write(env.lib("d/V1.mokuro.mokuro"), KEPT).unwrap();
     assert_eq!(env.up().sweep_kept_from_audit(), 0);
     assert_eq!(sidecars(&env.lib("d")), ["V1.mokuro", "V1.mokuro.mokuro"]);
@@ -800,7 +822,7 @@ async fn an_edited_main_sidecar_is_never_replaced_and_an_edited_layer_never_swap
     env.bunko_layer("A/V1.hayai-nova.mokuro");
     assert_eq!(env.judge("A/V1.cbz"), Verdict::Edited);
     assert_eq!(env.up().census()["edited"], 1);
-    let err = env.upgrade_generated("A/V1.cbz", HAYAI).unwrap_err();
+    let err = env.upgrade_generated("A/V1.cbz", hayai()).unwrap_err();
     assert!(err.contains("no longer needs an upgrade"), "{err}");
     let err = env
         .up()
@@ -818,7 +840,11 @@ async fn an_edited_main_sidecar_is_never_replaced_and_an_edited_layer_never_swap
     );
 
     env.volume_on_disk("B", LEGACY);
-    std::fs::write(env.lib("B/V1.hayai-nova.mokuro"), sealed_then_edited(HAYAI)).unwrap();
+    std::fs::write(
+        env.lib("B/V1.hayai-nova.mokuro"),
+        sealed_then_edited(hayai()),
+    )
+    .unwrap();
     env.row("B/V1.hayai-nova.mokuro", "hayai-nova", "ppocr-manga");
     assert_eq!(env.judge("B/V1.cbz"), Verdict::NeedsOcr);
 }

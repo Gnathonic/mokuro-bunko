@@ -223,6 +223,40 @@
   fails to load, with an error naming that row, until it is renamed.
 
 ### Added
+- **Two more OCR engines: `charspot-small` and `nar-small`.**
+  [manga-ocr-charspot-small](https://huggingface.co/muscgab/manga-ocr-charspot-small)
+  finds and classifies every character and has no decoder;
+  [manga-ocr-nar-small](https://huggingface.co/muscgab/manga-ocr-nar-small) writes a
+  text in one pass. Both run on ONNX Runtime on the CPU and need no backend pack, and
+  both read a whole text block at once rather than a line: the layout's blocks on a
+  line detector, the detector's own boxes on `animetext-blocks`. Their text stands as
+  read; PP-OCR's read is used only where they read nothing. On a 16-core desktop CPU a
+  12-page sample ran at 2.1 pages a second with `charspot-small` and 1.2 with
+  `nar-small`, where hayai-nova reads 0.4. Japanese only. Their weights are
+  CC BY-NC-SA 4.0 (non-commercial); they are fetched from the author's repository at a
+  pinned revision when a generation first uses them.
+  Measured on 1,000 text boxes of JMangaBench_Read with each model's own package,
+  boxes read exactly: `charspot-small` 93.5%, `nar-small` 92.0%, hayai-nova 89.1%,
+  paddle-manga 84.8%. Through this pipeline, where a detector first has to find the
+  text in each box again, `charspot-small` read 89.4% and `nar-small` 90.6% on
+  `animetext-blocks`, and PP-OCR's own reader 88.8%.
+- **Two more detectors: `ctd-lines` and `animetext-blocks`** (weights GPL-3.0).
+  `ctd-lines` is the line map of
+  [comic-text-detector](https://github.com/dmMaze/comic-text-detector): it boxes
+  dialogue tightly and leaves most sound effects and furigana out, and its lines are
+  read, merged, laid out and ordered exactly like the default detector's.
+  `animetext-blocks` is [AnimeText YOLO12-x](https://huggingface.co/deepghs/AnimeText_yolo),
+  a block detector: it boxes whole pieces of text, for the engines that read blocks
+  (`charspot-small`, `nar-small`); a generation that pairs it with another engine is
+  refused with the reason. Its repository is gated, so its file is fetched from this
+  project's `upstream-models-v1` release. Neither is the `ctd` or `animetext` detector
+  of 0.5: a row that still names one of those keeps reading with `ppocr-manga`.
+- **Model licences are shown, and restricted ones can be built out.** The admin panel
+  shows the licence beside an engine or detector whose weights are not Apache-2.0, and
+  the catalog API carries `license` and `license_class` for each. The models above are
+  opt-in and in the release builds; `xtask dist --permissive-models` (a build without
+  the `gpl-models` and `nc-models` Cargo features) makes a program that neither
+  offers, downloads nor runs them. The code that runs them is this project's own.
 - **`/login/api/me` says where an account may add files** (`permissions.addFiles`):
   anywhere (`all`), everywhere but the `closedSeries` other accounts own (`open`, an
   uploader), or nowhere (`none`). A reader can tell from it that the server enforces
@@ -354,6 +388,19 @@
   are test builds, never offered as an update.
 
 ### Changed
+- **PP-OCR manga v0.3.** The line detector and the CTC recognizer every engine reads
+  with are now [PP-OCRv6 manga v0.3](https://huggingface.co/Kellenok/PP-OCRv6_manga):
+  cleaner line boundaries, fewer boxes on artwork, and a dictionary that covers all of
+  JIS X 0208 levels 1 and 2 (19,053 characters, 345 more kanji). Its authors measure
+  the end-to-end error rate on manga pages at 5.98% against 6.71% for v0.2. The
+  optional language model that comes with v0.3 is not used: its authors mark it
+  experimental. The files (23 MB) are downloaded once after the update, beside the
+  v0.2 ones.
+- **Every engine's output revision is now 2**, because every engine reads the new
+  detector's lines. With `ocr.upgrade.enabled`, primary OCR written at revision 1 is
+  redone; without it nothing is redone and new volumes simply get the new models. A
+  processor still on an older release is offered no work until it is updated (the
+  library tells it; `auto_update` does it).
 - **An update keeps the installed OCR backend.** This release opens the backend packs
   of 0.7.4 and later (it builds the same packs), so updating from those (by hand, the
   automatic update or a new Docker image) downloads no pack; a release whose pack

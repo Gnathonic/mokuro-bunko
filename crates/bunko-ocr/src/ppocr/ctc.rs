@@ -1,7 +1,7 @@
 //! CTC decoding and the recognizer's batching/windowing rules (`ppocr.py:1080-1348`,
 //! spec §4.3–§4.7).
 //!
-//! The recognizer's `[T, 18710]` softmax rows are reduced right away to what every
+//! The recognizer's `[T, 19055]` softmax rows are reduced right away to what every
 //! later step reads — the argmax class, its probability and the blank probability —
 //! so a 2000-px window costs 250 × 12 bytes instead of 250 × 75 kB.
 

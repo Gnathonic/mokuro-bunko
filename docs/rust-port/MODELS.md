@@ -46,9 +46,11 @@ directly.
 
 ## 2. Sources, pins, licences, attribution
 
-All pins equal 0.5.2's (`REPO_REVISIONS` in `src/mokuro_bunko/ocr/engine_runner.py`,
-`REPO_REVISION` in `ppocr.py`); every export step re-parses those files and refuses to run
-if `tools/onnx_export/onnx_export/pins.py` disagrees.
+The pins of the exported models equal 0.5.2's (`REPO_REVISIONS` in
+`src/mokuro_bunko/ocr/engine_runner.py`); every export step re-parses that file and
+refuses to run if `tools/onnx_export/onnx_export/pins.py` disagrees. The PP-OCR files are
+no longer the ones of this release: since 0.8 the program reads with PP-OCRv6 manga v0.3,
+fetched from its repository (§2.1).
 
 | repo | revision | licence (model card at that revision) | used for |
 |---|---|---|---|
@@ -56,7 +58,7 @@ if `tools/onnx_export/onnx_export/pins.py` disagrees.
 | `google/siglip2-base-patch16-naflex` | `b53b807d3a2d5e2b3911292f2d69e5341cdc064c` | Apache-2.0 | hayai-nova preprocessing definition (no weights shipped from it) |
 | `PaddlePaddle/PaddleOCR-VL-1.6` | `c5630abae1d940eafe0697512a0325494b02ab42` | Apache-2.0 (card + `LICENSE` file) | paddle-manga base weights, tokenizer |
 | `sorryhyun/paddleocr-vl-1.6-manga-lora` | `26292839d1469c14212a12a1e01b5b1fe01bff15` | Apache-2.0 | LoRA (merged) + fine-tuned vision tower |
-| `Kellenok/PP-OCRv6_manga` | `ba1d479e8a61a20e8318c9758c73fbbbd290b98d` | Apache-2.0 | PP-OCR det/rec/dict (copied) |
+| `Kellenok/PP-OCRv6_manga` | `ba1d479e8a61a20e8318c9758c73fbbbd290b98d` (v0.2) | Apache-2.0 | PP-OCR det/rec/dict as copied into `models-v1`; read by 0.7 only |
 
 Licences were checked 2026-10-01 with `HfApi().model_info(repo, revision=<pin>).card_data`
 (all `license: apache-2.0`) and by reading the cards. Apache-2.0 permits redistribution of
@@ -80,7 +82,68 @@ the weights and of derived (converted, merged) weights; obligations when publish
   attribution)". We redistribute no images. Keep the Manga109 attribution/citation
   pointer in the release notes (the cards carry the BibTeX).
 
-Nothing GPL is involved; all of it is fine for app-store builds.
+Nothing in the `models-v1` and `torch-models-v1` releases is GPL; all of it is fine for
+app-store builds.
+
+### 2.1 Models fetched from their authors' repositories
+
+These are not exported: the program downloads each file as its authors published it
+and checks it against the sha256 compiled into `crates/bunko-ocr/src/models.rs`. All
+but one come straight from the pinned source; AnimeText's repository is gated, so that
+file is mirrored (§2.2). The licence class decides which builds know a model at all
+(`bunko_core::engines::LicenseClass`; Cargo features `gpl-models`, `nc-models`).
+
+| model | source and pin | files | weights' licence | class |
+|---|---|---|---|---|
+| PP-OCRv6 manga v0.3 (every engine's line detector and CTC reader) | `Kellenok/PP-OCRv6_manga` @ `d65838996a00ef6b1c73ca3a700d7a8c5fbbef8a` | `det/manga_det.onnx` 1,816,958 B, `rec/manga_rec.onnx` 21,334,702 B, `ppocrv6_dict.txt` 76,327 B | Apache-2.0 | permissive |
+| `ctd-lines` detector | the `comictextdetector.pt.onnx` asset of `zyddnys/manga-image-translator` release `beta-0.2.1` (the detector's authors' ONNX export); the same bytes at `mayocream/comic-text-detector-onnx` @ `a5d67ec772adef819ef5b0e7aa701fcf4c8bf74a` | 94,669,756 B | GPL-3.0 | `gpl-models` |
+| `animetext-blocks` detector | `deepghs/AnimeText_yolo` @ `a180c191bfdb9f0e31b57e7de567e7b6bac50f84`, `yolo12x_animetext/model.onnx`; fetched from our `upstream-models-v1` release (§2.2) | 236,662,175 B | GPL-3.0 | `gpl-models` |
+| `charspot-small` engine | `muscgab/manga-ocr-charspot-small` @ `72ca29202673880ca9c67b1c02c107535be4472b` | `model.onnx` 43,992,111 B, `vocab.json` | CC BY-NC-SA 4.0 (code Apache-2.0) | `nc-models` |
+| `nar-small` engine | `muscgab/manga-ocr-nar-small` @ `81ff4f3313263d1da349946a9dd20d14e0fb0e66` | `onnx/mangaocr_nar_small_fp32.onnx` 213,095,336 B, `nar_vocabulary_6817.json` | CC BY-NC-SA 4.0 (code Apache-2.0) | `nc-models` |
+
+What each licence means for us:
+
+- **comic-text-detector (GPL-3.0).** We distribute neither its weights nor its code. The
+  program fetches the authors' own file when an admin picks the detector. Only the
+  model's line map is used, through the DBNet post-processing PP-OCR already has here:
+  `crates/bunko-ocr/src/ppocr/ctd.rs` is written against the model's tensors and holds
+  nothing of comic-text-detector's source (its block grouping and ordering are not
+  reproduced; Bunko's own layout does that).
+- **AnimeText YOLO12-x (GPL-3.0).** The weights' licence allows passing them on, and
+  §2.2 does that, unmodified, with the licence text and the source. The code that runs
+  the model (`crates/bunko-ocr/src/animetext.rs`: scaling, the candidate decoding,
+  overlap suppression) is written against the model's tensors. Its card names the
+  AnimeText dataset (CC BY-NC-SA 4.0) as training data.
+- **muscgab's recognizers (weights CC BY-NC-SA 4.0).** Non-commercial use, attribution,
+  share alike. We do not rehost the weights. The inference code they are published with
+  is Apache-2.0 and `crates/bunko-engines/src/textbox.rs` follows its pre- and
+  post-processing. Their cards name AnimeText-OCR (CC BY-NC-SA 4.0) as real training data.
+- A build made with `xtask dist --permissive-models` has none of the rows of the last
+  four lines and none of the code behind them.
+
+### 2.2 The `upstream-models-v1` release
+
+`deepghs/AnimeText_yolo` can only be downloaded by an account that accepted its terms,
+which a server cannot do for its admin. Its ONNX file is therefore mirrored, byte for
+byte, as an asset of the GitHub release `upstream-models-v1`
+(`bunko_ocr::models::MIRROR_RELEASE`), with `NOTICE.md` (source, revision, size,
+sha256) and the GPL-3.0 text beside it. A later mirrored file, or another revision of
+this one, is a new asset name or a new release, never a changed asset.
+
+```sh
+cd <the folder with animetext_yolo12x.onnx, NOTICE.md, LICENSE-GPL-3.0.txt, RELEASE-NOTES.md>
+gh release create upstream-models-v1 --repo Gnathonic/mokuro-bunko \
+   --title "Upstream models (mirror) v1" --notes-file RELEASE-NOTES.md \
+   --prerelease --latest=false animetext_yolo12x.onnx NOTICE.md LICENSE-GPL-3.0.txt
+```
+
+Until the release exists a generation on `animetext-blocks` fails to start with the
+download error; `MOKURO_MODELS_MIRROR=<folder>` (the file under its flat name
+`animetext_yolo12x.onnx`) serves it locally.
+
+Checked 2026-11-09 against the model cards and licence files at those revisions. The
+Rust host of the two recognizers was compared with their own Python packages on 200
+text boxes: identical text for both, and character boxes within 0.001 px.
 
 ## 3. The pipeline (`tools/onnx_export/`)
 

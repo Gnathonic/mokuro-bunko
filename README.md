@@ -174,15 +174,21 @@ Most keys can also be set from the environment (`MOKURO_<SECTION>_<KEY>`, e.g. `
 
 ## OCR
 
-The recognizers (hayai-nova, paddle-manga) run on [libtorch](https://pytorch.org/) — the same torch 0.5.2 used, without Python — and the PP-OCR stages on [ONNX Runtime](https://onnxruntime.ai/) on the CPU. All models are Apache-2.0:
+The recognizers hayai-nova and paddle-manga run on [libtorch](https://pytorch.org/) — the same torch 0.5.2 used, without Python — and everything else on [ONNX Runtime](https://onnxruntime.ai/) on the CPU. The default engine, the default detector and the first three engines below are Apache-2.0:
 
 | Engine | What it is |
 |---|---|
 | `hayai-nova` (default) | [hayai-ocr v2.5 Nova](https://huggingface.co/JustANormalTinkerer/hayai-ocr-v2.5-nova): reads each text line, strong on display lettering and sound effects. |
 | `paddle-manga` | [PaddleOCR-VL 1.6](https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.6) with a [manga LoRA](https://huggingface.co/sorryhyun/paddleocr-vl-1.6-manga-lora): the most accurate and the slowest, about 2 GB of model files (3.6 GB in fp32). It runs on the CPU too, at about 40 s a page on 16 threads: there hayai-nova is the engine of choice. |
-| `ppocr-manga` | [PP-OCRv6 manga](https://huggingface.co/Kellenok/PP-OCRv6_manga) line detector and CTC recognizer on the CPU: small, reads scanned novel pages too. Its detector also feeds the other two. |
+| `ppocr-manga` | [PP-OCRv6 manga](https://huggingface.co/Kellenok/PP-OCRv6_manga) line detector and CTC recognizer on the CPU: small, reads scanned novel pages too. Its detector also feeds the other engines. |
+| `charspot-small` | [manga-ocr-charspot-small](https://huggingface.co/muscgab/manga-ocr-charspot-small): finds and classifies every character of a text block, no decoder. Small and fast on the CPU. Weights CC BY-NC-SA 4.0 (non-commercial). |
+| `nar-small` | [manga-ocr-nar-small](https://huggingface.co/muscgab/manga-ocr-nar-small): writes a text block in one pass, on the CPU. Weights CC BY-NC-SA 4.0 (non-commercial). |
 
-The 0.5 `mokuro` engine, the GPL `ctd` and `animetext` detectors and the `rtdetr` detector are gone; see the [migration guide](docs/MIGRATING-0.7.md) for what happens to old configs and existing `.mokuro` files.
+Besides the default `ppocr-manga` detector there are `ctd-lines`, the lines of [comic-text-detector](https://github.com/dmMaze/comic-text-detector), and `animetext-blocks`, [AnimeText YOLO12-x](https://huggingface.co/deepghs/AnimeText_yolo), which boxes whole text blocks for `charspot-small` and `nar-small` to read at once. The weights of both are GPL-3.0.
+
+The models that are not Apache-2.0 are opt-in: nothing of them is downloaded until a generation uses one, and the admin panel shows the licence beside the name. They are in the release builds; a build made with `xtask dist --permissive-models` (without the `gpl-models` and `nc-models` features) neither offers nor downloads them. See [OCR engines](docs/configuration.md#ocr-engines).
+
+The 0.5 `mokuro` engine and the `ctd`, `animetext` and `rtdetr` detectors of 0.5 are gone; see the [migration guide](docs/MIGRATING-0.7.md) for what happens to old configs and existing `.mokuro` files.
 
 **The OCR backend** is installed once on a full build: the server (and a processor) does it by itself, in the background while it already serves, when local OCR needs it (a new server after its first-run setup), or run `mokuro-bunko install-ocr`. It looks at the hardware and installs the matching *backend pack* into `<storage>/backends/`:
 
@@ -285,4 +291,4 @@ cargo clippy --workspace    # lints
 
 ## License
 
-[Mozilla Public License 2.0](LICENSE). Every program archive carries a `THIRD-PARTY-LICENSES.md` listing the licences of all bundled dependencies and native components (generated at build time; a copyleft licence with no permissive alternative fails the build); the OCR backend packs carry theirs in a `licenses/` folder. The OCR models are Apache-2.0; their sources, attributions and the datasets their model cards name are listed in [docs/rust-port/MODELS.md](docs/rust-port/MODELS.md) §2.
+[Mozilla Public License 2.0](LICENSE). Every program archive carries a `THIRD-PARTY-LICENSES.md` listing the licences of all bundled dependencies and native components (generated at build time; a copyleft licence with no permissive alternative fails the build); the OCR backend packs carry theirs in a `licenses/` folder. No model is part of a program archive: models are downloaded when they are first used. The default OCR models are Apache-2.0; the opt-in ones are GPL-3.0 (`ctd-lines`, `animetext-blocks`) and CC BY-NC-SA 4.0 (`charspot-small`, `nar-small`), and the code that runs them is this project's own. Sources, attributions and the datasets the model cards name are listed in [docs/rust-port/MODELS.md](docs/rust-port/MODELS.md) §2.
