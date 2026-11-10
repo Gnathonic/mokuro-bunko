@@ -131,6 +131,9 @@ pub struct LibraryDeps {
     pub outlook: Option<Arc<dyn OutlookSource>>,
     /// Manifest layer order; `None` = alphabetical.
     pub layer_order: Option<LayerOrder>,
+    /// The catalog's "Popular" order (`popular_rank` per series while
+    /// `analytics.enabled`); `None` = no ranks.
+    pub popular: Option<crate::analytics::popular::Popularity>,
 }
 
 impl LibraryDeps {
@@ -142,6 +145,7 @@ impl LibraryDeps {
             ocr_status: None,
             outlook: None,
             layer_order: None,
+            popular: None,
         }
     }
 }

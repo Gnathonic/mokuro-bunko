@@ -108,7 +108,7 @@ async fn check(
     }
     let key = client.limiter_key(username);
     if let Err(retry) = d.core.login_limiter.allow(&key) {
-        return json_error(429, &limited_message(retry));
+        return attempted(json_error(429, &limited_message(retry)), username);
     }
     let (db, u, p) = (d.db.clone(), username.to_string(), password.to_string());
     let user = match blocking(move || db.authenticate_user(&u, &p)).await {
@@ -119,16 +119,37 @@ async fn check(
     match user {
         Some(user) => {
             d.core.login_limiter.record_success(&key);
-            json_response(
-                200,
-                json!({"success": true, "user": {"username": user.username, "role": user.role.as_str()}}),
+            signed_in(
+                json_response(
+                    200,
+                    json!({"success": true, "user": {"username": user.username, "role": user.role.as_str()}}),
+                ),
+                &user,
             )
         }
         None => {
             d.core.login_limiter.record_failure(&key);
-            json_error(401, "Invalid credentials")
+            attempted(json_error(401, "Invalid credentials"), username)
         }
     }
+}
+
+/// A refused sign-in names its account for the request accounting (failed logins per
+/// IP and username); a response extension, never on the wire.
+fn attempted(mut resp: Response, username: &str) -> Response {
+    resp.extensions_mut()
+        .insert(crate::analytics::LoginAttempt(username.to_string()));
+    resp
+}
+
+/// A sign-in that succeeded names its account for the request accounting, so the
+/// sign-in counts for that account and not for an anonymous visitor at its IP.
+fn signed_in(mut resp: Response, user: &User) -> Response {
+    resp.extensions_mut().insert(crate::analytics::SignedIn {
+        username: user.username.clone(),
+        role: user.role,
+    });
+    resp
 }
 
 /// `POST /login/api/token` (§15.2): a password (JSON body or Basic header) buys a
@@ -182,7 +203,7 @@ async fn issue_token(
         if kind == TokenKind::Processor {
             report_processor_refusal(&d, username, &client.ip);
         }
-        return json_error(429, &limited_message(retry));
+        return attempted(json_error(429, &limited_message(retry)), username);
     }
     let (db, u, p) = (d.db.clone(), username.to_string(), password.to_string());
     let issued = blocking(move || -> bunko_db::Result<Option<(User, String, f64)>> {
@@ -210,7 +231,7 @@ async fn issue_token(
             if kind == TokenKind::Processor {
                 report_processor_refusal(&d, username, &client.ip);
             }
-            json_error(401, "Invalid credentials")
+            attempted(json_error(401, "Invalid credentials"), username)
         }
         Some((user, token, expires_at)) => {
             d.core.login_limiter.record_success(&key);
@@ -219,15 +240,18 @@ async fn issue_token(
                 // The account page then offers to set its first password.
                 who["has_password"] = json!(false);
             }
-            json_response(
-                200,
-                json!({
-                    "token": token,
-                    "token_type": "Bearer",
-                    "kind": kind.as_str(),
-                    "expires_at": expires_at,
-                    "user": who,
-                }),
+            signed_in(
+                json_response(
+                    200,
+                    json!({
+                        "token": token,
+                        "token_type": "Bearer",
+                        "kind": kind.as_str(),
+                        "expires_at": expires_at,
+                        "user": who,
+                    }),
+                ),
+                &user,
             )
         }
     }
@@ -531,7 +555,7 @@ async fn me(State(d): State<AccountsDeps>, client: Client, headers: HeaderMap) -
                 // The layer ids each account keeps its own copy of (D27): a reader
                 // pushes its corrections only when `edit` is listed.
                 "per_user_layers": bunko_core::sidecar_names::per_user_layers(),
-                // Reported only by builds that keep history per account (0.8.0 on): a
+                // Reported only by builds that keep history per account (0.7.8 on): a
                 // reader turns history sync on from the numeric core.
                 "version": bunko_core::VERSION,
             }),

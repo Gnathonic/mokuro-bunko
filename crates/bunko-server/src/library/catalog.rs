@@ -185,7 +185,30 @@ fn community_by_key(deps: &LibraryDeps) -> std::collections::HashMap<String, Val
     }
 }
 
-/// `_list_library`: the root view's one slim payload (Python `json.dumps` text).
+/// Each listed series' place in the "Popular" order (`None`: no downloads in the last
+/// 30 days), from the in-memory ranking, or nothing at all while analytics is off or
+/// there is no ranking. Only the order leaves the server, never a count.
+fn popular_ranks(deps: &LibraryDeps, names: &[&str]) -> Option<Vec<Option<u32>>> {
+    let popular = deps.popular.as_ref()?;
+    if !deps.core.config.read().analytics.enabled {
+        return None;
+    }
+    Some(crate::analytics::popular::ranks(&popular.counts(), names))
+}
+
+/// Add `popular_rank` to the series that have one.
+fn add_ranks(series: &mut [Value], ranks: Option<Vec<Option<u32>>>) {
+    let Some(ranks) = ranks else { return };
+    for (info, rank) in series.iter_mut().zip(ranks) {
+        if let (Value::Object(info), Some(rank)) = (info, rank) {
+            info.insert("popular_rank".into(), Value::from(rank));
+        }
+    }
+}
+
+/// `_list_library`: the root view's one slim payload (Python `json.dumps` text), with
+/// each series' `popular_rank` (1 = the most downloaded over the last 30 days) when
+/// analytics has one for it.
 fn list_library(deps: &LibraryDeps) -> String {
     let facts = display_facts(deps);
     let rows = deps.db.list_catalog_series().unwrap_or_else(|error| {
@@ -195,6 +218,10 @@ fn list_library(deps: &LibraryDeps) -> String {
     let mut series: Vec<Value> = Vec::new();
     if !rows.is_empty() {
         let community = community_by_key(deps);
+        let ranks = {
+            let names: Vec<&str> = rows.iter().map(|r| r.folder_name.as_str()).collect();
+            popular_ranks(deps, &names)
+        };
         for row in rows {
             let mut info = Map::new();
             info.insert("name".into(), Value::String(row.folder_name.clone()));
@@ -220,9 +247,12 @@ fn list_library(deps: &LibraryDeps) -> String {
             }
             series.push(Value::Object(info));
         }
+        add_ranks(&mut series, ranks);
     } else {
         // First boot, before the startup pass filled the table: never blank.
         let snapshot = deps.runtime.index().get_snapshot();
+        let names: Vec<&str> = snapshot.series.iter().map(|e| e.name.as_str()).collect();
+        let ranks = popular_ranks(deps, &names);
         for entry in &snapshot.series {
             let mut info = Map::new();
             info.insert("name".into(), Value::String(entry.name.clone()));
@@ -237,6 +267,7 @@ fn list_library(deps: &LibraryDeps) -> String {
             }
             series.push(Value::Object(info));
         }
+        add_ranks(&mut series, ranks);
     }
     bunko_db::pyfmt::dumps(
         &json!({ "series": series }),
@@ -323,7 +354,16 @@ fn get_series(deps: &LibraryDeps, name: &str) -> Response {
     if under_per_user_name(name) {
         return json_error(404, "Series not found");
     }
-    let name = &library_spelling(library, name);
+    // The spelling the library lists. A name the index lists as spelled is that already
+    // (the walk leaves out every spelling another shadows; before the first walk, one
+    // listing of the root taken for every request); only another spelling, or a nested
+    // series before the first walk, reads the listings here, at a cost that grows with
+    // the library.
+    let name = &if deps.runtime.index().lists_series(name) {
+        name.to_owned()
+    } else {
+        library_spelling(library, name)
+    };
     let base = resolve(library).unwrap_or_else(|| library.to_path_buf());
     let Some(series_dir) = resolve(&library.join(name)) else {
         return json_error(403, "Forbidden");
@@ -509,6 +549,12 @@ async fn serve_cover(deps: &LibraryDeps, cover: &str, headers: &HeaderMap) -> Re
         let mut resp = Response::new(Body::empty());
         *resp.status_mut() = http::StatusCode::NOT_MODIFIED;
         cover_headers(resp.headers_mut(), &found);
+        // For the request accounting: what the 304 did not send.
+        resp.extensions_mut().insert(bunko_dav::Served {
+            size: found.size,
+            len: 0,
+            accel: false,
+        });
         return resp;
     }
     let (file, mut size, content_type) = (found.file.clone(), found.size, found.content_type);
@@ -531,6 +577,11 @@ async fn serve_cover(deps: &LibraryDeps, cover: &str, headers: &HeaderMap) -> Re
     h.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
     h.insert(header::CONTENT_LENGTH, HeaderValue::from(size));
     cover_headers(h, &found);
+    resp.extensions_mut().insert(bunko_dav::Served {
+        size,
+        len: size,
+        accel: false,
+    });
     resp
 }
 

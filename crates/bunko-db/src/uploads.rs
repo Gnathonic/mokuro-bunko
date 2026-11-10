@@ -79,7 +79,13 @@ pub fn layer_sidecar_volume_path(path: &str) -> Option<String> {
 /// `normalize_volume_title_key`): NFC, trim, collapse whitespace runs to one space,
 /// lowercase.
 pub fn fold_series_title_key(title: &str) -> String {
-    let normalized: String = title.nfc().collect();
+    // NFC leaves ASCII as it is; skipping it there keeps the fold cheap enough for the
+    // request accounting, which folds the series of every library request.
+    let normalized: std::borrow::Cow<'_, str> = if title.is_ascii() {
+        std::borrow::Cow::Borrowed(title)
+    } else {
+        std::borrow::Cow::Owned(title.nfc().collect())
+    };
     let mut out = String::with_capacity(normalized.len());
     let mut in_space = false;
     for c in pyfmt::strip(&normalized).chars() {
@@ -571,6 +577,15 @@ mod tests {
             fold_series_title_key("STRASSE")
         );
         assert_eq!(fold_series_title_key("A\u{3000}\u{1c}B"), "a b");
+        // The ASCII path (no NFC) folds as the general one does.
+        assert_eq!(
+            fold_series_title_key("\u{1f} Dr\t\u{1c}Stone\x0b"),
+            "dr stone"
+        );
+        assert_eq!(
+            fold_series_title_key("\u{1f} Dr\t\u{1c}Stone\x0b\u{e9}"),
+            "dr stone \u{e9}"
+        );
     }
 
     #[test]

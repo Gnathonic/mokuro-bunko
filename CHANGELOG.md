@@ -257,6 +257,103 @@
   opt-in and in the release builds; `xtask dist --permissive-models` (a build without
   the `gpl-models` and `nc-models` Cargo features) makes a program that neither
   offers, downloads nor runs them. The code that runs them is this project's own.
+- **Server analytics for the admin: what is downloaded and read, by whom, and what
+  it costs.** A new counting layer sees every request, WebDAV (any method: PROPFIND,
+  GET, PUT, MOVE, LOCK, ...) as much as the web pages and JSON APIs, and keeps, per
+  hour and per day, the requests and response and request body bytes by protocol,
+  method, category (volumes, OCR sidecars, covers, navigation and metadata, progress
+  and profile sync, uploads, ...) and status, latency histograms, errors, failed
+  sign-ins per IP and username (WebDAV Basic auth and the login page alike), the
+  slowest requests, 304 and gzip savings, aborted and resumed downloads, and who
+  downloaded which volume. Accounts are counted by name, OCR processors as bandwidth
+  only, anonymous visitors by a salted pseudonymous id (per IPv4 address or IPv6
+  `/64`, its salt replaced every IP retention period; past 10,000 a day the rest count
+  together); raw client IPs are kept only `analytics.retention.ip_days` (30). A
+  download counts once most of the file was sent, and `//` or `/./` in a path never
+  splits one. It costs no I/O on the request path: counters
+  live in memory and are written every `analytics.flush_seconds` (60) to their own
+  `analytics.sqlite` beside `mokuro.db`, rolled into daily totals hourly and pruned by
+  retention. Memory is bounded even when every request comes from a new address: what
+  a window keeps per client (its address, anonymous id, origin, a refused username cut
+  to 64 characters) shares a 10 MiB budget, origins stop at 500 a day (the rest count
+  as `(other)`), and what does not fit is counted as dropped. Every view is served
+  under `/_admin/api/analytics/` (`overview`, `traffic`, `principals`, `series`,
+  `funnel`, `reading`, `users`, `library`, `health`, `host`, `crawlers`, `clients`,
+  `geo`), and the new `analytics:` config section is editable at
+  `PUT /_admin/api/settings/analytics` and through `MOKURO_ANALYTICS_*`.
+  `analytics.enabled: false` passes requests through untouched and writes nothing
+  (no library scan, no geography download either). The main database gains an index
+  on `volume_identities(volume_uuid)`.
+- **A "Popular" order in the public catalog.** The catalog's sort menu ranks series by
+  whole downloads over the last 30 days (accounts and anonymous visitors, a repeat on
+  another day counting again, OCR processors never). `/catalog/api/library` gives each
+  ranked series a `popular_rank` (1 = the most downloaded) and nothing more: no count
+  leaves the server. The ranking is kept in memory and refreshed in the background, so
+  the catalog never reads the analytics database. With analytics off there are no
+  ranks and the option is not offered.
+- **An Analytics tab in the admin panel.** Overview, Traffic (by category, protocol,
+  method or detail, WebDAV by method, the bytes progress and profile sync and
+  navigation cost), Popular (most downloaded and read series, against the previous
+  period, with each series' completion funnel), Reading, Users, Library, Clients &
+  geography, Health, Server, Crawlers and Settings, over 24 hours to all time. The
+  charts are plain inline SVG with a hover and keyboard readout and a table view
+  under each; it works at phone width. In the bandwidth-by-visitor lists (Users,
+  and the Overview's "Most bandwidth") anonymous visitors are one row, "Anonymous
+  visitors · N visitors", ranked by their summed bytes among the accounts, so many of
+  them never push an account off the list; it opens to each visitor with their IPs
+  (`principals?anon=group|split|only`). Every visitor count, the client mix, crawl
+  detection, geography and the failed sign-ins per IP stay per visitor.
+- **Analytics: reading, active accounts and the completion funnel.** The files Mokuro
+  Reader syncs over WebDAV (any client writing them counts the same) are read back
+  about ten seconds after they are written: `positions.json` for who opened which
+  volume when, the reading history (`history/<device>/*.events`, decoded with the
+  reader's own segment format) for pages and time read, `volume-data.json` for
+  progress, finished volumes and device names. Re-uploads, other devices' merged
+  copies, a volume listed twice in one file and the reader's DELETE-then-PUT never
+  count twice. Reading shows minutes, pages and readers per day and the top readers
+  and volumes; Users the accounts active per day, week and month, and each account's
+  traffic, reading time, finished volumes, devices and apps; the funnel, per volume of
+  a series in library order, who downloaded, started and finished it, and how far
+  reads got (a quarter, half, three quarters).
+- **Analytics: file types, page formats, growth, uploads and dormant series.** A
+  background scan (2 minutes after start, every `analytics.library_scan.interval_hours`,
+  and on **Rescan now**, `POST /_admin/api/analytics/library/rescan`) counts the
+  library's files by kind (archives, OCR sidecars and layers, covers, `series.json`,
+  ...) and extension, the archive types per series and the series without any sidecar,
+  and keeps one growth snapshot a day. It lists folders and reads sizes only, so a
+  cloud library is counted from its store's index without a download. On a library on
+  this disk it also counts the page image formats inside each archive (JPEG, PNG,
+  WebP, AVIF, GIF, JPEG XL) from the zip directory alone, at most 20 archives a second,
+  each read again only when it changes; zip64 archives and self-extractors are read
+  too. Uploads per day per uploader come from the counted WebDAV uploads, and from the
+  main database's upload records for the days before analytics; a series with no
+  download and no read in 90 days is listed as dormant. Case and spelling variants of
+  a series folder are one series.
+- **Analytics: server readings and crawl detection.** The Server view charts the
+  process's memory (RSS and peak), CPU, open connections and requests in flight, per
+  minute for a day and per hour beyond, sampled every 15 s on Linux, Android, Windows
+  and macOS (Docker and musl included; in a container the cgroup memory limit is the
+  host memory shown); a time the server was down is a gap, not a zero. The Crawlers
+  view lists episodes of one IP touching at least `analytics.crawl.min_series` series
+  that are also `min_coverage` of the catalog within `window_hours`, over WebDAV or
+  HTTP: volume downloads (`download`), per-series folder listings and catalog pages
+  (`metadata`), or both (`mixed`), with the principals, client, country, volumes, bytes
+  and requests of each, and how often each IP did it. Mokuro Reader's normal sync (its
+  one depth-infinity listing, the `series.json` files it refreshes, covers, a few
+  downloads) never opens one. Reported only: nothing is blocked or slowed.
+- **Analytics: client mix and rough geography.** Each request is classified by
+  `Origin` and `User-Agent` (hand-rolled, no UA database): the hosted Mokuro Reader
+  (its configured origin), a reader on another origin, Bunko's own pages (its own
+  origin decided as the CSRF check decides it), WebDAV clients (rclone, davfs2, the
+  Windows mini-redirector, Finder, Cyberduck, GNOME Files, Kodi, Nextcloud, WinSCP), API
+  tools (curl, wget, Python, Go, Node.js) and crawler bots, with the browser and OS
+  family; requests, bytes and distinct visitors are broken down by app, client,
+  browser, OS and protocol, the WebDAV clients on their own, with the cross-origin
+  `Origin`s. The opt-in `analytics.geo` downloads DB-IP's free country database
+  (CC BY 4.0) on demand, falls back to last month's while this month's is not out,
+  caps it at 64 MiB, verifies it before it replaces the stored one, refreshes it
+  monthly and on **Refresh database**, and answers lookups in memory (`LAN` for local
+  addresses) for WebDAV and web requests alike. New dependency: `maxminddb` (ISC).
 - **`/login/api/me` says where an account may add files** (`permissions.addFiles`):
   anywhere (`all`), everywhere but the `closedSeries` other accounts own (`open`, an
   uploader), or nowhere (`none`). A reader can tell from it that the server enforces
@@ -312,19 +409,9 @@
   / **Keep that copy**; the tab also lists the **Recent merges**. Upload owners, OCR
   records and volume ids follow every moved volume. A folder Mokuro Reader keeps
   recreating is left alone after the fourth merge in a day.
-- **positions.json is kept per account.** Mokuro Reader's position index (the newest
-  page per volume) joins volume-data.json, profiles.json and goals.json, so it syncs
-  per account instead of into the shared library. `/login/api/me` lists these files as
-  `per_user_files`, signed in or not, and a reader uses a per-account file only once the
-  server lists it.
-- **Reading history is kept per account.** Mokuro Reader's history files
-  (`/mokuro-reader/history/<device>/<file>`) are each account's own, stored under
-  `users/<name>/history/` and never shown to anyone else. Any account that can save
-  progress, `registered` included, creates its `history` and device folders and writes
-  its files there; a file is limited to 16 MiB and an account's history to 256 MiB.
-  History files are never moved, copied or locked, and saving progress or history no
-  longer drops the cached library listing. `/login/api/me` lists `history/` among the
-  `per_user_files`.
+- **positions.json and reading history per account, and `/login/api/me`'s `version`,**
+  came early in 0.7.8 (see there). 0.8 carries them to cloud libraries (next entry) and
+  reserves the per-user names in any spelling (see Breaking).
 - **Per-account files on a cloud library's folder.** The account named as the readers'
   progress account (Storage tab) now really shares its files with a reader that reads
   the cloud folder directly: its volume-data, profiles, goals, positions and reading
@@ -333,9 +420,6 @@
   applies at once. The cloud folder's `.mokuro-bunko.json` lists the per-account files
   (`per_user_files`), so a reader reading the cloud directly can sync its reading
   history there too.
-- **`/login/api/me` reports the server version** (`version`), signed in or not. A reader
-  turns reading-history sync on from 0.8.0, the first version that keeps history per
-  account.
 - **`/login/api/me` says where a reader's OCR corrections go.** It lists
   `per_user_layers: ["edit"]` (each account keeps its own `edit` layer, so a reader
   may push it) and `permissions.curated.scope`: `all` (editors, inviters, admins),
@@ -552,8 +636,35 @@
   them, uploading each leg's results and logs. It also runs on pushes to
   `0.8/remote-storage`. A PR that bumps `interop/reader.ref` is how a new reader is
   taken in.
+- **Archives made on macOS keep their real member names.** Archive Utility writes UTF-8
+  names without marking them as UTF-8. Damage reports from upload and processor
+  verification now show those names as written instead of as mojibake, and on a local
+  library a new cover for such an archive is the first image by its real names (covers
+  already made are kept). A cloud library still picks by the names as Python's zipfile
+  reads them.
+- **A member that inflates past its declared size is damaged.** Processor verification
+  passed such a member when its checksum matched; it now reports it as damaged, as the
+  upload check already did.
+- **An upload whose zip directory has a malformed extra field is refused as damaged.**
+  An extra field that runs past its directory entry used to be ignored at upload. The
+  library's own archive reader already refused nearly every such archive.
+- **Dependency updates**: zip 9, rcgen 0.14, windows 0.62, windows-sys 0.61.
 
 ### Fixed
+- **A WebDAV library no longer loses files to a listing the server cut short.** rclone's
+  `serve webdav`, like most servers built on Go's WebDAV package, gives up on a folder
+  listing when a file vanishes while it walks the folder, and still answers 207 with the
+  part it had. Bunko's own uploads to such a server (written under a temporary name,
+  then moved into place) made that happen, and Bunko read every file the listing left
+  out as deleted: volumes left the catalog and answered 404 until the next poll, a
+  running OCR job was cancelled, writes still waiting to upload into those folders
+  could be dropped, and a short listing during a full sync could leave them out until
+  their files changed. Now an answer that is not one whole listing is refused, and a
+  file leaves the index only once the server, asked for it by name, says it is gone;
+  otherwise Bunko lists again.
+- **The catalog toolbar fits a phone screen.** Below 560 px wide the search box takes
+  its own row and the sort and title-language selects share the next with the reader
+  settings button; the toolbar was 553 px wide, so the page scrolled sideways at 375 px.
 - **The numbered-OCR clean-up decides from the folder listing whether a name is free.**
   It asked the disk whether `<Vol>.<layer>.mokuro` existed: beside a `Vol.FAST.mokuro`
   a case-insensitive disk said yes and the numbered `Vol.fast_1.mokuro` was deleted
@@ -769,6 +880,11 @@
   one Bunko had never seen, Bunko restarted as if its folder had been removed and held
   the library for the admin. It now checks the folder the reader kept, and when
   everything its own held is there, drops its emptied folder quietly.
+- **Uploads with a stale Unicode name field are accepted.** Some zip tools store a
+  second, UTF-8 copy of each member's name (the Info-ZIP Unicode Path field). When that
+  copy no longer matched the name, upload verification refused the whole archive as "not
+  a readable zip", although the library reads it. A copy that does not match is now
+  ignored, as the library's own reader does.
 
 ### Known limits
 - **Merging duplicate folders on Google Drive can trash files Bunko cannot see.**
@@ -793,6 +909,90 @@
 - **Mokuro Reader tells WebDAV servers apart only by type.** Its protection for
   edited OCR from a server counts every WebDAV server as one provider, so a second
   WebDAV server (another Bunko included) is taken for the first.
+
+## [0.7.11] - 2026-11-07
+
+A crafted WebDAV request, OCR file or archive can no longer stop the server, and
+processors no longer trust distrusted certificate authorities.
+
+### Security
+- **Deeply nested DAV request bodies are refused.** A PROPFIND, PROPPATCH or LOCK body
+  nested tens of thousands of elements deep (a few hundred KiB, within the 1 MiB body
+  limit) overflowed the stack and stopped the whole server. With anonymous browsing on (the
+  default), one request from anyone could do it. Bodies nested deeper than 256 elements
+  are now a `400 Bad Request`. Real DAV clients nest a few levels.
+- **A deeply nested `.mokuro` file no longer stops the server at startup.** The startup
+  sweep of damaged OCR files reads a file serde cannot (one holding `NaN`, which Python
+  allows) with a second parser that recursed once per level. An account that can upload
+  could put a file there that overflowed the stack and stopped the server at every start
+  until it was removed by hand. That parser now refuses nesting deeper than 512, as the
+  library's own reader does, and the sweep removes such a file as damaged.
+- **A damaged or crafted archive no longer stops OCR.** The OCR page reader trusted an
+  archive's own zip64 entry count and record offsets. An archive claiming billions of
+  entries, or placing its zip64 records where none can be, made a memory allocation fail,
+  which ends the process. The full build runs OCR inside the server, so an account that
+  can upload could stop the server whenever OCR reached that volume, and a remote
+  processor the same way. Such archives are now refused as damaged, and a page declaring
+  more than 256 MiB is skipped like any other unreadable page.
+- **Distrusted emSign certificate authorities are no longer trusted.** The bundled root
+  store (webpki-roots 1.0.11) drops the emSign root whose intermediate keys were
+  compromised, and rustls-webpki 0.103.16 stops accepting distrusted intermediates.
+  Processors check the library's certificate against these roots by
+  default and sign in with their account password, so before this release someone on the
+  network path could have posed as the library. If your processors connect over networks
+  you don't trust, change their account passwords after updating.
+- **Dependency updates**: rustls 0.23.46, tokio 1.54.1, zstd 0.13.4 (zstd-safe 7.4.0,
+  zstd-sys 2.1.2).
+- **Docker image**: the runtime image installs Debian's security updates (it had a zlib
+  with two fixed CVEs).
+
+## [0.7.10] - 2026-11-07
+
+Covers uploaded with a volume are kept again; the catalog shows a changed cover at once.
+
+### Fixed
+- **Uploaded covers are kept.** 0.7.9 made a cover again whenever it was older than its
+  archive. A client uploads a volume's cover before the archive, so every uploaded cover
+  is older than its archive, and 0.7.9 would have replaced them all with made ones. The
+  rule is gone: as in 0.7.8, an archive with a cover or a `.nocover` marker beside it is
+  not covered again. Replacing a volume means deleting it, which deletes its cover and
+  marker too, so the new archive is covered as any new one.
+- **Catalog covers are revalidated** (from 0.7.9). The catalog served covers as fresh for
+  an hour with nothing to check them against, so a changed cover stayed old for up to an
+  hour and was then downloaded again in full. Covers now carry an `ETag` and
+  `Last-Modified` with `Cache-Control: no-cache`: a changed cover shows at once, and an
+  unchanged one costs a `304`.
+
+## [0.7.9] - 2026-11-07
+
+Withdrawn before publishing: it would have replaced uploaded covers (see 0.7.10).
+
+## [0.7.8] - 2026-11-05
+
+Reading history and positions.json are kept per account, as in 0.8: Mokuro Reader
+syncs its reading history and opens volumes where another device stopped.
+
+### Added
+- **positions.json is kept per account.** Mokuro Reader's position index (the newest
+  page per volume) joins volume-data.json, profiles.json and goals.json, so it syncs
+  per account instead of into the shared library. `/login/api/me` lists these files as
+  `per_user_files`, signed in or not, and a reader uses a per-account file only once the
+  server lists it.
+- **Reading history is kept per account.** Mokuro Reader's history files
+  (`/mokuro-reader/history/<device>/<file>`) are each account's own, stored under
+  `users/<name>/history/` and never shown to anyone else. Any account that can save
+  progress, `registered` included, creates its `history` and device folders and writes
+  its files there; a file is limited to 16 MiB and an account's history to 256 MiB.
+  History files are never moved, copied or locked, and saving progress or history no
+  longer drops the cached library listing. `/login/api/me` lists `history/` among the
+  `per_user_files`.
+- **`history` is a reserved series name.** `/mokuro-reader/history` is each account's
+  reading history now, so a series folder named exactly `history` at the library root
+  can no longer be reached; the server logs a warning at startup with the rename to
+  make, and the library scan skips it (`History/` stays an ordinary series).
+- **`/login/api/me` reports the server's `version`** (signed in or not), and lists
+  `history/` in `per_user_files`. Mokuro Reader turns reading-history sync on for
+  mokuro-bunko from this release.
 
 ## [0.7.7] - 2026-11-05
 

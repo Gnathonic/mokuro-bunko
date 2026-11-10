@@ -319,7 +319,10 @@ fn pages(archive: &Path) -> Result<Vec<String>, String> {
     let mut names = Vec::new();
     for i in 0..zip.len() {
         let mut member = zip.by_index(i).map_err(|e| e.to_string())?;
-        let name = member.name().to_string();
+        // A name the zip crate cannot decode is not a page.
+        let Ok(name) = member.name().map(|n| n.into_owned()) else {
+            continue;
+        };
         let lower = name.to_ascii_lowercase();
         if member.is_dir()
             || ![

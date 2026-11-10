@@ -107,8 +107,10 @@ pub fn sample_pages(archive: &Path) -> Result<Vec<String>, String> {
         .map_err(|e| format!("could not open the benchmark sample: {e}"))?;
     let zip = zip::ZipArchive::new(std::io::BufReader::new(file))
         .map_err(|e| format!("the benchmark sample is not a zip: {e}"))?;
+    // A name the zip crate cannot decode is not a page.
     let mut names: Vec<String> = zip
         .file_names()
+        .filter_map(Result::ok)
         .filter(|n| !n.ends_with('/'))
         .filter(|n| {
             let lower = n.to_ascii_lowercase();
@@ -118,7 +120,7 @@ pub fn sample_pages(archive: &Path) -> Result<Vec<String>, String> {
             .iter()
             .any(|s| lower.ends_with(s))
         })
-        .map(str::to_string)
+        .map(|n| n.into_owned())
         .collect();
     names.sort_by(|a, b| bunko_sched::job_order::natural_cmp(a, b));
     Ok(names)

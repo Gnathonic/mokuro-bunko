@@ -71,14 +71,14 @@ jobs:
       PREC: ${{ inputs.precision }}
       TARGET: ${{ inputs.target }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: 0.5.2 reference sources (release 0.5.2, 199cff5)
-        uses: actions/checkout@v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: 199cff5941ce32dc6e4e50e00f5fc6b0f519afc7
           path: ref052
           sparse-checkout: src/mokuro_bunko/ocr
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
       - name: MSVC environment (x64)
@@ -141,7 +141,7 @@ jobs:
             Tee-Object -FilePath "$env:GITHUB_WORKSPACE\out\$env:ENGINE\$env:PREC\$env:TARGET\verify.json"
           if ($LASTEXITCODE) { throw "verify failed (exit code $LASTEXITCODE)" }
       - name: Upload the package
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: torch-${{ inputs.engine }}-${{ inputs.precision }}-${{ inputs.target }}
           # the package only: its shared weights are the release's files (checked above)
@@ -189,7 +189,9 @@ jobs:
         working-directory: tools/torch_export
         # no real manga in a public repo's logs and artifacts: pages of generated text
         run: python -m torch_export.ocr_inputs "$env:GITHUB_WORKSPACE\ocr" --pages ${{ inputs.ocr_pages }} --engine $env:ENGINE
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
         if: inputs.compare_embedded && inputs.ocr
       - name: "OCR: CPU backend pack + ocr_volume"
         if: inputs.compare_embedded && inputs.ocr
@@ -263,7 +265,7 @@ jobs:
           if ($shas.Count -ne 1) { throw "the two layouts read different text" }
       - name: Upload the comparison logs
         if: always() && inputs.compare_embedded
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: torch-compare-logs-${{ inputs.engine }}-${{ inputs.precision }}-${{ inputs.target }}
           path: |

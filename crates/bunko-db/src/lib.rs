@@ -23,7 +23,11 @@
 //! | [`identities`] | `volume_identities` |
 //! | [`series`] | `series_facts`, `series_entry_cache`, `catalog_folders`, `community_details` |
 //! | [`schema`] | DDL, migrations, `schema_version` |
+//!
+//! [`analytics`] is a second database, `analytics.sqlite` beside `mokuro.db`
+//! ([`analytics::AnalyticsDb`]): usage analytics, never contending with this one.
 
+pub mod analytics;
 pub mod audit;
 pub mod database;
 pub mod error;

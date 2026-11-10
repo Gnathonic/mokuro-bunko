@@ -74,6 +74,9 @@ pub struct AdminDeps {
     pub storage: Option<Arc<crate::storage::StoreHandle>>,
     /// Connect / Disconnect (the Storage panel). `None`: one is made over `storage`.
     pub storage_control: Option<Arc<crate::storage::StorageControl>>,
+    /// The usage analytics (`/api/analytics/*`); `None`: 404, and the settings editor
+    /// only saves the config.
+    pub analytics: Option<crate::analytics::Analytics>,
 }
 
 #[derive(Clone)]
@@ -361,6 +364,7 @@ async fn dispatch(s: &AdminState, api_path: &str, req: ApiRequest) -> Response {
         ["settings", "queue"] if put => settings::queue(s, &req).await,
         ["settings", "ocr"] if put => settings::ocr(s, &req).await,
         ["settings", "dyndns"] if put => settings::dyndns(s, &req).await,
+        ["settings", "analytics"] if put => settings::analytics(s, &req).await,
 
         ["ocr", "generations", "stats"] if get => ocr::http::stats(s).await,
         ["ocr", "generations"] if get => ocr::http::list(s).await,
@@ -409,6 +413,11 @@ async fn dispatch(s: &AdminState, api_path: &str, req: ApiRequest) -> Response {
             storage::resolve_conflict(s, &req, id).await
         }
         ["storage", "readers"] if put => storage::readers(s, &req).await,
+
+        ["analytics", rest @ ..] => match &s.deps.analytics {
+            Some(a) => crate::analytics::api::dispatch(a, rest, &req.method, &req.query).await,
+            None => not_found(),
+        },
 
         ["update"] if get => update::http::get(s, &req).await,
         ["update", "apply"] if post => update::http::apply(s, &req).await,

@@ -925,8 +925,13 @@ fn unpack_zip(zip: &Path, dest: &Path, sha256: &str) -> std::result::Result<(), 
         let names: Vec<PathBuf> = (0..archive.len())
             .map(|i| {
                 let e = archive.by_index_raw(i).map_err(|e| e.to_string())?;
-                e.enclosed_name()
-                    .ok_or_else(|| format!("unsafe entry {:?} in {}", e.name(), zip.display()))
+                e.enclosed_name().ok_or_else(|| {
+                    format!(
+                        "unsafe entry {:?} in {}",
+                        String::from_utf8_lossy(e.name_raw()),
+                        zip.display()
+                    )
+                })
             })
             .collect::<std::result::Result<_, _>>()?;
         let top = common_top(names.iter().map(PathBuf::as_path));

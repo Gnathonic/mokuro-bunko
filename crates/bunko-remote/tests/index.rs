@@ -432,6 +432,37 @@ fn a_move_between_merged_members_keeps_the_path() {
     );
 }
 
+/// What a sweep on a path-id provider asks the provider about: the top of each
+/// subtree nothing stands in for.
+#[test]
+fn removal_tops_skip_what_went_with_a_folder_and_what_another_spelling_keeps() {
+    let f = fx();
+    // Path ids: a case-only rename of `S` made new pids; `Vol 2` did not survive it.
+    f.up(&dir("S", "root-1", "S", 1));
+    f.up(&file("S/Vol 1.cbz", "S", "Vol 1.cbz", 2));
+    f.up(&file("S/Vol 2.cbz", "S", "Vol 2.cbz", 3));
+    f.up(&dir("s", "root-1", "s", 4));
+    f.up(&file("s/Vol 1.cbz", "s", "Vol 1.cbz", 5));
+    f.up(&dir("T", "root-1", "T", 6));
+    f.up(&dir("T/a", "T", "a", 7));
+    f.up(&file("T/a/x.cbz", "T/a", "x.cbz", 8));
+    f.up(&file("T/keep.cbz", "T", "keep.cbz", 9));
+    let set = |pids: &[&str]| -> HashSet<String> { pids.iter().map(|p| p.to_string()).collect() };
+    // The old spelling answers on a server that folds case: it is not asked about.
+    assert_eq!(
+        f.idx
+            .removal_tops(&set(&["S", "S/Vol 1.cbz", "S/Vol 2.cbz"])),
+        ["S/Vol 2.cbz"]
+    );
+    // A removed folder speaks for what was in it.
+    assert_eq!(
+        f.idx
+            .removal_tops(&set(&["T/a", "T/a/x.cbz", "T/keep.cbz", "nope"])),
+        ["T/a", "T/keep.cbz"]
+    );
+    assert_eq!(f.idx.removal_tops(&HashSet::new()), Vec::<String>::new());
+}
+
 #[test]
 fn subtree_loss_counts_only_what_no_other_node_keeps_visible() {
     let f = fx();

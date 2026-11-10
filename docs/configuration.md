@@ -621,6 +621,137 @@ dyndns:
 
 `mokuro-bunko dyndns setup` fills these in interactively.
 
+### Analytics
+
+New in 0.8. The admin panel's **Analytics** tab: what is downloaded and read and by
+whom, what each kind of traffic costs, how healthy the server is, and which IPs crawl
+the catalog. WebDAV counts like the web pages and JSON APIs: every request, whatever
+its method (PROPFIND, GET, PUT, MOVE, LOCK, ...), is counted by protocol, method and
+category.
+
+```yaml
+analytics:
+  enabled: true
+  flush_seconds: 60
+  retention:
+    ip_days: 30
+    hourly_days: 90
+    host_minute_days: 7
+    crawl_days: 90
+  crawl:
+    window_hours: 6
+    min_series: 20
+    min_coverage: 0.25
+  library_scan:
+    interval_hours: 6
+    page_formats: true
+  geo:
+    enabled: false
+    url: "https://download.db-ip.com/free/dbip-country-lite-{year}-{month}.mmdb.gz"
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enabled` | boolean | `true` | Count requests. Off, the counting layer passes every request through untouched and nothing is written; what is stored stays viewable in the admin panel. |
+| `flush_seconds` | integer | `60` | How often the in-memory counters are written to the database (5 to 3600). A crash loses at most this much. |
+| `retention.ip_days` | integer | `30` | Days rows with a raw client IP are kept: the per-IP totals, the IPs an anonymous visitor came from, failed sign-ins per IP and username (their daily count is kept forever), the slowest requests (those at most 7 days) and a crawl episode's address. Afterwards only pseudonymous ids remain. Also how often the anonymous ids' salt is replaced. |
+| `retention.hourly_days` | integer | `90` | Days the hourly traffic, latency and error rows are kept. Daily totals (errors included) are kept forever. The last two complete days keep their hourly rows whatever this says, because their daily totals are still being rebuilt from them. |
+| `retention.host_minute_days` | integer | `7` | Days the per-minute memory and CPU samples are kept. |
+| `retention.crawl_days` | integer | `90` | Days a crawl episode is kept after its last request. Its client IP is kept only `retention.ip_days`; afterwards the episode shows a salted id of the address instead. |
+| `crawl.window_hours` | integer | `6` | The window the crawl detector looks at, per client IP (1 to 168). |
+| `crawl.min_series` | integer | `20` | Distinct series an IP must touch in the window (1 to 1,000,000), by downloading a volume or by asking about one series (a `Depth: 1` or `infinity` listing of its folder, its catalog page or manifest; `series.json` and covers are not counted)... |
+| `crawl.min_coverage` | number | `0.25` | ...that are at least this share of the catalog's series (above 0, at most 1), for an episode to open: an IP needs the larger of the two counts (with the defaults and a 30-series library, 20). Folder spellings of one title count as one series. Crawlers are reported only: nothing is blocked or slowed. |
+| `library_scan.interval_hours` | integer | `6` | How often the library's file types are counted (1 to 720); the first scan runs 2 minutes after start, and **Rescan now** (`POST /_admin/api/analytics/library/rescan`) runs one at once. The scan only lists folders and reads file sizes, so on a cloud library it is answered from the store's index and downloads nothing. |
+| `library_scan.page_formats` | boolean | `true` | Also count the page image formats inside archives (a library on this disk only; reads each archive's zip directory, never the pages, at most 20 archives a second). Each archive is read once and again only when its size or modification time changes, so a restart does not read the library again. |
+| `geo.enabled` | boolean | `false` | Opt-in: download DB-IP's free *IP to Country Lite* database (CC BY 4.0, ≤ 64 MiB compressed and uncompressed) to `<storage>/analytics/country.mmdb`, refresh it monthly, and show a rough country per IP, for WebDAV and web requests alike. Loopback, private, link-local, CGNAT (`100.64.0.0/10`) and unique-local IPv6 addresses are `LAN`; an address the database does not place is `ZZ` (unknown). Lookups stay on this server. Off (or with `enabled: false`), nothing is downloaded and no country is recorded; none is either until a database has loaded, local addresses included. |
+| `geo.url` | string | the DB-IP download | Where the database comes from, an `https://` URL (a redirect away from HTTPS is refused); `{year}` and `{month}` are filled in (the current month, else the previous one when this month's answers 404). A download is checked (it must open as a MaxMind DB and pass a full verification) before it replaces the stored file, so a failed or damaged one keeps the database there was; a failure is logged, shown in Analytics → Clients & geography, and tried again after 6 hours or on **Refresh database** (`POST /_admin/api/analytics/geo/refresh`). |
+
+The data lives in `analytics.sqlite` beside `mokuro.db` (its own file: it never
+slows the main database, and deleting it resets the analytics). Requests are counted
+in memory and written in one transaction per `flush_seconds`; complete days are
+rolled into daily totals once an hour. An account's traffic is attributed to the
+account (`u:<name>`); an OCR processor's (`p:<name>`) counts as bandwidth but not as
+downloads, reading, active users or crawling; an anonymous request is attributed to a
+pseudonymous id, the start of a salted SHA-256 of its client IPv4 address or IPv6
+`/64` (`a:<12 hex>`), so a visitor can be counted once without long-lived rows
+keeping the address. The salt is replaced every `retention.ip_days` and the old one
+deleted, so once the raw IPs are gone an id can no longer be traced back to its
+address (a visitor is one id within such a period only); a day keeps at most 10,000
+anonymous visitors apart, the rest count together as `a:other`. A download counts
+toward popularity once most of the file (95 %) was sent that day, so a one-byte range
+probe is no download. If `analytics.sqlite` is damaged (SQLite or its `quick_check`
+says so) it is moved aside as `analytics.sqlite.broken-<time>` and a new one is made
+(the moved file holds raw IPs too, so the hourly upkeep deletes it once it is
+`retention.ip_days` old);
+if it is healthy but cannot be opened (locked by another process, read-only) it is
+left as it is and the analytics are kept in memory for that run. The client
+IP is the one the server resolves, so `server.trusted_proxies` applies. Byte counts
+are response and request **body** bytes (headers and TLS are not counted); behind the
+image's nginx (`MOKURO_NGINX_ACCEL=1`) the archives nginx sends are counted from the
+file's size as estimates. Every key is also editable in the admin panel (Analytics →
+Settings, `PUT /_admin/api/settings/analytics`) and through `MOKURO_ANALYTICS_*`
+variables, dots as underscores (`MOKURO_ANALYTICS_RETENTION_IP_DAYS=14`).
+
+**Reading** is counted from the files Mokuro Reader syncs, whichever WebDAV client
+writes them: about ten seconds after an account's `positions.json`,
+`history/<device>/*.events` or `volume-data.json` is written (a PUT, or a MOVE into
+place), the server reads the file back from that account's own tree and compares it
+with what it saw before, so a file uploaded twice, another device's merged copy, a
+volume listed twice in one file (its last entry counts, as in the reader), or the
+reader's DELETE-then-PUT never counts twice. A new reading position is a *read*
+of that volume on that day (a position first seen more than 48 hours old is not); the
+reading history adds the time spent (one page view counts for 15 minutes at most) and
+the pages read as Mokuro Reader's own statistics count them: each page once per read
+of a volume (a restart reads it again), whichever device or upload brings it, so a
+two-page spread or turning back never counts a page twice, and a page flicked past
+faster than 1,500 characters a minute adds its time but not the page.
+`volume-data.json` gives each account's progress and finished volumes for the
+completion funnel, and the device names the reader shows. Volumes
+are matched to the library's series by their volume id, else by the series the
+reader names; a volume of no known series is shown as `(unknown)`. Files larger than
+the reader writes (4 MiB for `positions.json`, 16 MiB for a history file, 32 MiB for
+`volume-data.json`) and history files of a newer format are skipped.
+
+**Crawl detection** counts, per client IP, the distinct series it touched in the
+window: by downloading a volume (a `GET` answered 200 or 206), or by asking about one
+series (a WebDAV `PROPFIND` of a series folder with `Depth: 1` or `infinity`,
+`/catalog/api/series?name=`, a manifest). Mokuro Reader's normal sync does not count:
+its one `Depth: infinity` listing of the whole library, the `series.json` files it
+refreshes (every one on a first sync), the covers it shows, the `HEAD` before each
+download and its own progress files are not signals, so reading a few series never
+opens an episode, while an rclone or davfs2 mirror, a metadata walk over WebDAV or a
+script walking the catalog does. One known false positive: when the reader's
+`Depth: infinity` listing fails with an unexpected error (a timeout or a server error
+on a large library), it lists that sync folder by folder instead, and that walk is
+reported as a `metadata` episode. An episode is
+`download` when the downloads alone cross the thresholds, `metadata` when nothing was
+downloaded, `mixed` otherwise; it ends after a whole window without a request from
+that IP. Detection is per IP (a crawl split over many addresses, each under
+`min_series`, is not seen). At most 4,096 IPs are tracked (least recently used go
+first, an open episode last) and their touches are capped at 300,000 (about 6 MiB).
+
+**Server readings** are sampled every 15 s: the process's memory (RSS and peak), its
+CPU time as a percent of one core (two busy cores read 200 %), open connections and
+requests in flight (their highest per interval), and the machine's memory, or the
+container's cgroup memory limit when that is lower. Linux and Android read `/proc`
+(Docker and the musl build included), Windows and macOS their system calls; anywhere
+else the panel says the platform does not report them. Four samples make a minute
+(kept `retention.host_minute_days`), minutes make hours (kept `retention.hourly_days`).
+
+The client mix (Analytics → Clients & geography) is read from each request's
+`Origin` and `User-Agent`. A request whose `Origin` is the configured reader
+(`catalog.reader_url`, or the hosted reader of the default `cors.allowed_origins`)
+counts as the hosted Mokuro Reader; another cross-origin browser on WebDAV or
+`/login/api/*` as a reader on another origin; Bunko's own pages as the web UI (its own
+origin is decided as the CSRF check decides it: `Host` or `X-Forwarded-Host`, and a
+`Host` without a port, as `proxy_set_header Host $host` sends it, matches any port;
+a browser on an origin `cors.allowed_origins` refuses is Bunko's page too); WebDAV
+requests from anything that is not a browser as WebDAV clients, named when the user
+agent says which (rclone, davfs2, the Windows mini-redirector, Finder, Cyberduck, GNOME
+Files, Kodi, Nextcloud, WinSCP), with curl, wget, Python, Go and Node.js tools and
+crawler bots told apart too. Distinct visitors per app, client, browser or OS are
+counted only within `retention.ip_days` (an anonymous visitor stands for an IP).
+
 ### Updates
 
 ```yaml
@@ -1505,6 +1636,8 @@ MOKURO_REGISTRATION_MODE=invite
 MOKURO_SSL_ENABLED=true
 MOKURO_OCR_LOCAL_PROCESSING=false
 MOKURO_UPDATE_CHECK=false
+MOKURO_ANALYTICS_ENABLED=false
+MOKURO_ANALYTICS_RETENTION_IP_DAYS=14
 MOKURO_OCR_GENERATIONS='[{"name":"hayai-nova","engine":"hayai-nova","primary":true}]'
 ```
 
