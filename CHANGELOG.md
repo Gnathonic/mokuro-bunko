@@ -900,6 +900,12 @@
   was deleted moments later, so the installed server then started on an empty
   library. Such a server now keeps its settings in memory. If you have run the tests
   on a machine where you also use Bunko, check `storage.base_path` in your config.
+- **OCR starts after the backend is installed by hand.** When the server's own
+  backend install failed (no network, say) and the pack was then installed from a
+  terminal with `mokuro-bunko install-ocr`, as the failure says to, the server's next
+  automatic retry found nothing left to install, cleared the failure and stopped
+  there: its OCR kept waiting for a backend until the server was restarted. The retry
+  now starts the OCR with what is installed.
 
 ### Known limits
 - **Merging duplicate folders on Google Drive can trash files Bunko cannot see.**
