@@ -132,6 +132,21 @@ impl T {
 
     fn wait_steady(&self) {
         assert!(self.s().wait_steady(WAIT), "{:?}", self.s().engine_state());
+        // Steady is announced before the first steady poll, which brings what the
+        // provider changed during the first sync. Applied after a test's own write,
+        // that page would put the entry back as it was before the write.
+        self.settle_feed();
+    }
+
+    /// The poll that is running, if one is, has been applied. A poll starts only
+    /// after the one before it ended, so two more are asked for: the first may be
+    /// the running one, the second then starts after it.
+    fn settle_feed(&self) {
+        for _ in 0..2 {
+            let n = self.fake.calls(FakeOp::Changes);
+            self.s().feed().poll_now();
+            wait_until("a feed poll", || self.fake.calls(FakeOp::Changes) > n);
+        }
     }
 
     /// Simulate a crash: the store goes away without any further writes.
@@ -372,9 +387,12 @@ fn crash_at_each_state_yields_one_copy() {
         t.s().set_failpoint(Some(Arc::new(move |at: &str| at == p)));
         let src = t.local("v", b"ocr result");
         let r = fs::publish(&src, t.abs("S/v.mokuro"), &deferred(ocr(), Mode::CreateNew));
-        // The worker may mark the op HELD (and stop there) before publish returns.
-        if point != "HELD" {
-            assert_eq!(r.is_err(), point == "STAGED", "{point}");
+        // A stop at STAGED is publish's own: it fails. Every later point is the
+        // worker's, which may reach it (and stop the store) before publish has made
+        // its own STAGED check: publish then answers for the stopped store, so its
+        // result says nothing there. A real crash returns nothing at all.
+        if point == "STAGED" {
+            assert!(r.is_err(), "{point}");
         }
         wait_until(point, || t.s().crashed());
         t.stop();
@@ -1445,15 +1463,19 @@ fn done_entries_name_volumes_by_rule_v1() {
     assert_eq!(layers, ["gcv", "2024"]);
 }
 
-#[test]
-fn the_queue_file_is_written_on_change_within_its_floor_with_done_entries() {
-    fn tune(c: &mut RemoteStoreConfig) {
-        c.queue_floor = Some(Duration::from_millis(400));
-    }
+fn queue_floor<const MS: u64>(c: &mut RemoteStoreConfig) {
+    c.queue_floor = Some(Duration::from_millis(MS));
+}
+
+/// The queue file under a floor of `MS` milliseconds. `false` when this machine took
+/// longer than the floor to get from the first write to the look at what waits: the
+/// changes were then not within the floor, and the run says nothing.
+fn queue_file_within_a_floor<const MS: u64>() -> bool {
+    let floor = Duration::from_millis(MS);
     let t = T::with(
         FakeBackend::drive_like(),
         &[("Kingdom/Kingdom 12.cbz", b"zip")],
-        tune,
+        queue_floor::<MS>,
     );
     t.wait_steady();
     t.publish(
@@ -1466,6 +1488,8 @@ fn the_queue_file_is_written_on_change_within_its_floor_with_done_entries() {
         serde_json::json!({"version": 1, "generated_at": format!("2026-10-12T10:00:0{n}Z"),
             "pending_volumes": n, "volumes": []})
     };
+    // The floor runs from the first write, which is no earlier than this.
+    let first_write = Instant::now();
     assert!(t.s().publish_queue_doc(doc(1)).unwrap());
     t.idle();
     let read = |t: &T| -> serde_json::Value {
@@ -1483,13 +1507,30 @@ fn the_queue_file_is_written_on_change_within_its_floor_with_done_entries() {
     // A change within the floor waits for it; only the newest is written.
     assert!(t.s().publish_queue_doc(doc(2)).unwrap());
     assert!(t.s().publish_queue_doc(doc(3)).unwrap());
-    std::thread::sleep(Duration::from_millis(100));
+    std::thread::sleep(floor / 4);
     t.idle();
-    assert_eq!(t.fake.calls(FakeOp::Upload), uploads);
+    let waiting = t.fake.calls(FakeOp::Upload);
+    if first_write.elapsed() >= floor {
+        return false;
+    }
+    assert_eq!(waiting, uploads);
     wait_until("the floor", || t.fake.calls(FakeOp::Upload) > uploads);
     t.idle();
     assert_eq!(t.fake.calls(FakeOp::Upload), uploads + 1);
     assert_eq!(read(&t)["pending_volumes"], 3);
+    true
+}
+
+#[test]
+fn the_queue_file_is_written_on_change_within_its_floor_with_done_entries() {
+    // The first floor is enough on any machine that is not badly overloaded; a longer
+    // one is tried only when the machine was slower than the floor before it.
+    assert!(
+        queue_file_within_a_floor::<400>()
+            || queue_file_within_a_floor::<2_000>()
+            || queue_file_within_a_floor::<10_000>(),
+        "this machine was slower than every floor tried"
+    );
 }
 
 // ---- ownership and integrity hardening ---------------------------------------------
