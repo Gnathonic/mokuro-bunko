@@ -268,6 +268,239 @@ async fn queue(c: &mut Contract, server: &Server) {
     );
 }
 
+/// A queue file v2 answer made independent of when it ran: every time (`at`,
+/// `clock_at`, the clock's knots, the jobs' times, `done`) moved by one offset so the
+/// clock's fit time lands on the epoch sentinel, and `rev` (which starts from the
+/// time) set to 1. Knots stay strictly increasing, and every time keeps its distance
+/// to the others.
+fn steady_series_queue(resp: &contract_support::Resp) -> contract_support::Resp {
+    let mut v = resp.json().expect("the series queue file is JSON");
+    let fit = v["live"]["clock_at"]
+        .as_i64()
+        .or_else(|| v["clock_at"].as_i64())
+        .expect("a clock_at");
+    let off = fit - contract_support::EPOCH_S;
+    let shift = |x: &mut Value| {
+        if let Some(n) = x.as_i64() {
+            *x = json!(n - off);
+        }
+    };
+    shift(&mut v["at"]);
+    shift(&mut v["clock_at"]);
+    v["rev"] = json!(1);
+    if let Some(live) = v.get_mut("live").filter(|l| l.is_object()) {
+        shift(&mut live["clock_at"]);
+        for knot in live["clock"].as_array_mut().into_iter().flatten() {
+            for x in knot.as_array_mut().into_iter().flatten() {
+                shift(x);
+            }
+        }
+    }
+    for jobs in v["vols"]
+        .as_object_mut()
+        .into_iter()
+        .flat_map(|m| m.values_mut())
+    {
+        for job in jobs.as_array_mut().into_iter().flatten() {
+            for x in job.as_array_mut().into_iter().flatten().skip(2) {
+                shift(x);
+            }
+        }
+    }
+    for x in v["done"]
+        .as_object_mut()
+        .into_iter()
+        .flat_map(|m| m.values_mut())
+    {
+        shift(x);
+    }
+    contract_support::Resp {
+        status: resp.status,
+        headers: resp.headers.clone(),
+        body: serde_json::to_vec(&v).unwrap(),
+    }
+}
+
+/// The queue file v2 over HTTP (`docs/design/queue-file-v2.md` §7, §12.2): a series
+/// that owes OCR (Volume 02, held: no processor), the same with its ETag, a series
+/// that owes nothing, a write refused; and one file with every job state, rendered by
+/// the code that renders the real ones.
+async fn series_queue(c: &mut Contract, server: &Server) {
+    let path = format!(
+        "{}/.mokuro-series-queue.json",
+        dav_path(&["Contract Series"])
+    );
+    let req = Req::new("GET", &path, "basic:reader");
+    let r = server.send(&req).await;
+    assert_eq!(r.status, 200, "{}", r.text());
+    let doc = r.json().unwrap();
+    assert_eq!(doc["vols"], json!({"Volume 02": [[0, "q", null]]}), "{doc}");
+    c.golden(
+        "series-queue-http",
+        &fixture(&req, &steady_series_queue(&r)),
+    );
+    let etag = r.header("etag").expect("an ETag").to_string();
+    // Sent with the real ETag; recorded with the sentinel.
+    let req = Req::new("GET", &path, "basic:reader").header("if-none-match", &etag);
+    let resp = server.send(&req).await;
+    assert_eq!(resp.status, 304, "{}", resp.text());
+    c.golden("series-queue-http-not-modified", &fixture(&req, &resp));
+    let empty = format!(
+        "{}/.mokuro-series-queue.json",
+        dav_path(&["日本語シリーズ"])
+    );
+    let req = Req::new("GET", &empty, "basic:reader");
+    let r = server.send(&req).await;
+    assert_eq!(r.status, 200, "{}", r.text());
+    assert_eq!(r.json().unwrap()["vols"], json!({}));
+    c.golden(
+        "series-queue-http-empty",
+        &fixture(&req, &steady_series_queue(&r)),
+    );
+    let r = export(
+        c,
+        server,
+        "series-queue-put-refused",
+        Req::new("PUT", &path, "basic:reader")
+            .header("content-type", "application/json")
+            .text("{}"),
+    )
+    .await;
+    assert_eq!(r.status, 405, "{}", r.text());
+    c.golden(
+        "series-queue-shapes",
+        &file_fixture(
+            "Example Saga/.mokuro-series-queue.json",
+            &series_queue_shapes(),
+        ),
+    );
+}
+
+/// A made-up series with every job state: running (and finishing), claimed, waiting
+/// with a work position, untimed, held by its row, and a finished volume; with the
+/// `live` block of the HTTP copy. Times are on the epoch sentinel.
+fn series_queue_shapes() -> Value {
+    use bunko_sched::series_queue::{
+        Clock, LiveJob, LiveState, RowDesc, SeriesLive, Sink, Snapshot, live_block,
+    };
+    let t0 = contract_support::EPOCH_S as f64;
+    let rows = vec![
+        RowDesc {
+            kind: "ocr".into(),
+            id: "hayai-nova".into(),
+            parts: json!([{"role": "recognizer", "name": "Hayai Nova", "version": "2.5"},
+                          {"role": "detector", "name": "PP-OCR Manga", "version": "0.3"}]),
+        },
+        RowDesc {
+            kind: "layer".into(),
+            id: "paddle".into(),
+            parts: json!([{"role": "recognizer", "name": "PaddleOCR-VL", "version": "0.3"}]),
+        },
+    ];
+    let job = |row: &str, state: LiveState| LiveJob {
+        row: row.into(),
+        state,
+    };
+    let snapshot = |now: f64, vols: Vec<(&str, Vec<LiveJob>)>| Snapshot {
+        now,
+        rows: rows.clone(),
+        held: None,
+        held_rows: Default::default(),
+        series: [(
+            "example saga".to_string(),
+            SeriesLive {
+                folder: "Example Saga".into(),
+                vols: vols.into_iter().map(|(s, j)| (s.to_string(), j)).collect(),
+            },
+        )]
+        .into_iter()
+        .collect(),
+    };
+    let mut sink = Sink::new(0, None);
+    sink.clock = Some(Clock::identity(t0 as i64));
+    let first = snapshot(
+        t0,
+        vec![
+            (
+                "Example Saga 01",
+                vec![job(
+                    "hayai-nova",
+                    LiveState::Running {
+                        t0: t0 - 300.0,
+                        e: Some(t0 + 60.0),
+                    },
+                )],
+            ),
+            (
+                "Example Saga 02",
+                vec![job(
+                    "hayai-nova",
+                    LiveState::Running {
+                        t0: t0 - 120.0,
+                        e: Some(t0 + 600.0),
+                    },
+                )],
+            ),
+            (
+                "Example Saga 03",
+                vec![
+                    job(
+                        "hayai-nova",
+                        LiveState::Queued {
+                            e: Some(t0 + 1800.0),
+                        },
+                    ),
+                    job(
+                        "paddle",
+                        LiveState::Queued {
+                            e: Some(t0 + 9000.0),
+                        },
+                    ),
+                ],
+            ),
+            (
+                "Example Saga 04",
+                vec![job("hayai-nova", LiveState::Claimed)],
+            ),
+            (
+                "Example Saga 05",
+                vec![job("hayai-nova", LiveState::Queued { e: None })],
+            ),
+        ],
+    );
+    sink.refresh(&first, &|_| true);
+    // Volume 01 finishes and its series settles: it leaves, with a done entry. The
+    // layer row is held from now: its job keeps the position it was published with.
+    let mut second = first.clone();
+    second.now = t0 + 120.0;
+    second.held_rows.insert("paddle".into());
+    second
+        .series
+        .get_mut("example saga")
+        .unwrap()
+        .vols
+        .remove("Example Saga 01");
+    sink.refresh(&second, &|_| true);
+    // Volume 02 finishes while the series' metadata is still to be recompiled: it
+    // stays, shown running, until the series settles.
+    let mut third = second.clone();
+    third.now = t0 + 900.0;
+    third
+        .series
+        .get_mut("example saga")
+        .unwrap()
+        .vols
+        .remove("Example Saga 02");
+    sink.refresh(&third, &|_| false);
+    let published = &sink.series["example saga"];
+    let mut body = published.body("example-instance");
+    body.insert(
+        "live".into(),
+        live_block(&third, sink.clock.as_ref().unwrap(), 5),
+    );
+    Value::Object(body)
+}
+
 async fn compiled(c: &mut Contract, server: &Server) {
     let lib = server.library();
     for (name, rel) in [
@@ -808,6 +1041,7 @@ async fn export_all(c: &mut Contract, seed: &Seed) {
         let server = Server::local(seed).await;
         manifests(c, seed, &server).await;
         queue(c, &server).await;
+        series_queue(c, &server).await;
         compiled(c, &server).await;
         webdav(c, &server).await;
         server.stop().await;
