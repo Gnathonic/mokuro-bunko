@@ -84,6 +84,9 @@ mod full {
                     "the OCR backend this server had loaded was removed; restart the server to run OCR".into()
                 });
             }
+            // OCR on this machine is on again: a pack recorded for removal at the next
+            // start (Windows: removed while loaded here) stays.
+            crate::pack_removal::call_off(&self.engines.backends_dir());
             let mut engines = self.engines.clone();
             if let Some((path, cli)) = &self.live {
                 let backend = match cli {

@@ -10,7 +10,8 @@
 //!   of loaded libraries (Windows: its DLLs). It is recorded in
 //!   `<backends>/.remove-at-start.json` instead and removed at the next start, before
 //!   any pack is loaded ([`at_start`]). Turned on again meanwhile, OCR on this machine
-//!   keeps the pack: the removal is called off at that start.
+//!   keeps the pack: its OCR starting again calls the removal off ([`call_off`]), and so
+//!   does a start that finds OCR on this machine on.
 //! * Elsewhere (Linux, macOS) a loaded pack is deleted at once: the libraries mapped in
 //!   memory stay readable. The process must not use that pack again, though (it reads
 //!   files of it later, such as GPU kernel libraries): its next start of OCR restarts
@@ -193,11 +194,7 @@ pub fn at_start(root: &Path, local_on: bool) -> Vec<String> {
     let wanted = pending(root);
     if !wanted.is_empty() {
         if local_on {
-            info!(
-                "OCR on this machine is on again: the OCR backend pack(s) {} recorded for removal stay",
-                wanted.join(", ")
-            );
-            let _ = write_pending(root, &[]);
+            call_off(root);
         } else {
             let mut left = Vec::new();
             for name in wanted {
@@ -240,6 +237,30 @@ pub fn at_start(root: &Path, local_on: bool) -> Vec<String> {
         }
     }
     removed
+}
+
+/// OCR on this machine is on again (its OCR starts in this process, or the server
+/// starts with it on): the packs recorded for removal at the next start stay, and the
+/// record goes. Turned off again before that start, OCR on this machine keeps them
+/// still: only a new Remove removes them. Returns the packs the removal was called off
+/// for.
+pub fn call_off(root: &Path) -> Vec<String> {
+    let wanted = pending(root);
+    if wanted.is_empty() {
+        return wanted;
+    }
+    match write_pending(root, &[]) {
+        Ok(()) => info!(
+            "OCR on this machine is on again: the OCR backend pack(s) {} recorded for removal stay",
+            wanted.join(", ")
+        ),
+        Err(e) => warn!(
+            "OCR on this machine is on again, but {} could not be updated ({e}): the OCR backend pack(s) {} go at the next start with OCR on this machine off",
+            root.join(PENDING_FILE).display(),
+            wanted.join(", ")
+        ),
+    }
+    wanted
 }
 
 static LOADED_REMOVED: AtomicBool = AtomicBool::new(false);
@@ -383,6 +404,29 @@ pub(crate) mod tests {
         assert_eq!(at_start(root, true), Vec::<String>::new());
         assert_eq!(installed(root), ["torch-cu130-2.13.0"]);
         assert!(pending(root).is_empty());
+    }
+
+    /// Regression (Windows): a removal recorded for the next start was called off only
+    /// when that start found OCR on this machine on. Turned on again (its OCR running on
+    /// the pack once more) and then off before the restart, OCR on this machine lost the
+    /// pack at that start, though the owner had taken the Remove back, and the panel
+    /// meanwhile said "removed when the server next starts" of a pack in use. OCR
+    /// starting again calls the removal off for good.
+    #[test]
+    fn ocr_started_again_calls_a_removal_at_start_off() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let torch = pack(root, "torch-cu130-2.13.0", "cu130");
+        let r = remove_installed(root, std::slice::from_ref(&torch), true, |_| 1);
+        assert_eq!(r.deferred, ["torch-cu130-2.13.0"]);
+        // Turned on again: this server's OCR starts on the pack.
+        assert_eq!(call_off(root), ["torch-cu130-2.13.0"]);
+        assert!(pending(root).is_empty(), "the panel no longer says it goes");
+        assert!(call_off(root).is_empty());
+        // Turned off again, then the server restarts: the pack stays.
+        assert!(at_start(root, false).is_empty());
+        assert_eq!(installed(root), ["torch-cu130-2.13.0"]);
+        assert!(torch.join("lib/libtorch.so").is_file());
     }
 
     /// Where loaded files can be deleted (Linux, macOS), a loaded pack goes at once and
