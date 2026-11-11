@@ -337,7 +337,15 @@ volumes, and the widths found are stored in that machine's profile
 hardware), never in `config.yaml`. On the library's own hardware a row with
 hand-set pools is not width-tuned; it still gets a precision-only autobench
 when its mode needs a precision pick. A pair whose benchmark cannot be had
-runs untuned rather than never.
+runs untuned rather than never. Until a pair is measured, the machine's claims
+pass over that row's volumes without reading the library for them, so a
+processor waiting for its benchmarks costs a large queue nothing. A processor
+that drops off keeps its queued autobench runs for 10 minutes: back with the
+same host and catalog, it carries on where it was, with the sample already
+packed, and no benchmark is asked for again. Back changed, or later, it is
+measured afresh. While a run waits for its machine, the benchmark API shows it
+as queued (`waiting_for_machine`) and cancels it, and a server that stops ends
+every such run and removes its sample.
 
 ## Remote processors
 

@@ -28,7 +28,8 @@ pub struct OwedVolume {
     pub rows: Vec<Arc<str>>,
     /// The rows of `rows` owed because their layer is Bunko's own output at an older
     /// engine revision ([`UpgradeProbe::layer_outdated`]), not because it is missing.
-    /// They are upgrades: the queue runs them after that row's missing files.
+    /// They are upgrades: the queue runs them after that row's missing files. Their
+    /// result replaces that file in place, a Sync write, as an upgrade's swap is.
     pub outdated: Vec<Arc<str>>,
     /// Non-primary rows withheld because the supplied `.mokuro` names pages the archive
     /// lacks (never a failure, no record).

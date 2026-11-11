@@ -106,9 +106,14 @@ fn config(base: PathBuf) -> Config {
 }
 
 fn options() -> ServeOptions {
+    options_paced(Duration::from_millis(5))
+}
+
+/// [`options`] with the fake OCR taking `page_delay` per page.
+fn options_paced(page_delay: Duration) -> ServeOptions {
     let pipeline = bunko_processor::FakePipeline::new(bunko_processor::FakeConfig {
         engines: vec![bunko_core::engines::DEFAULT_ENGINE.into()],
-        page_delay: Duration::from_millis(5),
+        page_delay,
         overlap: 1,
         ..Default::default()
     });
@@ -132,8 +137,18 @@ impl Server {
         tune: Option<bunko_server::storage::testing::Tune>,
         before: impl FnOnce(&Services),
     ) -> Server {
+        Server::start_with(base, fake, tune, before, options()).await
+    }
+
+    async fn start_with(
+        base: &std::path::Path,
+        fake: &Arc<FakeBackend>,
+        tune: Option<bunko_server::storage::testing::Tune>,
+        before: impl FnOnce(&Services),
+        opts: ServeOptions,
+    ) -> Server {
         bunko_server::storage::testing::register_tuned(base, fake.clone(), tune);
-        let services = Services::new(config(base.to_path_buf()), None, &options()).unwrap();
+        let services = Services::new(config(base.to_path_buf()), None, &opts).unwrap();
         before(&services);
         let stop = CancellationToken::new();
         let running = start_library_services(&services, stop.clone());
@@ -575,5 +590,59 @@ async fn an_emptied_cloud_folder_retires_its_series_file_only_while_online() {
     assert!(!catalog.to_string().contains("\"Gone\""), "{catalog}");
     assert!(store.conflicts().is_empty(), "{:?}", store.conflicts());
     fake.set_list_hook(None);
+    server.stop().await;
+}
+
+/// Regression (§5.3 poll cadence): OCR running on a cloud library keeps its change
+/// feed at the active interval (Drive: 30 s) instead of the idle 5 min, and the admin
+/// storage status says why. Nothing noted OCR work before, so the feed stayed idle.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ocr_running_turns_the_cloud_feed_to_its_active_interval() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("storage");
+    let fake = fake_library();
+    // Vol 2 (3 pages) takes about 6 s to OCR: the claim is in flight for a few ticks.
+    let server = Server::start_with(
+        &base,
+        &fake,
+        Some(quick),
+        |_| {},
+        options_paced(Duration::from_secs(2)),
+    )
+    .await;
+    let store = server.store();
+    eventually("OCR noted on the feed", Duration::from_secs(60), || {
+        store
+            .poll_cadence()
+            .because
+            .contains(&bunko_store::Activity::Ocr)
+    })
+    .await;
+    assert!(
+        node(&fake, "Series/Vol 2.mokuro").is_none(),
+        "noted while the claim runs, not after"
+    );
+    let c = store.poll_cadence();
+    assert!(c.active && !c.push, "{c:?}");
+    assert_eq!(c.every, Duration::from_secs(30), "Drive's active interval");
+    let storage = server.services.storage.clone().unwrap();
+    let st = tokio::task::spawn_blocking(move || storage.status_json())
+        .await
+        .unwrap();
+    assert_eq!(st["poll"]["every_s"], 30, "{st}");
+    assert_eq!(st["poll"]["active"], true, "{st}");
+    assert!(
+        st["poll"]["because"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("ocr")),
+        "{st}"
+    );
+    eventually(
+        "the OCR result in the cloud",
+        Duration::from_secs(60),
+        || node(&fake, "Series/Vol 2.mokuro").is_some(),
+    )
+    .await;
     server.stop().await;
 }

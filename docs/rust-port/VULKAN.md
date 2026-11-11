@@ -142,7 +142,14 @@ is skipped there.
 * **Runtime failure** mid-volume: the runtime is demoted on that device and the same read
   is retried on the next runtime; with none left the session's GPU→CPU fallback applies.
 * **Downloads stay on demand.** `install-ocr` fetches the Vulkan pack (~18 MB) first and
-  the libtorch pack second on a machine with a GPU (`hwdetect::vulkan_wanted`); a runtime's
+  the libtorch pack second on a machine with a GPU (`hwdetect::vulkan_wanted`). The
+  background install of `serve` and `processor serve` fetches the libtorch pack alone
+  (`MOKURO_INSTALL_NO_EXTRAS=1`) and then the Vulkan pack on its own
+  (`install-ocr --variant vulkan --no-models`). That fetch does not mark the machine as
+  installing, and a failed one waits before the next try (`.optional-pack.json`;
+  `install_ocr::Need::Extra`). The exception is a machine whose only GPU route it is
+  (`Need::Extra { route: true }`: `ocr.backend: vulkan`, or a libtorch choice of `cpu`):
+  its first fetch is waited for as an install is. A runtime's
   graphs (~0.8–1 GB each) are fetched when a benchmark trial or a session first needs them
   (`models download` on a Vulkan-only GPU fetches them smallest first).
 * **Windows.** Windows lists its GPUs through DXGI: AMD and Intel adapters (no libtorch GPU
@@ -173,7 +180,8 @@ cargo run -p bunko-engines --example vulkan_check -- check hayai-nova <golden.js
   Vulkan (ncnn / WebGPU). The benchmark's trials and winner (`fp32@ncnn` …) are in the
   generations' precision view, as every precision trial.
 * `install-ocr`: `--variant vulkan`; with a GPU, `--if-needed` installs the Vulkan pack
-  first (never fatal) then the libtorch pack.
+  first (never fatal) then the libtorch pack. The background installer fetches it
+  separately, so a missing Vulkan pack never holds a machine whose libtorch pack works.
 * Tests: `bunko-engines` `vulkan::tests` (selection, cache, mismatch, load failure,
   crash marker, mid-volume failover with fake runtimes; exceptions; KFD map),
   `precision::tests::backend_qualified_formats_resolve_to_a_backend`,

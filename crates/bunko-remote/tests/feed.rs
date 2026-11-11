@@ -1614,3 +1614,225 @@ async fn an_index_in_the_old_root_order_takes_the_canonical_one() {
     assert_eq!(root.winner_pid, Some(top.pid));
     assert!(r.has("a.cbz"));
 }
+
+// ---- the poll cadence (§5.3) ------------------------------------------------------
+
+/// The shipped cadence shape: 30 s active, 5 min idle, active for 5 min after the
+/// last signal.
+fn cadence_config() -> FeedConfig {
+    FeedConfig {
+        poll_active: Duration::from_secs(30),
+        poll_idle: Duration::from_secs(300),
+        ..config()
+    }
+}
+
+/// How long the feed takes to show `path` once a reader put it in the cloud.
+async fn pickup(r: &mut Rig, path: &str) -> Duration {
+    let t = Instant::now();
+    put(&r.fake, path);
+    assert_eq!(r.next().await, added(path, false));
+    Instant::now() - t
+}
+
+/// Regression: nothing ever turned the feed active, so a volume a reader uploaded
+/// straight to the cloud waited for the idle poll (5 min) even while that reader kept
+/// writing. A foreign change is reader activity: the next one shows within the active
+/// interval, and five minutes after the last one the feed is idle again.
+#[tokio::test(start_paused = true)]
+async fn a_readers_direct_writes_keep_the_feed_polling_at_the_active_interval() {
+    let f = FakeBackend::drive_like();
+    seed(&f, &["A/v1.cbz"]);
+    let mut r = rig_with(Arc::new(f), cadence_config(), None);
+    r.ready().await;
+    // Idle: the first upload waits for the idle poll.
+    let first = pickup(&mut r, "A/v2.cbz").await;
+    assert!(first > Duration::from_secs(30), "idle at first: {first:?}");
+    // That was a reader writing: the next one shows within the active interval.
+    let second = pickup(&mut r, "A/v3.cbz").await;
+    assert!(
+        second <= Duration::from_secs(31),
+        "a reader's write keeps the feed active: {second:?}"
+    );
+    let c = r.feed.cadence();
+    assert_eq!(c.every, Duration::from_secs(30));
+    assert_eq!(c.because, vec![bunko_store::Activity::Reader]);
+    // Five minutes after the last one it is idle again.
+    tokio::time::sleep(Duration::from_secs(310)).await;
+    let c = r.feed.cadence();
+    assert!(!c.active && c.because.is_empty(), "{c:?}");
+    assert_eq!(c.every, Duration::from_secs(300));
+    let later = pickup(&mut r, "A/v4.cbz").await;
+    assert!(
+        later > Duration::from_secs(60),
+        "back to the idle interval: {later:?}"
+    );
+}
+
+/// Bunko's own writes (their echoes) are not reader activity.
+#[tokio::test(start_paused = true)]
+async fn an_echo_of_bunkos_own_write_does_not_turn_the_feed_active() {
+    let f = FakeBackend::drive_like();
+    seed(&f, &["A/v1.cbz"]);
+    let mut r = rig_with(Arc::new(f), cadence_config(), None);
+    r.ready().await;
+    r.echoes.names.lock().insert("v1.mokuro".into());
+    put(&r.fake, "A/v1.mokuro");
+    r.feed.poll_now();
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert!(r.has("A/v1.mokuro"));
+    let c = r.feed.cadence();
+    assert!(!c.active, "{c:?}");
+    assert_eq!(c.every, Duration::from_secs(300));
+}
+
+/// A bridge request turns the feed active and polls at once; it stays active for five
+/// minutes after the last request, then goes back to the idle interval.
+#[tokio::test(start_paused = true)]
+async fn a_bridge_request_polls_at_once_and_holds_the_active_interval_for_five_minutes() {
+    let f = FakeBackend::drive_like();
+    seed(&f, &["A/v1.cbz"]);
+    let mut r = rig_with(Arc::new(f), cadence_config(), None);
+    r.ready().await;
+    // Well inside the idle wait.
+    tokio::time::sleep(Duration::from_secs(20)).await;
+    put(&r.fake, "A/v2.cbz");
+    let t = Instant::now();
+    r.feed.note_activity(bunko_store::Activity::Bridge);
+    assert_eq!(r.next().await, added("A/v2.cbz", false));
+    assert!(
+        Instant::now() - t < Duration::from_secs(2),
+        "the first signal polls at once: {:?}",
+        Instant::now() - t
+    );
+    // Only the bridge from now on (the upload above was reader activity too): let
+    // that lapse while requests keep coming.
+    for _ in 0..12 {
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        r.feed.note_activity(bunko_store::Activity::Bridge);
+    }
+    let c = r.feed.cadence();
+    assert_eq!(c.because, vec![bunko_store::Activity::Bridge]);
+    assert_eq!(c.every, Duration::from_secs(30));
+    // Polls every 30 s while active …
+    let before = r.fake.calls(FakeOp::Changes);
+    tokio::time::sleep(Duration::from_secs(120)).await;
+    let polls = r.fake.calls(FakeOp::Changes) - before;
+    assert!(
+        (3..=5).contains(&polls),
+        "about four polls in 2 min: {polls}"
+    );
+    // … (the last request was 2 min ago: 3 min to go) and every 5 min after.
+    tokio::time::sleep(Duration::from_secs(185)).await;
+    let c = r.feed.cadence();
+    assert!(!c.active, "{c:?}");
+    let before = r.fake.calls(FakeOp::Changes);
+    tokio::time::sleep(Duration::from_secs(600)).await;
+    let polls = r.fake.calls(FakeOp::Changes) - before;
+    assert!(
+        (1..=3).contains(&polls),
+        "idle: about two polls in 10 min: {polls}"
+    );
+    // A signal while active does not poll again at once.
+    r.feed.note_activity(bunko_store::Activity::Ocr);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let before = r.fake.calls(FakeOp::Changes);
+    r.feed.note_activity(bunko_store::Activity::Ocr);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(r.fake.calls(FakeOp::Changes), before);
+}
+
+/// OCR work keeps the feed active for as long as it is noted, and five minutes past
+/// the last note.
+#[tokio::test(start_paused = true)]
+async fn ocr_work_keeps_the_feed_active() {
+    let f = FakeBackend::drive_like();
+    seed(&f, &["A/v1.cbz"]);
+    let mut r = rig_with(Arc::new(f), cadence_config(), None);
+    r.ready().await;
+    // The scheduler notes a claim in flight every second for 20 minutes: the feed
+    // polls every 30 s all that time (idle, it would have polled four times).
+    let before = r.fake.calls(FakeOp::Changes);
+    for _ in 0..1200 {
+        r.feed.note_activity(bunko_store::Activity::Ocr);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    let polls = r.fake.calls(FakeOp::Changes) - before;
+    assert!(
+        (39..=42).contains(&polls),
+        "polls in 20 min of OCR: {polls}"
+    );
+    let c = r.feed.cadence();
+    assert_eq!(c.because, vec![bunko_store::Activity::Ocr]);
+    tokio::time::sleep(Duration::from_secs(7)).await;
+    let got = pickup(&mut r, "A/v2.cbz").await;
+    assert!(got <= Duration::from_secs(31), "{got:?}");
+    // The upload made it reader activity too; both lapse five minutes on.
+    tokio::time::sleep(Duration::from_secs(301)).await;
+    assert!(!r.feed.cadence().active);
+}
+
+/// A push feed (MEGA) hears of changes anyway: activity changes nothing.
+#[tokio::test(start_paused = true)]
+async fn a_push_feed_ignores_activity() {
+    let f = FakeBackend::mega_like();
+    seed(&f, &["A/v1.cbz"]);
+    let mut r = rig_with(Arc::new(f), cadence_config(), None);
+    r.ready().await;
+    let waits = r.fake.calls(FakeOp::WaitChange);
+    r.feed.note_activity(bunko_store::Activity::Bridge);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(r.fake.calls(FakeOp::WaitChange), waits, "no extra poll");
+    let c = r.feed.cadence();
+    assert!(c.push && !c.active && c.because.is_empty(), "{c:?}");
+    // Changes still arrive at once.
+    let got = pickup(&mut r, "A/v2.cbz").await;
+    assert!(got < Duration::from_secs(2), "{got:?}");
+}
+
+/// Regression: another install's lease heartbeat (it rewrites `.mokuro-bunko.json`
+/// every `ttl / 3`, 5 min by default) and its queue files (a pre-release's root file,
+/// and each series' `.mokuro-series-queue.json` of the queue file v2) are foreign
+/// changes, but no reader's: counted, a standby install polled at the active interval
+/// for good.
+#[tokio::test(start_paused = true)]
+async fn another_installs_control_files_are_not_reader_activity() {
+    let f = FakeBackend::drive_like();
+    seed(&f, &["A/v1.cbz"]);
+    let mut r = rig_with(Arc::new(f), cadence_config(), None);
+    r.ready().await;
+    let before = r.fake.calls(FakeOp::Changes);
+    for round in 0..3u8 {
+        r.fake
+            .reader_put("mokuro-reader/.mokuro-bunko.json", &[b'{', round, b'}']);
+        r.fake
+            .reader_put("mokuro-reader/.mokuro-queue.json", &[b'[', round, b']']);
+        r.fake.reader_put(
+            "mokuro-reader/A/.mokuro-series-queue.json",
+            &[b'{', round, b'}'],
+        );
+        r.feed.poll_now();
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        let c = r.feed.cadence();
+        assert!(!c.active && c.because.is_empty(), "round {round}: {c:?}");
+    }
+    r.fake.reader_delete("mokuro-reader/.mokuro-queue.json");
+    r.fake
+        .reader_delete("mokuro-reader/A/.mokuro-series-queue.json");
+    r.feed.poll_now();
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert!(
+        r.fake.calls(FakeOp::Changes) - before >= 4,
+        "the feed polled"
+    );
+    assert!(!r.feed.cadence().active, "{:?}", r.feed.cadence());
+    // A reader's own file in the root still counts.
+    r.drain();
+    put(&r.fake, "notes.json");
+    r.feed.poll_now();
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert_eq!(
+        r.feed.cadence().because,
+        vec![bunko_store::Activity::Reader]
+    );
+}

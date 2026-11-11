@@ -249,3 +249,44 @@ fn a_volume_finished_between_two_looks_is_still_named_done() {
             .is_empty()
     );
 }
+
+/// A job held on its own (an outdated file written again, or an upgrade, waits while
+/// this Bunko claims a cloud library) is untimed, but its row is not held: the marker
+/// names no held row and the row's other jobs are not shown held (regression: the
+/// whole row went into `held_rows`).
+#[test]
+fn a_job_held_on_its_own_holds_no_row() {
+    let mut h = harness(vec![primary()]);
+    h.add("A/A 1.cbz", 4);
+    h.add("A/A 2.cbz", 4);
+    h.add("B/B 1.cbz", 4);
+    h.at(0.0);
+    let mut p = h.connect("box", 1);
+    let _ = p.drain();
+    let row = primary();
+    let s = h.s.series_queue_snapshot();
+    assert!(s.held_rows.is_empty(), "{:?}", s.held_rows);
+    // A waiting volume's file is outdated (written again in place) while the library
+    // is being claimed.
+    let (key, folder, stem) = s
+        .series
+        .iter()
+        .flat_map(|(k, l)| l.vols.iter().map(move |(st, j)| (k, &l.folder, st, j)))
+        .find(|(_, _, _, j)| matches!(j[0].state, LiveState::Queued { .. }))
+        .map(|(k, f, st, _)| (k.clone(), f.clone(), st.clone()))
+        .expect("a waiting volume");
+    h.s.owed
+        .volumes
+        .get_mut(&format!("{folder}/{stem}.cbz"))
+        .unwrap()
+        .outdated = vec![row.id.as_str().into()];
+    h.s.upgrade_held = Some("Upgrades wait until this Bunko holds the library".into());
+    // As the tick does when the hold begins.
+    h.s.pending_cache = None;
+    let s = h.s.series_queue_snapshot();
+    assert!(s.held_rows.is_empty(), "{:?}", s.held_rows);
+    assert_eq!(
+        states(&s, &key, &stem),
+        [(row.name.clone(), LiveState::Queued { e: None })]
+    );
+}

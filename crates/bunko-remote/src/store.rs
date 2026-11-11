@@ -145,7 +145,8 @@ pub struct RemoteStoreConfig {
     /// The first retry delay of an outbox op (doubles per attempt, capped at 5 min).
     pub retry_base: Duration,
     /// The series queue files' batch window W (queue file v2 §6.4); `None`: per
-    /// provider (WebDAV 30 s, Drive and OneDrive 120 s, MEGA 300 s).
+    /// provider (a local folder 15 s, WebDAV 30 s, Drive and OneDrive 120 s, MEGA
+    /// 300 s).
     pub queue_floor: Option<Duration>,
     /// `status_files`: the lease holder writes each series' OCR queue file into the
     /// store and the queue's block into its marker (queue file v2 §6.10; default on).
@@ -1226,6 +1227,11 @@ impl<B: Backend> RemoteStore<B> {
         self.core.feed.state()
     }
 
+    /// The change feed's poll cadence now (§5.3).
+    pub fn poll_cadence(&self) -> crate::feed::PollCadence {
+        self.core.feed.cadence()
+    }
+
     /// Wait (blocking: a content-kind call) until the feed is steady; `false` on
     /// timeout.
     pub fn wait_steady(&self, timeout: Duration) -> bool {
@@ -1881,6 +1887,14 @@ impl<B: Backend> LibraryStore for RemoteStore<B> {
         }
     }
 
+    /// The fence is shut because this Bunko is still claiming the library (§9.2): its
+    /// first sync, the settle wait (with what is left), or confirming its claim.
+    fn claiming(&self) -> Option<bunko_store::Claiming> {
+        self.core
+            .claiming()
+            .map(|left| bunko_store::Claiming { left })
+    }
+
     fn case_winner(&self, parent: &Path, fold: &str) -> Option<String> {
         let rel = self.rel(parent).ok()?;
         let idx = self.core.index.lock();
@@ -1889,5 +1903,11 @@ impl<B: Backend> LibraryStore for RemoteStore<B> {
             .into_iter()
             .next()
             .map(|v| v.name)
+    }
+
+    /// The change feed's poll cadence (§5.3): a bridge request, OCR work or a
+    /// reader's direct write keeps it at the active interval for five minutes.
+    fn note_activity(&self, why: bunko_store::Activity) {
+        self.core.feed.note_activity(why);
     }
 }

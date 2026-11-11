@@ -167,6 +167,8 @@ fn profiles() -> Vec<Profile> {
         ("webdav_cas", FakeBackend::webdav_cas),
         ("onedrive_like", FakeBackend::onedrive_like),
         ("mega_like", FakeBackend::mega_like),
+        ("folder_like", FakeBackend::folder_like),
+        ("folder_like_ci", FakeBackend::folder_like_ci),
     ]
 }
 

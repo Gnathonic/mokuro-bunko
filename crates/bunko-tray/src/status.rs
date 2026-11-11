@@ -167,13 +167,14 @@ impl Storage {
         !self.backend.is_empty() && self.backend != "local"
     }
 
-    /// "Google Drive", "OneDrive", "MEGA", "WebDAV".
+    /// "Google Drive", "OneDrive", "MEGA", "WebDAV", "Local folder".
     pub fn name(&self) -> &'static str {
         match self.backend.as_str() {
             "gdrive" => "Google Drive",
             "onedrive" => "OneDrive",
             "mega" => "MEGA",
             "webdav" => "WebDAV",
+            "folder" => "Local folder",
             _ => "This computer",
         }
     }
@@ -304,6 +305,18 @@ pub(crate) mod tests {
         assert_eq!(s.stats.as_ref().unwrap().cpu_cores_busy, Some(6.5));
         assert_eq!(s.library_url(), Some("https://lib.example"));
         assert!(s.can_pause());
+    }
+
+    #[test]
+    fn a_folder_library_is_named_local_folder() {
+        let st = |backend: &str| Storage {
+            backend: backend.into(),
+            ..Storage::default()
+        };
+        assert_eq!(st("folder").name(), "Local folder");
+        assert!(st("folder").is_cloud());
+        assert_eq!(st("local").name(), "This computer");
+        assert_eq!(st("webdav").name(), "WebDAV");
     }
 
     #[test]

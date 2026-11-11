@@ -41,14 +41,25 @@ storage:
   base_path: "/var/lib/mokuro-bunko"
 
   # Where the library is. Default: local (base_path/library/). A cloud
-  # library is the Mokuro Reader folder of a cloud account; connect it in
+  # library is the Mokuro Reader folder of a cloud account; connect it (or a
+  # library folder) in
   # the setup wizard, the admin panel's Storage tab or with
   # `mokuro-bunko library connect`, which also does the sign-in. Passwords
   # and tokens are never kept in this file. All keys:
   # docs/configuration.md, "Library location".
   # library:
-  #   backend: local          # local | gdrive | onedrive | mega | webdav
+  #   backend: local          # local | folder | gdrive | onedrive | mega | webdav
   #   folder: mokuro-reader   # the library folder in the cloud account
+  #
+  # A folder you choose instead (the one Mokuro Reader's Local Folder uses),
+  # read and written in place; distinct from local:
+  # library:
+  #   backend: folder
+  #   path: /srv/manga        # Windows: D:\Manga
+  #   # Where a browser on another computer (setup wizard, admin Storage tab)
+  #   # may choose a library folder; none unless listed. Only this file and
+  #   # MOKURO_LIBRARY_FOLDER_ROOTS set it.
+  #   folder_roots: [/srv/manga]
 
 registration:
   # Registration mode:

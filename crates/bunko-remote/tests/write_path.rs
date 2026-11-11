@@ -1370,6 +1370,77 @@ fn a_clean_restart_resumes_the_lease_at_once_with_the_same_epoch() {
     assert_eq!(t.s().health(), Health::Online);
 }
 
+/// A Sync write while this Bunko is still claiming the library (its settle wait) is
+/// refused before the store takes the caller's bytes: the caller keeps its file, as on
+/// an outbox-full refusal, and nothing of it is left in the outbox or the cloud. (An
+/// upgrade's result was moved into
+/// the outbox and dropped with the refused op, and the upgrade then failed on its own
+/// vanished file: "No such file or directory".)
+#[test]
+fn a_sync_write_refused_while_claiming_keeps_the_callers_file() {
+    let t = T::with(
+        FakeBackend::drive_like(),
+        &[("S/", b""), ("S/v.mokuro", b"old")],
+        lease_slow,
+    );
+    t.wait_steady();
+    wait_until("the claim's settle wait", || {
+        t.s().lease().and_then(|l| l.claiming_left()).is_some()
+    });
+    let src = t.local("result", b"new");
+    let w = WriteIntent::new(
+        Mode::Replace { base: None },
+        Origin::Upgrade,
+        Durability::Sync,
+    );
+    let e = fs::publish(&src, t.abs("S/v.mokuro"), &w).unwrap_err();
+    assert!(
+        matches!(
+            bunko_store::classify(&e),
+            bunko_store::ErrorClass::LeaseClaiming { .. }
+        ),
+        "{e}"
+    );
+    assert_eq!(
+        std::fs::read(&src).unwrap(),
+        b"new",
+        "the caller keeps its file"
+    );
+    assert!(
+        t.s().outbox().iter().all(|o| o.dest != "S/v.mokuro"),
+        "{:?}",
+        t.s().outbox()
+    );
+    let node = t.fake.node_at(&format!("{FOLDER}/S/v.mokuro")).unwrap();
+    assert_eq!(t.fake.content(&node.pid).unwrap(), b"old");
+}
+
+/// The store says whether this Bunko is still claiming the library, with what is left
+/// of the settle wait; once it holds the library it is not, and a Sync write goes.
+#[test]
+fn the_store_says_it_is_claiming_until_it_holds_the_library() {
+    let t = T::with(FakeBackend::drive_like(), &[("S/", b"")], lease_slow);
+    t.wait_steady();
+    wait_until("the claim's settle wait", || {
+        t.s().lease().and_then(|l| l.claiming_left()).is_some()
+    });
+    let claiming = t.s().claiming().expect("the store says it is claiming");
+    assert!(
+        claiming.left.is_some_and(|l| l > Duration::from_secs(3000)),
+        "{claiming:?}"
+    );
+    drop(t);
+
+    let t = T::with(FakeBackend::drive_like(), &[("S/", b"")], lease_quick);
+    t.wait_steady();
+    wait_holder(t.s());
+    assert_eq!(t.s().claiming(), None);
+    let w = WriteIntent::new(Mode::CreateNew, Origin::Upgrade, Durability::Sync);
+    t.publish("S/v.mokuro", b"new", w);
+    let node = t.fake.node_at(&format!("{FOLDER}/S/v.mokuro")).unwrap();
+    assert_eq!(t.fake.content(&node.pid).unwrap(), b"new");
+}
+
 #[test]
 fn a_crash_during_the_claim_settle_resumes_the_lease_at_once() {
     let mut t = T::with(FakeBackend::drive_like(), &[], lease_slow);

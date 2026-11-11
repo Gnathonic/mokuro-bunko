@@ -858,3 +858,44 @@ async fn a_renamed_main_keeps_its_sealed_block_in_the_cloud() {
     server.assert_no_staging_leak().await;
     server.stop().await;
 }
+
+/// Regression (§5.3 poll cadence): a bridge request turns the cloud library's change
+/// feed to its active interval (Drive: 30 s, from the idle 5 min) and polls at once;
+/// the admin storage status shows the cadence and why. Nothing noted bridge requests
+/// before, so the feed stayed idle while a reader used the library through Bunko.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_bridge_request_turns_the_cloud_feed_to_its_active_interval() {
+    use bunko_remote::fake::FakeOp;
+    let fake = fake_library(FakeBackend::drive_like());
+    let server = Server::start(&fake, no_lease).await;
+    let store = server.store();
+    eventually("the feed is idle", Duration::from_secs(30), || {
+        !store.poll_cadence().active
+    })
+    .await;
+    let st = server.admin_storage().await;
+    assert_eq!(
+        st["poll"],
+        serde_json::json!({"push": false, "every_s": 300, "active": false, "because": []}),
+        "{st}"
+    );
+    // Settle into the idle wait, then a reader asks through the bridge.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let polls = fake.calls(FakeOp::Changes);
+    let r = server
+        .dav("PROPFIND", "/mokuro-reader/", &[("depth", "1")], None)
+        .await;
+    assert_eq!(r.status, 207, "{}", r.text());
+    let c = store.poll_cadence();
+    assert!(c.active, "{c:?}");
+    assert_eq!(c.because, vec![bunko_store::Activity::Bridge]);
+    assert_eq!(c.every, Duration::from_secs(30));
+    eventually("a poll at once", Duration::from_secs(5), || {
+        fake.calls(FakeOp::Changes) > polls
+    })
+    .await;
+    let st = server.admin_storage().await;
+    assert_eq!(st["poll"]["every_s"], 30, "{st}");
+    assert_eq!(st["poll"]["because"], serde_json::json!(["bridge"]), "{st}");
+    server.stop().await;
+}

@@ -448,7 +448,7 @@
                     <h3 class="settings-section__title">Library</h3>
                     <dl class="kv">
                         <div><dt>Where</dt><dd id="st-provider">-</dd></div>
-                        <div><dt>Account</dt><dd id="st-account">-</dd></div>
+                        <div id="st-account-row"><dt>Account</dt><dd id="st-account">-</dd></div>
                         <div><dt>Folder</dt><dd id="st-folder">-</dd></div>
                         <div id="st-pairing-row" hidden><dt>Pairing</dt><dd id="st-pairing">-</dd></div>
                         <div><dt>Health</dt><dd id="st-health">-</dd></div>
@@ -476,6 +476,7 @@
                         <label class="form-label" for="sc-provider">Where does your library live?</label>
                         <select class="form-select" id="sc-provider" onchange="storageConnectForm()">
                             <option value="local">This computer</option>
+                            <option value="folder">Local folder</option>
                             <option value="gdrive">Google Drive</option>
                             <option value="onedrive">OneDrive</option>
                             <option value="mega">MEGA</option>
@@ -501,6 +502,18 @@
                         <div class="form-group"><label class="form-label" for="sc-dav-user">User</label><input class="form-input" id="sc-dav-user" autocomplete="off"></div>
                         <div class="form-group"><label class="form-label" for="sc-dav-password">App password</label><input class="form-input" id="sc-dav-password" type="password" autocomplete="off"></div>
                         <label class="check"><input type="checkbox" id="sc-dav-http"> Allow http:// (a server on your own network; one on this computer, localhost or 127.0.0.1, needs no tick)</label>
+                    </div>
+                    <div id="sc-folder" hidden>
+                        <div class="form-group">
+                            <label class="form-label" for="sc-folder-path">The library folder</label>
+                            <div class="fs-row">
+                                <input class="form-input" id="sc-folder-path" placeholder="/srv/manga or D:\Manga" autocomplete="off" autocapitalize="off" spellcheck="false">
+                                <button type="button" class="btn btn--secondary btn--sm" id="sc-folder-browse" onclick="storageBrowse()" hidden>Browse…</button>
+                            </div>
+                            <p class="form-hint">The folder Mokuro Reader's Local Folder uses; Bunko reads and writes it in place. The full path as this server sees it. In Docker, mount the folder into the container first (for example <code>-v /srv/manga:/library</code>) and type <code>/library</code>.</p>
+                            <p class="form-hint" id="sc-folder-pinned" hidden>Set by MOKURO_LIBRARY_PATH.</p>
+                        </div>
+                        <div class="fs-picker" id="sc-folder-picker" hidden></div>
                     </div>
                     <div class="connectivity-section__actions">
                         <button class="btn btn--primary btn--sm" id="sc-connect" onclick="storageConnect(null)">Connect</button>

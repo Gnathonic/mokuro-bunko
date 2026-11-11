@@ -5,6 +5,8 @@
 // choice, "Create it?", Sign in again, Change pairing (a Disconnect, then a Connect
 // with the other reader), Disconnect (Wait / Export / Discard), Take over, readers,
 // "Keep this copy" / "Keep that copy" of a blocked case merge; "Recent merges".
+// A library in a folder you choose (Local folder) connects like a cloud one, with a
+// typed path or, for an admin on this machine, Browse… (`/_admin/api/fs`).
 // Nothing here ever sees a token or a password beyond the form it was typed into.
 'use strict';
 
@@ -13,8 +15,13 @@ let storageState = null;
 let storageUsersLoaded = false;
 
 const STORAGE_NAMES = {
-    local: 'This computer', gdrive: 'Google Drive', onedrive: 'OneDrive', mega: 'MEGA', webdav: 'WebDAV server',
+    local: 'This computer', folder: 'Local folder', gdrive: 'Google Drive', onedrive: 'OneDrive', mega: 'MEGA', webdav: 'WebDAV server',
 };
+
+// "Disconnect the …": the provider as a sentence names it.
+function stTheLibrary(st) {
+    return st.backend === 'folder' ? 'library folder' : (st.provider || 'cloud') + ' library';
+}
 
 function stEl(id) { return document.getElementById(id); }
 
@@ -54,6 +61,17 @@ function stHealth(st) {
     }
 }
 
+// How often the feed asks the provider for changes, and why (0.8 §5.3).
+const POLL_BECAUSE = { ocr: 'OCR running', bridge: 'reader requests through Bunko', reader: 'reader changes in the cloud' };
+function stPoll(p) {
+    if (!p) return '';
+    if (p.push) return ' (the provider pushes its changes)';
+    const s = p.every_s;
+    const every = s >= 60 && s % 60 === 0 ? (s / 60) + ' min' : s + ' s';
+    const why = (p.because || []).map((b) => POLL_BECAUSE[b]).filter(Boolean);
+    return ' · checks every ' + every + ' (' + (why.length ? why.join(', ') : p.active ? 'active' : 'idle') + ')';
+}
+
 function startStoragePolling() {
     stopStoragePolling();
     const tick = async () => {
@@ -79,14 +97,17 @@ async function loadStorage() {
     }
     storageState = st;
     const cloud = st.backend !== 'local';
+    const folder = st.backend === 'folder';
     stText('st-provider', STORAGE_NAMES[st.backend] || st.provider);
+    // A library folder has no account: its path is the Folder row.
+    stEl('st-account-row').hidden = folder;
     stText('st-account', cloud ? (st.account || 'not signed in') : '');
-    stText('st-folder', st.folder);
+    stText('st-folder', folder ? (st.path || st.account) : st.folder);
     stEl('st-pairing-row').hidden = !st.pairing;
     stText('st-pairing', stPairing(st.pairing) + (st.pairing_change ? ' — configured ' + stPairing(st.pairing_change.configured) + ', connected ' + stPairing(st.pairing_change.connected) : ''));
     stText('st-health', stHealth(st));
     const sync = st.sync;
-    stText('st-sync', st.engine === 'steady' ? 'Up to date' : st.engine === 'full-sync' && sync
+    stText('st-sync', st.engine === 'steady' ? 'Up to date' + stPoll(st.poll) : st.engine === 'full-sync' && sync
         ? 'First sync: ' + (sync.total ? sync.done + ' of ' + sync.total : sync.done + ' listed') : st.engine || '-');
     stEl('st-store-row').hidden = !st.store_id;
     stText('st-store', st.store_id);
@@ -107,7 +128,7 @@ async function loadStorage() {
     stEl('st-reauth').hidden = !needsAuth || !!st.pairing_change;
     stEl('st-disconnect').hidden = !cloud;
     stEl('st-pairing-change').hidden = !(st.backend === 'gdrive' && st.pairing && !st.pairing.startsWith('custom'));
-    stEl('st-change').textContent = cloud ? 'Use another library…' : 'Keep the library in the cloud…';
+    stEl('st-change').textContent = cloud ? 'Use another library…' : 'Keep the library in a folder or the cloud…';
     // Readers.
     stEl('sr-serve').checked = !!st.serve_readers;
     stEl('sr-progress-row').hidden = !(cloud && st.serve_readers);
@@ -227,6 +248,10 @@ function storageShowConnect(reauth) {
         stEl('sc-provider').value = conf.backend;
     }
     if (conf.google_project && conf.google_project !== 'custom') stEl('sc-reader-select').value = conf.google_project;
+    const pinnedPath = (conf.pinned || {}).path;
+    if (pinnedPath || (conf.path && !stEl('sc-folder-path').value)) stEl('sc-folder-path').value = pinnedPath || conf.path;
+    stEl('sc-folder-path').readOnly = !!pinnedPath;
+    stEl('sc-folder-pinned').hidden = !pinnedPath;
     if (conf.webdav) {
         if (conf.webdav.url) stEl('sc-dav-url').value = conf.webdav.url;
         if (conf.webdav.username) stEl('sc-dav-user').value = conf.webdav.username;
@@ -245,10 +270,15 @@ function storageConnectForm() {
     if (custom) stEl('sc-custom').textContent = 'Pairing: ' + (conf.custom_pairing_label || 'custom') + ' (storage.library.oauth.google).';
     stEl('sc-mega').hidden = p !== 'mega';
     stEl('sc-webdav').hidden = p !== 'webdav';
+    stEl('sc-folder').hidden = p !== 'folder';
+    if (p !== 'folder') stEl('sc-folder-picker').hidden = true;
+    // Browse… lists this machine's folders: for a browser on this machine only (the
+    // server refuses anyone else).
+    stEl('sc-folder-browse').hidden = !STORAGE_LOOPBACK || stEl('sc-folder-path').readOnly;
     // OneDrive's code is for work or school accounts (personal ones cannot use one).
     stEl('sc-code').hidden = !(p === 'gdrive' || p === 'onedrive');
     stEl('sc-code').textContent = p === 'onedrive' ? 'Use a sign-in code (work or school)' : 'Use a code instead';
-    stEl('sc-connect').textContent = p === 'local' ? 'Use this computer' : 'Connect';
+    stEl('sc-connect').textContent = p === 'local' ? 'Use this computer' : p === 'folder' ? 'Use this folder' : 'Connect';
 }
 
 const STORAGE_LOOPBACK = ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname);
@@ -266,8 +296,16 @@ async function storageConnect(flow) {
         loadStorage();
         return;
     }
-    if (st.backend === 'local' && !confirm('Keep the library in ' + STORAGE_NAMES[p] + ' instead? This is a different library: the one on this computer stays where it is.')) return;
+    const path = stEl('sc-folder-path').value.trim();
+    if (p === 'folder') {
+        // A full path: /…, ~, a drive letter (D:\ or D:/) or a share (\\server\share).
+        if (!path) { showToast('Enter the folder\'s full path.', 'error'); return; }
+        if (!/^(\/|~|[A-Za-z]:[\\/]|\\\\)/.test(path)) { showToast('Enter the full path: it starts with / or a drive letter.', 'error'); return; }
+    }
+    const where = p === 'folder' ? path : STORAGE_NAMES[p];
+    if (st.backend === 'local' && !confirm('Keep the library in ' + where + ' instead? This is a different library: the one on this computer stays where it is.')) return;
     const body = { provider: p };
+    if (p === 'folder') body.path = path;
     if (p === 'gdrive' && !stEl('sc-reader').hidden) body.reader = stEl('sc-reader-select').value;
     if (p === 'mega') body.mega = { email: stEl('sc-mega-email').value.trim(), password: stEl('sc-mega-password').value, totp: stEl('sc-mega-totp').value.trim() || null };
     if (p === 'webdav') body.webdav = { url: stEl('sc-dav-url').value.trim(), username: stEl('sc-dav-user').value.trim(), password: stEl('sc-dav-password').value, allow_http: stEl('sc-dav-http').checked };
@@ -363,7 +401,7 @@ function renderStorageConnect(c, st) {
             p(c.message || 'This is another account.');
             const use = document.createElement('button');
             use.className = 'btn btn--danger btn--sm';
-            use.textContent = 'Use this account\'s library instead';
+            use.textContent = c.provider === 'folder' ? 'Use this folder instead' : 'Use this account\'s library instead';
             use.onclick = async () => {
                 try { await apiPost('/storage/connect/account', { use_this_account: true }); } catch (err) { showToast(err.message, 'error'); }
                 loadStorage();
@@ -380,7 +418,7 @@ function renderStorageConnect(c, st) {
         }
         case 'connected': {
             const ck = c.check || {};
-            p('Connected as ' + (c.account || '?') + '. ' + (ck.summary || ''));
+            p((c.provider === 'folder' ? 'Folder: ' + (ck.folder || c.account || '?') : 'Connected as ' + (c.account || '?')) + '. ' + (ck.summary || ''));
             if (ck.pairing || c.pairing) p('Pairing: ' + stPairing(ck.pairing || c.pairing) + ' · ' + (ck.volumes || 0) + ' volumes visible.');
             if (ck.warning) p(ck.warning);
             if (ck.lease) p(ck.lease);
@@ -389,7 +427,7 @@ function renderStorageConnect(c, st) {
             if (!ck.found) {
                 const create = document.createElement('button');
                 create.className = 'btn btn--primary btn--sm';
-                create.textContent = 'Create ' + (ck.folder || 'mokuro-reader') + '/';
+                create.textContent = c.provider === 'folder' ? 'Create it' : 'Create ' + (ck.folder || 'mokuro-reader') + '/';
                 create.onclick = async () => {
                     try { await apiPost('/storage/connect/create', {}); showToast('Created.', 'success'); } catch (err) { showToast(err.message, 'error'); }
                     loadStorage();
@@ -428,13 +466,82 @@ function renderStorageConnect(c, st) {
     }
 }
 
+// ---- Browse… (Local folder, an admin on this machine only) ------------------------------
+
+// An inline folder browser over /_admin/api/fs: the current folder, Up, the drives
+// (Windows), the subfolders, and "Use this folder", which fills the path.
+function storageBrowse() {
+    const box = stEl('sc-folder-picker');
+    const input = stEl('sc-folder-path');
+    const el = (tag, cls, text) => {
+        const e = document.createElement(tag);
+        if (cls) e.className = cls;
+        if (text != null) e.textContent = text;
+        return e;
+    };
+    const at = el('p', 'fs-picker__path');
+    const list = el('ul', 'fs-picker__list');
+    const err = el('p', 'form-error');
+    err.setAttribute('role', 'alert');
+    err.hidden = true;
+    const actions = el('div', 'fs-picker__actions');
+    const close = el('button', 'btn btn--secondary btn--sm', 'Close');
+    const use = el('button', 'btn btn--primary btn--sm', 'Use this folder');
+    close.type = use.type = 'button';
+    actions.append(close, use);
+    box.replaceChildren(at, list, err, actions);
+    box.hidden = false;
+    let current = null;
+    const row = (label, path) => {
+        const li = el('li');
+        const b = el('button', 'fs-picker__item', label);
+        b.type = 'button';
+        b.onclick = () => load(path, false);
+        li.appendChild(b);
+        return li;
+    };
+    async function load(path, first) {
+        let d;
+        try {
+            d = await apiGet('/fs?path=' + encodeURIComponent(path || ''));
+        } catch (e) {
+            // A typed path that is not there yet: start at the home folder.
+            if (first && path) return load('', false);
+            err.textContent = e.message;
+            err.hidden = false;
+            return;
+        }
+        err.hidden = true;
+        current = d;
+        at.textContent = d.path;
+        const join = (n) => d.path + (d.path.endsWith(d.sep) ? '' : d.sep) + n;
+        const items = [];
+        if (d.parent) items.push(row('\u2191 Up', d.parent));
+        (d.drives || []).filter((x) => x !== d.path).forEach((x) => items.push(row(x, x)));
+        d.dirs.forEach((n) => items.push(row('\u{1F4C1} ' + n, join(n))));
+        if (!d.dirs.length) items.push(el('li', 'fs-picker__empty', 'No folders in here.'));
+        if (d.truncated) items.push(el('li', 'fs-picker__empty', 'This folder holds more than 5,000 entries: only some are shown. Type the path to go further.'));
+        list.replaceChildren(...items);
+    }
+    close.onclick = () => { box.hidden = true; };
+    use.onclick = () => {
+        if (current) input.value = current.path;
+        box.hidden = true;
+        input.focus();
+    };
+    load(input.value.trim(), true);
+}
+
 // ---- Disconnect, pairing, lease -------------------------------------------------------
 
 async function storageDisconnect(mode, waitS) {
     const st = storageState || {};
     let body = { mode: mode };
     if (mode === 'wait') {
-        if (waitS == null && !confirm('Disconnect the ' + (st.provider || 'cloud') + ' library? Bunko uploads what it still owes first, then forgets its sign-in and local index. Nothing in the cloud is deleted.')) return false;
+        const what = st.backend === 'folder'
+            ? 'Bunko writes what it still owes first, then forgets its local index. Disconnect leaves every file in the folder where it is.'
+            : 'Bunko uploads what it still owes first, then forgets its sign-in and local index. Nothing in the cloud is deleted.';
+        if (waitS == null && !confirm('Disconnect the ' + stTheLibrary(st) + '? ' + what)) return false;
         body.wait_s = waitS || 20;
     } else if (mode === 'export') {
         // Bunko picks the folder (a new one under its storage folder's exports/); the

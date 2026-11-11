@@ -2,7 +2,8 @@
 //! connected machines, holds, the raw queue-page status, the reader queue file's
 //! content and one volume's outlook (spec ocr-scheduling §15.3, §19–§20, §23–§25).
 
-use std::collections::HashSet;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use bunko_core::generations::Generation;
@@ -272,6 +273,13 @@ impl Scheduler {
         if job.upgrade {
             e.insert("kind".into(), json!("upgrade"));
         }
+        // Held: the plan leaves it out of the lanes and shows why.
+        if let Some(reason) = &self.upgrade_held
+            && self.replaces_in_place(job)
+        {
+            e.insert("held".into(), json!(true));
+            e.insert("reason".into(), json!(reason));
+        }
         let key = self.failure_key_of(job, row);
         let mtime = self.owed.volumes.get(&*job.rel).map(|v| v.mtime);
         if let Some(attempts) = bunko_sched::failures::pending_attempts(
@@ -320,15 +328,18 @@ impl Scheduler {
         pending: &[Map<String, Value>],
         running: &[Map<String, Value>],
     ) -> Vec<Map<String, Value>> {
-        let running_keys: HashSet<String> = running
-            .iter()
-            .map(|j| format!("{:?}", job_identity(j)))
-            .collect();
-        pending
-            .iter()
-            .filter(|e| !running_keys.contains(&format!("{:?}", job_identity(e))))
-            .cloned()
-            .collect()
+        // A few volumes per lane run: they are compared as values, not by a text key
+        // made for each of a large queue's thousands of entries.
+        static NULL: Value = Value::Null;
+        let running_keys: Vec<(Value, Value, Value)> = running.iter().map(job_identity).collect();
+        let runs = |e: &Map<String, Value>| {
+            running_keys.iter().any(|(s, v, g)| {
+                e.get("series").unwrap_or(&NULL) == s
+                    && e.get("volume").unwrap_or(&NULL) == v
+                    && e.get("generation_id").unwrap_or(&NULL) == g
+            })
+        };
+        pending.iter().filter(|e| !runs(e)).cloned().collect()
     }
 
     /// `_lane_machines()`: one entry per lane, by hardware name.
@@ -372,13 +383,32 @@ impl Scheduler {
                 stalled
             }
         };
+        // Asked per item and lane, answered per row and machine: a refusal reads the
+        // machine's profile from disk, and a large queue is tens of thousands of asks.
+        let refusals: RefCell<HashMap<String, HashMap<String, Option<String>>>> =
+            RefCell::default();
         let refusal = |g: &str, machine: &str| -> Option<String> {
             if stalled.contains(machine) {
                 return Some(format!("{machine} takes no new work now"));
             }
-            let row = self.settings.rows.iter().find(|r| r.id == g)?;
-            let m = self.machine_by_name(machine)?;
-            self.refusal(&m.pid, row)
+            if let Some(known) = refusals.borrow().get(g).and_then(|m| m.get(machine)) {
+                return known.clone();
+            }
+            let found = self
+                .settings
+                .rows
+                .iter()
+                .find(|r| r.id == g)
+                .and_then(|row| {
+                    let m = self.machine_by_name(machine)?;
+                    self.refusal(&m.pid, row)
+                });
+            refusals
+                .borrow_mut()
+                .entry(g.to_string())
+                .or_default()
+                .insert(machine.to_string(), found.clone());
+            found
         };
         let hold = |g: &str| -> Option<String> {
             let row = self.settings.rows.iter().find(|r| r.id == g)?;
@@ -556,7 +586,8 @@ impl Scheduler {
         );
         raw.insert(
             "pending_ocr".into(),
-            Value::Array(plan.pending.iter().cloned().map(Value::Object).collect()),
+            // Moved, not copied: a large queue's list is thousands of entries.
+            Value::Array(plan.pending.into_iter().map(Value::Object).collect()),
         );
         raw.insert("queue_done_at".into(), json!(plan.done_at));
         raw.insert(
@@ -818,12 +849,27 @@ impl Scheduler {
         let text = |e: &Map<String, Value>, k: &str| {
             e.get(k).and_then(Value::as_str).unwrap_or("").to_string()
         };
+        let id = |e: &Map<String, Value>| {
+            (
+                text(e, "series"),
+                text(e, "volume"),
+                text(e, "generation_id"),
+            )
+        };
+        // Jobs held one by one before the plan (an upgrade waiting while this Bunko
+        // claims a cloud library): their row is not held, they are only untimed.
+        let held_jobs: HashSet<(String, String, String)> = items
+            .iter()
+            .filter(|e| bunko_sched::py::truthy(e.get("held")))
+            .map(id)
+            .collect();
         // Predicted finishes by (series, volume, row id).
         let mut finish: HashMap<(String, String, String), f64> = HashMap::new();
         let mut held_rows: BTreeSet<String> = BTreeSet::new();
         for e in plan.running.iter().chain(plan.pending.iter()) {
             let gid = text(e, "generation_id");
             if bunko_sched::py::truthy(e.get("held"))
+                && !held_jobs.contains(&id(e))
                 && let Some(name) = name_of.get(gid.as_str())
             {
                 held_rows.insert((*name).to_string());

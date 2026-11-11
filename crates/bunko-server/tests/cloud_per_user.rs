@@ -749,6 +749,19 @@ fn no_poll(c: &mut bunko_remote::RemoteStoreConfig) {
     c.poll_idle = Duration::from_secs(3600);
 }
 
+/// The first bridge request turns the feed active and polls at once (0.8 §5.3): make
+/// one and wait for that poll, so a change made after it stays behind the index (the
+/// next poll is an hour away).
+async fn bridge_polled(e: &Env, fake: &FakeBackend) {
+    let pages = fake.change_pages();
+    let (status, _) = e.get("boss", "/mokuro-reader/Series/Vol%201.cbz").await;
+    assert_eq!(status, 200);
+    eventually("the poll the first bridge request makes", || {
+        fake.change_pages() > pages
+    })
+    .await;
+}
+
 /// A cloud-direct reader rewrites the owner's positions.json behind Bunko's index, on a
 /// provider with no pinned reads (WebDAV): the owner's GET, which sent no precondition,
 /// is never a 412. It answers 503 with a short Retry-After while Bunko reads the
@@ -759,6 +772,7 @@ async fn a_file_changed_behind_the_index_is_a_retry_not_a_412() {
     fake.reader_put(&format!("{ROOT}/Series/Vol 1.cbz"), b"volume");
     fake.reader_put(&format!("{ROOT}/positions.json"), b"{\"v\":1}");
     let e = env_tuned(LibraryBackend::WebDav, Some(fake.clone()), no_poll).await;
+    bridge_polled(&e, &fake).await;
     fake.reader_put(&format!("{ROOT}/positions.json"), b"{\"v\":2}");
     let resp = e
         .app
@@ -802,6 +816,7 @@ async fn a_copy_of_a_file_changed_behind_the_index_is_a_retry_not_a_412() {
     fake.reader_put(&format!("{ROOT}/Series/Vol 1.cbz"), b"volume");
     fake.reader_put(&format!("{ROOT}/Series/notes.txt"), b"one");
     let e = env_tuned(LibraryBackend::WebDav, Some(fake.clone()), no_poll).await;
+    bridge_polled(&e, &fake).await;
     fake.reader_put(&format!("{ROOT}/Series/notes.txt"), b"two");
     let copy = || {
         Request::builder()
@@ -850,6 +865,7 @@ async fn a_large_file_changed_behind_the_index_is_a_retry_before_any_header() {
     fake.reader_put(&format!("{ROOT}/Series/Vol 1.cbz"), b"volume");
     fake.reader_put(&format!("{ROOT}/Series/big.bin"), &big(1));
     let e = env_tuned(LibraryBackend::WebDav, Some(fake.clone()), no_poll).await;
+    bridge_polled(&e, &fake).await;
     fake.reader_put(&format!("{ROOT}/Series/big.bin"), &big(2));
     let resp = e
         .app

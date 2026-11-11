@@ -233,6 +233,42 @@ impl FakeBackend {
         })
     }
 
+    /// A local folder (`folder::FolderBackend`) on a case-sensitive filesystem: path
+    /// ids, unique exact names, creates that never replace (no CAS on a replace),
+    /// unpinned reads, a push feed, atomic replaces, 1 ms mtimes, a trash that
+    /// removes.
+    pub fn folder_like() -> Self {
+        Self::folder("folder_like", Names::Exact)
+    }
+
+    /// A local folder on a filesystem that folds case (NTFS, APFS): as
+    /// [`FakeBackend::folder_like`], with one name per spelling-insensitive key.
+    pub fn folder_like_ci() -> Self {
+        Self::folder("folder_like_ci", Names::CaseInsensitive)
+    }
+
+    fn folder(name: &'static str, names: Names) -> Self {
+        Self::new(Profile {
+            name,
+            caps: BackendCaps {
+                cas_create: true,
+                cas_overwrite: false,
+                pinned_read: false,
+                push: true,
+                atomic_replace: true,
+                mtime_granularity_ns: 1_000_000,
+                path_ids: true,
+                ..base_caps()
+            },
+            ids: Ids::Path,
+            names,
+            replace_is_new_node: false,
+            keeps_revisions: false,
+            roots_anywhere: false,
+            trash_flags: false,
+        })
+    }
+
     /// OneDrive: opaque ids, case-insensitive unique names, CAS, cTag pins.
     pub fn onedrive_like() -> Self {
         Self::new(Profile {
@@ -1526,6 +1562,11 @@ impl Backend for FakeBackend {
                             return Err(BErr::NameConflict);
                         }
                         Some(_) if prof.ids == Ids::Opaque => return Err(BErr::NameConflict),
+                        // Another spelling holds the name (case-insensitive path ids,
+                        // a local folder on NTFS or APFS): not this file's race.
+                        Some(existing) if st.nodes[&existing].name != name.as_bytes() => {
+                            return Err(BErr::NameConflict);
+                        }
                         Some(_) if prof.caps.cas_create => return Err(BErr::PreconditionFailed),
                         Some(existing) => {
                             let freeing = st.nodes[&existing].data.len() as u64;

@@ -10,11 +10,11 @@
 //
 // Environment (unset when the suite has no such party): READER_URL, BUNKO_URL,
 // CLOUDSIM_URL, CLOUDSIM_PREAUTH_URL, RCLONE_URL, RIG_PROVIDER (local|google|microsoft|
-// mega|rclone), RIG_ACCOUNTS (a JSON file: [{username, password, role}] on the Bunko
-// server), RIG_WORKDIR, RIG_FAKEPROC_HOLD (processor-fake holds each volume until this
-// file exists), RIG_CONTEXT (JSON: {sim_account, mega?: {email, password},
-// webdav?: {url, username, password}, library: {series, volumes}, lease?: {ttl_s},
-// uploads?: {dir, files}}) and RIG_CONTROL_URL (the runner's control port, with a Bunko
+// mega|rclone|folder), RIG_ACCOUNTS (a JSON file: [{username, password, role}] on the
+// Bunko server), RIG_WORKDIR, RIG_FAKEPROC_HOLD (processor-fake holds each volume until
+// this file exists), RIG_CONTEXT (JSON: {sim_account, mega?: {email, password},
+// webdav?: {url, username, password}, folder?: {path}, library: {series, volumes},
+// lease?: {ttl_s}, uploads?: {dir, files}}) and RIG_CONTROL_URL (the runner's control port, with a Bunko
 // server: `rig.restartBunko`, `rig.stopBunko`, `rig.startBunko`).
 import { test as base, expect } from '@playwright/test';
 import { readFileSync } from 'node:fs';
@@ -59,6 +59,8 @@ function rigFromEnv() {
         simAccount: context.sim_account ?? 'bunko',
         mega: context.mega,
         webdav: context.webdav,
+        /** The folder provider: Bunko's library folder on this disk (`{path}`). */
+        folder: context.folder,
         library: context.library,
         /** A Bunko server on the cloud: its lease timing (`{ttl_s}`, the store tune). */
         lease: context.lease,

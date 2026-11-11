@@ -118,6 +118,41 @@ fn bytes(n: u64) -> String {
     }
 }
 
+/// How often the change feed asks the provider for changes, and why (0.8 §5.3).
+fn poll_line(p: &Value) -> Option<String> {
+    if !p.is_object() {
+        return None;
+    }
+    if p["push"] == true {
+        return Some("Polling: none (the provider pushes its changes)".to_string());
+    }
+    let s = p["every_s"].as_u64()?;
+    let every = if s >= 60 && s % 60 == 0 {
+        format!("{} min", s / 60)
+    } else {
+        format!("{s} s")
+    };
+    let because: Vec<&str> = p["because"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|b| match b.as_str()? {
+            "ocr" => Some("OCR running"),
+            "bridge" => Some("reader requests through Bunko"),
+            "reader" => Some("reader changes in the cloud"),
+            _ => None,
+        })
+        .collect();
+    let why = if !because.is_empty() {
+        because.join(", ")
+    } else if p["active"] == true {
+        "active".to_string()
+    } else {
+        "idle".to_string()
+    };
+    Some(format!("Polling: every {every} ({why})"))
+}
+
 /// The lines `library status` prints for a `library.storage` block.
 pub fn describe(v: &Value, source: &str) -> Vec<String> {
     let backend = text(&v["backend"]).unwrap_or_else(|| "?".into());
@@ -130,16 +165,24 @@ pub fn describe(v: &Value, source: &str) -> Vec<String> {
         out.push(format!("(from the {source})"));
         return out;
     }
-    let mut first = format!(
-        "Library: {backend}, folder {}",
-        text(&v["folder"]).unwrap_or_default()
-    );
-    if let Some(p) = text(&v["pairing"]) {
-        first.push_str(&format!(" (pairing {p})"));
-    }
-    out.push(first);
-    if let Some(a) = text(&v["account"]) {
-        out.push(format!("Account: {a}"));
+    if backend == "folder" {
+        // The folder is the account: one line says both.
+        out.push(format!(
+            "Library: local folder {}",
+            text(&v["path"]).unwrap_or_else(|| "(storage.library.path is not set)".into())
+        ));
+    } else {
+        let mut first = format!(
+            "Library: {backend}, folder {}",
+            text(&v["folder"]).unwrap_or_default()
+        );
+        if let Some(p) = text(&v["pairing"]) {
+            first.push_str(&format!(" (pairing {p})"));
+        }
+        out.push(first);
+        if let Some(a) = text(&v["account"]) {
+            out.push(format!("Account: {a}"));
+        }
     }
     match text(&v["store_id"]) {
         Some(id) => {
@@ -165,6 +208,9 @@ pub fn describe(v: &Value, source: &str) -> Vec<String> {
             }
         }
         out.push(h);
+        if let Some(line) = poll_line(&v["poll"]) {
+            out.push(line);
+        }
     } else if let Some(indexed) = v["indexed"].as_bool() {
         out.push(format!(
             "Index:   {}",
@@ -389,6 +435,9 @@ pub fn connect_request(
     if a.email.is_some() && a.provider != CloudProvider::Mega {
         return Err(Fail::msg("--email applies to mega only"));
     }
+    if a.path.is_some() && a.provider != CloudProvider::Folder {
+        return Err(Fail::msg("--path applies to folder only"));
+    }
     let lib = &config.storage.library;
     let mut req = ConnectRequest {
         provider: a.provider.as_str().into(),
@@ -431,9 +480,24 @@ pub fn connect_request(
                 totp: totp.filter(|t| !t.trim().is_empty()),
             });
         }
-        _ => {}
+        CloudProvider::Folder => {
+            let path = a.path.as_deref().ok_or_else(|| {
+                Fail::msg("folder needs --path <the folder Mokuro Reader's Local Folder uses>")
+            })?;
+            req.path = Some(full_path(path).to_string_lossy().into_owned());
+        }
+        CloudProvider::Gdrive | CloudProvider::Onedrive => {}
     }
     Ok(req)
+}
+
+/// `--path` as the server sees it: a relative path is taken from this terminal's
+/// folder (the server runs on this machine); `~` is left for the server to expand.
+fn full_path(p: &std::path::Path) -> std::path::PathBuf {
+    if p.is_absolute() || p.to_string_lossy().starts_with('~') {
+        return p.to_path_buf();
+    }
+    std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf())
 }
 
 /// The WebDAV app password: `--password-file`, `MOKURO_WEBDAV_PASSWORD_FILE`, or the
@@ -486,7 +550,7 @@ pub fn connect(ctx: &Ctx, a: crate::cli::LibraryConnectArgs) -> CmdResult {
             )?;
             (Some(pw), Some(totp))
         }
-        _ => (None, None),
+        CloudProvider::Gdrive | CloudProvider::Onedrive | CloudProvider::Folder => (None, None),
     };
     let req = connect_request(&a, &config, secret, totp, flow)?;
     let interactive = std::io::stdin().is_terminal();
@@ -624,8 +688,13 @@ impl Printer {
 /// what happens next, not the wizard's question.
 pub fn check_lines(v: &Value, create: bool) -> Vec<String> {
     let mut out = Vec::new();
+    let folder_library = v["provider"].as_str() == Some("folder");
     if let Some(a) = v["account"].as_str() {
-        out.push(format!("Signed in as {a}."));
+        out.push(if folder_library {
+            format!("Folder: {a}")
+        } else {
+            format!("Signed in as {a}.")
+        });
     }
     let c = &v["check"];
     if let Some(p) = v["pairing"].as_str() {
@@ -636,7 +705,11 @@ pub fn check_lines(v: &Value, create: bool) -> Vec<String> {
     }
     if create && c["found"].as_bool() == Some(false) {
         let folder = c["folder"].as_str().unwrap_or("mokuro-reader");
-        out.push(format!("Creating {folder}/…"));
+        out.push(if folder_library {
+            format!("Creating {folder}…")
+        } else {
+            format!("Creating {folder}/…")
+        });
     } else if let Some(s) = c["summary"].as_str() {
         out.push(s.to_string());
     }
@@ -663,12 +736,27 @@ fn want_create(v: &Value, create: bool, interactive: bool) -> Result<bool, Fail>
     if create {
         return Ok(true);
     }
+    let local = v["provider"].as_str() == Some("folder");
     if !interactive {
-        println!("Run again with --create to make the folder, or create it in the cloud first.");
+        println!(
+            "{}",
+            if local {
+                "Run again with --create to make the folder."
+            } else {
+                "Run again with --create to make the folder, or create it in the cloud first."
+            }
+        );
         return Ok(false);
     }
     let folder = v["check"]["folder"].as_str().unwrap_or("mokuro-reader");
-    crate::prompt::confirm(&format!("Create {folder}/ now?"), Some(true))
+    crate::prompt::confirm(
+        &if local {
+            format!("Create {folder} now?")
+        } else {
+            format!("Create {folder}/ now?")
+        },
+        Some(true),
+    )
 }
 
 fn finished(v: &Value, use_this_account: bool) -> Result<bool, Fail> {
@@ -886,6 +974,7 @@ fn connect_body(req: &bunko_server::storage::connect::ConnectRequest) -> Value {
         "provider": req.provider,
         "reader": req.reader,
         "folder": req.folder,
+        "path": req.path,
         "flow": req.flow,
         "use_this_account": req.use_this_account,
     });
@@ -1184,6 +1273,7 @@ mod tests {
             "account": "me@example.com", "pairing": "release", "connected": true, "problem": null,
             "health": {"state": "syncing", "done": 10, "total": 0}, "engine": "full-sync",
             "sync": {"done": 10, "total": null},
+            "poll": {"push": false, "every_s": 300, "active": false, "because": []},
             "cache": {"blobs": 2, "blob_bytes": 2048, "zipdirs": 1, "blocks": 0, "block_bytes": 0, "spools": 1, "spool_bytes": 5242880},
         });
         let lines = describe(&v, "running server");
@@ -1194,6 +1284,7 @@ mod tests {
                 "Account: me@example.com",
                 "Store:   0123456789abcdef",
                 "Health:  syncing (feed: full-sync), 10 synced",
+                "Polling: every 5 min (idle)",
                 "Cache:   2 small files (2.0 KiB), 1 archive directories, 1 spooled archives (5.0 MiB)",
                 "(from the running server)",
             ]
@@ -1212,6 +1303,17 @@ mod tests {
             "holder": {"name": "nas", "ours": false}});
         assert!(
             describe(&v, "running server").contains(&"Lease:   standby (held by nas)".to_string())
+        );
+        // The feed's cadence (§5.3): what keeps it at the active interval.
+        v["poll"] =
+            json!({"push": false, "every_s": 30, "active": true, "because": ["ocr", "reader"]});
+        assert!(describe(&v, "running server").contains(
+            &"Polling: every 30 s (OCR running, reader changes in the cloud)".to_string()
+        ));
+        v["poll"] = json!({"push": true, "every_s": 300, "active": false, "because": []});
+        assert!(
+            describe(&v, "running server")
+                .contains(&"Polling: none (the provider pushes its changes)".to_string())
         );
     }
 
@@ -1270,6 +1372,10 @@ mod tests {
         );
         let a = connect_args(&["mega", "--email", "me@example.com"]);
         assert_eq!(a.email.as_deref(), Some("me@example.com"));
+        let a = connect_args(&["folder", "--path", "/srv/manga", "--create"]);
+        assert_eq!(a.provider, crate::cli::CloudProvider::Folder);
+        assert_eq!(a.path.as_deref(), Some(std::path::Path::new("/srv/manga")));
+        assert!(a.create);
         assert!(parse(&["library", "connect", "dropbox"]).is_err());
         assert!(parse(&["library", "connect", "gdrive", "--reader", "nightly"]).is_err());
         // No password on the command line, ever.
@@ -1323,6 +1429,90 @@ mod tests {
             connect_request(&a, &config, Some("hunter2".into()), Some(" ".into()), None).unwrap();
         assert_eq!(r.mega.as_ref().unwrap().totp, None);
         assert!(!format!("{r:?}").contains("hunter2"));
+    }
+
+    /// `connect folder --path` sends the path (a relative one from this terminal's
+    /// folder); --path is refused for the clouds, and a folder without it.
+    #[test]
+    fn a_folder_connect_sends_its_path() {
+        let config = bunko_core::Config::default();
+        let full = std::env::temp_dir().join("manga");
+        let full_s = full.to_string_lossy().into_owned();
+        let a = connect_args(&["folder", "--path", &full_s]);
+        let r = connect_request(&a, &config, None, None, None).unwrap();
+        assert_eq!(r.provider, "folder");
+        assert_eq!(r.path.as_deref(), Some(full_s.as_str()));
+        let body = connect_body(&r);
+        assert_eq!(body["provider"], "folder");
+        assert_eq!(body["path"], full_s.as_str());
+        assert!(body.get("webdav").is_none() && body.get("mega").is_none());
+        let a = connect_args(&["folder", "--path", "manga"]);
+        let r = connect_request(&a, &config, None, None, None).unwrap();
+        let sent = std::path::PathBuf::from(r.path.unwrap());
+        assert!(sent.is_absolute() && sent.ends_with("manga"), "{sent:?}");
+        let a = connect_args(&["folder", "--path", "~/Manga"]);
+        let r = connect_request(&a, &config, None, None, None).unwrap();
+        assert_eq!(r.path.as_deref(), Some("~/Manga"));
+        let e = connect_request(&connect_args(&["folder"]), &config, None, None, None)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("--path"), "{e}");
+        for p in ["gdrive", "onedrive", "mega", "webdav"] {
+            let a = connect_args(&[p, "--path", &full_s]);
+            let e = connect_request(&a, &config, Some("x".into()), None, None)
+                .unwrap_err()
+                .to_string();
+            assert!(e.contains("--path applies to folder only"), "{p}: {e}");
+        }
+        // No sign-in flow for a folder.
+        assert_eq!(
+            cli_flow(
+                &connect_args(&["folder", "--path", &full_s]),
+                Here::default()
+            )
+            .unwrap(),
+            None
+        );
+        assert!(cli_flow(&connect_args(&["folder", "--device"]), Here::default()).is_err());
+    }
+
+    #[test]
+    fn folder_status_and_check_lines() {
+        let v = json!({
+            "backend": "folder", "provider": "the library folder", "folder": "mokuro-reader",
+            "path": "/srv/manga", "store_id": "0123456789abcdef", "account": "/srv/manga",
+            "problem": null, "health": {"state": "online"}, "engine": "steady",
+        });
+        let lines = describe(&v, "running server");
+        assert_eq!(
+            lines[..3],
+            [
+                "Library: local folder /srv/manga",
+                "Store:   0123456789abcdef",
+                "Health:  online (feed: steady)",
+            ]
+        );
+        let offline = describe(
+            &json!({"backend": "folder", "folder": "mokuro-reader", "path": null,
+                "store_id": null, "problem": "storage.library.path must be set"}),
+            "configuration",
+        );
+        assert_eq!(
+            offline[0],
+            "Library: local folder (storage.library.path is not set)"
+        );
+        assert_eq!(offline[1], "Store:   not connected");
+        let status = json!({"state": "connected", "provider": "folder", "account": "/srv/manga",
+            "check": {"folder": "/srv/manga", "found": true, "volumes": 3, "series": 2,
+                "summary": "Found /srv/manga: 3 volumes in 2 series.",
+                "warning": "Bunko cannot write to this folder, so OCR results, covers and series info cannot be saved there."}});
+        let lines = check_lines(&status, false);
+        assert_eq!(lines[0], "Folder: /srv/manga");
+        assert_eq!(lines[1], "Found /srv/manga: 3 volumes in 2 series.");
+        assert!(lines[2].starts_with("Note: Bunko cannot write"));
+        let missing = json!({"state": "connected", "provider": "folder", "account": "/srv/manga",
+            "check": {"folder": "/srv/manga", "found": false}});
+        assert_eq!(check_lines(&missing, true)[1], "Creating /srv/manga…");
     }
 
     /// The device code is printed with where to enter it and its expiry, once per code;

@@ -44,6 +44,9 @@ impl From<&PageSuffixes> for Suffixes {
 /// The most page-suffix reads asked of a helper at a time (remote store).
 pub const SUFFIX_BATCH: usize = 8;
 
+/// The start of [`Scheduler::upgrade_hold`]'s reason.
+pub const UPGRADES_WAIT: &str = "Upgrades wait until this Bunko holds the library";
+
 /// Appended to a row id to name that row's upgrade jobs in the queue order: they are a
 /// group of their own, ranked right after the row's missing files. Row ids are
 /// `[A-Za-z0-9_-]`, so the name never collides with a real row.
@@ -292,11 +295,16 @@ impl Scheduler {
                 let Some(row) = self.row(&job.gid) else {
                     continue;
                 };
-                let key = self.failure_key_of(&job, row);
-                let record = self.failures.get(&key).and_then(Value::as_object);
+                // The key is a new string per job, and with no failure records there is
+                // nothing to look up with it.
+                let key = (!self.failures.is_empty()).then(|| self.failure_key_of(&job, row));
+                let record = key
+                    .as_ref()
+                    .and_then(|k| self.failures.get(k))
+                    .and_then(Value::as_object);
                 match eligibility_in(record, Some(vol.mtime), now, poll, &fleet) {
                     Eligibility::BackedOff | Eligibility::Parked => continue,
-                    Eligibility::Replaced => stale.push(key),
+                    Eligibility::Replaced => stale.extend(key),
                     _ => {}
                 }
                 if !exclude.contains(&job) {
@@ -799,6 +807,40 @@ impl Scheduler {
         }
     }
 
+    /// Does `job`'s result replace a file the library has, in place: an upgrade's swap,
+    /// or a generation layer written again over its own outdated file (critique C10)?
+    /// That is a Sync write; a new file is a Deferred one.
+    pub fn replaces_in_place(&self, job: &Job) -> bool {
+        job.upgrade
+            || self
+                .owed
+                .volumes
+                .get(&*job.rel)
+                .is_some_and(|v| v.outdated.iter().any(|g| **g == *job.gid))
+    }
+
+    /// Why the jobs that replace a file in place ([`Self::replaces_in_place`]: upgrades,
+    /// and outdated layers written again) wait while the rest of the queue runs, or
+    /// None: on a cloud library this Bunko is still claiming (its first sync, the
+    /// settle wait, or confirming its claim, spec §9.2). Such a replace is a Sync write
+    /// checked against the cloud's current version, which only the Bunko holding the
+    /// library may make; a new OCR file is a Deferred write that waits in the outbox,
+    /// so other jobs run.
+    pub fn upgrade_hold(&self) -> Option<String> {
+        let store = bunko_store::store_for(&self.library())?;
+        if !store.caps().remote {
+            return None;
+        }
+        let claiming = store.claiming()?;
+        Some(match claiming.left {
+            Some(left) => format!(
+                "{UPGRADES_WAIT}; it is still claiming it (about {} left)",
+                bunko_remote::status::about(left)
+            ),
+            None => format!("{UPGRADES_WAIT}; it is still claiming it"),
+        })
+    }
+
     /// Hold (or release) every machine for an automatic update: no new claims; the
     /// claims in flight finish and upload.
     pub fn set_update_drain(&mut self, on: bool) {
@@ -934,6 +976,12 @@ impl Scheduler {
         precision_pick_needed(row, profile.as_ref(), supported.as_ref()).then_some("precision")
     }
 
+    /// The benchmark of row `gid` on the machine named `machine` is asked for or runs.
+    pub fn autobench_asked(&self, machine: &str, gid: &str) -> bool {
+        let key = (profile_key(machine).to_string(), gid.to_string());
+        self.autobench.asked.contains(&key) || self.autobench.inflight.contains(&key)
+    }
+
     pub fn want_autobench(&mut self, pid: &str, row: &Generation) {
         let Some(name) = self.machines.get(pid).map(|m| m.name.clone()) else {
             return;
@@ -989,8 +1037,13 @@ impl Scheduler {
             .cloned()
             .chain(self.attempted.iter().cloned())
             .collect();
-        // Phase B.
-        let proposed = self.candidates(&unavailable, true);
+        // Phase B. Upgrade jobs (and outdated layers written again) wait while this
+        // Bunko is still claiming a cloud library: their replace needs the lease. The
+        // rest of the queue runs.
+        let mut proposed = self.candidates(&unavailable, true);
+        if self.upgrade_hold().is_some() {
+            proposed.retain(|j| !self.replaces_in_place(j));
+        }
         // By volume: the jobs of volumes this lane started come first and are never left
         // to another lane; of the rest, only the jobs open to it.
         let by_volume = self.settings.by_volume;
@@ -1118,6 +1171,13 @@ impl Scheduler {
                 continue;
             };
             if offered.get(&*job.gid) != Some(&true) {
+                continue;
+            }
+            // A row this machine has not measured takes nothing here until its benchmark
+            // lands, so once that benchmark is asked for, the row's other volumes are
+            // passed over unread. Each look at a volume lists its folder several times (a
+            // provider index read on a cloud library), and a large queue holds thousands.
+            if unmeasured.contains(&*job.gid) && self.autobench_asked(&mname, &job.gid) {
                 continue;
             }
             let probe = self.upgrade_probe();

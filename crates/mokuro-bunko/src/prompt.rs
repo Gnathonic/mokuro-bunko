@@ -89,6 +89,13 @@ pub fn choice(text: &str, choices: &[&str], default: Option<&str>) -> Result<Str
 
 /// `click.confirm(text, default=...)`. `None` default means an answer is required.
 pub fn confirm(text: &str, default: Option<bool>) -> Result<bool, Fail> {
+    confirm_or_eof(text, default)?.ok_or_else(abort)
+}
+
+/// [`confirm`], except that end of input answers `None` instead of aborting. A command
+/// that goes on whatever the answer (a running tunnel) uses it, so a Ctrl-D does not
+/// end the command.
+pub fn confirm_or_eof(text: &str, default: Option<bool>) -> Result<Option<bool>, Fail> {
     let suffix = match default {
         Some(true) => "[Y/n]",
         Some(false) => "[y/N]",
@@ -97,11 +104,14 @@ pub fn confirm(text: &str, default: Option<bool>) -> Result<bool, Fail> {
     let prompt = format!("{text} {suffix}: ");
     loop {
         show(&prompt);
-        let value = read_line()?.ok_or_else(abort)?.trim().to_lowercase();
+        let Some(line) = read_line()? else {
+            return Ok(None);
+        };
+        let value = line.trim().to_lowercase();
         match value.as_str() {
-            "y" | "yes" => return Ok(true),
-            "n" | "no" => return Ok(false),
-            "" if default.is_some() => return Ok(default.unwrap_or(false)),
+            "y" | "yes" => return Ok(Some(true)),
+            "n" | "no" => return Ok(Some(false)),
+            "" if default.is_some() => return Ok(default),
             _ => println!("Error: invalid input"),
         }
     }

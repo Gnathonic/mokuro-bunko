@@ -273,6 +273,9 @@ fn profiles() -> Vec<Profile> {
         ("drive_like", FakeBackend::drive_like as fn() -> FakeBackend),
         ("mega_like", FakeBackend::mega_like),
         ("webdav_plain", FakeBackend::webdav_plain),
+        // A local folder on a case-sensitive filesystem. Its case-folding sibling
+        // (`folder_like_ci`) cannot hold two spellings, so there is nothing to merge.
+        ("folder_like", FakeBackend::folder_like),
     ]
 }
 

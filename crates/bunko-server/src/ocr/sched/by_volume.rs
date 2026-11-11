@@ -74,11 +74,13 @@ pub struct RowChecks(HashMap<(String, Arc<str>), bool>);
 /// The jobs a volume owes, as `candidates` builds them (its rows, then the primary's
 /// upgrade when the primary itself is not owed).
 pub fn owed_jobs(rel: &str, vol: &OwedVolume, primary: Option<&str>) -> Vec<Job> {
+    // One path shared by the volume's jobs: a large queue is thousands of them.
+    let shared: Arc<str> = rel.into();
     let mut owed: Vec<Job> = vol
         .rows
         .iter()
         .map(|g| Job {
-            rel: rel.into(),
+            rel: shared.clone(),
             gid: g.clone(),
             upgrade: false,
         })

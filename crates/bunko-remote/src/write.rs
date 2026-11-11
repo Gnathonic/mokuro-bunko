@@ -368,6 +368,7 @@ impl<B: Backend> RemoteStore<B> {
         if fresh && indexed.is_some() && !o.truncate {
             // Opened to modify: start from the current bytes.
             let mut src = self.open(p)?;
+            src.will_read(0, u64::MAX);
             let mut dst = std::fs::File::create(&local)?;
             io::copy(&mut src, &mut dst)?;
         }
@@ -498,6 +499,12 @@ impl<B: Backend> RemoteStore<B> {
                     &format!("the outbox is full ({queued} bytes wait for the provider)"),
                 ));
             }
+        }
+        // A Sync write the fence refuses now is refused before the bytes are taken:
+        // `stage_put` moves the caller's file into the outbox, and the refusal would
+        // then drop it with the op. The caller keeps its bytes, as above.
+        if w.durability == Durability::Sync && !self.core.fence_open() {
+            return Err(self.core.fence_refusal());
         }
         let op = self.core.stage_put(&src, rel, w)?;
         forget_staging(self);
@@ -851,7 +858,9 @@ impl<B: Backend> RemoteStore<B> {
     /// `from`'s bytes, so the rename that follows publishes it (spec §3.4).
     pub(crate) fn copy_impl(&self, from: &Path, to: &Path) -> io::Result<u64> {
         let mut src: Box<dyn Read> = if from.starts_with(&self.cfg.root) {
-            Box::new(self.open(from)?)
+            let mut f = self.open(from)?;
+            f.will_read(0, u64::MAX);
+            Box::new(f)
         } else {
             self.check_local_source(from)?;
             Box::new(std::fs::File::open(from)?)

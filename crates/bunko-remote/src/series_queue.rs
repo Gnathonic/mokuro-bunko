@@ -70,10 +70,13 @@ pub const SNAPSHOT_WAIT: Duration = Duration::from_secs(5);
 /// once per window.
 pub const TICK_MAX: Duration = Duration::from_secs(30);
 
-/// The window W and the cap B of a provider (§6.4): WebDAV 30 s / 20, Google Drive
-/// 120 s / 30, OneDrive 120 s / 15, MEGA 300 s / 20.
+/// The window W and the cap B of a provider (§6.4): local folder 15 s / 100, WebDAV
+/// 30 s / 20, Google Drive 120 s / 30, OneDrive 120 s / 15, MEGA 300 s / 20.
 pub fn pacing(caps: &BackendCaps) -> (Duration, usize) {
-    if caps.path_ids {
+    if caps.path_ids && caps.push {
+        // A local folder: path ids, and a watcher in place of a polled feed.
+        (Duration::from_secs(15), 100)
+    } else if caps.path_ids {
         (Duration::from_secs(30), 20)
     } else if caps.push && !caps.atomic_replace {
         (Duration::from_secs(300), 20)
@@ -1180,8 +1183,15 @@ mod tests {
         let webdav = BackendCaps {
             path_ids: true,
             hash_kind: None,
-            ..base
+            ..base.clone()
         };
         assert_eq!(pacing(&webdav), (Duration::from_secs(30), 20));
+        let folder = BackendCaps {
+            path_ids: true,
+            push: true,
+            hash_kind: None,
+            ..base
+        };
+        assert_eq!(pacing(&folder), (Duration::from_secs(15), 100));
     }
 }

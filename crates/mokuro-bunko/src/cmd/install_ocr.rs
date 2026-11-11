@@ -61,6 +61,10 @@ mod full {
     /// [`EVENT_PREFIX`] + one JSON object, besides the usual text.
     pub const EVENTS_ENV: &str = "MOKURO_INSTALL_EVENTS";
     pub const EVENT_PREFIX: &str = "@@ocr-install ";
+    /// `MOKURO_INSTALL_NO_EXTRAS=1` (set by the background installer for the libtorch
+    /// pack): no Vulkan pack beside it. The background installer fetches that pack on
+    /// its own, so a machine never waits for it and its failure is remembered.
+    pub const NO_EXTRAS_ENV: &str = "MOKURO_INSTALL_NO_EXTRAS";
     /// The lock two installs into one backends directory take (a background install of
     /// the server, of a processor on the same storage, a `install-ocr` by hand).
     pub const LOCK_FILE: &str = ".install.lock";
@@ -102,8 +106,22 @@ mod full {
         Off(String),
         /// A fitting pack is installed, or nothing enabled needs one.
         Satisfied(String),
-        /// The pack of this variant is missing.
+        /// The pack of this variant is missing: local OCR has no backend.
         Install { variant: String, reason: String },
+        /// The pack in use fits (`have`), and an optional pack beside it is missing:
+        /// the Vulkan pack, whose runtimes are only more benchmark candidates. OCR runs
+        /// without it, so nothing that waits for a backend waits for it.
+        Extra {
+            variant: String,
+            reason: String,
+            have: String,
+            /// The optional pack is this machine's only GPU route: the libtorch choice
+            /// is the CPU (`ocr.backend: vulkan`, AMD or Intel on Windows, an AMD GPU
+            /// with no ROCm build, an NVIDIA driver too old for CUDA). Its first fetch
+            /// is waited for, as an install is, so the machine is not benchmarked on
+            /// the CPU meanwhile; after a failure it runs on the CPU.
+            route: bool,
+        },
     }
 
     /// The library's enabled generations need the libtorch backend (hayai-nova,
@@ -218,9 +236,11 @@ mod full {
             Some(m) => {
                 match hwdetect::vulkan_wanted(&ocr.backend_preference(), hw, bunko_update::TARGET) {
                     Some(why) if already_fits(&ocr.backends_dirs(), VULKAN).is_none() => {
-                        Need::Install {
+                        Need::Extra {
                             variant: VULKAN.to_string(),
                             reason: why,
+                            have: m,
+                            route: choice.variant == "cpu",
                         }
                     }
                     _ => Need::Satisfied(m),
@@ -345,6 +365,7 @@ mod full {
         // serves without it.
         if matches!(requested.as_deref(), None | Some("auto"))
             && variant != VULKAN
+            && !std::env::var(NO_EXTRAS_ENV).is_ok_and(|v| v == "1")
             && let Some(why) = hwdetect::vulkan_wanted(&ocr.backend_preference(), &hw, target)
         {
             install_vulkan_extra(&ocr, &args, &root, &search, &why);
@@ -402,6 +423,7 @@ mod full {
                     event(serde_json::json!({
                         "stage": "failed", "message": f.message,
                         "needs_owner": f.needs_owner, "action": f.action,
+                        "lasting": f.lasting,
                     }));
                     Fail::msg(f.to_string())
                 })?;
@@ -434,16 +456,20 @@ mod full {
         // updates").
         // A variant picked by hand (not what `ocr.backend` would pick here) is kept
         // by later `--if-needed` runs while the hardware stays the same.
-        let chosen = requested
-            .as_deref()
-            .filter(|r| *r != "auto" && *r != wanted.variant)
-            .map(str::to_string);
-        HardwareRecord {
-            auto_variant: auto.variant.to_string(),
-            reason: auto.reason.clone(),
-            chosen,
+        // The record is the libtorch pack's: the Vulkan pack beside it (installed on its
+        // own by the background installer) must not replace a variant picked by hand.
+        if variant != VULKAN {
+            let chosen = requested
+                .as_deref()
+                .filter(|r| *r != "auto" && *r != wanted.variant)
+                .map(str::to_string);
+            HardwareRecord {
+                auto_variant: auto.variant.to_string(),
+                reason: auto.reason.clone(),
+                chosen,
+            }
+            .write(&root);
         }
-        .write(&root);
         event(serde_json::json!({"stage": "installed", "variant": variant,
             "pack": pack_dir.file_name().map(|n| n.to_string_lossy().into_owned())}));
         if let Some((_, m)) = find_installed(&search, &variant) {
@@ -916,6 +942,9 @@ mod full {
         pub message: String,
         pub needs_owner: bool,
         pub action: Option<String>,
+        /// The release has nothing to download yet (it is not published): asking again
+        /// within minutes finds the same.
+        pub lasting: bool,
     }
 
     impl PackFailure {
@@ -924,6 +953,7 @@ mod full {
                 message: message.to_string(),
                 needs_owner: false,
                 action: None,
+                lasting: false,
             }
         }
 
@@ -932,6 +962,7 @@ mod full {
                 message: message.into(),
                 needs_owner: true,
                 action: Some(action.into()),
+                lasting: false,
             }
         }
     }
@@ -963,6 +994,12 @@ mod full {
                     format!("{loc}: {e}"),
                     "The release manifest is not signed by the release key: do not install it. If you use a mirror or a fork, check update.manifest_url (and update.public_key) in the config file.",
                 ));
+            }
+            Err(e @ bunko_update::UpdateError::NotPublished(_)) => {
+                return Err(PackFailure {
+                    lasting: true,
+                    ..PackFailure::retry(format!("{loc}: {e}"))
+                });
             }
             Err(e) => return Err(PackFailure::retry(format!("{loc}: {e}"))),
         };
@@ -1596,7 +1633,7 @@ mod full {
 }
 
 #[cfg(all(test, feature = "ocr"))]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::path::Path;
 
@@ -1801,6 +1838,97 @@ mod tests {
         add("cpu", bunko_core::VERSION);
         assert!(already_fits(&roots, "cpu").is_some());
         assert!(already_fits(&roots, "rocm7.1").is_none());
+    }
+
+    /// A pack of this release for `variant` (no files: complete) in `root`.
+    pub(crate) fn fake_pack(root: &Path, variant: &str) {
+        let name = if variant == VULKAN {
+            "vulkan-test".to_string()
+        } else {
+            format!("torch-{variant}-test")
+        };
+        let pack = root.join(&name);
+        std::fs::create_dir_all(&pack).unwrap();
+        let m = serde_json::json!({
+            "format": 1, "name": name, "variant": variant, "torch": "2.13.0",
+            "target": bunko_update::TARGET, "os": "linux", "arch": "x86_64", "abi": 1,
+            "library": "", "bunko_version": bunko_core::VERSION, "files": []
+        });
+        std::fs::write(pack.join("pack.json"), m.to_string()).unwrap();
+    }
+
+    /// An NVIDIA machine whose driver takes the cu130 pack.
+    pub(crate) fn nvidia() -> crate::hwdetect::Hardware {
+        crate::hwdetect::Hardware {
+            nvidia_driver: Some("595.58.03".into()),
+            nvidia_gpus: vec!["NVIDIA GeForce RTX 4090".into()],
+            ..Default::default()
+        }
+    }
+
+    /// The Vulkan pack only adds benchmark candidates beside the libtorch pack: a
+    /// machine whose libtorch pack is in place lacks no backend without it, so nothing
+    /// that waits for a backend may wait for it.
+    #[test]
+    fn a_missing_vulkan_pack_is_no_missing_backend() {
+        let hw = nvidia();
+        if crate::hwdetect::vulkan_wanted("auto", &hw, bunko_update::TARGET).is_none() {
+            return; // No Vulkan pack on this platform.
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.yaml");
+        std::fs::write(
+            &config,
+            format!("storage:\n  base_path: {}\n", dir.path().display()),
+        )
+        .unwrap();
+        let target = || crate::ocr_target::OcrTarget {
+            role: crate::ocr_target::Role::Library,
+            storage: dir.path().to_path_buf(),
+            processor_config: None,
+            library: Some(crate::cfgfile::load_effective_quiet(&config).unwrap()),
+            reason: String::new(),
+        };
+        let backends = target().backends_dir();
+        // No pack: the libtorch one is what is missing.
+        match need(&target(), &hw) {
+            Need::Install { variant, .. } => assert_eq!(variant, "cu130"),
+            other => panic!("{other:?}"),
+        }
+        // The cu130 pack in place, the Vulkan pack missing: no backend is missing.
+        fake_pack(&backends, "cu130");
+        let n = need(&target(), &hw);
+        assert!(
+            !matches!(n, Need::Install { .. }),
+            "the optional Vulkan pack counts as a missing backend: {n:?}"
+        );
+        assert!(
+            matches!(&n, Need::Extra { variant, have, route: false, .. } if variant == VULKAN && have.contains("torch-cu130-test")),
+            "{n:?}"
+        );
+        // Pinned to Vulkan, the libtorch choice is the CPU floor: the Vulkan pack is
+        // the machine's GPU route, and its first fetch is waited for.
+        std::fs::write(
+            &config,
+            format!(
+                "storage:\n  base_path: {}\nocr:\n  backend: vulkan\n",
+                dir.path().display()
+            ),
+        )
+        .unwrap();
+        let n = need(&target(), &hw);
+        assert!(
+            matches!(&n, Need::Extra { variant, route: true, .. } if variant == VULKAN),
+            "{n:?}"
+        );
+        std::fs::write(
+            &config,
+            format!("storage:\n  base_path: {}\n", dir.path().display()),
+        )
+        .unwrap();
+        // Both in place: nothing at all.
+        fake_pack(&backends, VULKAN);
+        assert!(matches!(need(&target(), &hw), Need::Satisfied(_)));
     }
 
     #[test]
