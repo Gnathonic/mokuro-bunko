@@ -55,6 +55,7 @@ pub const MARKER_VERSION: u32 = 1;
 pub const DEFAULT_TTL: Duration = Duration::from_secs(900);
 /// The TTL on MEGA (`ttl_s` 3600); the caller picks it for that provider.
 pub const MEGA_TTL: Duration = Duration::from_secs(3600);
+
 /// The shortest CLAIM_LEASE settle wait (`max(60 s, 2 × feed interval)`).
 pub const CLAIM_SETTLE_MIN: Duration = Duration::from_secs(60);
 /// A same-named node larger than this is not read: it is not a marker.
@@ -241,6 +242,18 @@ impl MarkerSet {
     pub fn max_epoch(&self) -> u64 {
         self.nodes.iter().map(|n| n.marker.epoch).max().unwrap_or(0)
     }
+}
+
+/// The marker file a claim writes into when it has none of its own: the
+/// top-ranked node holding a marker (fresh or not), else a same-named file that
+/// holds none; `None` when the folder has no such file.
+fn existing_marker_node(set: &MarkerSet) -> Option<RNode> {
+    let mut nodes: Vec<&MarkerNode> = set.nodes.iter().collect();
+    nodes.sort_by(|a, b| rank(&a.marker, &b.marker).then_with(|| a.node.pid.cmp(&b.node.pid)));
+    nodes
+        .first()
+        .map(|n| n.node.clone())
+        .or_else(|| set.others.first().cloned())
 }
 
 // ---- configuration, clocks, persisted state ----------------------------------
@@ -797,6 +810,22 @@ impl<B: Backend> Lease<B> {
                 nodes.extend(found);
                 server_now = server_now.max(now);
             }
+            // A name search can lag behind the files (Drive's does): the file this
+            // install recorded as its marker is looked up by id when the search left
+            // it out, so a claim or heartbeat never takes it for missing and writes a
+            // second file beside it.
+            let recorded = self.record.lock().marker_pid.clone();
+            if let Some(pid) = recorded
+                && !nodes.iter().any(|n| n.pid == pid)
+                && let Some(n) = self.backend.stat(&pid).await?
+                && !n.trashed
+                && !n.is_dir
+                && n.name_raw == MARKER_NAME.as_bytes()
+                && n.parent.as_ref().is_some_and(|p| roots.contains(p))
+            {
+                tracing::debug!(pid, "lease: the name search missed our marker; read by id");
+                nodes.push(n);
+            }
             let mut set = MarkerSet {
                 nodes: Vec::new(),
                 others: Vec::new(),
@@ -1020,6 +1049,7 @@ impl<B: Backend> Lease<B> {
             next.heartbeat_at = self.now_iso();
             if let Some(node) = self.write_marker(&next, &set, WriteMode::Heartbeat).await? {
                 self.become_holder(next, &node, ok_at)?;
+                self.trash_stale_duplicates(&set, &node.pid).await;
                 return Ok(Heartbeat::Held);
             }
         }
@@ -1121,6 +1151,42 @@ impl<B: Backend> Lease<B> {
         }
     }
 
+    /// Move every other stale marker file to the trash (the holder only): a library
+    /// has one marker file, and copies under the same name left by an earlier Bunko
+    /// (one that wrote its own file beside another's) go once this one holds the
+    /// lease. Readers ignore a stale marker already. The trash, not a permanent
+    /// delete: the file is not ours. A node rewritten since the listing stays
+    /// (`if_cver`), and so does any fresh one.
+    async fn trash_stale_duplicates(&mut self, set: &MarkerSet, keep: &str) {
+        let stale: Vec<(Pid, String, String)> = set
+            .nodes
+            .iter()
+            .filter(|n| n.node.pid != keep && !self.is_ours(&n.marker))
+            .filter(|n| !n.is_fresh(set.server_now))
+            .map(|n| {
+                (
+                    n.node.pid.clone(),
+                    n.node.cver.clone(),
+                    n.marker.instance_name.clone(),
+                )
+            })
+            .collect();
+        for (pid, cver, name) in stale {
+            match self.backend.trash(&pid, Some(&cver)).await {
+                Ok(()) | Err(BErr::NotFound) => {
+                    tracing::info!(
+                        pid,
+                        instance = %name,
+                        "lease: moved a second, stale marker file to the trash (a library \
+                         keeps one)"
+                    );
+                    self.cache.remove(&pid);
+                }
+                Err(e) => tracing::debug!(pid, error = %e, "lease: a stale marker file stays"),
+            }
+        }
+    }
+
     async fn delete_node(&mut self, pid: &str) {
         match self.backend.delete_permanent(pid).await {
             Ok(()) | Err(BErr::NotFound) => {
@@ -1200,13 +1266,20 @@ impl<B: Backend> Lease<B> {
             }
             (Some(o), _) => self.put_replace(m, o).await?,
             (None, WriteMode::Release) => return Ok(None),
-            (None, _) => match self.put(m, Target::New).await {
-                Ok(n) => Some(n),
-                // A unique-name provider already has a node by this name.
-                Err(LeaseError::Backend(BErr::NameConflict | BErr::PreconditionFailed)) => {
-                    self.replace_existing(m).await?
-                }
-                Err(e) => return Err(e),
+            // One marker file per library, on every provider: a claim or a take-over
+            // writes into the marker file that is there (another Bunko's, stale or
+            // the holder's) rather than beside it. Two Bunkos claiming at once then
+            // write the same file, and the settle re-read decides between them.
+            (None, _) => match existing_marker_node(set) {
+                Some(t) => self.put_replace(m, &t).await?,
+                None => match self.put(m, Target::New).await {
+                    Ok(n) => Some(n),
+                    // A unique-name provider already has a node by this name.
+                    Err(LeaseError::Backend(BErr::NameConflict | BErr::PreconditionFailed)) => {
+                        self.replace_existing(m).await?
+                    }
+                    Err(e) => return Err(e),
+                },
             },
         };
         let Some(node) = written else {

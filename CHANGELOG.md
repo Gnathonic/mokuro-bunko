@@ -965,6 +965,12 @@
   library before it has read the library's series.json files and claimed the library;
   until then its uploads showed only as HELD. The panel now says what they wait for,
   with how many series.json files are left to read or how long the claim has left.
+- **A cloud library keeps one `.mokuro-bunko.json`.** On Google Drive and MEGA, which
+  allow two files of one name, a Bunko claiming a library wrote its own marker file
+  beside the one another Bunko had left, so the folder collected one per Bunko that
+  ever managed it, with different contents. A claim now writes into the marker file
+  that is there, as it always did on providers with unique names, and the Bunko that
+  holds the library moves any second, stale marker file to the provider's trash.
 
 ### Known limits
 - **Merging duplicate folders on Google Drive can trash files Bunko cannot see.**
