@@ -6,6 +6,7 @@
 
 pub mod accounts;
 pub mod admin;
+pub mod analytics;
 pub mod app;
 pub mod auth;
 pub mod backend;
@@ -19,6 +20,7 @@ pub mod ocr;
 pub mod ops;
 pub mod rt;
 pub mod serve;
+pub mod storage;
 pub mod thumbs;
 pub mod tls;
 

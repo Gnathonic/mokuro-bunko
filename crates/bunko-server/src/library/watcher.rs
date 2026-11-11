@@ -5,35 +5,18 @@
 //! never `.json`, so the compiler's own writes cannot re-trigger it). No debounce here:
 //! the metadata timers debounce.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::sync::Arc;
 
 use bunko_library::paths::is_relevant_change;
 use notify::event::{CreateKind, ModifyKind, RemoveKind, RenameMode};
-use notify::{Event, EventKind, RecursiveMode, Watcher};
+use notify::{Event, EventKind};
 
-/// One relevant change.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WatchEvent {
-    /// `path` appeared (created, or the destination of a move).
-    Added { path: PathBuf, is_dir: bool },
-    /// `path` vanished (deleted, or the source of a move).
-    Removed { path: PathBuf, is_dir: bool },
-    /// The kernel queue overflowed (or the backend asked for it): events were lost.
-    Rescan,
-}
-
-impl WatchEvent {
-    pub fn path(&self) -> Option<&Path> {
-        match self {
-            WatchEvent::Added { path, .. } | WatchEvent::Removed { path, .. } => Some(path),
-            WatchEvent::Rescan => None,
-        }
-    }
-}
+pub use bunko_store::WatchEvent;
 
 /// Watching runs while this value lives; dropping it stops the backend thread.
 pub struct LibraryWatcher {
-    _watcher: notify::RecommendedWatcher,
+    _guard: bunko_store::WatchGuard,
 }
 
 /// Whether a path that no longer exists was a directory. The backend cannot say for
@@ -47,7 +30,7 @@ pub(super) fn vanished_is_dir(path: &Path) -> bool {
 }
 
 fn stat_is_dir(path: &Path) -> Option<bool> {
-    std::fs::metadata(path).ok().map(|m| m.is_dir())
+    bunko_store::fs::metadata(path).ok().map(|m| m.is_dir())
 }
 
 /// The relevant [`WatchEvent`]s of one backend event.
@@ -107,35 +90,30 @@ pub fn translate(event: &Event) -> Vec<WatchEvent> {
 
 impl LibraryWatcher {
     /// Watch `root` (created first, as 0.5.2 did) recursively. `on_event` runs on the
-    /// backend's thread for every relevant change.
+    /// backend's thread for every relevant change. A remote store mounted at `root`
+    /// delivers its own change feed; the local disk is watched through
+    /// [`bunko_store::LocalStore::watch`] with [`translate`].
     pub fn start(
         root: &Path,
-        on_event: impl Fn(WatchEvent) + Send + 'static,
-    ) -> notify::Result<Self> {
-        std::fs::create_dir_all(root).map_err(notify::Error::io)?;
-        let mut watcher =
-            notify::recommended_watcher(move |res: notify::Result<Event>| match res {
-                Ok(event) => {
-                    for change in translate(&event) {
-                        on_event(change);
-                    }
-                }
-                Err(error) => {
-                    tracing::warn!(%error, "[FS-WATCHER] watch error");
-                    if matches!(error.kind, notify::ErrorKind::MaxFilesWatch) {
-                        on_event(WatchEvent::Rescan);
-                    }
-                }
-            })?;
-        watcher.watch(root, RecursiveMode::Recursive)?;
-        tracing::info!("[FS-WATCHER] Watching {}", root.display());
-        Ok(Self { _watcher: watcher })
+        on_event: impl Fn(WatchEvent) + Send + Sync + 'static,
+    ) -> std::io::Result<Self> {
+        use bunko_store::LibraryStore;
+        let sink: bunko_store::WatchSink = Arc::new(on_event);
+        let guard = match bunko_store::store_for(root) {
+            Some(store) if store.caps().remote => store.watch(sink)?,
+            _ => {
+                let translate: bunko_store::Translate = Arc::new(translate);
+                bunko_store::LocalStore::with_translator(root, translate).watch(sink)?
+            }
+        };
+        Ok(Self { _guard: guard })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     fn ev(kind: EventKind, path: &str) -> Event {
         Event::new(kind).add_path(PathBuf::from(path))

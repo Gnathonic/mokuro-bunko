@@ -1,13 +1,16 @@
 //! The scheduler, driven deterministically: a manual clock, inline helper work, fake
 //! processors on channels (spec ocr-scheduling §5–§16).
 
+// Fixtures are set up and checked with std::fs on purpose.
+#![allow(clippy::disallowed_methods)]
+
 mod ocr_common;
 
 use std::sync::Arc;
 
 use bunko_proto::{Event, Op};
 use bunko_server::ocr::sched::Msg;
-use bunko_server::ocr::types::{Job, LibraryFacts};
+use bunko_server::ocr::types::{FileFacts, Job, LibraryFacts};
 use ocr_common::*;
 
 fn names(v: &[(String, String, String)]) -> Vec<String> {
@@ -544,6 +547,39 @@ fn an_admin_retry_brings_a_parked_volume_back() {
     assert_eq!(names(&volumes(&p.drain())), vec!["A/V1.cbz"]);
     assert_eq!(h.s.retry_failed(None), 1);
     assert!(h.s.failures.is_empty());
+}
+
+/// A failure record stays while its archive is listed in any letter case, as on a
+/// disk that ignores case: the series and volume in another case (and `.CBZ`) are the
+/// one the library lists, the same on every host. Gone in every spelling, it goes.
+#[test]
+fn a_failure_record_follows_its_archive_in_any_case() {
+    let mut h = harness(vec![primary()]);
+    h.add("A/V1.cbz", 2);
+    h.at(0.0);
+    let mut p = h.connect("box", 1);
+    let ops = p.drain();
+    let sid = opened(&ops)[0].clone();
+    let claim = volumes(&ops)[0].1.clone();
+    h.event(&p, ready(&sid));
+    h.event(
+        &p,
+        Event::VolumeFailed {
+            sid: sid.clone(),
+            id: claim,
+            error: "no page images found".into(),
+        },
+    );
+    h.event(&p, exit(&sid, Some(0)));
+    assert!(h.s.failures.contains_key("A/V1.cbz"));
+    let lib = h.library();
+    std::fs::remove_dir_all(lib.join("A")).unwrap();
+    write_cbz(&lib.join("a/v1.CBZ"), 2);
+    h.s.prune_failures();
+    assert!(h.s.failures.contains_key("A/V1.cbz"), "kept in any case");
+    std::fs::remove_dir_all(lib.join("a")).unwrap();
+    h.s.prune_failures();
+    assert!(h.s.failures.is_empty(), "gone in every spelling");
 }
 
 #[test]
@@ -1253,10 +1289,11 @@ fn a_mismatched_result_name_removes_only_its_claim_directory() {
 fn local_up(h: &mut H, formats: &[&str]) -> tokio::sync::mpsc::UnboundedReceiver<Op> {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let catalog: bunko_proto::Catalog = serde_json::from_value(serde_json::json!({
-        "engines": ["hayai-nova", "paddle-manga", "ppocr-manga"],
+        "engines": ENGINES,
         "detectors": ["ppocr-manga"],
         "devices": [{"id": "cpu", "label": "CPU"},
                     {"id": "gpu:0", "label": "GPU 0", "formats": formats, "provider": "rocm", "arch": "gfx1201"}],
+        "engine_revisions": current_revisions(ENGINES),
     }))
     .unwrap();
     let host = bunko_proto::HostInfo {
@@ -1452,9 +1489,10 @@ fn fp32_device_autobenches_once(device: serde_json::Value) {
     h.add("A/V2.cbz", 4);
     h.at(0.0);
     let catalog = serde_json::json!({
-        "engines": ["hayai-nova", "paddle-manga", "ppocr-manga"],
+        "engines": ENGINES,
         "detectors": ["ppocr-manga"],
         "devices": [{"id": "cpu", "label": "CPU", "formats": ["fp32", "bf16"], "provider": "cpu", "arch": "x86_64"}, device.clone()],
+        "engine_revisions": current_revisions(ENGINES),
     });
     let mut p = h.connect_catalog("box", 1, catalog);
     h.at(0.0);
@@ -1542,6 +1580,7 @@ fn forced_bf16_still_runs_where_a_package_exists() {
     let mut h = h;
     let rdna2 = serde_json::json!({
         "engines": ["hayai-nova", "ppocr-manga"], "detectors": ["ppocr-manga"],
+        "engine_revisions": current_revisions(["hayai-nova", "ppocr-manga"]),
         "devices": [{"id": "cpu", "label": "CPU", "provider": "cpu", "arch": "x86_64", "formats": ["fp32"]},
                     {"id": "gpu:0", "label": "GPU 0", "formats": ["fp32", "fp16", "bf16"], "provider": "rocm", "arch": "gfx1030"}],
     });
@@ -1557,6 +1596,7 @@ fn forced_bf16_still_runs_where_a_package_exists() {
     );
     let turing = serde_json::json!({
         "engines": ["hayai-nova", "ppocr-manga"], "detectors": ["ppocr-manga"],
+        "engine_revisions": current_revisions(["hayai-nova", "ppocr-manga"]),
         "devices": [{"id": "gpu:0", "label": "GPU 0", "formats": ["fp32", "fp16"], "provider": "cuda", "arch": "sm_75"}],
     });
     let _q = h.connect_catalog("turing", 1, turing);
@@ -1565,6 +1605,7 @@ fn forced_bf16_still_runs_where_a_package_exists() {
     // A CPU with a bf16 package runs a forced bf16 row (the engines allow it there).
     let cpu = serde_json::json!({
         "engines": ["hayai-nova", "ppocr-manga"], "detectors": ["ppocr-manga"],
+        "engine_revisions": current_revisions(["hayai-nova", "ppocr-manga"]),
         "devices": [{"id": "cpu", "label": "CPU", "formats": ["fp32", "bf16"], "provider": "cpu", "arch": "x86_64"},
                     {"id": "gpu:0", "label": "no package", "formats": [], "provider": "cuda", "arch": "sm_89"}],
     });
@@ -1572,4 +1613,272 @@ fn forced_bf16_still_runs_where_a_package_exists() {
     let on = h.s.precision_on(&row);
     assert_eq!(on["zen4"]["bf16"]["eligible"], true, "{on:#?}");
     assert_eq!(on["zen4"]["auto-accuracy"]["precision"], "fp32");
+}
+
+/// A processor whose build of the row's engine is older than this library's revision
+/// is offered none of its work: its output would be outdated the moment it landed, and
+/// the upgrade would queue the volume again. One announcing the current revision is. A
+/// 0.7 processor announces none, which counts as revision 1: refused like any other
+/// older build once the engine is past its first revision.
+#[test]
+fn a_processor_with_an_older_engine_revision_gets_no_work() {
+    let engine = primary().engine;
+    let now = bunko_layout::sidecar::engine_revision(&engine);
+    let older = now - 1;
+    let mut h = harness(vec![primary()]);
+    h.add("A/V1.cbz", 2);
+    h.at(0.0);
+    let catalog = |revision: u32| {
+        serde_json::json!({
+            "engines": [&engine],
+            "detectors": ["ppocr-manga"],
+            "devices": [{"id": "cpu", "label": "CPU"}],
+            "engine_revisions": {&engine: revision},
+        })
+    };
+    let mut stale = h.connect_catalog("stale", 1, catalog(older));
+    assert!(
+        opened(&stale.drain()).is_empty(),
+        "offered to revision {older}"
+    );
+    let why = h.s.refusal(&stale.pid, &primary()).expect("a refusal");
+    assert!(why.contains(&format!("revision {older},")), "{why}");
+    let mut current = h.connect_catalog("current", 1, catalog(now));
+    assert_eq!(opened(&current.drain()).len(), 1);
+    assert!(h.s.refusal(&current.pid, &primary()).is_none());
+    // A 0.7 processor announces no revisions: that is revision 1, whatever the engine
+    // is at today. Refused when 1 is older than the library's, with those words.
+    let old = h.connect_catalog(
+        "old",
+        1,
+        serde_json::json!({
+            "engines": [&engine],
+            "detectors": ["ppocr-manga"],
+            "devices": [{"id": "cpu", "label": "CPU"}],
+        }),
+    );
+    let why = h.s.refusal(&old.pid, &primary());
+    if now > 1 {
+        let why = why.expect("a refusal of a 0.7 processor");
+        assert!(why.contains("revision 1,"), "{why}");
+    } else {
+        assert!(why.is_none(), "{why:?}");
+    }
+}
+
+/// An installed sidecar carries its install time, its revision (1 where the runner
+/// wrote none) and a v1 content seal over the block that holds both.
+#[test]
+fn an_installed_sidecar_is_dated_revisioned_and_sealed() {
+    let mut h = harness(vec![primary(), layer("g-2", "fast")]);
+    h.add("A/V1.cbz", 2);
+    h.at(0.0);
+    let mut p = h.connect("box", 1);
+    let ops = p.drain();
+    let sid = opened(&ops)[0].clone();
+    let (_, claim, _) = volumes(&ops)[0].clone();
+    h.event(&p, ready(&sid));
+    h.event(&p, started(&sid, &claim, 2));
+    h.done_with(
+        &p,
+        &sid,
+        &claim,
+        "V1.mokuro",
+        2,
+        1.0,
+        br#"{"version":"0.2.5","title":"x","volume":"y","ocr_engine":{"id":"hayai-nova","generator":"mokuro-bunko"},"pages":[]}"#,
+    );
+    let bytes = std::fs::read(h.library().join("A/V1.mokuro")).unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let block = &v["ocr_engine"];
+    assert_eq!(block["revision"], 1);
+    let created = block["created"].as_str().expect("an install time");
+    assert!(created.ends_with('Z') && created.len() >= 20, "{created}");
+    assert!(block["seal"].as_str().unwrap().starts_with("v1:"));
+    assert!(bunko_layout::seal::is_sealed(&bytes));
+}
+
+/// A processor's first job: `(processor, sid, claim, sidecar name)`, the volume started.
+fn first_job(h: &mut H, pages: u32) -> (Proc, String, String, String) {
+    let mut p = h.connect("box", 1);
+    let ops = p.drain();
+    let sid = opened(&ops)[0].clone();
+    let (_, claim, _) = volumes(&ops)[0].clone();
+    let name = ops
+        .iter()
+        .find_map(|o| match o {
+            Op::Volume(v) => Some(v.sidecar_name.clone()),
+            _ => None,
+        })
+        .expect("a volume op");
+    h.event(&p, ready(&sid));
+    h.event(&p, started(&sid, &claim, pages));
+    (p, sid, claim, name)
+}
+
+/// The `ocr_sidecar_rejected` audit reasons.
+fn rejected_reasons(h: &H) -> Vec<String> {
+    h.db.as_ref()
+        .unwrap()
+        .list_audit_events(200, None)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.action == "ocr_sidecar_rejected")
+        .filter_map(|e| {
+            let d: serde_json::Value = serde_json::from_str(e.details.as_deref()?).ok()?;
+            d["reason"].as_str().map(str::to_string)
+        })
+        .collect()
+}
+
+/// Every file name in `dir`, sorted.
+fn listing(dir: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+const SUPERSEDED: &str = "a sidecar was already at the destination; the result was discarded";
+
+/// A result in the shape a hayai-nova runner writes, at `revision`.
+fn hayai_result(revision: u32) -> Vec<u8> {
+    format!(
+        r#"{{"version":"0.2.5","title":"x","volume":"y","ocr_engine":{{"id":"hayai-nova","revision":{revision},"detector":"ppocr-manga","generator":"mokuro-bunko"}},"pages":[]}}"#
+    )
+    .into_bytes()
+}
+
+/// The rename race (critique S6): a reader renamed a volume and PUT its main sidecar
+/// while the OCR of the new name ran. The person's file stays, the result is
+/// discarded (no `Vol_1.mokuro` beside it, ever), the job is not failed, and the next
+/// walk owes nothing.
+#[test]
+fn a_main_sidecar_that_arrived_during_the_job_is_kept_and_the_result_discarded() {
+    let mut h = harness_db(vec![primary()], Arc::new(FileFacts), None);
+    h.add("A/V1.cbz", 2);
+    h.at(0.0);
+    let (p, sid, claim, name) = first_job(&mut h, 2);
+    let reader = r#"{"version":"0.2.5","title":"A","volume":"V1","pages":[]}"#;
+    std::fs::write(h.library().join("A/V1.mokuro"), reader).unwrap();
+    h.done_with(&p, &sid, &claim, &name, 2, 1.0, &hayai_result(1));
+    assert_eq!(
+        std::fs::read_to_string(h.library().join("A/V1.mokuro")).unwrap(),
+        reader
+    );
+    assert_eq!(listing(&h.library().join("A")), ["V1.cbz", "V1.mokuro"]);
+    assert_eq!(rejected_reasons(&h), [SUPERSEDED]);
+    assert!(h.s.failures.is_empty(), "not a failure of the volume");
+    assert!(h.s.claims.is_empty());
+    h.at(31.0);
+    assert!(h.s.claims.is_empty(), "owed nothing on the next walk");
+    assert!(h.s.pending_jobs().is_empty());
+}
+
+/// A layer a reader rename moved in while the row ran (sealed, the same revision): kept
+/// as it is, no `Vol.fast_1.mokuro`. A person's file at the row's name, Bunko's output a
+/// person corrected and another engine's are kept even against a newer revision.
+#[test]
+fn a_layer_already_at_the_destination_is_kept() {
+    let edited = {
+        let mut v: serde_json::Value = serde_json::from_str(&sealed(
+            r#"{"ocr_engine":{"id":"hayai-nova","revision":1},"pages":[]}"#,
+        ))
+        .unwrap();
+        v["edited"] = serde_json::json!({"by": "mokuro-reader", "at": "2026-10-29T00:00:00Z"});
+        v.to_string()
+    };
+    for (existing, result_revision) in [
+        (
+            sealed(
+                r#"{"volume":"V1","ocr_engine":{"id":"hayai-nova","revision":1,"generation":"fast"},"pages":[]}"#,
+            ),
+            1,
+        ),
+        (
+            r#"{"version":"0.2.5","pages":[{"img_path":"a.jpg","blocks":[]}]}"#.to_string(),
+            2,
+        ),
+        (edited, 2),
+        (
+            sealed(r#"{"ocr_engine":{"id":"paddle-manga","revision":1},"pages":[]}"#),
+            2,
+        ),
+        // Unsealed: only a stamp, which anyone can write.
+        (
+            r#"{"ocr_engine":{"id":"hayai-nova","revision":1},"pages":[]}"#.to_string(),
+            2,
+        ),
+    ] {
+        let mut h = harness_db(
+            vec![primary(), layer("g-2", "fast")],
+            Arc::new(FileFacts),
+            None,
+        );
+        h.add("A/V1.cbz", 2);
+        std::fs::write(
+            h.library().join("A/V1.mokuro"),
+            r#"{"version":"0.2.5","pages":[]}"#,
+        )
+        .unwrap();
+        h.at(0.0);
+        let (p, sid, claim, name) = first_job(&mut h, 2);
+        assert_eq!(name, "V1.fast.mokuro");
+        std::fs::write(h.library().join("A/V1.fast.mokuro"), &existing).unwrap();
+        h.done_with(
+            &p,
+            &sid,
+            &claim,
+            &name,
+            2,
+            1.0,
+            &hayai_result(result_revision),
+        );
+        assert_eq!(
+            std::fs::read_to_string(h.library().join("A/V1.fast.mokuro")).unwrap(),
+            existing
+        );
+        assert_eq!(
+            listing(&h.library().join("A")),
+            ["V1.cbz", "V1.fast.mokuro", "V1.mokuro"]
+        );
+        assert_eq!(rejected_reasons(&h), [SUPERSEDED]);
+        assert!(h.s.failures.is_empty());
+    }
+}
+
+/// Bunko's own sealed output of the same engine at a lower revision is replaced in
+/// place by the newer result; nothing is kept beside it.
+#[test]
+fn bunkos_own_older_revision_at_the_destination_is_replaced_in_place() {
+    let mut h = harness_db(
+        vec![primary(), layer("g-2", "fast")],
+        Arc::new(FileFacts),
+        None,
+    );
+    h.add("A/V1.cbz", 2);
+    std::fs::write(
+        h.library().join("A/V1.mokuro"),
+        r#"{"version":"0.2.5","pages":[]}"#,
+    )
+    .unwrap();
+    h.at(0.0);
+    let (p, sid, claim, name) = first_job(&mut h, 2);
+    std::fs::write(
+        h.library().join("A/V1.fast.mokuro"),
+        sealed(r#"{"ocr_engine":{"id":"hayai-nova","revision":1,"generation":"fast"},"pages":[]}"#),
+    )
+    .unwrap();
+    h.done_with(&p, &sid, &claim, &name, 2, 1.0, &hayai_result(2));
+    let bytes = std::fs::read(h.library().join("A/V1.fast.mokuro")).unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(v["ocr_engine"]["revision"], 2);
+    assert!(bunko_layout::seal::is_sealed(&bytes));
+    assert_eq!(
+        listing(&h.library().join("A")),
+        ["V1.cbz", "V1.fast.mokuro", "V1.mokuro"]
+    );
+    assert!(rejected_reasons(&h).is_empty());
 }

@@ -1,98 +1,65 @@
 //! The files that belong to a volume archive and go when it goes (0.5.2
 //! `ocr.generations.sidecar_siblings`, spec §8.3.5 / §8.9).
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+
+use bunko_core::sidecar_names::{self, LayerClass};
 
 use crate::paths;
 
-/// Archive extensions a volume can have.
-const VOLUME_EXTENSIONS: [&str; 4] = [".cbz", ".cbr", ".zip", ".rar"];
-
-/// The reader's layer-id grammar `^[a-z0-9-]{1,32}$`.
-fn is_layer_id(s: &str) -> bool {
-    !s.is_empty()
-        && s.len() <= 32
-        && s.bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-}
-
-/// `("Vol 1", "hayai-nova")` for `Vol 1.hayai-nova.mokuro[.gz]`; split on the LAST dot.
-fn split_layer_sidecar(name: &str) -> Option<(&str, &str)> {
-    let name = name.strip_suffix(".gz").unwrap_or(name);
-    let middle = name.strip_suffix(".mokuro")?;
-    let cut = middle.rfind('.')?;
-    if cut == 0 {
-        return None;
-    }
-    let layer = &middle[cut + 1..];
-    is_layer_id(layer).then(|| (&middle[..cut], layer))
-}
-
-fn volume_stems<'a>(names: impl Iterator<Item = &'a str>) -> HashSet<String> {
-    let mut stems = HashSet::new();
-    for name in names {
-        let lower = name.to_lowercase();
-        for ext in VOLUME_EXTENSIONS {
-            if lower.ends_with(ext) && lower.len() == name.len() {
-                stems.insert(name[..name.len() - ext.len()].to_string());
-                break;
-            }
-        }
-    }
-    stems
-}
-
-/// Every sidecar of the archive `cbz` (listed from its directory): `<stem>.mokuro`,
-/// `<stem>.mokuro.gz`, `<stem>.webp`, `<stem>.nocover`, and every
-/// `<stem>.<layer>.mokuro[.gz]` that is not the primary sidecar of another volume.
+/// Every sidecar of the archive `cbz`, as its folder lists them: every file
+/// [`sidecar_names::sweep_set`] gives that volume (`<stem>.mokuro[.gz]`, `<stem>.webp`,
+/// `<stem>.nocover` in any spelling rule v1 gives it, its layers). Only listed names:
+/// a constructed `<stem>.mokuro` is never deleted on the chance that it exists, since a
+/// host that folds names would open another file there (`STRASSE.mokuro` for
+/// `Straße.mokuro` on Linux casefold), one rule v1 does not give the volume. Folders
+/// are no sidecars and archive nothing (rule 2). Nothing when the folder cannot be
+/// listed.
+///
+/// Never a file that, with `cbz` gone, is a correction or curated layer of
+/// another listed archive: an archive nested under a volume's name (`V.edit.cbz` beside
+/// `V.cbz`) would otherwise take `V`'s own `V.edit.mokuro` or `V.curated.mokuro` with
+/// it, for good.
 pub fn siblings(cbz: &Path) -> Vec<PathBuf> {
     let name = paths::file_name(cbz);
-    let stem = paths::py_stem(&name).to_string();
     let Some(dir) = cbz.parent() else {
         return Vec::new();
     };
-    let mut out: Vec<PathBuf> = [".mokuro", ".mokuro.gz", ".webp", ".nocover"]
-        .iter()
-        .map(|s| dir.join(format!("{stem}{s}")))
-        .collect();
-    let Ok(entries) = std::fs::read_dir(dir) else {
+    let mut out: Vec<PathBuf> = Vec::new();
+    let Ok(entries) = bunko_store::fs::read_dir(dir) else {
         return out;
     };
     let mut names: Vec<String> = entries
         .flatten()
+        .filter(|e| !e.file_type().is_ok_and(|t| t.is_dir()))
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .collect();
     names.sort();
-    let mut others = volume_stems(names.iter().map(String::as_str));
-    others.remove(&stem);
-    for entry in &names {
-        if let Some((s, layer)) = split_layer_sidecar(entry)
-            && s == stem
-            && !others.contains(&format!("{stem}.{layer}"))
-        {
-            out.push(dir.join(entry));
+    let listed: Vec<&str> = names.iter().map(String::as_str).collect();
+    for entry in sidecar_names::sweep_set(&name, &listed) {
+        let path = dir.join(&entry);
+        if !out.contains(&path) {
+            out.push(path);
         }
     }
+    let others = sidecar_names::volume_stems(listed.iter().copied().filter(|n| *n != name));
+    out.retain(|path| {
+        let leaving = paths::file_name(path);
+        !matches!(
+            sidecar_names::layer_class_of_name(&leaving, &others),
+            Some(LayerClass::Personal | LayerClass::Curated)
+        )
+    });
     out
 }
 
 /// `<stem>` when `name` is a bare primary sidecar `<stem>.mokuro[.gz]` (any case).
 pub fn primary_sidecar_stem(name: &str) -> Option<&str> {
-    let lower = name.to_lowercase();
-    if lower.len() != name.len() {
-        return None;
-    }
-    if lower.ends_with(".mokuro.gz") {
-        Some(&name[..name.len() - ".mokuro.gz".len()])
-    } else if lower.ends_with(".mokuro") {
-        Some(&name[..name.len() - ".mokuro".len()])
-    } else {
-        None
-    }
+    sidecar_names::split_mokuro(name).map(|(stem, _)| stem)
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // fixtures are written with std::fs
 mod tests {
     use super::*;
 
@@ -122,8 +89,135 @@ mod tests {
         assert!(!got.contains(&"Vol 01.backup.2024.mokuro".to_string()));
         assert!(!got.contains(&"Vol 01.Upper.mokuro".to_string()));
         assert!(!got.contains(&"Vol 02.hayai.mokuro".to_string()));
+        assert!(!got.contains(&"Vol 01.cbz".to_string()));
         assert_eq!(primary_sidecar_stem("V.MOKURO"), Some("V"));
         assert_eq!(primary_sidecar_stem("V.mokuro.gz"), Some("V"));
         assert_eq!(primary_sidecar_stem("V.cbz"), None);
+    }
+
+    /// Rule v1's sweep: a folded stem is the archive's only while no archive here
+    /// has that exact spelling (a case-sensitive store can hold both).
+    #[test]
+    fn folded_stems_only_without_an_exact_archive() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        for n in ["Vol 01.cbz", "vol 01.hayai.mokuro", "VOL 01.MOKURO"] {
+            std::fs::write(d.join(n), b"x").unwrap();
+        }
+        let names = |cbz: &str| -> Vec<String> {
+            siblings(&d.join(cbz))
+                .iter()
+                .map(|p| paths::file_name(p))
+                .collect()
+        };
+        let got = names("Vol 01.cbz");
+        assert!(got.contains(&"vol 01.hayai.mokuro".to_string()));
+        assert!(got.contains(&"VOL 01.MOKURO".to_string()));
+
+        // Archives that differ only in case: a listing only a case-sensitive store can
+        // hold. Rule v1 is a function of the listing, so it is checked on the listing
+        // itself, the same on every host.
+        let listing = [
+            "Vol 01.cbz",
+            "vol 01.cbz",
+            "VOL 01.cbz",
+            "vol 01.hayai.mokuro",
+            "VOL 01.MOKURO",
+        ];
+        let got = sidecar_names::sweep_set("Vol 01.cbz", &listing);
+        assert!(!got.contains(&"vol 01.hayai.mokuro".to_string()));
+        assert!(!got.contains(&"VOL 01.MOKURO".to_string()));
+        assert!(
+            sidecar_names::sweep_set("vol 01.cbz", &listing)
+                .contains(&"vol 01.hayai.mokuro".to_string())
+        );
+        assert!(
+            sidecar_names::sweep_set("VOL 01.cbz", &listing).contains(&"VOL 01.MOKURO".to_string())
+        );
+    }
+
+    /// C11: an archive nested under a volume's name leaves that volume's correction
+    /// and curated layers; folders are no archives.
+    #[test]
+    fn a_nested_archive_leaves_the_outer_volumes_layers() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        for n in [
+            "V.cbz",
+            "V.edit.cbz",
+            "V.edit.mokuro",
+            "V.curated.cbz",
+            "V.curated.mokuro",
+            "V.hayai.cbz",
+            "V.hayai.mokuro",
+            "V.hayai.webp",
+        ] {
+            std::fs::write(d.join(n), b"x").unwrap();
+        }
+        let names = |cbz: &str| -> Vec<String> {
+            siblings(&d.join(cbz))
+                .iter()
+                .map(|p| paths::file_name(p))
+                .collect()
+        };
+        assert!(!names("V.edit.cbz").contains(&"V.edit.mokuro".to_string()));
+        assert!(!names("V.curated.cbz").contains(&"V.curated.mokuro".to_string()));
+        // An engine id is no such layer: the nested volume's own primary goes with it.
+        let hayai = names("V.hayai.cbz");
+        assert!(hayai.contains(&"V.hayai.mokuro".to_string()));
+        assert!(hayai.contains(&"V.hayai.webp".to_string()));
+        // Alone, a dotted volume's primary goes with it.
+        std::fs::remove_file(d.join("V.cbz")).unwrap();
+        assert!(names("V.edit.cbz").contains(&"V.edit.mokuro".to_string()));
+        // A folder named like an archive claims nothing.
+        std::fs::create_dir(d.join("W.cbz")).unwrap();
+        std::fs::write(d.join("W.curated.cbz"), b"x").unwrap();
+        std::fs::write(d.join("W.curated.mokuro"), b"x").unwrap();
+        assert!(names("W.curated.cbz").contains(&"W.curated.mokuro".to_string()));
+    }
+
+    /// Only listed names go with an archive: `Straße.mokuro` is not built and deleted
+    /// on the chance it exists (Linux casefold would open, and delete, the
+    /// `STRASSE.mokuro` beside it, which rule v1 does not give `Straße.cbz`; a
+    /// case-sensitive disk would not).
+    #[test]
+    fn only_listed_names_go_with_an_archive() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        for n in ["Stra\u{df}e.cbz", "STRASSE.mokuro", "V.cbz", "v.mokuro"] {
+            std::fs::write(d.join(n), b"x").unwrap();
+        }
+        let listed: Vec<String> = std::fs::read_dir(d)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        let straße = siblings(&d.join("Stra\u{df}e.cbz"));
+        assert!(straße.is_empty(), "{straße:?}");
+        let v: Vec<String> = siblings(&d.join("V.cbz"))
+            .iter()
+            .map(|p| paths::file_name(p))
+            .collect();
+        assert_eq!(v, ["v.mokuro"]);
+        assert!(v.iter().all(|n| listed.contains(n)));
+    }
+
+    #[test]
+    fn every_archive_extension_keeps_its_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        for n in [
+            "Vol 01.cbz",
+            "Vol 01.5.zip",
+            "Vol 01.5.mokuro",
+            "Vol 01.7.mokuro",
+        ] {
+            std::fs::write(d.join(n), b"x").unwrap();
+        }
+        let got: Vec<String> = siblings(&d.join("Vol 01.cbz"))
+            .iter()
+            .map(|p| paths::file_name(p))
+            .collect();
+        assert!(!got.contains(&"Vol 01.5.mokuro".to_string()));
+        assert!(got.contains(&"Vol 01.7.mokuro".to_string()));
     }
 }

@@ -17,9 +17,32 @@ use bunko_sched::job_order::{JobKey, order_jobs};
 use bunko_sched::plan::{LanePricing, MachineBench, Pricing};
 use serde_json::{Map, Value};
 
-use super::{Claimed, Lane, Scheduler};
+use super::{Claimed, Lane, Msg, Scheduler};
+use crate::ocr::owed::{PageSuffixes, read_page_suffixes};
 use crate::ocr::profiles::{Formats, RowProfile, machine_pools, profile_key, runner_pools};
-use crate::ocr::types::{Job, LOCAL, stamp_of};
+use crate::ocr::types::{Job, LOCAL, Stamp, stamp_of};
+
+/// What `machine_reads` knows of a volume's page formats.
+enum Suffixes {
+    Known(Arc<[String]>),
+    /// Not readable (gone, damaged, an I/O error on a local disk): the claim's own
+    /// checks decide, as for any machine.
+    Unknown,
+    /// Being read on a helper (remote store): offered once known.
+    Wait,
+}
+
+impl From<&PageSuffixes> for Suffixes {
+    fn from(read: &PageSuffixes) -> Self {
+        match read {
+            PageSuffixes::Read(suffixes) => Suffixes::Known(suffixes.clone()),
+            PageSuffixes::Unreadable => Suffixes::Unknown,
+        }
+    }
+}
+
+/// The most page-suffix reads asked of a helper at a time (remote store).
+pub const SUFFIX_BATCH: usize = 8;
 
 /// The pseudo row id upgrade jobs are ordered under: after every real row.
 pub const UPGRADE_ORDER_KEY: &str = "\u{10FFFF}upgrade";
@@ -110,6 +133,9 @@ pub fn catalog_can_run(
     if !catalog.engines.contains(&row.engine) {
         return Some(format!("{} is not installed on this processor", row.engine));
     }
+    if let Some(why) = engine_revision_refusal(catalog, &row.engine) {
+        return Some(why);
+    }
     let detector = row.effective_detector();
     if !detector.is_empty() && !catalog.detectors.iter().any(|d| d == detector) {
         return Some(format!(
@@ -128,6 +154,19 @@ pub fn catalog_can_run(
         }
     }
     precision_refusal(row, catalog, stage_device)
+}
+
+/// A processor whose build of `engine` writes an older revision than this library's
+/// ([`bunko_layout::sidecar::engine_revision`]): what it made would be outdated at once
+/// and queued again by the upgrade, round after round.
+pub fn engine_revision_refusal(catalog: &bunko_proto::Catalog, engine: &str) -> Option<String> {
+    let has = catalog.engine_revision(engine);
+    let wanted = bunko_layout::sidecar::engine_revision(engine);
+    (has < wanted).then(|| {
+        format!(
+            "its {engine} is revision {has}, older than this library's revision {wanted}; update the processor"
+        )
+    })
 }
 
 /// `model_device(row, None)`: where the row's model sits under its own placement.
@@ -300,41 +339,113 @@ impl Scheduler {
         runner_pools(&machine_pools(&stored, &row.pools.to_value()))
     }
 
-    /// The page suffixes of `rel`'s volume (lowercase, with the dot), read from its zip
-    /// directory and kept while its size and mtime stay. None: not readable here (the
-    /// claim's own checks then decide).
-    fn page_suffixes(&mut self, rel: &str) -> Option<Arc<[String]>> {
+    /// The page suffixes of `rel`'s volume, kept on its owed entry while its size and
+    /// mtime stay ([`crate::ocr::owed::OwedVolume::page_suffixes`]). On a local library
+    /// a miss is read here; on a remote one (spec §8: the actor reads no archive) it is
+    /// asked of a helper ([`Self::start_suffix_reads`]) and the volume waits.
+    fn page_suffixes(&mut self, rel: &str) -> Suffixes {
         let path = self.library().join(rel);
-        let meta = std::fs::metadata(&path).ok()?;
-        let stamp = (meta.len(), crate::ocr::types::mtime_ns(&meta));
-        if let Some((size, mtime, suffixes)) = self.page_suffixes.get(rel)
-            && (*size, *mtime) == stamp
+        let Some(stamp) = stamp_of(&path) else {
+            return Suffixes::Unknown;
+        };
+        if let Some(v) = self.owed.volumes.get(rel)
+            && let Some((at, read)) = &v.page_suffixes
+            && *at == stamp
         {
-            return Some(suffixes.clone());
+            return Suffixes::from(read);
         }
-        let volume = bunko_library::Volume::open(&path).ok()?;
-        let suffixes: BTreeSet<String> = volume
-            .pages()
-            .iter()
-            .filter_map(|page| {
-                let name = page.path.rsplit('/').next().unwrap_or(&page.path);
-                name.rfind('.').map(|i| name[i..].to_ascii_lowercase())
-            })
-            .collect();
-        let suffixes: Arc<[String]> = suffixes.into_iter().collect();
-        if self.page_suffixes.len() >= 4096 {
-            self.page_suffixes.clear();
+        if self.remote_library() {
+            // Only an owed volume keeps them: anything else would be asked for again
+            // and again.
+            // At most a batch is asked for at a time, in the order the volumes were
+            // looked at (claim priority): an older processor facing a long backlog of
+            // unknown volumes is offered the first it reads after one batch, not after
+            // the whole backlog; the next pass asks for the next ones.
+            if self.suffixes_wanted.len() < SUFFIX_BATCH
+                && self.owed.volumes.contains_key(rel)
+                && !self.suffixes_failed.contains(rel)
+            {
+                self.suffixes_wanted.insert(rel.to_string());
+            }
+            return Suffixes::Wait;
         }
-        self.page_suffixes
-            .insert(rel.to_string(), (stamp.0, stamp.1, suffixes.clone()));
-        Some(suffixes)
+        let Ok(read) = read_page_suffixes(&path) else {
+            return Suffixes::Unknown;
+        };
+        let out = Suffixes::from(&read);
+        if let Some(v) = self.owed.volumes.get_mut(rel) {
+            v.page_suffixes = Some((stamp, read));
+        }
+        out
+    }
+
+    /// Read the page suffixes `machine_reads` asked for, on a helper thread (one batch
+    /// of at most [`SUFFIX_BATCH`] at a time, in the order asked; called at the end of
+    /// every pump). Each batch answers on its own, so the lanes look again after it.
+    pub(super) fn start_suffix_reads(&mut self) {
+        if self.suffixes_reading || self.suffixes_wanted.is_empty() || self.stopping {
+            return;
+        }
+        self.suffixes_reading = true;
+        let library = self.library();
+        let n = self.suffixes_wanted.len().min(SUFFIX_BATCH);
+        let rels: Vec<String> = self.suffixes_wanted.drain(..n).collect();
+        self.run_background(Box::new(move || {
+            let read = rels
+                .into_iter()
+                .map(|rel| {
+                    let path = library.join(&rel);
+                    let stamp = stamp_of(&path);
+                    // A panic on a malformed archive must still answer, or no read
+                    // would start again and the scan would never end: the volume is
+                    // then judged by the claim's own checks, as a damaged one is.
+                    let read = std::panic::catch_unwind(|| read_page_suffixes(&path))
+                        .unwrap_or_else(|_| {
+                            tracing::warn!("reading the page formats of {rel} panicked");
+                            Ok(PageSuffixes::Unreadable)
+                        })
+                        .map_err(|e| e.to_string());
+                    (rel, stamp, read)
+                })
+                .collect();
+            Msg::PageSuffixesRead(read)
+        }));
+    }
+
+    /// A helper's page suffixes: kept on each volume still owed, and every lane looks
+    /// again. One that could not be read waits for the next walk.
+    pub(super) fn page_suffixes_read(
+        &mut self,
+        read: Vec<(String, Option<Stamp>, Result<PageSuffixes, String>)>,
+    ) {
+        self.suffixes_reading = false;
+        for (rel, stamp, result) in read {
+            match (stamp, result) {
+                (Some(stamp), Ok(read)) => {
+                    if let Some(v) = self.owed.volumes.get_mut(&rel) {
+                        v.page_suffixes = Some((stamp, read));
+                    }
+                }
+                (_, Err(e)) => {
+                    tracing::warn!("could not read the page formats of {rel}: {e}");
+                    self.suffixes_failed.insert(rel);
+                }
+                // Gone meanwhile: its removal follows.
+                (None, Ok(_)) => {}
+            }
+        }
+        self.bump();
+        if self.processing_hold().is_none() {
+            self.maybe_start_scan();
+        }
     }
 
     /// Whether machine `pid`'s release reads every page of `job`'s volume. This server's
     /// own OCR does; a processor is judged by the version it registered with
     /// ([`bunko_proto::PAGE_FORMATS_SINCE`]), so a volume is looked into only for a
     /// processor older than some page format. A volume it cannot read waits for one
-    /// that can instead of failing there.
+    /// that can instead of failing there; so does one whose pages are not known yet
+    /// (being read on a helper, remote store).
     pub fn machine_reads(&mut self, pid: &str, job: &Job) -> bool {
         let Some(machine) = self.machines.get(pid) else {
             return false;
@@ -343,8 +454,10 @@ impl Scheduler {
             return true;
         }
         let (version, label) = (machine.host.version.clone(), machine.label());
-        let Some(suffixes) = self.page_suffixes(&job.rel) else {
-            return true;
+        let suffixes = match self.page_suffixes(&job.rel) {
+            Suffixes::Known(suffixes) => suffixes,
+            Suffixes::Unknown => return true,
+            Suffixes::Wait => return false,
         };
         let unread: Vec<&str> = suffixes
             .iter()
@@ -613,7 +726,29 @@ impl Scheduler {
     }
 
     pub fn held(&self, machine_name: &str) -> bool {
-        self.update_drain || self.holds.get(machine_name).copied().unwrap_or(0) > 0
+        self.update_drain
+            || self.storage_hold().is_some()
+            || self.holds.get(machine_name).copied().unwrap_or(0) > 0
+    }
+
+    /// Why a remote library store takes no new claims now (spec §3.5, §9.1
+    /// `held.reason`): `storage-offline`, `storage-auth`, `storage-full`,
+    /// `storage-transfer-quota` or `storage-lease`. None on a local library, and while
+    /// the store is online or still syncing.
+    pub fn storage_hold(&self) -> Option<&'static str> {
+        use bunko_store::{Blocked, Health};
+        let store = bunko_store::store_for(&self.library())?;
+        if !store.caps().remote {
+            return None;
+        }
+        match store.health() {
+            Health::Online | Health::Syncing { .. } | Health::Suspect => None,
+            Health::Degraded { .. } | Health::Offline => Some("storage-offline"),
+            Health::NeedsReauth => Some("storage-auth"),
+            Health::Blocked(Blocked::StorageFull) => Some("storage-full"),
+            Health::Blocked(_) => Some("storage-transfer-quota"),
+            Health::LeaseHeld { .. } => Some("storage-lease"),
+        }
     }
 
     /// Hold (or release) every machine for an automatic update: no new claims; the
@@ -910,7 +1045,11 @@ impl Scheduler {
             if offered.get(&*job.gid) != Some(&true) {
                 continue;
             }
-            if !crate::ocr::owed::still_owed(&library, &job.rel, &row, job.upgrade) {
+            let probe = self.upgrade_probe();
+            let probe = probe
+                .as_deref()
+                .map(|u| u as &dyn crate::ocr::owed::UpgradeProbe);
+            if !crate::ocr::owed::still_owed_with(&library, &job.rel, &row, job.upgrade, probe) {
                 self.forget_candidate(&job);
                 continue;
             }
@@ -959,6 +1098,7 @@ impl Scheduler {
                 stamp,
                 settling: false,
                 row,
+                spool: None,
             },
         );
         self.bump();

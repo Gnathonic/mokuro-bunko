@@ -13,6 +13,7 @@
 //! Unlike the other library crates this one is async (tokio): it streams request and
 //! response bodies. Filesystem work runs in `spawn_blocking`.
 
+mod analytics;
 mod cache;
 mod conditional;
 mod hooks;
@@ -20,6 +21,7 @@ mod locks;
 mod methods;
 mod path_case;
 mod paths;
+mod personal;
 mod propfind;
 mod resource;
 mod response;
@@ -37,10 +39,14 @@ use bunko_core::reader_tree;
 use bunko_core::{Role, StorageLayout};
 use http::{HeaderMap, Request, Response, StatusCode};
 
+pub use analytics::{
+    DavDepth, DavInfo, DavTarget, ListingInfo, Served, canonical_path, dav_target_of,
+};
 pub use bunko_core::reader_tree::Caller;
 pub use cache::{CacheConfig, PropfindCache};
-pub use hooks::{AuditEvent, DavHooks, NoHooks, PutFollowUp};
-pub use path_case::{LibraryPathCanonicalizer, PathCase, fold_name, is_case_sensitive};
+pub use hooks::{AuditEvent, DavHooks, HookGuard, NoHooks, PutFollowUp};
+pub use path_case::{LibraryPathCanonicalizer, PathCase, fold_name};
+pub use personal::{EDITS_DIR, MAX_LAYER_BYTES, PersonalOverlays};
 pub use upload::{DamageMemory, DigestAlgo, parse_content_digest};
 pub use write_locks::{AccountWriteGuard, AccountWriteLocks, PathWriteLocks, WriteLockGuard};
 
@@ -73,6 +79,28 @@ impl Default for HistoryLimits {
     }
 }
 
+/// A refusal of a write, from the server's auth layer: a 403 with `message` as its text
+/// body, and `detail` (when set) as the `detail` of a PUT's verdict.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refusal {
+    pub message: String,
+    pub detail: Option<&'static str>,
+    /// Set when the decision could not be made now (series folder adoption pending, an
+    /// owner lookup failed): a 503 with this `Retry-After` instead, so a client retries
+    /// rather than taking it as a final refusal of the file.
+    pub retry_after: Option<u64>,
+}
+
+/// [`DavContext::ownership_recheck`]: the auth decision made again. Blocking (it lists
+/// a folder and reads the database).
+pub type OwnershipRecheck = Arc<dyn Fn() -> Result<(), Refusal> + Send + Sync>;
+
+/// A response extension the server's auth layer puts on a refusal it answered itself:
+/// the `detail` its PUT verdict carries ([`put_refusal_verdict`]) in place of the
+/// generic one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RefusalDetail(pub &'static str);
+
 /// Who is asking, as the server's auth layer decided (spec §2.3).
 #[derive(Clone)]
 pub struct DavContext {
@@ -83,6 +111,16 @@ pub struct DavContext {
     /// The account owns a cloud library's root: its per-user files are the root's own
     /// (spec 0.8 §10). Never true for anonymous.
     pub owns_cloud_root: bool,
+    /// Auth admitted this write only as the caller's own correction layer (D27), from a
+    /// folder listing of its own: the path must still resolve to one when it is
+    /// written, else the write is refused. An archive of the layer's dotted name that
+    /// lands in between makes the path that archive's shared primary.
+    pub personal_only: bool,
+    /// Auth admitted this write by a series owner rule (0.8), decided from a folder
+    /// listing and the database: asked again just before the write lands (a PUT's
+    /// publish, a DELETE's removal), so an archive that arrived meanwhile and governs
+    /// the path now refuses it.
+    pub ownership_recheck: Option<OwnershipRecheck>,
     /// `MOKURO_NGINX_ACCEL=1`: answer library GET/HEAD with `X-Accel-Redirect` (§8.10).
     pub nginx_accel: bool,
     /// The resolved client IP (logging only).
@@ -96,6 +134,8 @@ impl DavContext {
             username: None,
             role: Role::Anonymous,
             owns_cloud_root: false,
+            personal_only: false,
+            ownership_recheck: None,
             nginx_accel: false,
             client_ip: None,
             hooks,
@@ -107,6 +147,8 @@ impl DavContext {
             username: Some(username.into()),
             role,
             owns_cloud_root: false,
+            personal_only: false,
+            ownership_recheck: None,
             nginx_accel: false,
             client_ip: None,
             hooks,
@@ -130,11 +172,27 @@ pub(crate) struct Inner {
     pub roots: Roots,
     pub write_locks: PathWriteLocks,
     pub history_writers: AccountWriteLocks,
+    /// One archive publish per library folder at a time, from the last check of its
+    /// name against the folder's archives to the publish
+    /// ([`methods::archive_name_check`]): two archives the filename fold makes one
+    /// volume name never both land. Keyed by the folder's physical path, folded.
+    pub archive_publishes: AccountWriteLocks,
     pub locks: LockManager,
     pub dead: DeadProps,
     pub damage: DamageMemory,
     pub cache: Arc<PropfindCache>,
     pub path_case: PathCase,
+}
+
+impl Inner {
+    /// Every account's correction overlays (they follow their volume).
+    pub(crate) fn overlays(&self) -> PersonalOverlays {
+        PersonalOverlays::new(
+            self.roots.library.clone(),
+            self.roots.users.clone(),
+            self.write_locks.clone(),
+        )
+    }
 }
 
 /// The WebDAV handler. Cheap to clone; build one per server.
@@ -150,23 +208,23 @@ pub enum DavInitError {
 }
 
 impl Dav {
-    /// Build the handler over `layout` (creates `library/`, `inbox/`, `users/` and
-    /// `library/thumbnails/` like 0.5.2). Call inside a tokio runtime so the PROPFIND cache
+    /// Build the handler over `layout` (creates `library/`, `inbox/` and `users/`). Call inside a tokio runtime so the PROPFIND cache
     /// can schedule background refreshes.
     pub fn new(layout: &StorageLayout, config: DavConfig) -> Result<Dav, DavInitError> {
         layout.ensure_directories()?;
         let roots = Roots {
-            library: std::fs::canonicalize(layout.library())?,
-            users: std::fs::canonicalize(layout.users())?,
+            library: bunko_store::fs::canonicalize(layout.library())?,
+            users: bunko_store::fs::canonicalize(layout.users())?,
             history: config.history,
         };
         let cache = PropfindCache::new(config.propfind_cache, roots.clone());
-        let path_case = PathCase::new(LibraryPathCanonicalizer::new(roots.library.clone(), None));
+        let path_case = PathCase::new(LibraryPathCanonicalizer::new(roots.library.clone()));
         Ok(Dav {
             inner: Arc::new(Inner {
                 roots,
                 write_locks: PathWriteLocks::new(),
                 history_writers: AccountWriteLocks::default(),
+                archive_publishes: AccountWriteLocks::default(),
                 locks: LockManager::new(),
                 dead: DeadProps::default(),
                 damage: DamageMemory::default(),
@@ -187,6 +245,12 @@ impl Dav {
         &self.inner.cache
     }
 
+    /// Every account's correction overlays, for the hooks of changes made outside DAV
+    /// (a rename, merge or delete in the cloud folder): they follow their volume.
+    pub fn overlays(&self) -> PersonalOverlays {
+        self.inner.overlays()
+    }
+
     /// The per-path write-lock registry shared with non-DAV writers (the metadata compiler
     /// takes it around `series.json`/`catalog.json` writes, spec §8.7).
     pub fn write_locks(&self) -> &PathWriteLocks {
@@ -201,7 +265,10 @@ impl Dav {
             paths::Target::Progress(rel) => self.inner.roots.user_path(caller?, &rel),
             paths::Target::Library(rel) => {
                 let roots = &self.inner.roots;
-                roots.library_member(&roots.library, &rel)
+                match roots.personal(&rel) {
+                    Some(file) => roots.personal_path(&file.rel, caller?),
+                    None => roots.library_member(&roots.library, &rel),
+                }
             }
             _ => None,
         }
@@ -270,7 +337,8 @@ pub fn put_gives_verdict(path: &str) -> bool {
 /// a body limit, ...) into the JSON verdict a reader expects (spec §9; in 0.5.2 the upload
 /// middleware wrapped the auth layer). Other headers (`WWW-Authenticate`) are kept. A
 /// response for a path without a verdict, or a success, is returned unchanged; a `.cbz`
-/// PUT always gets `X-Mokuro-Put: verified`.
+/// PUT always gets `X-Mokuro-Put: verified`. A 403 carrying a [`RefusalDetail`] says
+/// why in its verdict's `detail`.
 pub fn put_refusal_verdict(path: &str, resp: Response<Body>) -> Response<Body> {
     methods::put::refusal_verdict(path, resp)
 }
@@ -283,7 +351,7 @@ pub enum LibraryChange {
     Library,
     /// Inside the series folder of this name.
     Series(String),
-    /// Under `thumbnails/`, or the cloud-root owner's per-user tree.
+    /// The cloud-root owner's per-user tree.
     Ignore,
 }
 
@@ -304,9 +372,6 @@ pub fn classify_change(library_root: &Path, path: &Path) -> LibraryChange {
     }
     if parts.len() < 2 {
         return LibraryChange::Library;
-    }
-    if parts[0] == "thumbnails" {
-        return LibraryChange::Ignore;
     }
     LibraryChange::Series(parts[0].clone())
 }
@@ -346,10 +411,6 @@ mod tests {
             LibraryChange::Library
         );
         assert_eq!(
-            classify_change(root, Path::new("/lib/thumbnails/a.webp")),
-            LibraryChange::Ignore
-        );
-        assert_eq!(
             classify_change(root, Path::new("/lib/S/v.cbz")),
             LibraryChange::Series("S".into())
         );
@@ -365,10 +426,19 @@ mod tests {
             classify_change(root, Path::new("/lib/history")),
             LibraryChange::Ignore
         );
+        // Reserved in any spelling.
         assert_eq!(
             classify_change(root, Path::new("/lib/History/v.cbz")),
-            LibraryChange::Series("History".into())
+            LibraryChange::Ignore
         );
+        // `thumbnails` is no reserved name in any spelling (covers live beside their
+        // archives; 0.5.2's cover cache folder is gone): a series like any, everywhere.
+        for name in ["thumbnails", "Thumbnails"] {
+            assert_eq!(
+                classify_change(root, &Path::new("/lib").join(name).join("a.webp")),
+                LibraryChange::Series(name.into())
+            );
+        }
         assert!(is_relevant_change(Path::new("/lib/S/v.mokuro.gz"), false));
         assert!(is_relevant_change(Path::new("/lib/S/v.webp"), false));
         assert!(!is_relevant_change(Path::new("/lib/S/series.json"), false));

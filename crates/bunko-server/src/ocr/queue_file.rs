@@ -2,6 +2,15 @@
 //! `middleware/queue_file.py`, spec http-webdav §11): rebuilt at most once a second,
 //! ETAs kept within 60 s of what was published, a strong ETag over the document without
 //! `generated_at`, a gzip representation with its own tag, every write refused with 405.
+//!
+//! The file is recognised in every spelling the filename fold joins
+//! ([`bunko_core::names::is_fixed_name`]: `.MOKURO-QUEUE.JSON`, `.mokuro-queue.jſon`,
+//! one with a zero width space in it), as every host makes them one name: a GET of any
+//! serves the generated document, and a write of any answers 405, on a local library as
+//! on a cloud one (where the store lists the file). Bunko's other control file at the
+//! library root, the cloud lease marker `.mokuro-bunko.json`, is written by the lease
+//! only: every write of it, in any spelling, answers 403 for every account, as a cloud
+//! store refuses it, so a local library holds none a client made either.
 
 use std::time::Instant;
 
@@ -18,6 +27,8 @@ use super::OcrControl;
 use crate::core::{Core, RequestCtx};
 
 pub const QUEUE_FILE_PATH: &str = "/mokuro-reader/.mokuro-queue.json";
+/// The queue file's name at the library root.
+pub const QUEUE_FILE_NAME: &str = ".mokuro-queue.json";
 pub const QUEUE_FILE_VERSION: u64 = 1;
 pub const REBUILD_SECONDS: f64 = 1.0;
 pub const ETA_HYSTERESIS_SECONDS: f64 = 60.0;
@@ -222,25 +233,75 @@ fn not_allowed() -> Response {
     resp
 }
 
-/// The 405 cases, decided before authentication: any write to the file, and a
-/// MOVE/COPY whose Destination is the file. None: not this module's request.
+fn marker_refused() -> Response {
+    let body = "The storage lease marker is written by Bunko only.";
+    let mut resp = Response::new(Body::from(body));
+    *resp.status_mut() = StatusCode::FORBIDDEN;
+    let h = resp.headers_mut();
+    h.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/plain; charset=utf-8"),
+    );
+    h.insert(header::CONTENT_LENGTH, HeaderValue::from(body.len()));
+    resp
+}
+
+/// The library-root name a decoded request path (or Destination path) names, `.` and
+/// `..` segments and empty ones resolved: `Some("x")` for `/mokuro-reader/x`,
+/// `/mokuro-reader/./x/`, `None` for anything else.
+fn root_name(path: &str) -> Option<String> {
+    let mut segs: Vec<&str> = Vec::new();
+    for seg in path.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                segs.pop();
+            }
+            s => segs.push(s),
+        }
+    }
+    match segs[..] {
+        ["mokuro-reader", name] => Some(name.to_string()),
+        _ => None,
+    }
+}
+
+/// Whether `path` (decoded) is the queue file, in any spelling the filename fold joins
+/// with `.mokuro-queue.json`.
+pub fn is_queue_file(path: &str) -> bool {
+    root_name(path).is_some_and(|n| bunko_core::names::is_fixed_name(&n, QUEUE_FILE_NAME))
+}
+
+/// Whether `path` (decoded) is the cloud lease marker, in any spelling the filename
+/// fold joins with `.mokuro-bunko.json`.
+pub fn is_marker_file(path: &str) -> bool {
+    root_name(path)
+        .is_some_and(|n| bunko_core::names::is_fixed_name(&n, bunko_remote::status::MARKER_NAME))
+}
+
+/// The refusals, decided before authentication: any write to the queue file in any
+/// spelling, and a MOVE/COPY whose Destination is it (405); any write to the lease
+/// marker in any spelling, a MOVE of it, and a MOVE/COPY onto it (403). None: not this
+/// module's request.
 pub fn refusal(method: &Method, path: &str, destination: Option<&str>) -> Option<Response> {
-    if (method.as_str() == "MOVE" || method.as_str() == "COPY")
-        && destination
-            .and_then(crate::auth::paths::destination_path)
-            .as_deref()
-            == Some(QUEUE_FILE_PATH)
-    {
+    let m = method.as_str();
+    if m == "MOVE" || m == "COPY" {
+        let to = destination.and_then(crate::auth::paths::destination_path);
+        if to.as_deref().is_some_and(is_queue_file) {
+            return Some(not_allowed());
+        }
+        if to.as_deref().is_some_and(is_marker_file) {
+            return Some(marker_refused());
+        }
+    }
+    let read = *method == Method::OPTIONS || *method == Method::GET || *method == Method::HEAD;
+    if is_queue_file(path) && !read {
         return Some(not_allowed());
     }
-    if path != QUEUE_FILE_PATH
-        || *method == Method::OPTIONS
-        || *method == Method::GET
-        || *method == Method::HEAD
-    {
-        return None;
+    if is_marker_file(path) && !read && m != "PROPFIND" && m != "COPY" {
+        return Some(marker_refused());
     }
-    Some(not_allowed())
+    None
 }
 
 /// Serve the file for an already authorised GET/HEAD.
@@ -331,7 +392,9 @@ pub async fn middleware(
     if let Some(refused) = refusal(req.method(), &path, destination.as_deref()) {
         return refused;
     }
-    if path != QUEUE_FILE_PATH || *req.method() == Method::OPTIONS {
+    // Any spelling (PathCase may have given the path a listed one): the generated
+    // document, never a file a client made.
+    if !is_queue_file(&path) || *req.method() == Method::OPTIONS {
         return next.run(req).await;
     }
     // The same gate as a GET of a library file.

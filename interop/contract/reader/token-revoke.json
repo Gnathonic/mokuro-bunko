@@ -1,0 +1,13 @@
+{
+  "expect": {
+    "status": [
+      200
+    ]
+  },
+  "request": {
+    "auth": "bearer:reader",
+    "headers": {},
+    "method": "DELETE",
+    "path": "/login/api/token"
+  }
+}

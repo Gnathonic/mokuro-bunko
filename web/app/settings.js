@@ -150,6 +150,11 @@
     renderEngineNote();
     try {
       const h = await get('/app/api/ocr/hardware');
+      // The engines this build runs (a build without a licence class has fewer).
+      const pick = $('ocr-engine');
+      for (const e of h.engines || []) {
+        if (![...pick.options].some((o) => o.value === e)) pick.add(new Option(e, e));
+      }
       const gpus = (h.nvidia_gpus || []).concat(h.amd_gfx || [], h.vulkan_gpus || []);
       const packs = h.packs.filter((p) => p.role !== 'server');
       $('ocr-kv').innerHTML =

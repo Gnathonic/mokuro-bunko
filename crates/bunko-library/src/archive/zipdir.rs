@@ -10,7 +10,7 @@
 //! duplicate names, for one). Only the central directory is read to list an
 //! archive; members are streamed one at a time.
 
-use std::fs::File;
+use bunko_store::fs::File;
 use std::io::{self, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 

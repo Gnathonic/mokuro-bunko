@@ -127,6 +127,7 @@ fn run(cli: Cli) -> out::CmdResult {
         Command::Ssl(c) => cmd::ssl::run(&ctx, c),
         Command::Tunnel(c) => cmd::tunnel::run(&ctx, c),
         Command::Dyndns(c) => cmd::dyndns::run(&ctx, c),
+        Command::Library(c) => cmd::library::run(&ctx, c),
         Command::Update(c) => cmd::update::run(&ctx, c),
         #[cfg(feature = "ocr")]
         Command::Models(c) => cmd::models::run(&ctx, c),
@@ -137,6 +138,8 @@ fn run(cli: Cli) -> out::CmdResult {
         Command::Gui(args) => cmd::gui::run(&ctx, args),
         #[cfg(feature = "tray")]
         Command::Tray(args) => cmd::tray::run(&ctx, args),
+        #[cfg(feature = "testing")]
+        Command::ProcessorFake(args) => cmd::processor_fake::run(&ctx, args),
     }
 }
 

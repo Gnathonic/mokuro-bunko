@@ -190,9 +190,11 @@ mod tests {
                     problems.push(format!("`{k}`: the tray has no item \"{item}\""));
                 }
             }
-            // The full build has every command: a row it does not know is stale.
+            // The full build has every command: a row it does not know is stale (but
+            // only the testing build has the rig's `processor-fake`).
             #[cfg(feature = "ocr")]
-            if !keys.contains(k) {
+            if !keys.contains(k) && (cfg!(feature = "testing") || !k.starts_with("processor-fake"))
+            {
                 problems.push(format!("stale row (no such command or flag): `{k}`"));
             }
         }

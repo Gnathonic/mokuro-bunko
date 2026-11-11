@@ -18,6 +18,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use bunko_update::tools::Windowless;
 use parking_lot::Mutex;
 
 /// An hour of samples at most: a wedged benchmark must not cost memory too.
@@ -79,7 +80,9 @@ fn nvidia_probe(index: Option<u32>) -> (Option<f64>, Option<f64>) {
     if let Some(i) = index {
         cmd.args(["-i", &i.to_string()]);
     }
-    cmd.stdin(std::process::Stdio::null())
+    // Run every few seconds for the life of a server: never a console window for it.
+    cmd.windowless()
+        .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     let Ok(out) = cmd.output() else {
         return (None, None);

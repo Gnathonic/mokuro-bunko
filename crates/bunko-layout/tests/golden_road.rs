@@ -15,6 +15,34 @@ use bunko_layout::sidecar::{
 };
 use common::*;
 
+/// `text` (a sidecar) without the `ocr_engine.revision` 0.8 adds, which the recorded
+/// Python bytes predate. The revision itself must be `written` when the block was
+/// written without one and then normalised (it ran before revisions: 1), and else the
+/// engine's current one. Dumped with `sep`, so the rest is compared byte for byte.
+fn without_revision(text: &str, sep: Separators, written: Option<i64>) -> Result<String, String> {
+    let mut v = Value::parse(text).map_err(|e| e.to_string())?;
+    if let Some(Value::Object(block)) = v.get_mut("ocr_engine") {
+        let engine = block
+            .iter()
+            .find(|(k, _)| k == "id")
+            .and_then(|(_, v)| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let want =
+            written.unwrap_or_else(|| i64::from(bunko_layout::sidecar::engine_revision(&engine)));
+        let at = block.iter().position(|(k, _)| k == "revision");
+        match at.map(|i| block.remove(i).1) {
+            Some(Value::Int(have)) if have == want => {}
+            other => {
+                return Err(format!(
+                    "ocr_engine.revision is {other:?}, not {engine}'s {want}"
+                ));
+            }
+        }
+    }
+    Ok(v.dumps(sep))
+}
+
 struct RoadInput {
     width: i64,
     height: i64,
@@ -253,7 +281,12 @@ fn volume_sidecars_and_normalization_match_python() {
         let volume = build_volume(&header, &chosen);
         let path = tmp.path().join(format!("{name}.mokuro"));
         write_sidecar(&path, &volume).expect("write");
-        let runner_bytes = std::fs::read_to_string(&path).expect("read");
+        let runner_bytes = without_revision(
+            &std::fs::read_to_string(&path).expect("read"),
+            Separators::Default,
+            None,
+        )
+        .unwrap_or_else(|e| format!("{name}: {e}"));
         if !b(get(case, "runner_modified")) && runner_bytes != s(get(case, "runner_bytes")) {
             errs.push(format!(
                 "{name}: runner bytes\n got {}\nwant {}",
@@ -294,9 +327,16 @@ fn volume_sidecars_and_normalization_match_python() {
                 generator: s(get(n, "generator")).to_string(),
                 generation: s(get(n, "generation")).to_string(),
             }),
+            created: None,
         };
         assert!(normalize_sidecar_file(&path, &norm).expect("normalize"));
-        let normalized = std::fs::read_to_string(&path).expect("read");
+        // Python's bytes carry no revision: normalising says they ran revision 1.
+        let normalized = without_revision(
+            &std::fs::read_to_string(&path).expect("read"),
+            Separators::Compact,
+            Some(1),
+        )
+        .unwrap_or_else(|e| format!("{name}: {e}"));
         if normalized != s(get(case, "normalized_bytes")) {
             errs.push(format!(
                 "{name}: normalized\n got {normalized}\nwant {}",

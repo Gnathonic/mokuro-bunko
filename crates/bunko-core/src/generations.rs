@@ -22,6 +22,7 @@
 //! Every migration is reported in [`ParsedGenerations::warnings`].
 
 use crate::engines::{self, Road};
+use crate::sidecar_names::{self, LayerClass};
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
@@ -30,7 +31,8 @@ pub const MAX_GENERATION_NAME: usize = 32;
 /// The key a retired row that was the primary keeps in `config.yaml` (its `primary` is
 /// saved as false): its files are the bare `<Volume>.mokuro` ones. 0.5 ignores it.
 pub const RETIRED_FROM_PRIMARY: &str = "retired_from_primary";
-pub const RESERVED_NAMES: &[&str] = &["original", "gcv", "updated-ocr"];
+pub const RESERVED_NAMES: &[&str] = &["original", "gcv", "updated-ocr", "edit", "curated"];
+/// Also reserved: `edit-<n>` and `curated-<n>` ([`sidecar_names::layer_class`]).
 pub const RESERVED_PREFIXES: &[&str] = &["tr-"];
 pub const MAX_STAGE_WORKERS: u32 = 64;
 pub const MAX_QUEUE_CAPACITY: u32 = 256;
@@ -283,6 +285,15 @@ pub fn name_rejection(name: &str) -> Option<String> {
              {MAX_GENERATION_NAME} characters at most, starting with a letter or a digit (a name outside this \
              is invisible to every reader)"
         ));
+    }
+    // The correction families (D27), any `-<n>` included: `edit`, `edit-<n>`,
+    // `curated`, `curated-<n>`.
+    let family = match sidecar_names::layer_class(name) {
+        LayerClass::Other => None,
+        _ => Some("readers' corrections are saved under it"),
+    };
+    if let Some(why) = family {
+        return Some(format!("name '{name}' is reserved: {why}"));
     }
     if RESERVED_NAMES.contains(&name) {
         return Some(format!(
@@ -648,6 +659,9 @@ fn parse_row(
                 ),
             ));
         };
+        if let Some(why) = engines::mismatch(spec, d) {
+            return Err(row_err(index, "detector", why));
+        }
         detector = Some(d.id.to_string());
     }
 
@@ -1062,6 +1076,48 @@ mod tests {
         assert_eq!(hayai.detector.as_deref(), Some("ppocr-manga"));
     }
 
+    /// The detectors that came back in 0.8 are choices of their own: a line detector
+    /// goes with every engine that takes one, a block detector only with the engines
+    /// that read blocks, and the 0.5 names still mean "the default".
+    #[test]
+    fn a_block_detector_goes_only_with_an_engine_that_reads_blocks() {
+        let rows = |engine: &str, detector: &str| {
+            json!([
+                {"name": "main", "engine": "hayai-nova", "primary": true},
+                {"name": "layer", "engine": engine, "detector": detector}
+            ])
+        };
+        let detector_of = |v: Value| {
+            let p = parse_generation_list(&v).unwrap();
+            p.rows[1].detector.clone()
+        };
+        assert_eq!(
+            detector_of(rows("charspot-small", "animetext-blocks")).as_deref(),
+            Some("animetext-blocks")
+        );
+        assert_eq!(
+            detector_of(rows("nar-small", "ctd-lines")).as_deref(),
+            Some("ctd-lines")
+        );
+        assert_eq!(
+            detector_of(rows("paddle-manga", "ctd-lines")).as_deref(),
+            Some("ctd-lines")
+        );
+        let err = parse_generation_list(&rows("paddle-manga", "animetext-blocks")).unwrap_err();
+        let text = format!("{err:?}");
+        assert!(
+            text.contains("finds text blocks") && text.contains("charspot-small, nar-small"),
+            "{text}"
+        );
+        // 0.5's names are not the new detectors: they still fall back to the default.
+        for old in ["ctd", "animetext"] {
+            assert_eq!(
+                detector_of(rows("charspot-small", old)).as_deref(),
+                Some("ppocr-manga")
+            );
+        }
+    }
+
     #[test]
     fn names_follow_reader_grammar() {
         assert!(name_rejection("hayai-nova").is_none());
@@ -1070,6 +1126,40 @@ mod tests {
         assert!(name_rejection("original").is_some());
         assert!(name_rejection("tr-en").is_some());
         assert!(name_rejection(&"a".repeat(33)).is_some());
+    }
+
+    /// A generation's file must never read as a reader's corrections or the shared
+    /// curated layer (D27).
+    #[test]
+    fn correction_names_are_reserved() {
+        for name in ["edit", "edit-2", "curated", "curated-3"] {
+            assert!(name_rejection(name).is_some(), "{name}");
+        }
+        for name in ["hayai-nova", "editor", "curated-ocr-x", "edits"] {
+            assert!(name_rejection(name).is_none(), "{name}");
+        }
+        assert!(name_rejection("edit-2").unwrap().contains("corrections"));
+    }
+
+    /// Owner decision, 2026-11-01: `pre-upgrade` and `previous-ocr` are names like any
+    /// other, and a row may carry them.
+    #[test]
+    fn pre_upgrade_and_previous_ocr_are_ordinary_generation_names() {
+        for name in [
+            "pre-upgrade",
+            "pre-upgrade-2",
+            "previous-ocr",
+            "previous-ocr-4",
+        ] {
+            assert!(name_rejection(name).is_none(), "{name}");
+        }
+        let p = parse_generation_list(&json!([
+            {"name": "pre-upgrade", "engine": "hayai-nova", "primary": true},
+            {"name": "previous-ocr", "engine": "paddle-manga"}
+        ]))
+        .unwrap();
+        assert_eq!(p.rows[0].name, "pre-upgrade");
+        assert_eq!(p.rows[1].files_suffix(), ".previous-ocr.mokuro");
     }
 
     #[test]

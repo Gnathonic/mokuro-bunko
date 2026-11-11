@@ -10,6 +10,7 @@
 mod archive;
 mod dist;
 mod docker;
+mod interop;
 mod licenses;
 mod manifest;
 mod names;
@@ -56,6 +57,8 @@ enum Cmd {
     TorchPack(torch_pack::TorchPackArgs),
     /// Build the Vulkan backend pack (ncnn + ONNX Runtime WebGPU, docs/rust-port/VULKAN.md).
     VulkanPack(vulkan_pack::VulkanPackArgs),
+    /// The cross-party test rig: performance and interop suites against a real server.
+    Interop(interop::InteropArgs),
 }
 
 #[derive(clap::Args)]
@@ -72,6 +75,9 @@ struct LicensesArgs {
     /// Without the desktop tray (as `dist --no-tray`).
     #[arg(long)]
     no_tray: bool,
+    /// Without the restricted-licence models (as `dist --permissive-models`).
+    #[arg(long)]
+    permissive_models: bool,
 }
 
 fn main() -> Result<()> {
@@ -86,6 +92,7 @@ fn main() -> Result<()> {
         Cmd::DockerContext(a) => docker::run(&a),
         Cmd::TorchPack(a) => torch_pack::run(&a).map(drop),
         Cmd::VulkanPack(a) => vulkan_pack::run(&a).map(drop),
+        Cmd::Interop(a) => interop::run(&a),
     }
 }
 
@@ -97,6 +104,7 @@ fn licenses_cmd(a: &LicensesArgs) -> Result<()> {
     };
     let mut build = names::Build::new(&target, a.flavor, a.ep)?;
     build.no_tray = a.no_tray;
+    build.permissive_models = a.permissive_models;
     let version = util::workspace_version(&root)?;
     let report = licenses::collect(&root, &build, &version, &[])?;
     let mut counts = std::collections::BTreeMap::<&str, usize>::new();

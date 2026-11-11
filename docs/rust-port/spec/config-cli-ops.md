@@ -109,7 +109,7 @@ Meaning: networks of reverse proxies whose `X-Real-IP`/`X-Forwarded-For` are bel
 |---|---|---|---|---|
 | base_path | path str | platform default (1.1) | `expanduser()` on YAML values (str -> Path) | yes + alias `MOKURO_STORAGE` (no expanduser, 2.3) |
 
-Derived directories (NOT configurable): `library = base/library`, `inbox = base/inbox`, `users = base/users`. `ensure_directories()` (config.py:98-103) creates `library`, `inbox`, `users` (all `parents=True, exist_ok=True`) and `library/thumbnails`.
+Derived directories (NOT configurable): `library = base/library`, `inbox = base/inbox`, `users = base/users`. `ensure_directories()` (config.py:98-103) creates `library`, `inbox`, `users` (all `parents=True, exist_ok=True`) and `library/thumbnails`. Rust 0.8: no `library/thumbnails`. The first 0.8 start on a storage folder (once: it then writes `.legacy-thumbnails-checked` in `base_path`) removes the empty `library/thumbnails/` an earlier release made, when the library lists exactly that name and no other spelling of it; one holding anything, or listed beside another spelling, stays. After that start `thumbnails` is an ordinary name in any spelling, and an empty `thumbnails/` series made later stays. A cloud library gets no `library/` either.
 Other fixed names under `base_path` (grep of src; other specs own contents): `mokuro.db` (SQLite; server.py:194), `logs/server.log`, `logs/ocr/` (logging_setup.py:23-30), `.ocr-failures.json`, `.ocr-progress.json`, `.ocr-heartbeat`, `.ocr-bench.json`, `.ocr-congestion.json`, `.processing/` (OCR staging/samples), `processors/` (per-machine profiles), `bench/` (processor-side), `.tmp`/`.pip-cache` (Unraid entrypoint only). Probe files created+deleted by checks: `.mokuro-doctor-probe`, `.mokuro-write-test`.
 
 ### 3.3 `registration` (RegistrationConfig, config.py:106-135)
@@ -324,7 +324,7 @@ Routes (setup/api.py:61-117):
 | `POST /setup/api/complete` | non-local -> same 403 (even after setup); not needed -> `400 {"error":"Setup already completed"}`; else the handler below |
 | `GET /setup`, `GET /setup/` | needed && non-local -> 403 JSON; else serves `web/index.html` |
 | `GET /setup/<file>` (not starting `api/`) | same gate; serves `setup/web/<file>` (assets: index.html, setup.css, setup.js; Rust: embed these) |
-| `GET /` with `Accept` containing `text/html` and setup needed | `302 Location: /setup` (empty body) |
+| `GET /` with `Accept` containing `text/html` and setup needed | `302 Location: /setup` (empty body; 0.8: `setup`) |
 | anything else | passed to the wrapped app |
 "Local" (`_is_local_request`, setup/api.py:172-183): `REMOTE_ADDR` must be a loopback IP; and the effective client IP (`get_client_ip`, 3.1), if different from `REMOTE_ADDR`, must also be loopback. A localhost reverse proxy forwarding a public client's `X-Real-IP` is therefore rejected; Docker bridge networking (non-loopback peer) makes setup unreachable from the host browser unless using localhost inside the container.
 

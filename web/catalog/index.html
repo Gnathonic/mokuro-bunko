@@ -4,13 +4,13 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Catalog - Mokuro Bunko</title>
-    <link rel="stylesheet" href="/_static/shared.css">
-    <link rel="stylesheet" href="/catalog/styles.css">
+    <link rel="stylesheet" href="_static/shared.css">
+    <link rel="stylesheet" href="catalog/styles.css">
 </head>
 <body>
     <!-- Header -->
     <header class="mokuro-header">
-        <a href="/" class="mokuro-header__brand">
+        <a href="./" class="mokuro-header__brand">
             <div class="mokuro-header__logo">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                     <circle cx="12" cy="12" r="10"/>
@@ -21,9 +21,9 @@
             <span class="mokuro-header__title">Mokuro</span>
         </a>
         <nav class="mokuro-header__nav" id="header-nav" data-current="catalog">
-            <a href="/" class="btn btn--ghost btn--sm">Home</a>
-            <a href="/login" class="btn btn--secondary btn--sm">Login</a>
-            <a href="/register" class="btn btn--primary btn--sm">Register</a>
+            <a href="./" class="btn btn--ghost btn--sm">Home</a>
+            <a href="login" class="btn btn--secondary btn--sm">Login</a>
+            <a href="register" class="btn btn--primary btn--sm">Register</a>
         </nav>
     </header>
 
@@ -45,6 +45,7 @@
             </div>
             <select id="sort-mode" class="title-lang-select" title="Sort series">
                 <option value="title">A–Z</option>
+                <option value="popular">Popular</option>
                 <option value="newest">Newest</option>
                 <option value="densest">Wordiest</option>
                 <option value="rating">Rating</option>
@@ -76,7 +77,7 @@
         </div>
     </main>
 
-    <script src="/_static/nav.js"></script>
-    <script src="/catalog/catalog.js"></script>
+    <script src="_static/nav.js"></script>
+    <script src="catalog/catalog.js"></script>
 </body>
 </html>

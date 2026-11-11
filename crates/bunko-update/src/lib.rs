@@ -14,6 +14,7 @@
 pub mod auto;
 pub mod backend;
 pub mod layout;
+pub mod tools;
 
 use base64::Engine as _;
 use ed25519_dalek::{Signature, VerifyingKey};
@@ -958,6 +959,26 @@ mod tests {
             Some("v0.7.0-beta.2")
         );
         assert_eq!(newest_release_with(&releases[..3], "release.json"), None);
+    }
+
+    /// The interop rig's nightly test builds (`.github/workflows/interop-nightly.yml`)
+    /// are pre-releases too, at the top of the API's list: never an update. They carry
+    /// no `release.json`, and their tags are not versions.
+    #[test]
+    fn prerelease_lookup_skips_the_nightly_test_builds() {
+        let json = r#"[
+            {"tag_name": "nightly-0.8", "draft": false, "assets": [
+                {"name": "mokuro-bunko-testing-x86_64-linux"},
+                {"name": "bunko-cloudsim-x86_64-linux"}, {"name": "nightly.json"}]},
+            {"tag_name": "nightly", "draft": false, "assets": [{"name": "release.json"}]},
+            {"tag_name": "v0.7.3", "draft": false, "assets": [{"name": "release.json"}]}
+        ]"#;
+        let releases: Vec<GithubRelease> = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            newest_release_with(&releases, "release.json").as_deref(),
+            Some("v0.7.3")
+        );
+        assert_eq!(newest_release_with(&releases[..2], "release.json"), None);
     }
 
     #[test]

@@ -15,10 +15,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use bunko_store::{Health, fs};
 use parking_lot::{Mutex, MutexGuard};
 
 use crate::compat::normalize_volume_title_key;
-use crate::compiler::{SeriesFolder, compile_series_volumes, iter_series_folders, volume_key_for};
+use crate::compiler::{
+    SeriesFolder, compile_series_volumes, iter_series_folders, orphan_series_files_where,
+    volume_key_for,
+};
 use crate::fsutil;
 use crate::paths::{CATALOG_FILE_NAME, SERIES_FILE_NAME};
 use crate::schema::{
@@ -153,16 +157,33 @@ pub fn write_if_changed(
     data: &[u8],
     locks: &dyn PathWriteLocks,
 ) -> Result<bool, WriteError> {
-    let same_length =
-        std::fs::metadata(path).is_ok_and(|meta| meta.is_file() && meta.len() == data.len() as u64);
-    if same_length && std::fs::read(path).is_ok_and(|current| current == data) {
+    let current = fs::metadata(path).ok();
+    // Publish only over the version compared here (always `None` for a local file).
+    let base = current.as_ref().and_then(|meta| meta.version().cloned());
+    let same_length = current
+        .as_ref()
+        .is_some_and(|meta| meta.is_file() && meta.len() == data.len() as u64);
+    if same_length && fs::read(path).is_ok_and(|current| current == data) {
         return Ok(false);
     }
     let _guard = locks
         .try_lock(path)
         .ok_or_else(|| WriteError::Busy(path.to_path_buf()))?;
-    fsutil::atomic_write_bytes(path, data)?;
+    fsutil::atomic_write_bytes_with(path, data, base)?;
     Ok(true)
+}
+
+/// What became of a `series.json` update.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeriesUpdate {
+    /// Merged (also when nothing changed).
+    Applied,
+    /// Unparseable, or a folder name that is no series key.
+    Invalid,
+    /// No folder of that title holds a volume right now.
+    NoFolder,
+    /// The service is stopping.
+    Stopped,
 }
 
 /// Why a client update could not be applied.
@@ -278,7 +299,7 @@ impl MetadataService {
     /// Every series folder, or `None` when the library root isn't readable
     /// (a transient mount failure must not read as "the library emptied").
     fn scan_folders(&self) -> Option<Vec<SeriesFolder>> {
-        std::fs::read_dir(&self.library_path).ok()?;
+        fs::read_dir(&self.library_path).ok()?;
         Some(iter_series_folders(&self.library_path))
     }
 
@@ -295,21 +316,24 @@ impl MetadataService {
         }
         let data = dump_series_file(&folder.title, facts, index, volumes)
             .map_err(|error| WriteError::Io(std::io::Error::other(error)))?;
-        write_if_changed(
-            &folder.path.join(SERIES_FILE_NAME),
-            &data,
-            self.locks.as_ref(),
-        )
+        // The spelling the folder lists (`Series.json`): never a second one beside it.
+        let path = fsutil::spelled(&folder.path, SERIES_FILE_NAME);
+        // Nothing is written in a frozen case-variant group (the series folder a member
+        // of one, or two spellings of `series.json` in it).
+        if fsutil::frozen_path(&self.library_path, &path).is_some() {
+            return Ok(false);
+        }
+        write_if_changed(&path, &data, self.locks.as_ref())
     }
 
     fn publish_catalog(&self, entries: &[(String, SeriesFacts)]) -> Result<bool, WriteError> {
         let data = dump_catalog_file(entries)
             .map_err(|error| WriteError::Io(std::io::Error::other(error)))?;
-        write_if_changed(
-            &self.library_path.join(CATALOG_FILE_NAME),
-            &data,
-            self.locks.as_ref(),
-        )
+        let path = fsutil::spelled(&self.library_path, CATALOG_FILE_NAME);
+        if fsutil::frozen_path(&self.library_path, &path).is_some() {
+            return Ok(false);
+        }
+        write_if_changed(&path, &data, self.locks.as_ref())
     }
 
     /// Publish one series file, logging and rescheduling on failure.
@@ -362,22 +386,43 @@ impl MetadataService {
             return Ok(());
         };
         let mut latest = 0.0f64;
-        let mut covers: HashSet<String> = HashSet::new();
+        let mut files: Vec<String> = Vec::new();
+        let mut dirs: Vec<String> = Vec::new();
         for (name, path) in entries {
             let lower = crate::pyunicode::lower(&name);
-            let Some(meta) = fsutil::stat(&path).filter(|meta| meta.is_file()) else {
+            let Some(meta) = fsutil::stat(&path) else {
                 continue;
             };
+            if !meta.is_file() {
+                if meta.is_dir() {
+                    dirs.push(name);
+                }
+                continue;
+            }
             if lower.ends_with(".cbz") {
                 latest = latest.max(fsutil::py_mtime(&meta));
-            } else if lower.ends_with(".webp") {
-                covers.insert(name);
             }
+            files.push(name);
         }
+        files.sort();
+        let listed = crate::sidecar::Listed { files, dirs };
+        let files = &listed.files;
+        // The first volume's cover as the thumbnail worker writes it: in the spelling
+        // the folder lists (`v.webp` for `V.cbz`, rule v1, never a shadowed archive's).
         let cover_path = volumes
             .iter()
-            .map(|volume| format!("{}.webp", volume.volume_title))
-            .find(|candidate| covers.contains(candidate))
+            .find_map(|volume| {
+                let archive = files.iter().find(|n| {
+                    bunko_core::sidecar_names::cbz_stem(n) == Some(volume.volume_title.as_str())
+                })?;
+                let cover = crate::sidecar::listed_sibling_in(
+                    &folder.path.join(archive),
+                    ".webp",
+                    &listed,
+                )?;
+                let name = cover.file_name()?.to_str()?.to_string();
+                files.contains(&name).then_some(name)
+            })
             .map(|candidate| format!("{}/{candidate}", folder.title));
         let character_total = volumes.iter().fold(0i64, |sum, v| {
             sum.saturating_add(match &v.character_count {
@@ -402,6 +447,90 @@ impl MetadataService {
                 .fold(0i64, i64::saturating_add),
             damaged_volumes: volumes.iter().filter(|v| v.missing_pages() > 0).count() as i64,
         })
+    }
+
+    /// May an orphan `series.json` go now (X16)? Always on a local library; on a
+    /// remote one only while it is `Online`: the feed STEADY, not Suspect, no other
+    /// Bunko holding the lease, no pause. Mid full sync, or while removals wait to be
+    /// confirmed, a folder may only look empty.
+    fn may_retire(&self) -> bool {
+        bunko_store::store_for(&self.library_path)
+            .is_none_or(|store| !store.caps().remote || store.health() == Health::Online)
+    }
+
+    /// Would a re-upload compile this `series.json` again? Yes when its facts are
+    /// stored, or when it carries nothing a facts row would hold (what Bunko compiles
+    /// for a series nobody gave facts to). A hand-placed file with facts of its own,
+    /// or one that does not parse, is not ours to drop.
+    fn regenerable(&self, series_key: &str, path: &Path) -> Result<bool, StoreError> {
+        if self.store.series_facts(series_key)?.is_some() {
+            return Ok(true);
+        }
+        let Ok(bytes) = fs::read(path) else {
+            return Ok(false);
+        };
+        Ok(
+            parse_series_update(&bytes, (self.clock)()).is_some_and(|file| {
+                !file.facts.has_facts()
+                    && file.spine_offset.is_none()
+                    && file.volume_offsets.is_empty()
+            }),
+        )
+    }
+
+    /// Retire the `series.json` of top-level folders that lost their last archive
+    /// (only those whose series key is in `only`, when given): a reader would keep
+    /// showing a series that is gone. Only a [regenerable](Self::regenerable) file
+    /// goes: a re-upload compiles it again, from the facts row, which is never
+    /// deleted. Locally an unlink; in
+    /// the cloud the provider trash, or a permanent delete of a version Bunko wrote
+    /// itself. Returns the number retired.
+    fn retire_orphan_series_files(
+        &self,
+        only: Option<&HashSet<String>>,
+    ) -> Result<usize, StoreError> {
+        let orphans = orphan_series_files_where(&self.library_path, |key| {
+            only.is_none_or(|only| only.contains(key))
+        });
+        if orphans.is_empty() {
+            return Ok(0);
+        }
+        if !self.may_retire() {
+            // Nothing else looks again before the periodic rescan: the watcher ignores
+            // .json and no hook fires when the store comes back. A slow retry (the
+            // longest the debounce allows), not the 5 s one, which would spin while
+            // a Suspect or Offline store lasts. Checked before `regenerable`, which
+            // may have to read the file from a store that is not in step.
+            tracing::debug!("[METADATA] library not steady, empty folders keep series.json");
+            self.hooks
+                .schedule_regeneration(Some(self.policy.max_debounce));
+            return Ok(0);
+        }
+        let mut retired = 0;
+        for (title, path) in orphans {
+            if fsutil::frozen_path(&self.library_path, &path).is_some()
+                || !self.regenerable(&normalize_volume_title_key(&title), &path)?
+            {
+                continue;
+            }
+            let Some(_guard) = self.locks.try_lock(&path) else {
+                tracing::info!(series = %title, "[METADATA] skipped busy series folder");
+                self.retry_later();
+                continue;
+            };
+            match fs::remove_file(&path) {
+                Ok(()) => {
+                    tracing::info!(series = %title, "[METADATA] retired series.json of empty folder");
+                    retired += 1;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    tracing::warn!(series = %title, %error, "[METADATA] could not retire series.json of empty folder");
+                    self.retry_later();
+                }
+            }
+        }
+        Ok(retired)
     }
 
     fn published(&self, changed: usize) {
@@ -476,6 +605,7 @@ impl MetadataService {
                 let folder_names: HashSet<String> =
                     folders.iter().map(|folder| folder.title.clone()).collect();
                 self.store.prune_catalog_series(&folder_names)?;
+                changed += self.retire_orphan_series_files(None)?;
                 changed += self.publish_catalog_logged(&catalog_entries);
             }
         }
@@ -541,6 +671,8 @@ impl MetadataService {
             }
             if !self.is_stopped() {
                 let _guard = self.pass_lock.lock();
+                // The DELETE/MOVE hooks drive this path for a series that lost a volume.
+                changed += self.retire_orphan_series_files(Some(&keys))?;
                 changed += self.publish_catalog_logged(&catalog_entries);
             }
         }
@@ -572,6 +704,7 @@ impl MetadataService {
             self.materialize_catalog_row(folder, &volumes)?;
             changed += self.publish_series_logged(folder, &facts, &index, &volumes);
         }
+        changed += self.retire_orphan_series_files(Some(&HashSet::from([key])))?;
         changed += self.publish_catalog_logged(&catalog_entries);
         Ok(changed)
     }
@@ -586,15 +719,39 @@ impl MetadataService {
         payload: &[u8],
         actor: Option<&str>,
     ) -> Result<bool, UpdateError> {
+        self.update_series(series_title, payload, actor, false)
+            .map(|outcome| outcome == SeriesUpdate::Applied)
+    }
+
+    /// A `series.json` found in a cloud library (a submission, D18): merged as a
+    /// client PUT is, except that a folder holding no volume keeps the facts row
+    /// (nothing is compiled there until a volume arrives, which then uses them).
+    /// `Err(Busy)`: the pass lock stayed taken; ask again.
+    pub fn ingest_series_submission(
+        &self,
+        series_title: &str,
+        payload: &[u8],
+        actor: Option<&str>,
+    ) -> Result<SeriesUpdate, UpdateError> {
+        self.update_series(series_title, payload, actor, true)
+    }
+
+    fn update_series(
+        &self,
+        series_title: &str,
+        payload: &[u8],
+        actor: Option<&str>,
+        keep_without_folder: bool,
+    ) -> Result<SeriesUpdate, UpdateError> {
         if self.is_stopped() {
-            return Ok(false);
+            return Ok(SeriesUpdate::Stopped);
         }
         let series_key = normalize_volume_title_key(series_title);
         if series_key.is_empty() {
-            return Ok(false);
+            return Ok(SeriesUpdate::Invalid);
         }
         let Some(update) = parse_series_update(payload, (self.clock)()) else {
-            return Ok(false);
+            return Ok(SeriesUpdate::Invalid);
         };
         let Some(guard) = self.pass_lock.try_lock_for(self.policy.update_lock_timeout) else {
             return Err(UpdateError::Busy(self.policy.update_lock_timeout));
@@ -604,14 +761,17 @@ impl MetadataService {
         {
             let _guard = guard;
             let Some(folders) = self.scan_folders() else {
-                return Ok(false);
+                return Ok(SeriesUpdate::NoFolder);
             };
-            let Some(resolved_title) = folders
+            let found = folders
                 .iter()
                 .find(|folder| normalize_volume_title_key(&folder.title) == series_key)
-                .map(|folder| folder.title.clone())
+                .map(|folder| folder.title.clone());
+            let compile = found.is_some();
+            let Some(resolved_title) =
+                found.or_else(|| keep_without_folder.then(|| series_title.to_owned()))
             else {
-                return Ok(false);
+                return Ok(SeriesUpdate::NoFolder);
             };
             let stored = self
                 .store
@@ -644,12 +804,14 @@ impl MetadataService {
                     })
                     .map_err(UpdateError::Store)?;
             }
-            match self.recompile_series_locked(series_title, false) {
-                Ok(count) => changed = count,
-                Err(error) => {
-                    // The facts are durable; the PUT is still accepted.
-                    tracing::warn!(%error, "[METADATA] republish failed after an accepted update");
-                    self.retry_later();
+            if compile {
+                match self.recompile_series_locked(series_title, false) {
+                    Ok(count) => changed = count,
+                    Err(error) => {
+                        // The facts are durable; the PUT is still accepted.
+                        tracing::warn!(%error, "[METADATA] republish failed after an accepted update");
+                        self.retry_later();
+                    }
                 }
             }
         }
@@ -657,7 +819,7 @@ impl MetadataService {
             self.hooks.on_external_ids_changed(&series_key);
         }
         self.published(changed);
-        Ok(true)
+        Ok(SeriesUpdate::Applied)
     }
 }
 

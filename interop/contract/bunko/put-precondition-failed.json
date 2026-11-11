@@ -1,0 +1,25 @@
+{
+  "body": {
+    "ok": false,
+    "reason": "server-error",
+    "detail": "The server could not store the upload (412).",
+    "retry": false
+  },
+  "headers": {
+    "cache-control": "no-store",
+    "content-type": "application/json",
+    "x-mokuro-put": "verified"
+  },
+  "request": {
+    "auth": "basic:reader",
+    "body_cbz": {
+      "pages": 3
+    },
+    "headers": {
+      "if-match": "\"etag\""
+    },
+    "method": "PUT",
+    "path": "/mokuro-reader/Contract%20Series/Volume%2003.cbz"
+  },
+  "status": 412
+}

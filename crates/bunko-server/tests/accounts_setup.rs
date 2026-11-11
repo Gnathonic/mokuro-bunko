@@ -2,6 +2,9 @@
 //! code that lets another computer (a Docker host's or a NAS's browser) through the
 //! localhost gate.
 
+// Fixtures are set up and checked with std::fs on purpose.
+#![allow(clippy::disallowed_methods)]
+
 mod accounts_support;
 
 use accounts_support::*;
@@ -206,7 +209,7 @@ async fn root_redirects_browsers_to_setup_until_an_admin_exists() {
     let r = env
         .send(empty(req("GET", "/").header("accept", "text/html")))
         .await;
-    assert_eq!((r.status, r.header("location")), (302, Some("/setup")));
+    assert_eq!((r.status, r.header("location")), (302, Some("setup")));
     assert!(r.body.is_empty());
     // Non-HTML clients are not redirected: the home page heuristics apply.
     let r = env
@@ -237,7 +240,7 @@ async fn a_remote_request_without_a_code_gets_the_code_page() {
     assert_eq!(r.status, 200);
     let page = r.text();
     assert!(
-        page.contains(r#"<form method="post" action="/setup/code""#),
+        page.contains(r#"<form method="post" action="setup/code""#),
         "{page}"
     );
     assert!(page.contains("server log"), "{page}");
@@ -341,7 +344,7 @@ async fn the_right_code_opens_the_wizard_once() {
     // Typed loosely: lower case, spaces instead of the dash.
     let typed = code.to_lowercase().replace('-', " ");
     let r = env.send(code_form(DOCKER, &typed)).await;
-    assert_eq!((r.status, r.header("location")), (303, Some("/setup")));
+    assert_eq!((r.status, r.header("location")), (303, Some("../setup")));
     let cookie = r
         .header("set-cookie")
         .expect("a session cookie")
@@ -350,9 +353,12 @@ async fn the_right_code_opens_the_wizard_once() {
         cookie.starts_with(&format!("{SESSION_COOKIE}=")),
         "{cookie}"
     );
-    for attr in ["Path=/setup", "HttpOnly", "SameSite=Strict", "Max-Age=3600"] {
+    for attr in ["HttpOnly", "SameSite=Strict", "Max-Age=3600"] {
         assert!(cookie.contains(attr), "{cookie}");
     }
+    // No Path: the browser's default for `<mount>/setup/code` is `<mount>/setup`, which
+    // `Path=/setup` would miss under a sub-path mount.
+    assert!(!cookie.contains("Path="), "{cookie}");
     assert!(!cookie.contains("Secure"), "plain http");
     assert!(
         !cookie.contains(&normalize_code(&code)) && !cookie.contains(&code),
@@ -414,7 +420,7 @@ async fn the_right_code_opens_the_wizard_once() {
     let r = env.send(code_form(DOCKER, &code)).await;
     assert_eq!(
         (r.status, r.header("location"), r.header("set-cookie")),
-        (303, Some("/setup"), None),
+        (303, Some("../setup"), None),
         "setup is done: the (inert) page, no session"
     );
 }
@@ -729,4 +735,94 @@ async fn every_setup_route_is_gated() {
         .await;
     assert_eq!(r.status, 410);
     assert_eq!(env.deps.core.config.read().registration.mode, "invite");
+}
+
+/// A server reachable from this computer only, with no readers: the admin password is
+/// optional. That account has no password at all, so it signs in only with an empty
+/// password from this computer, naming this computer as the host, unproxied; once it
+/// sets a password it is an ordinary account.
+#[tokio::test]
+async fn a_local_only_server_may_have_an_admin_without_a_password() {
+    let env = Env::with_config(|c| c.server.host = "127.0.0.1".into());
+    let no_readers = json!({"admin": {"username": "owner", "password": ""},
+                            "library": {"serve_readers": false}});
+    // With readers, the password is still required.
+    let r = env
+        .send(json_body(
+            req("POST", "/setup/api/complete"),
+            json!({"admin": {"username": "owner", "password": ""},
+                   "library": {"serve_readers": true}}),
+        ))
+        .await;
+    assert_eq!(r.status, 400, "{:?}", r.json());
+    let r = env
+        .send(json_body(req("POST", "/setup/api/complete"), no_readers))
+        .await;
+    assert_eq!(r.status, 201, "{:?}", r.json());
+    assert_eq!(env.db.get_user("owner").unwrap().unwrap().role, Role::Admin);
+    // No password matches it (Basic auth included).
+    assert!(env.db.authenticate_user("owner", "").unwrap().is_none());
+
+    let token = |host: &str, extra: Option<(&str, &str)>| {
+        let mut b = req("POST", "/login/api/token").header("host", host);
+        if let Some((k, v)) = extra {
+            b = b.header(k, v);
+        }
+        env.send(json_body(b, json!({"username": "owner", "password": ""})))
+    };
+    let r = token("127.0.0.1:18100", None).await;
+    assert_eq!(r.status, 200, "{:?}", r.json());
+    assert_eq!(r.json()["user"]["has_password"], false);
+    let bearer = r.json()["token"].as_str().unwrap().to_string();
+    assert_eq!(token("localhost:18100", None).await.status, 200);
+    // A DNS-rebinding page names its own host; a proxy says it forwarded.
+    assert_eq!(token("evil.example:18100", None).await.status, 400);
+    assert_eq!(
+        token("127.0.0.1:18100", Some(("x-forwarded-for", "203.0.113.10")))
+            .await
+            .status,
+        400
+    );
+    let remote = env
+        .send(json_body(
+            from_peer("POST", "/login/api/token", "203.0.113.10").header("host", "127.0.0.1"),
+            json!({"username": "owner", "password": ""}),
+        ))
+        .await;
+    assert_eq!(remote.status, 400);
+
+    // It sets its first password without a current one; then it is an ordinary account.
+    let r = env
+        .send(json_body(
+            req("POST", "/api/account/password")
+                .header("authorization", format!("Bearer {bearer}")),
+            json!({"new_password": "password123"}),
+        ))
+        .await;
+    assert_eq!(r.status, 200, "{:?}", r.json());
+    assert_eq!(token("127.0.0.1:18100", None).await.status, 401);
+    assert!(
+        env.db
+            .authenticate_user("owner", "password123")
+            .unwrap()
+            .is_some()
+    );
+}
+
+/// Listening on every address, an empty admin password is refused as before.
+#[tokio::test]
+async fn a_server_open_to_the_network_needs_the_admin_password() {
+    let env = Env::new();
+    let r = env
+        .send(json_body(
+            req("POST", "/setup/api/complete"),
+            json!({"admin": {"username": "owner", "password": ""},
+                   "library": {"serve_readers": false}}),
+        ))
+        .await;
+    assert_eq!(
+        (r.status, r.json()),
+        (400, json!({"error": "Password is required"}))
+    );
+    assert!(env.db.get_user("owner").unwrap().is_none());
 }

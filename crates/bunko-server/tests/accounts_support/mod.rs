@@ -85,6 +85,9 @@ pub fn app(deps: AccountsDeps) -> Router {
             deps,
             accounts::root_middleware,
         ))
+        .layer(axum::middleware::from_fn(
+            bunko_server::http::base_href::inject,
+        ))
 }
 
 pub struct Resp {

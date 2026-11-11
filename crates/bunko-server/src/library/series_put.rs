@@ -25,7 +25,7 @@ fn text(code: u16, message: &str) -> Response {
 
 /// Whether the DAV fallback must hand this request to [`series_put`]: a `PUT` whose
 /// percent-decoded path is exactly `/mokuro-reader/<Series>/series.json` (lexically
-/// normalised, file name case-insensitive).
+/// normalised, the file name in any spelling the filename fold joins).
 pub fn is_series_put(method: &Method, decoded_path: &str) -> bool {
     *method == Method::PUT && series_title_from_series_file_path(decoded_path).is_some()
 }
@@ -55,8 +55,9 @@ fn parse_content_length(raw: &str) -> Option<i64> {
 
 /// The handler. Order of checks and answers is 0.5.2's: 401 without a user, 411
 /// without `Content-Length` (body not read), 400 for a bad length, 413 above 4 MiB
-/// (body not read), 503 + `Retry-After: 30` when a compile holds the lock, then the
-/// audit event, then 400 (refused) or 204 (accepted; also when nothing changed).
+/// (body not read), then (0.8) 409 when the case-variant freeze holds the file (body
+/// not read), 503 + `Retry-After: 30` when a compile holds the lock, then the audit
+/// event, then 400 (refused) or 204 (accepted; also when nothing changed).
 pub async fn series_put(deps: &LibraryDeps, req: Request, ctx: RequestCtx) -> Response {
     let Some(username) = ctx
         .identity
@@ -84,6 +85,20 @@ pub async fn series_put(deps: &LibraryDeps, req: Request, ctx: RequestCtx) -> Re
     let Some(series_title) = series_title_from_series_file_path(&path) else {
         return text(400, "Invalid metadata path");
     };
+    // The freeze holds here as in WebDAV, which this request never reaches: nothing is
+    // submitted for a `series.json` a case-variant group freezes (a member of a group at
+    // the root, or a `series.json` listed in two spellings), however the path spells it.
+    if let Some(rel) = bunko_library::paths::library_relative(&path) {
+        let library = deps.runtime.library_path().to_path_buf();
+        let frozen =
+            tokio::task::spawn_blocking(move || bunko_library::fsutil::frozen(&library, &rel))
+                .await
+                .ok()
+                .flatten();
+        if let Some(frozen) = frozen {
+            return text(409, &frozen.describe());
+        }
+    }
     let body = match axum::body::to_bytes(req.into_body(), length as usize).await {
         Ok(bytes) => bytes.to_vec(),
         // Shorter or longer than declared: the body is not the update the client meant.

@@ -1,10 +1,11 @@
 //! A [`PagePipeline`] with no models, for tests and for exercising a server's
 //! scheduler end to end: configurable load and page delays and failures, and a
-//! minimal valid `.mokuro` sidecar (one blank page per image member of the archive).
+//! minimal valid `.mokuro` sidecar (one page per image member of the archive, blank or
+//! with one text block).
 
 use std::collections::{BTreeMap, HashSet};
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -35,6 +36,11 @@ pub struct FakeConfig {
     pub overlap: usize,
     /// Engines the catalog lists (default `["fake"]`).
     pub engines: Vec<String>,
+    /// The output revision announced for every listed engine and written into its
+    /// sidecars' `ocr_engine.revision`, right after the id (default: this build's
+    /// [`bunko_layout::sidecar::engine_revision`]), to stand in for an older or newer
+    /// processor (`processor-fake --engine-revision`, the rig's upgrade scenarios).
+    pub engine_revision: Option<u32>,
     /// Adds a `gpu:0` device computing in these formats; the engine runs there unless
     /// the row pins it to the CPU.
     pub gpu_formats: Option<Vec<String>>,
@@ -54,6 +60,13 @@ pub struct FakeConfig {
     /// While set, a volume waits before its last page (until cleared or cancelled): a
     /// test can act on a volume that is certainly still running, however slow the host.
     pub hold: Option<Arc<AtomicBool>>,
+    /// Each volume, once started, waits until this file exists (or it is cancelled): a
+    /// test in another process holds a volume mid-OCR, as `processor-fake --hold-file`
+    /// does for the interop rig's "rename during OCR".
+    pub hold_file: Option<PathBuf>,
+    /// Every page gets one text block reading this (`processor-fake --page-text`), so a
+    /// reader has a block to correct; without it, pages are blank.
+    pub page_text: Option<String>,
 }
 
 /// The fake engine. Cheap to clone (clones share their counters).
@@ -67,6 +80,13 @@ struct Inner {
     config: FakeConfig,
     opened: AtomicU64,
     ran: Mutex<Vec<String>>,
+}
+
+impl FakeConfig {
+    fn revision_of(&self, engine: &str) -> u32 {
+        self.engine_revision
+            .unwrap_or_else(|| bunko_layout::sidecar::engine_revision(engine))
+    }
 }
 
 impl FakePipeline {
@@ -161,6 +181,10 @@ impl PagePipeline for FakePipeline {
                     .map(|n| n.get() as u32),
             },
             catalog: Catalog {
+                engine_revisions: engines
+                    .iter()
+                    .map(|e| (e.clone(), config.revision_of(e)))
+                    .collect(),
                 engines,
                 detectors: vec!["ppocr-manga".into()],
                 devices: {
@@ -369,6 +393,16 @@ impl VolumeRunner for FakeRunner {
                 meta.stem
             )));
         }
+        if let Some(file) = &config.hold_file {
+            while !file.exists() {
+                if cancel.is_cancelled() {
+                    return Err(RunError::Cancelled);
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            // The page schedule starts after the wait, not before it.
+            pacer = Pacer::start(Duration::ZERO);
+        }
         let total = names.len() as u32;
         let mut out_pages = Vec::new();
         for (i, name) in names.iter().enumerate() {
@@ -393,7 +427,17 @@ impl VolumeRunner for FakeRunner {
                 ));
             }
             self.items.fetch_add(1, Ordering::SeqCst);
-            out_pages.push(json!({"version": "0.2.5", "img_width": 0, "img_height": 0, "blocks": [], "img_path": name}));
+            let blocks = match &config.page_text {
+                Some(text) => json!([{
+                    "box": [10, 10, 40, 110],
+                    "vertical": true,
+                    "font_size": 30,
+                    "lines_coords": [[[10.0, 10.0], [40.0, 10.0], [40.0, 110.0], [10.0, 110.0]]],
+                    "lines": [text],
+                }]),
+                None => json!([]),
+            };
+            out_pages.push(json!({"version": "0.2.5", "img_width": 0, "img_height": 0, "blocks": blocks, "img_path": name}));
             progress(PageProgress::Page {
                 done: i as u32 + 1,
                 total,
@@ -409,7 +453,7 @@ impl VolumeRunner for FakeRunner {
             "title_uuid": meta.title_uuid,
             "volume": meta.volume,
             "volume_uuid": meta.volume_uuid,
-            "ocr_engine": {"id": self.engine, "generator": "mokuro-bunko", "precision": self.precision},
+            "ocr_engine": {"id": self.engine, "revision": config.revision_of(&self.engine), "generator": "mokuro-bunko", "precision": self.precision},
             "pages": out_pages,
         });
         let tmp = out.with_file_name(format!(

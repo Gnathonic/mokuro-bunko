@@ -2,6 +2,9 @@
 //! scheduler stops offering it work, drains its sessions, takes released claims back at
 //! once without recording anything, and never blames what ends while it is paused.
 
+// Fixtures are set up and checked with std::fs on purpose.
+#![allow(clippy::disallowed_methods)]
+
 mod ocr_common;
 
 use bunko_proto::{Availability, Event, Op};
@@ -193,9 +196,10 @@ fn a_processor_registering_paused_gets_no_work() {
             body: json!({
                 "protocol": 3,
                 "name": "box",
-                "catalog": {"engines": ["hayai-nova", "paddle-manga", "ppocr-manga"],
+                "catalog": {"engines": ENGINES,
                             "detectors": ["ppocr-manga"],
-                            "devices": [{"id": "cpu", "label": "CPU"}]},
+                            "devices": [{"id": "cpu", "label": "CPU"}],
+                            "engine_revisions": current_revisions(ENGINES)},
                 "availability": {"paused": true, "until": "2030-01-01T08:00:00Z", "reason": "schedule"},
             }),
             account_stamp: None,

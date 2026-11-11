@@ -27,6 +27,12 @@ pub trait LibraryCounts: Send + Sync {
     fn pending_ocr(&self) -> Result<u64, String> {
         Err("not counted".into())
     }
+
+    /// Series in the index snapshot, folder spellings of one title counted once (the
+    /// crawl detector's catalog size).
+    fn total_series(&self) -> Result<u64, String> {
+        Err("not counted".into())
+    }
 }
 
 /// The OCR side of `/api/health` (the OCR scheduler implements this).
@@ -208,16 +214,20 @@ pub fn is_browser_request(headers: &HeaderMap) -> bool {
     !depth.contains("Depth")
 }
 
-fn redirect(location: &'static str) -> Response {
+/// A 302 to `target` (root-relative, no leading `/`), relative to the request so it
+/// stays under a sub-path mount.
+fn redirect(path: &str, target: &str) -> Response {
     let mut resp = StatusCode::FOUND.into_response();
-    resp.headers_mut()
-        .insert(header::LOCATION, HeaderValue::from_static(location));
+    if let Ok(v) = HeaderValue::from_str(&crate::http::base_href::relative_to_root(path, target)) {
+        resp.headers_mut().insert(header::LOCATION, v);
+    }
     resp
 }
 
 /// The answer to `GET /` when it is not WebDAV's, in 0.5.2's order:
-/// 1. setup needed and `Accept` has `text/html` → `302 /setup`;
-/// 2. a browser and `catalog.enabled && catalog.use_as_homepage` → `302 /catalog/`;
+/// 1. setup needed and `Accept` has `text/html` → `302 setup`;
+/// 2. a browser and `catalog.enabled && catalog.use_as_homepage` (and readers are
+///    served) → `302 catalog/`;
 /// 3. a browser → the home page;
 ///
 /// `None` (every other method/path, and non-browser `GET /`) means: hand the request
@@ -238,7 +248,7 @@ pub async fn root_response(
     if wants_html {
         let (flag, db) = (deps.setup.clone(), deps.db.clone());
         match blocking(move || flag.needs_setup(&db)).await {
-            Ok(Ok(true)) => return Some(redirect("/setup")),
+            Ok(Ok(true)) => return Some(redirect(path, "setup")),
             Ok(Ok(false)) => {}
             // A locked DB must not turn the home page into a setup redirect.
             Ok(Err(e)) => warn!("setup check failed: {e}"),
@@ -250,10 +260,10 @@ pub async fn root_response(
     }
     let catalog_home = {
         let c = deps.core.config.read();
-        c.catalog.enabled && c.catalog.use_as_homepage
+        c.catalog.enabled && c.catalog.use_as_homepage && c.server.serve_readers
     };
     if catalog_home {
-        return Some(redirect("/catalog/"));
+        return Some(redirect(path, "catalog/"));
     }
     Some(serve_page_json_errors(
         "home",

@@ -1,0 +1,2 @@
+# The self-test's own pending list (caps.spec.mjs), never the rig's.
+rig-selftest-pending

@@ -174,9 +174,24 @@ fn validation(err: Option<&'static str>) -> Result<()> {
     }
 }
 
+/// The account whose name equals `username` ignoring ASCII case (names are ASCII):
+/// its name as stored, and its status.
+fn same_name(conn: &Connection, username: &str) -> Result<Option<(String, String)>> {
+    Ok(conn
+        .query_row(
+            "SELECT username, status FROM users WHERE username = ? COLLATE NOCASE \
+             ORDER BY username = ? DESC, id LIMIT 1",
+            [username, username],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?)
+}
+
 /// Insert an account row inside the caller's write transaction; returns its id. Errors
 /// carry 0.5.2's messages (`already exists` as [`DbError::Conflict`], a deleted
-/// account's name pointing at `restore-user`).
+/// account's name pointing at `restore-user`). A name equal to an existing one but for
+/// case is taken too: `users/<name>/` (progress, history, corrections) would be that
+/// account's folder on a library disk that folds case (Windows, macOS).
 pub(crate) fn insert_user(
     conn: &Connection,
     username: &str,
@@ -185,6 +200,20 @@ pub(crate) fn insert_user(
     status: UserStatus,
     notes: &str,
 ) -> Result<i64> {
+    let taken = |conn: &Connection| -> Result<i64> {
+        match same_name(conn, username)? {
+            Some((existing, status)) if status == "deleted" => Err(DbError::Invalid(format!(
+                "Username '{username}' belongs to a deleted account; bring it back \
+                 with: mokuro-bunko admin restore-user {existing}"
+            ))),
+            _ => Err(DbError::Conflict(format!(
+                "Username '{username}' already exists"
+            ))),
+        }
+    };
+    if same_name(conn, username)?.is_some() {
+        return taken(conn);
+    }
     let inserted = conn.execute(
         "INSERT INTO users (username, password_hash, role, status, notes) \
          VALUES (?, ?, ?, ?, ?)",
@@ -199,23 +228,7 @@ pub(crate) fn insert_user(
     match inserted {
         Ok(_) => Ok(conn.last_insert_rowid()),
         Err(rusqlite::Error::SqliteFailure(e, _)) if e.code == ErrorCode::ConstraintViolation => {
-            let existing: Option<String> = conn
-                .query_row(
-                    "SELECT status FROM users WHERE username = ?",
-                    [username],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            if existing.as_deref() == Some("deleted") {
-                Err(DbError::Invalid(format!(
-                    "Username '{username}' belongs to a deleted account; bring it back \
-                     with: mokuro-bunko admin restore-user {username}"
-                )))
-            } else {
-                Err(DbError::Conflict(format!(
-                    "Username '{username}' already exists"
-                )))
-            }
+            taken(conn)
         }
         Err(e) => Err(e.into()),
     }
@@ -292,6 +305,39 @@ impl Database {
         self.write(|conn| insert_user(conn, username, &password_hash, role, status, notes))
     }
 
+    /// An account with no password (the admin of a server reachable from this computer
+    /// only, when its owner skipped the password): no password matches it, so it signs
+    /// in only where the server allows that without one.
+    pub fn create_user_without_password(
+        &self,
+        username: &str,
+        role: Role,
+        status: UserStatus,
+        notes: &str,
+    ) -> Result<i64> {
+        let _bump = self.bump_users_version();
+        if pyfmt::strip(username).is_empty() {
+            return Err(DbError::invalid("Username is required"));
+        }
+        validation(validate_username(username))?;
+        self.write(|conn| insert_user(conn, username, "", role, status, notes))
+    }
+
+    /// The active account `username`, when it has no password.
+    pub fn passwordless_user(&self, username: &str) -> Result<Option<User>> {
+        let row = self.read(|conn| {
+            Ok(conn
+                .prepare_cached(&format!(
+                    "SELECT {USER_COLUMNS} FROM users WHERE username = ? AND password_hash = ''"
+                ))?
+                .query_row([username], |r| RawUser::from_row(r, 0))
+                .optional()?)
+        })?;
+        Ok(row
+            .filter(|raw| raw.status == "active")
+            .and_then(RawUser::into_login))
+    }
+
     /// Validate a new account's name and password and hash the password (outside every
     /// lock): the first half of [`create_user`](Self::create_user).
     pub(crate) fn new_account_hash(&self, username: &str, password: &str) -> Result<String> {
@@ -301,6 +347,22 @@ impl Database {
         validation(validate_username(username))?;
         validation(validate_password(password))?;
         Ok(hash_password(password, self.bcrypt_cost)?)
+    }
+
+    /// Does an account (any status) hold this name, ignoring ASCII case? A new account
+    /// may not take it ([`insert_user`]).
+    pub fn username_taken(&self, username: &str) -> Result<bool> {
+        self.read(|conn| Ok(same_name(conn, username)?.is_some()))
+    }
+
+    /// The account holding this name ignoring ASCII case (an exact match first), whatever
+    /// its status: the account that keeps a new account from taking `username`
+    /// ([`insert_user`]). Its `username` is the name as stored.
+    pub fn get_user_ignoring_case(&self, username: &str) -> Result<Option<User>> {
+        match self.read(|conn| same_name(conn, username))? {
+            Some((stored, _)) => self.get_user(&stored),
+            None => Ok(None),
+        }
     }
 
     /// Any account by name, whatever its status.
@@ -678,12 +740,24 @@ mod tests {
         let dup = mk("alice", "password123").unwrap_err();
         assert!(matches!(dup, DbError::Conflict(_)));
         assert_eq!(dup.to_string(), "Username 'alice' already exists");
+        // users/<name>/ on a disk that folds case: a case variant is the same name.
+        let dup = mk("ALICE", "password123").unwrap_err();
+        assert!(matches!(dup, DbError::Conflict(_)));
+        assert_eq!(dup.to_string(), "Username 'ALICE' already exists");
+        assert!(db.get_user("ALICE").unwrap().is_none());
+        let held = db.get_user_ignoring_case("ALICE").unwrap().unwrap();
+        assert_eq!(held.username, "alice");
+        assert!(db.get_user_ignoring_case("bob").unwrap().is_none());
         db.delete_user("alice").unwrap();
         let gone = mk("alice", "password123").unwrap_err();
         assert!(matches!(gone, DbError::Invalid(_)));
         assert_eq!(
             gone.to_string(),
             "Username 'alice' belongs to a deleted account; bring it back with: mokuro-bunko admin restore-user alice"
+        );
+        assert_eq!(
+            mk("Alice", "password123").unwrap_err().to_string(),
+            "Username 'Alice' belongs to a deleted account; bring it back with: mokuro-bunko admin restore-user alice"
         );
         assert_eq!(
             normalize_role("boss").unwrap_err().to_string(),

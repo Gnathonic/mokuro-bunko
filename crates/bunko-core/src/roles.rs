@@ -1,4 +1,5 @@
-//! User roles. A strict hierarchy, plus the separate `processor` role for OCR machines.
+//! User roles and the capabilities they grant. A strict hierarchy, plus the separate
+//! `processor` role for OCR machines.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -84,5 +85,66 @@ impl FromStr for Role {
             "processor" => Role::Processor,
             other => return Err(format!("unknown role '{other}'")),
         })
+    }
+}
+
+/// Capabilities derived from a role.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Perm {
+    Read,
+    WriteProgress,
+    AddFiles,
+    ModifyDelete,
+    ManageInvites,
+    Admin,
+    Process,
+}
+
+pub fn has_perm(role: Role, perm: Perm) -> bool {
+    use Role::*;
+    match perm {
+        Perm::Read => true,
+        Perm::WriteProgress => matches!(role, Registered | Uploader | Inviter | Editor | Admin),
+        Perm::AddFiles => matches!(role, Uploader | Inviter | Editor | Admin),
+        Perm::ModifyDelete => matches!(role, Inviter | Editor | Admin),
+        Perm::ManageInvites => matches!(role, Inviter | Admin),
+        Perm::Admin => role == Admin,
+        Perm::Process => role == Processor,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The capability table as 0.7 shipped it (bunko-server `auth`), row per role in
+    /// `Role::ALL` order, columns Read, WriteProgress, AddFiles, ModifyDelete,
+    /// ManageInvites, Admin, Process.
+    #[test]
+    fn has_perm_keeps_the_07_table() {
+        let perms = [
+            Perm::Read,
+            Perm::WriteProgress,
+            Perm::AddFiles,
+            Perm::ModifyDelete,
+            Perm::ManageInvites,
+            Perm::Admin,
+            Perm::Process,
+        ];
+        #[rustfmt::skip]
+        let table: [(Role, [bool; 7]); 7] = [
+            (Role::Anonymous, [true, false, false, false, false, false, false]),
+            (Role::Registered, [true, true, false, false, false, false, false]),
+            (Role::Uploader, [true, true, true, false, false, false, false]),
+            (Role::Editor, [true, true, true, true, false, false, false]),
+            (Role::Inviter, [true, true, true, true, true, false, false]),
+            (Role::Admin, [true, true, true, true, true, true, false]),
+            (Role::Processor, [true, false, false, false, false, false, true]),
+        ];
+        for (role, row) in table {
+            for (perm, want) in perms.iter().zip(row) {
+                assert_eq!(has_perm(role, *perm), want, "{role} {perm:?}");
+            }
+        }
     }
 }

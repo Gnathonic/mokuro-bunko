@@ -1,0 +1,24 @@
+{
+  "after": "history-mkcol-device",
+  "expect": {
+    "headers": [
+      "x-mokuro-upload",
+      "x-mokuro-size",
+      "x-mokuro-digest-verified"
+    ],
+    "status": [
+      201,
+      204
+    ]
+  },
+  "request": {
+    "auth": "basic:progress",
+    "body_text": "reading history\n",
+    "headers": {
+      "content-digest": "<digest>",
+      "content-type": "application/octet-stream"
+    },
+    "method": "PUT",
+    "path": "/mokuro-reader/history/0b6f1c2e-3d4a-4b5c-8d9e-0f1a2b3c4d5e/2026-10.events?Content-Type=application/octet-stream"
+  }
+}

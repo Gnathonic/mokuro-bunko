@@ -23,6 +23,7 @@ fn full_status() -> bc::Status {
             queue_pending: Some(12),
             error: None,
             activity: None,
+            storage: None,
         },
         current: vec![bc::CurrentVolume {
             volume: "Dr Stone/Dr Stone 01".into(),

@@ -623,8 +623,14 @@ impl Installer {
                 self.spawn();
                 Ok(true)
             }
-            Decision::Nothing(_) => {
+            Decision::Nothing(why) => {
+                // Nothing to do any more (installed by hand meanwhile, or OCR turned
+                // off). The failure no longer stands, and this ends the install as a
+                // run does: the OCR that waited for the backend starts with what is
+                // installed now.
                 self.publish(None);
+                self.0.finished.send_modify(|n| *n += 1);
+                info!("OCR backend: nothing left to install ({why})");
                 Ok(false)
             }
         }
@@ -688,7 +694,7 @@ impl BackgroundInstall for Installer {
         self.0.finished.subscribe()
     }
 
-    /// A pack of this release that serves the machine is in place, or none is needed
+    /// A pack this release opens that serves the machine is in place, or none is needed
     /// (what `install-ocr --if-needed` checks). One that failed to replace another
     /// leaves the old in place: still ready.
     fn backend_ready(&self) -> bool {
@@ -1209,6 +1215,47 @@ exit 1"#,
             !v.message.unwrap().contains("trying again"),
             "no more retries"
         );
+    }
+
+    /// The backend was put in place by hand while the server's own install kept
+    /// failing (`mokuro-bunko install-ocr` in a terminal, as the failure says to), or
+    /// local OCR was turned off: the automatic retry finds nothing left to install.
+    /// It drops the failure and says the install ended, so the OCR that waited for
+    /// the backend starts.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_retry_with_nothing_left_to_install_ends_the_wait() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = fake_exe(
+            dir.path(),
+            r#"echo '@@ocr-install {"stage":"failed","message":"network down","needs_owner":false}'
+exit 1"#,
+        );
+        let inst = Installer::with_exe(library(dir.path()), exe)
+            .with_retry_after(vec![Duration::from_secs(2)]);
+        let mut rx = inst.subscribe();
+        let mut done = BackgroundInstall::finished(&inst);
+        inst.spawn();
+        wait_state(&mut rx, "failed").await;
+        // The failed run's own end.
+        tokio::time::timeout(Duration::from_secs(5), done.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        // By the time of the retry nothing is left to install.
+        std::fs::write(
+            dir.path().join("config.yaml"),
+            format!(
+                "storage:\n  base_path: {}\nocr:\n  local_processing: false\n",
+                dir.path().join("storage").display()
+            ),
+        )
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(20), done.changed())
+            .await
+            .expect("the retry that found nothing to install did not say it ended")
+            .unwrap();
+        assert!(rx.borrow().is_none(), "the failure is dropped");
     }
 
     #[test]

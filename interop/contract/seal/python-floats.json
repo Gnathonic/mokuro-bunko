@@ -1,0 +1,7 @@
+{
+  "description": "Python's float spellings (1e-05, 1e+16, -0.0, 24.0, 5e-324, ...) and integers past 2^53, which canonicalise to what JavaScript's JSON.parse then String() gives.",
+  "document": "{\"version\": \"0.2.5\", \"title\": \"T\", \"volume\": \"V\", \"ocr_engine\": {\"id\": \"mokuro\", \"seal\": \"v1:8f3732088794cd2a928ff5e6d255f07950de6134bb864883e8b5b9adebfed4f6\"}, \"pages\": [{\"img_path\": \"001.jpg\", \"img_width\": 1200, \"img_height\": 1700, \"blocks\": [{\"box\": [1e-05, 1e+16, 0.30000000000000004, -0.0], \"font_size\": 24.0, \"lines_coords\": [[[5e-324, 1.7976931348623157e+308], [1.2345678901234568e+17, 1e+21], [1e-07, 333333333.3333333], [1e-06, 1e+20]]], \"lines\": [\"数\"], \"extra\": [9007199254740993, 12345678901234567890, -0, 1.0, 4.5, -2.5]}]}]}",
+  "seal_input": "{\"ocr_engine\":{\"id\":\"mokuro\"},\"pages\":[{\"blocks\":[{\"box\":[0.00001,10000000000000000,0.30000000000000004,0],\"extra\":[9007199254740992,12345678901234567000,0,1,4.5,-2.5],\"font_size\":24,\"lines\":[\"数\"],\"lines_coords\":[[[5e-324,1.7976931348623157e+308],[123456789012345680,1e+21],[1e-7,333333333.3333333],[0.000001,100000000000000000000]]]}],\"img_height\":1700,\"img_path\":\"001.jpg\",\"img_width\":1200}]}",
+  "seal": "v1:8f3732088794cd2a928ff5e6d255f07950de6134bb864883e8b5b9adebfed4f6",
+  "is_sealed": true
+}

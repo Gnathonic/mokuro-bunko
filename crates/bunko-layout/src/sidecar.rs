@@ -19,11 +19,30 @@ use crate::records::{RawLine, RawPage};
 pub const MOKURO_FORMAT_VERSION: &str = "0.2.5";
 
 /// `RECOGNIZER_REPOS` (engine -> recognizer repo).
-pub const RECOGNIZER_REPOS: [(&str, &str); 3] = [
+pub const RECOGNIZER_REPOS: [(&str, &str); 5] = [
     ("hayai-nova", "JustANormalTinkerer/hayai-ocr-v2.5-nova"),
     ("paddle-manga", "sorryhyun/paddleocr-vl-1.6-manga-lora"),
     ("ppocr-manga", "Kellenok/PP-OCRv6_manga"),
+    ("charspot-small", "muscgab/manga-ocr-charspot-small"),
+    ("nar-small", "muscgab/manga-ocr-nar-small"),
 ];
+
+/// Each composed engine's output revision, written as `ocr_engine.revision`. Bump an
+/// engine's number only when its output changes (new weights or export, a layout
+/// change): with upgrades on, every older sealed file of that engine is OCR'd again,
+/// and processors announcing an older revision are offered none of its work.
+pub const ENGINE_REVISIONS: [(&str, u32); 3] =
+    [("hayai-nova", 2), ("paddle-manga", 2), ("ppocr-manga", 2)];
+
+/// `engine`'s current output revision; 1 for an engine not in [`ENGINE_REVISIONS`].
+/// An absent `ocr_engine.revision` reads as 1 (what 0.7 wrote): current for an engine
+/// still at 1, old output for one that has moved on.
+pub fn engine_revision(engine: &str) -> u32 {
+    ENGINE_REVISIONS
+        .iter()
+        .find(|(e, _)| *e == engine)
+        .map_or(1, |(_, r)| *r)
+}
 
 /// `REPO_REVISIONS`: the pinned commit of every VLM repo the runner resolves.
 pub const REPO_REVISIONS: [(&str, &str); 4] = [
@@ -211,10 +230,50 @@ pub fn finish_page(
     }
 }
 
+/// One mokuro page from the blocks of a block detector: `blocks[k]` holds the lines the
+/// block reader found in block `k`, in its reading order. The blocks and their lines
+/// are kept as they are (no furigana filter, no roles, no merging: the detector and
+/// the reader decided all that); the layout only puts the blocks in reading order and
+/// builds them. A line says itself which way it runs.
+pub fn blocks_page(blocks: &[Vec<RawLine>], width: i64, height: i64, version: &str) -> Page {
+    use crate::layout::{Kind, Line, build_block, measure, order_blocks};
+
+    let mut measured: Vec<Vec<Line>> = Vec::new();
+    let mut index = 0usize;
+    for block in blocks {
+        let mut lines = Vec::new();
+        for raw in block {
+            let raw = raw.rounded();
+            if let Some(mut line) = measure(index, &raw).filter(|l| !l.text.is_empty()) {
+                line.vertical = raw.vertical;
+                lines.push(line);
+            }
+            index += 1;
+        }
+        if !lines.is_empty() {
+            measured.push(lines);
+        }
+    }
+    let groups: Vec<Vec<&Line>> = measured.iter().map(|b| b.iter().collect()).collect();
+    let kinds = vec![Kind::Text; groups.len()];
+    let order = order_blocks(&groups, &kinds, &[]);
+    Page {
+        version: version.to_string(),
+        img_width: width,
+        img_height: height,
+        blocks: order
+            .iter()
+            .map(|&i| build_block(&groups[i], width as f64, height as f64, 0.0))
+            .collect(),
+    }
+}
+
 /// The `ocr_engine` block of a composed engine's sidecar.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OcrEngine {
     pub id: String,
+    /// [`engine_revision`] of `id`: written right after it.
+    pub revision: u32,
     pub recognizer: String,
     pub detector: String,
     /// `--generator` (the server passes `"mokuro-bunko <version>"`), else
@@ -226,6 +285,9 @@ pub struct OcrEngine {
     pub weights: Vec<(String, String)>,
     /// What the recognizer computed in; omitted when none loaded (ppocr-manga).
     pub precision: Option<String>,
+    /// The parts a reader names the OCR by, in display order: `(role, name,
+    /// version)`, the version empty when the model has none. Omitted when empty.
+    pub parts: Vec<(String, String, String)>,
 }
 
 impl OcrEngine {
@@ -233,6 +295,7 @@ impl OcrEngine {
     pub fn new(engine: &str, generator: Option<&str>, patches: i64) -> OcrEngine {
         OcrEngine {
             id: engine.to_string(),
+            revision: engine_revision(engine),
             recognizer: RECOGNIZER_REPOS
                 .iter()
                 .find(|(e, _)| *e == engine)
@@ -246,12 +309,14 @@ impl OcrEngine {
             patch_budget: PATCH_BUDGET_ENGINES.contains(&engine).then_some(patches),
             weights: Vec::new(),
             precision: None,
+            parts: Vec::new(),
         }
     }
 
     pub fn to_value(&self) -> Value {
         let mut items = vec![
             ("id".to_string(), Value::Str(self.id.clone())),
+            ("revision".to_string(), Value::Int(i64::from(self.revision))),
             (
                 "recognizer".to_string(),
                 Value::Str(self.recognizer.clone()),
@@ -275,6 +340,22 @@ impl OcrEngine {
         }
         if let Some(p) = self.precision.as_ref().filter(|p| !p.is_empty()) {
             items.push(("precision".to_string(), Value::Str(p.clone())));
+        }
+        if !self.parts.is_empty() {
+            let part = |(role, name, version): &(String, String, String)| {
+                let mut fields = vec![
+                    ("role".to_string(), Value::Str(role.clone())),
+                    ("name".to_string(), Value::Str(name.clone())),
+                ];
+                if !version.is_empty() {
+                    fields.push(("version".to_string(), Value::Str(version.clone())));
+                }
+                Value::Object(fields)
+            };
+            items.push((
+                "parts".to_string(),
+                Value::Array(self.parts.iter().map(part).collect()),
+            ));
         }
         Value::Object(items)
     }
@@ -371,6 +452,22 @@ pub struct Normalization {
     pub volume_uuid: String,
     /// `Some` for non-primary rows only.
     pub stamp: Option<LayerStamp>,
+    /// The install time (ISO UTC) written as `ocr_engine.created` into a file that has
+    /// a block; `None` writes none.
+    pub created: Option<String>,
+}
+
+/// Stamp a layer's `ocr_engine` block (`_stamp_ocr_engine`): the engine and generator
+/// unless the runner named them, the generation always. A file without a block gets one.
+pub fn stamp_layer(data: &mut Value, stamp: &LayerStamp) {
+    let mut stamped = match data.get("ocr_engine") {
+        Some(block @ Value::Object(_)) => block.clone(),
+        _ => Value::object(),
+    };
+    stamped.set_default("id", Value::Str(stamp.engine.clone()));
+    stamped.set_default("generator", Value::Str(stamp.generator.clone()));
+    stamped.set("generation", Value::Str(stamp.generation.clone()));
+    data.set("ocr_engine", stamped);
 }
 
 /// `_normalize_mokuro_metadata` on a parsed sidecar, in place. A non-object
@@ -384,14 +481,16 @@ pub fn normalize_sidecar(data: &mut Value, norm: &Normalization) -> bool {
     data.set("title_uuid", Value::Str(title_uuid(&norm.series_name)));
     data.set("volume_uuid", Value::Str(norm.volume_uuid.clone()));
     if let Some(stamp) = &norm.stamp {
-        let mut stamped = match data.get("ocr_engine") {
-            Some(block @ Value::Object(_)) => block.clone(),
-            _ => Value::object(),
-        };
-        stamped.set_default("id", Value::Str(stamp.engine.clone()));
-        stamped.set_default("generator", Value::Str(stamp.generator.clone()));
-        stamped.set("generation", Value::Str(stamp.generation.clone()));
-        data.set("ocr_engine", stamped);
+        stamp_layer(data, stamp);
+    }
+    // Only a block is dated: an upstream-shaped primary stays in upstream shape. A
+    // runner's own revision stands; one that wrote none ran revision 1 (the scheduler
+    // offers no work to a processor older than this library's revision).
+    if let Some(block @ Value::Object(_)) = data.get_mut("ocr_engine") {
+        block.set_default("revision", Value::Int(1));
+        if let Some(created) = &norm.created {
+            block.set("created", Value::Str(created.clone()));
+        }
     }
     true
 }
@@ -485,6 +584,145 @@ mod tests {
             title_uuid("python.org"),
             "886313e1-3b8a-5372-9b90-0c9aee199e5d"
         );
+    }
+
+    fn read_line(text: &str, x0: f64, y0: f64, x1: f64, y1: f64, vertical: bool) -> RawLine {
+        RawLine {
+            quad: vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
+            score: 0.9,
+            text: text.to_string(),
+            conf: 0.9,
+            vertical,
+            angle: 0.0,
+            char_confs: Vec::new(),
+        }
+    }
+
+    /// A block detector's blocks stand as they were found: every line kept (a short
+    /// line beside a long one is no furigana here), in the reader's order, and the
+    /// blocks in reading order (right to left).
+    #[test]
+    fn a_block_detectors_blocks_stand_and_are_put_in_reading_order() {
+        let left = vec![
+            read_line("こんにちは", 160.0, 100.0, 200.0, 400.0, true),
+            read_line("ね", 110.0, 100.0, 150.0, 140.0, true),
+        ];
+        let right = vec![
+            read_line("あ", 800.0, 100.0, 840.0, 140.0, true),
+            read_line("", 700.0, 100.0, 740.0, 140.0, true),
+        ];
+        let page = blocks_page(&[left, right, Vec::new()], 1000, 1400, "0.2.5");
+        assert_eq!((page.img_width, page.img_height), (1000, 1400));
+        let lines: Vec<&[String]> = page.blocks.iter().map(|b| b.lines.as_slice()).collect();
+        assert_eq!(
+            lines,
+            [
+                &["あ".to_string()][..],
+                &["こんにちは".into(), "ね".into()][..]
+            ]
+        );
+        assert!(page.blocks.iter().all(|b| b.vertical));
+        assert_eq!(page.blocks[1].lines_coords.len(), 2);
+        // The one-character line is as wide as it is tall: it runs the way its
+        // reader said, not the way its box looks.
+        let across = vec![read_line("OK", 100.0, 100.0, 180.0, 140.0, false)];
+        assert!(!blocks_page(&[across], 1000, 1400, "0.2.5").blocks[0].vertical);
+        assert!(blocks_page(&[], 10, 10, "0.2.5").blocks.is_empty());
+    }
+
+    /// The parts a reader labels the OCR by close the block; a part without a version
+    /// has no `version` key.
+    #[test]
+    fn engine_block_lists_its_parts_last() {
+        let mut e = OcrEngine::new("charspot-small", None, 0);
+        e.detector = "animetext-blocks".into();
+        e.parts = vec![
+            ("recognizer".into(), "Charspot Small".into(), String::new()),
+            ("detector".into(), "AnimeText".into(), "12x".into()),
+        ];
+        let v = e.to_value();
+        let Value::Object(items) = &v else {
+            panic!("{v:?}")
+        };
+        assert_eq!(items.last().map(|(k, _)| k.as_str()), Some("parts"));
+        let Some(Value::Array(parts)) = v.get("parts") else {
+            panic!("{v:?}")
+        };
+        assert_eq!(parts.len(), 2);
+        assert!(parts[0].get("version").is_none());
+        assert_eq!(parts[1].get("version"), Some(&Value::Str("12x".into())));
+        assert_eq!(
+            parts[0].get("name"),
+            Some(&Value::Str("Charspot Small".into()))
+        );
+        // None: no key at all, as before.
+        assert!(
+            OcrEngine::new("hayai-nova", None, 512)
+                .to_value()
+                .get("parts")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn engine_block_carries_its_revision_after_the_id() {
+        let block = OcrEngine::new("hayai-nova", None, 512).to_value();
+        let Value::Object(items) = &block else {
+            panic!("an object");
+        };
+        let keys: Vec<&str> = items.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(&keys[..3], ["id", "revision", "recognizer"]);
+        let current = engine_revision("hayai-nova");
+        assert_eq!(block.get("revision"), Some(&Value::Int(i64::from(current))));
+        // 0.8's line detector (PP-OCR manga v0.3) made every engine's output new.
+        assert!(ENGINE_REVISIONS.iter().all(|(_, r)| *r >= 2));
+        assert_eq!(
+            engine_revision("no-such-engine"),
+            1,
+            "unknown engines are 1"
+        );
+    }
+
+    #[test]
+    fn normalisation_dates_blocks_and_keeps_their_revision() {
+        let norm = |stamp: Option<LayerStamp>| Normalization {
+            series_name: "S".into(),
+            volume: "V".into(),
+            volume_uuid: "u".into(),
+            stamp,
+            created: Some("2026-10-29T00:00:00Z".into()),
+        };
+        // Upstream mokuro shape (no block): stays without one.
+        let mut plain = Value::parse(r#"{"version":"0.2.5","pages":[]}"#).unwrap();
+        assert!(normalize_sidecar(&mut plain, &norm(None)));
+        assert!(plain.get("ocr_engine").is_none());
+        // A block without a revision reads as 1 and says so; the install time is set.
+        let mut bare = Value::parse(r#"{"ocr_engine":{"id":"x"},"pages":[]}"#).unwrap();
+        assert!(normalize_sidecar(&mut bare, &norm(None)));
+        let block = bare.get("ocr_engine").unwrap();
+        assert_eq!(block.get("revision"), Some(&Value::Int(1)));
+        assert_eq!(
+            block.get("created").and_then(Value::as_str),
+            Some("2026-10-29T00:00:00Z")
+        );
+        // A revision the runner wrote is never overwritten, on a stamped layer too.
+        let mut layer =
+            Value::parse(r#"{"ocr_engine":{"id":"x","revision":3},"pages":[]}"#).unwrap();
+        let stamp = LayerStamp {
+            engine: "x".into(),
+            generator: "mokuro-bunko".into(),
+            generation: "fast".into(),
+        };
+        assert!(normalize_sidecar(&mut layer, &norm(Some(stamp))));
+        let block = layer.get("ocr_engine").unwrap();
+        assert_eq!(block.get("revision"), Some(&Value::Int(3)));
+        assert!(block.get("created").is_some());
+        // No install time given: nothing dated.
+        let mut undated = Value::parse(r#"{"ocr_engine":{"id":"x"},"pages":[]}"#).unwrap();
+        let mut n = norm(None);
+        n.created = None;
+        assert!(normalize_sidecar(&mut undated, &n));
+        assert!(undated.get("ocr_engine").unwrap().get("created").is_none());
     }
 
     #[test]

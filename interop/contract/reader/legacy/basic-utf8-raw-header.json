@@ -1,0 +1,15 @@
+{
+  "note": "The UTF-8 Basic header for the non-ASCII seed password, spelled out byte for byte (what basicAuthHeader sends).",
+  "request": {
+    "auth": "raw:Basic cmVhZGVyOmNvbnRyYWN0LXDDpHNzd8O2cmQt4pyT",
+    "headers": {
+      "depth": "0"
+    },
+    "method": "PROPFIND",
+    "path": "/mokuro-reader/"
+  },
+  "expect": {
+    "status": [207],
+    "headers": ["content-type"]
+  }
+}

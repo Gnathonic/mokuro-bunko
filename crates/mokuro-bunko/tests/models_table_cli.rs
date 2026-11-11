@@ -117,9 +117,9 @@ async fn engines_and_models_count_the_compiled_packages_and_add_up_to_the_folder
     // PP-OCR, paddle-manga's tokenizer (the engine is not in use) and an fp32 weights
     // file no row needs.
     for id in [
-        "ppocr-manga/det-v0.2",
-        "ppocr-manga/rec-v0.2",
-        "ppocr-manga/dict-v6",
+        "ppocr-manga/det-v0.3",
+        "ppocr-manga/rec-v0.3",
+        "ppocr-manga/dict-v0.3",
     ] {
         put_id(&models, id);
     }
@@ -262,9 +262,9 @@ async fn engines_and_models_count_the_compiled_packages_and_add_up_to_the_folder
     let folder = du(&models);
     assert_eq!(t["disk"], folder, "{t}");
     let ppocr: u64 = [
-        "ppocr-manga/det-v0.2",
-        "ppocr-manga/rec-v0.2",
-        "ppocr-manga/dict-v6",
+        "ppocr-manga/det-v0.3",
+        "ppocr-manga/rec-v0.3",
+        "ppocr-manga/dict-v0.3",
     ]
     .iter()
     .map(|id| sz(id))

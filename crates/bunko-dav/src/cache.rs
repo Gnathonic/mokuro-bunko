@@ -5,7 +5,8 @@
 //! same and is answered from the same cache; 0.5.2 walked those live, which let parallel
 //! requests each hold a whole-library listing); the shared entry is generated anonymously
 //! and always answers `allprop`; an authenticated caller of `/` or `/mokuro-reader` gets their own
-//! progress files appended; `gzip` is served when `Accept-Encoding` mentions it; entries
+//! progress files appended, and of any cached collection its own correction layers below it
+//! (D27: the walk sets the cloud-root owner's physical ones aside in the entry); `gzip` is served when `Accept-Encoding` mentions it; entries
 //! are fresh for `ttl`, then served stale while one background refresh runs, until
 //! `stale_ttl`.
 //!
@@ -63,6 +64,9 @@ struct Entry {
     gz_prefix: Bytes,
     crc: crc32fast::Hasher,
     raw_len: u64,
+    /// The physical personal files the anonymous walk hid (D27), rendered: appended to
+    /// the answer for the cloud-root owner only.
+    owner_tail: Arc<str>,
     generated: Instant,
     last_used: u64,
 }
@@ -193,6 +197,7 @@ fn compress(level: Compression, body: impl FnOnce(&mut dyn FnMut(&str))) -> Opti
         gz_prefix: Bytes::from(gz),
         crc,
         raw_len,
+        owner_tail: Arc::from(""),
         generated: Instant::now(),
         last_used: 0,
     })
@@ -201,6 +206,13 @@ fn compress(level: Compression, body: impl FnOnce(&mut dyn FnMut(&str))) -> Opti
 /// A cache answer, before per-user injection.
 pub(crate) struct Hit {
     entry: Entry,
+}
+
+impl Hit {
+    /// The cloud-root owner's own corrections below the cached path, rendered.
+    pub(crate) fn owner_tail(&self) -> &str {
+        &self.entry.owner_tail
+    }
 }
 
 impl PropfindCache {
@@ -220,14 +232,20 @@ impl PropfindCache {
     /// the path is not a resource (not cached; the live path answers it).
     fn generate(roots: &Roots, key: &str) -> Option<Entry> {
         let res = roots.lookup(key, None)?;
-        let ctx = PropCtx {
-            caller: None,
-            locks: None,
-            dead: None,
+        let hidden = std::cell::RefCell::new(String::new());
+        let mut entry = {
+            let ctx = PropCtx {
+                caller: None,
+                locks: None,
+                dead: None,
+                hidden_personal: Some(&hidden),
+            };
+            compress(Compression::new(6), |feed| {
+                propfind::walk(roots, &res, None, &Mode::AllProp, &ctx, feed)
+            })?
         };
-        compress(Compression::new(6), |feed| {
-            propfind::walk(roots, &res, None, &Mode::AllProp, &ctx, feed)
-        })
+        entry.owner_tail = Arc::from(hidden.into_inner());
+        Some(entry)
     }
 
     /// Run `body` (which writes the `<D:response>` elements of a listing) on a blocking
@@ -509,6 +527,11 @@ pub(crate) fn respond(hit: Hit, tail_xml: &str, gzip: bool) -> Response<Body> {
     );
     resp.headers_mut()
         .insert(VARY, HeaderValue::from_static("Accept-Encoding"));
+    // For the request accounting: what the listing is before compression.
+    resp.extensions_mut().insert(crate::ListingInfo {
+        raw_len: total,
+        gzip,
+    });
     resp
 }
 

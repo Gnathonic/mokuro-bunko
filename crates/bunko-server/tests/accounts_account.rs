@@ -1,5 +1,8 @@
 //! Account page API (spec db-auth-admin §17; 0.5.2 had no direct tests for it).
 
+// Fixtures are set up and checked with std::fs on purpose.
+#![allow(clippy::disallowed_methods)]
+
 mod accounts_support;
 
 use accounts_support::*;
@@ -200,8 +203,10 @@ async fn delete(env: &Env, auth: &str, body: serde_json::Value) -> Resp {
 async fn self_delete_removes_the_account_and_its_progress() {
     let env = env();
     let progress = env.deps.core.layout.users().join("carol");
-    std::fs::create_dir_all(&progress).unwrap();
+    std::fs::create_dir_all(progress.join("edits/S")).unwrap();
     std::fs::write(progress.join("volume-data.json"), b"{}").unwrap();
+    // Its own corrections (D27) go with it.
+    std::fs::write(progress.join("edits/S/V.edit.mokuro"), b"{}").unwrap();
     let t = token(&env, "carol", PW).await;
 
     let r = delete(&env, &bearer(&t), json!({})).await;

@@ -22,6 +22,7 @@ use bunko_db::pyfmt::truthy;
 use bunko_db::{TokenKind, User};
 use http::{HeaderMap, header};
 use serde_json::{Value, json};
+use std::collections::{BTreeMap, HashSet};
 use std::str::FromStr;
 
 pub fn routes() -> Router<AccountsDeps> {
@@ -107,7 +108,7 @@ async fn check(
     }
     let key = client.limiter_key(username);
     if let Err(retry) = d.core.login_limiter.allow(&key) {
-        return json_error(429, &limited_message(retry));
+        return attempted(json_error(429, &limited_message(retry)), username);
     }
     let (db, u, p) = (d.db.clone(), username.to_string(), password.to_string());
     let user = match blocking(move || db.authenticate_user(&u, &p)).await {
@@ -118,16 +119,37 @@ async fn check(
     match user {
         Some(user) => {
             d.core.login_limiter.record_success(&key);
-            json_response(
-                200,
-                json!({"success": true, "user": {"username": user.username, "role": user.role.as_str()}}),
+            signed_in(
+                json_response(
+                    200,
+                    json!({"success": true, "user": {"username": user.username, "role": user.role.as_str()}}),
+                ),
+                &user,
             )
         }
         None => {
             d.core.login_limiter.record_failure(&key);
-            json_error(401, "Invalid credentials")
+            attempted(json_error(401, "Invalid credentials"), username)
         }
     }
+}
+
+/// A refused sign-in names its account for the request accounting (failed logins per
+/// IP and username); a response extension, never on the wire.
+fn attempted(mut resp: Response, username: &str) -> Response {
+    resp.extensions_mut()
+        .insert(crate::analytics::LoginAttempt(username.to_string()));
+    resp
+}
+
+/// A sign-in that succeeded names its account for the request accounting, so the
+/// sign-in counts for that account and not for an anonymous visitor at its IP.
+fn signed_in(mut resp: Response, user: &User) -> Response {
+    resp.extensions_mut().insert(crate::analytics::SignedIn {
+        username: user.username.clone(),
+        role: user.role,
+    });
+    resp
 }
 
 /// `POST /login/api/token` (§15.2): a password (JSON body or Basic header) buys a
@@ -158,12 +180,14 @@ async fn issue_token(
             AuthHeader::None | AuthHeader::Bearer(_) => {}
         }
     }
-    let (Some(username), Some(password)) = (
-        username.as_str().filter(|s| !s.is_empty()),
-        password.as_str().filter(|s| !s.is_empty()),
-    ) else {
+    let Some(username) = username.as_str().filter(|s| !s.is_empty()) else {
         return json_error(400, "Missing credentials");
     };
+    // No password: only an account that has none, from this computer (`local`).
+    let password = password.as_str().unwrap_or("");
+    if password.is_empty() && !super::local::passwordless_sign_in(&d.core, &client, &headers) {
+        return json_error(400, "Missing credentials");
+    }
     let kind_value = data.get("kind").filter(|v| truthy(v));
     let kind = match kind_value {
         None => TokenKind::Web,
@@ -179,11 +203,16 @@ async fn issue_token(
         if kind == TokenKind::Processor {
             report_processor_refusal(&d, username, &client.ip);
         }
-        return json_error(429, &limited_message(retry));
+        return attempted(json_error(429, &limited_message(retry)), username);
     }
     let (db, u, p) = (d.db.clone(), username.to_string(), password.to_string());
     let issued = blocking(move || -> bunko_db::Result<Option<(User, String, f64)>> {
-        let Some(user) = db.authenticate_user(&u, &p)? else {
+        let user = if p.is_empty() {
+            db.passwordless_user(&u)?
+        } else {
+            db.authenticate_user(&u, &p)?
+        };
+        let Some(user) = user else {
             return Ok(None);
         };
         db.prune_expired_auth_tokens()?;
@@ -202,19 +231,27 @@ async fn issue_token(
             if kind == TokenKind::Processor {
                 report_processor_refusal(&d, username, &client.ip);
             }
-            json_error(401, "Invalid credentials")
+            attempted(json_error(401, "Invalid credentials"), username)
         }
         Some((user, token, expires_at)) => {
             d.core.login_limiter.record_success(&key);
-            json_response(
-                200,
-                json!({
-                    "token": token,
-                    "token_type": "Bearer",
-                    "kind": kind.as_str(),
-                    "expires_at": expires_at,
-                    "user": {"username": user.username, "role": user.role.as_str()},
-                }),
+            let mut who = json!({"username": user.username, "role": user.role.as_str()});
+            if password.is_empty() {
+                // The account page then offers to set its first password.
+                who["has_password"] = json!(false);
+            }
+            signed_in(
+                json_response(
+                    200,
+                    json!({
+                        "token": token,
+                        "token_type": "Bearer",
+                        "kind": kind.as_str(),
+                        "expires_at": expires_at,
+                        "user": who,
+                    }),
+                ),
+                &user,
             )
         }
     }
@@ -241,13 +278,52 @@ async fn revoke_token(State(d): State<AccountsDeps>, headers: HeaderMap) -> Resp
     }
 }
 
+/// An uploader's series folders (0.8), each as recorded, by code point: the ones it
+/// owns and the ones another account owns (closed to it). Only folders listed now, as
+/// auth checks them: a record whose folder went without a hook closes nothing.
+///
+/// What cannot be read is never reported as a shorter list, which a reader would act
+/// on as true: unsure, a series is closed and not owned. With the library root
+/// unlistable, every record of another account closes its series and none is owned;
+/// with the records unreadable, `closed` is `None`: the account may add nowhere. Auth
+/// answers those requests 503 meanwhile, and the reader's next /me corrects it.
+///
+/// `volumes` are the archives it may publish the curated layer of outside the series it
+/// owns ([`curated_volumes`]); there a shorter list only offers less, so whatever cannot
+/// be read is left out.
+struct SeriesFolders {
+    owned: Vec<String>,
+    closed: Option<Vec<String>>,
+    volumes: Vec<CuratedVolume>,
+}
+
+/// A volume outside the account's own series whose curated layer it may publish: its
+/// series folder as listed, and the archive's stem.
+struct CuratedVolume {
+    series: String,
+    volume: String,
+}
+
 /// The client-facing permissions object (§15.4 `P`): `metadata` nests inside, which is
-/// where the reader's `identity.ts` reads it.
-fn permissions(role: Role, owned_series: Option<Vec<String>>) -> Value {
+/// where the reader's `identity.ts` reads it. `addFiles` (0.8) says where the account
+/// may add files: anywhere, every series but the `closedSeries` other accounts own, or
+/// nowhere. Its presence tells a reader the server enforces series owners.
+fn permissions(role: Role, folders: Option<SeriesFolders>) -> Value {
+    let (owned, closed, volumes) = match folders {
+        Some(f) => (Some(f.owned), f.closed, f.volumes),
+        None => (None, Some(Vec::new()), Vec::new()),
+    };
     let metadata = if has_perm(role, Perm::ModifyDelete) {
         json!({"scope": "all"})
-    } else if let (Role::Uploader, Some(owned)) = (role, owned_series) {
+    } else if let (Role::Uploader, Some(owned)) = (role, owned) {
         json!({"scope": "owned", "ownedSeries": owned})
+    } else {
+        json!({"scope": "none"})
+    };
+    let add_files = if has_perm(role, Perm::ModifyDelete) {
+        json!({"scope": "all"})
+    } else if let (true, Some(closed)) = (has_perm(role, Perm::AddFiles), closed) {
+        json!({"scope": "open", "closedSeries": closed})
     } else {
         json!({"scope": "none"})
     };
@@ -256,26 +332,189 @@ fn permissions(role: Role, owned_series: Option<Vec<String>>) -> Value {
         "canAddFiles": has_perm(role, Perm::AddFiles),
         "canModifyDelete": has_perm(role, Perm::ModifyDelete),
         "metadata": metadata,
+        "curated": curated(role, volumes),
+        "addFiles": add_files,
     })
 }
 
-/// The 200 identity body for a signed-in user (the uploader's owned series are read
-/// from the ownership table).
-fn identity_body(db: &bunko_db::Database, user: &User) -> bunko_db::Result<Value> {
-    let owned = if user.role == Role::Uploader {
-        Some(db.list_series_owned_by(&user.username)?)
+/// `curated`: its scope, and with `owned` the `volumes` it controls outside the series
+/// it owns (those are `metadata.ownedSeries`), so a reader can offer Publish per volume
+/// in a shared series.
+fn curated(role: Role, volumes: Vec<CuratedVolume>) -> Value {
+    let scope = curated_scope(role);
+    if scope != "owned" {
+        return json!({ "scope": scope });
+    }
+    let volumes: Vec<Value> = volumes
+        .into_iter()
+        .map(|v| json!({"series": v.series, "volume": v.volume}))
+        .collect();
+    json!({"scope": scope, "volumes": volumes})
+}
+
+/// Who may publish a volume's shared `curated` layer (D27; auth enforces it): every
+/// volume; the volumes it controls (`owned`: its uploads, and every volume of a series
+/// it owns; a 403 on any other is final); or none.
+fn curated_scope(role: Role) -> &'static str {
+    if has_perm(role, Perm::ModifyDelete) {
+        "all"
+    } else if role == Role::Uploader {
+        "owned"
     } else {
-        None
+        "none"
+    }
+}
+
+/// See [`SeriesFolders`]. Blocking (lists the library root).
+fn series_folders(
+    db: &bunko_db::Database,
+    library: &std::path::Path,
+    username: &str,
+) -> SeriesFolders {
+    let records = db
+        .series_folders_owned_by(username)
+        .and_then(|owned| Ok((owned, db.series_folders_closed_to(username)?)));
+    let (owned, closed) = match records {
+        Ok(records) => records,
+        Err(e) => {
+            tracing::warn!("series folder owners for /me: {e}");
+            return SeriesFolders {
+                owned: Vec::new(),
+                closed: None,
+                volumes: Vec::new(),
+            };
+        }
     };
-    Ok(json!({
+    let live = crate::library::owners::live_series_keys(library)
+        .inspect_err(|e| {
+            tracing::warn!("series folders for /me: the library root cannot be listed: {e}")
+        })
+        .ok();
+    let volumes = match &live {
+        Some(live) => {
+            let keys = |rows: &[bunko_db::SeriesFolderOwner]| -> HashSet<String> {
+                rows.iter().map(|r| r.series_key.clone()).collect()
+            };
+            curated_volumes(db, library, username, live, &keys(&owned), &keys(&closed))
+        }
+        None => Vec::new(),
+    };
+    // A record whose folder may or may not be listed closes its series, and owns nothing.
+    let listed = |rows: Vec<bunko_db::SeriesFolderOwner>, unsure: bool| -> Vec<String> {
+        rows.into_iter()
+            .filter(|r| live.as_ref().map_or(unsure, |l| l.contains(&r.series_key)))
+            .map(|r| r.folder_name)
+            .collect()
+    };
+    SeriesFolders {
+        owned: listed(owned, false),
+        closed: Some(listed(closed, true)),
+        volumes,
+    }
+}
+
+/// The listed archives `username` controls in the series folders it does not own (D1),
+/// by series then stem: those auth lets it publish the curated layer of. A volume is
+/// controlled when every archive governing its `<stem>.curated.mokuro` (the nearest
+/// listed one, by either fold: `sidecar_names::governing_archives_by_either_fold`, as
+/// auth asks) is its recorded upload; in a series
+/// another account owns, only while that layer is listed (a new one there is refused).
+/// `owned` and `closed` are the series keys of its own and other accounts' records,
+/// `live` those listed at the root. Archives directly in a series folder only; a folder
+/// or record that cannot be read adds nothing. Blocking.
+fn curated_volumes(
+    db: &bunko_db::Database,
+    library: &std::path::Path,
+    username: &str,
+    live: &HashSet<String>,
+    owned: &HashSet<String>,
+    closed: &HashSet<String>,
+) -> Vec<CuratedVolume> {
+    use bunko_core::sidecar_names::{cbz_stem, governing_archives_by_either_fold};
+    use bunko_db::uploads::fold_series_title_key;
+    use bunko_library::fsutil::ListedPath;
+    use std::collections::BTreeSet;
+    let uploads = match db.volume_uploads_by(username) {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!("volume uploads for /me: {e}");
+            return Vec::new();
+        }
+    };
+    // Each record is read where it leads through the listings (a series or volume
+    // renamed to another case outside Bunko included, a shadowed case variant never),
+    // and each governing archive's owner is asked exactly as auth asks it.
+    let walk = bunko_library::fsutil::ListedWalk::new(library);
+    let mut by_folder: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for rel in &uploads {
+        if let Ok(ListedPath::Reaches(listed)) = walk.walk(rel)
+            && let Some((folder, name)) = listed.split_once('/')
+            && !name.contains('/')
+        {
+            by_folder
+                .entry(folder.to_string())
+                .or_default()
+                .insert(name.to_string());
+        }
+    }
+    let mut out = Vec::new();
+    for (folder, archives) in by_folder {
+        let key = fold_series_title_key(&folder);
+        if !live.contains(&key) || owned.contains(&key) {
+            continue;
+        }
+        let Ok(entries) = bunko_store::fs::read_dir(library.join(&folder)) else {
+            continue;
+        };
+        let names: Vec<String> = entries
+            .flatten()
+            .filter(|e| e.file_type().is_ok_and(|t| !t.is_dir()))
+            .filter_map(|e| e.file_name().into_string().ok())
+            .collect();
+        let listed: Vec<&str> = names.iter().map(String::as_str).collect();
+        for archive in &archives {
+            let Some(stem) = cbz_stem(archive) else {
+                continue;
+            };
+            let layer = format!("{stem}.curated.mokuro");
+            if closed.contains(&key) && !listed.contains(&layer.as_str()) {
+                continue;
+            }
+            let governors = governing_archives_by_either_fold(&layer, &listed);
+            let mine = !governors.is_empty()
+                && governors.iter().all(|g| {
+                    crate::backend::volume_owner_in(db, &walk, &format!("{folder}/{g}"))
+                        .ok()
+                        .flatten()
+                        .is_some_and(|owner| owner.eq_ignore_ascii_case(username))
+                });
+            if mine {
+                out.push(CuratedVolume {
+                    series: folder.clone(),
+                    volume: stem.to_string(),
+                });
+            }
+        }
+    }
+    out.sort_by(|a, b| (&a.series, &a.volume).cmp(&(&b.series, &b.volume)));
+    out
+}
+
+/// The 200 identity body for a signed-in user (an uploader's series folders are read
+/// from the owner records and the library root).
+fn identity_body(db: &bunko_db::Database, library: &std::path::Path, user: &User) -> Value {
+    let folders =
+        (user.role == Role::Uploader).then(|| series_folders(db, library, &user.username));
+    json!({
         "authenticated": true,
         "username": user.username,
         "role": user.role.as_str(),
         "created_at": user.created_at,
-        "permissions": permissions(user.role, owned),
+        "permissions": permissions(user.role, folders),
         "per_user_files": bunko_core::reader_tree::advertised(),
+        "per_user_layers": bunko_core::sidecar_names::per_user_layers(),
         "version": bunko_core::VERSION,
-    }))
+    })
 }
 
 fn unauthenticated(status: u16, error: &str) -> Response {
@@ -285,11 +524,12 @@ fn unauthenticated(status: u16, error: &str) -> Response {
 /// `GET /login/api/me` (§15.4). `authenticated` is in every answer, 401/429 included.
 async fn me(State(d): State<AccountsDeps>, client: Client, headers: HeaderMap) -> Response {
     let db = d.db.clone();
+    let library = d.core.layout.library();
     match auth_header(&headers) {
         AuthHeader::Bearer(token) => {
             let result = blocking(move || -> bunko_db::Result<Option<Value>> {
                 match db.resolve_auth_token(&token)? {
-                    Some(user) => identity_body(&db, &user).map(Some),
+                    Some(user) => Ok(Some(identity_body(&db, &library, &user))),
                     None => Ok(None),
                 }
             })
@@ -312,6 +552,9 @@ async fn me(State(d): State<AccountsDeps>, client: Client, headers: HeaderMap) -
                 // What this server keeps per account (`history/`: a directory tree): a
                 // reader uses a name (positions.json, history/) only once it is listed.
                 "per_user_files": bunko_core::reader_tree::advertised(),
+                // The layer ids each account keeps its own copy of (D27): a reader
+                // pushes its corrections only when `edit` is listed.
+                "per_user_layers": bunko_core::sidecar_names::per_user_layers(),
                 // Reported only by builds that keep history per account (0.7.8 on): a
                 // reader turns history sync on from the numeric core.
                 "version": bunko_core::VERSION,
@@ -324,7 +567,7 @@ async fn me(State(d): State<AccountsDeps>, client: Client, headers: HeaderMap) -
             }
             let result = blocking(move || -> bunko_db::Result<Option<Value>> {
                 match db.authenticate_user(&username, &password)? {
-                    Some(user) => identity_body(&db, &user).map(Some),
+                    Some(user) => Ok(Some(identity_body(&db, &library, &user))),
                     None => Ok(None),
                 }
             })
@@ -354,6 +597,7 @@ async fn nav_config(State(d): State<AccountsDeps>) -> Response {
         "queue_show_in_nav": c.queue.show_in_nav,
         "queue_public_access": c.queue.public_access,
         "registration_enabled": c.registration.mode != "disabled",
+        "serve_readers": c.server.serve_readers,
     });
     drop(c);
     json_response(200, body)
@@ -365,11 +609,42 @@ mod tests {
 
     #[test]
     fn permissions_per_role() {
-        let p = permissions(Role::Uploader, Some(vec!["A".into()]));
+        let folders = SeriesFolders {
+            owned: vec!["A".into()],
+            closed: Some(vec!["B".into()]),
+            volumes: vec![CuratedVolume {
+                series: "C".into(),
+                volume: "Vol 1".into(),
+            }],
+        };
+        let p = permissions(Role::Uploader, Some(folders));
+        assert_eq!(
+            permissions(
+                Role::Uploader,
+                Some(SeriesFolders {
+                    owned: Vec::new(),
+                    closed: None,
+                    volumes: Vec::new(),
+                })
+            )["addFiles"],
+            json!({"scope": "none"})
+        );
         assert_eq!(
             serde_json::to_string(&p).unwrap(),
-            r#"{"canWriteProgress":true,"canAddFiles":true,"canModifyDelete":false,"metadata":{"scope":"owned","ownedSeries":["A"]}}"#
+            r#"{"canWriteProgress":true,"canAddFiles":true,"canModifyDelete":false,"metadata":{"scope":"owned","ownedSeries":["A"]},"curated":{"scope":"owned","volumes":[{"series":"C","volume":"Vol 1"}]},"addFiles":{"scope":"open","closedSeries":["B"]}}"#
         );
+        // Where an account may add files (0.8; its presence is the capability).
+        for (role, scope) in [
+            (Role::Admin, json!({"scope": "all"})),
+            (Role::Editor, json!({"scope": "all"})),
+            (Role::Inviter, json!({"scope": "all"})),
+            (Role::Uploader, json!({"scope": "open", "closedSeries": []})),
+            (Role::Registered, json!({"scope": "none"})),
+            (Role::Processor, json!({"scope": "none"})),
+            (Role::Anonymous, json!({"scope": "none"})),
+        ] {
+            assert_eq!(permissions(role, None)["addFiles"], scope, "{role:?}");
+        }
         assert_eq!(
             permissions(Role::Inviter, None)["metadata"],
             json!({"scope": "all"})
@@ -378,10 +653,192 @@ mod tests {
             permissions(Role::Processor, None)["metadata"],
             json!({"scope": "none"})
         );
+        // Who may publish the shared `curated` layer (D27): an uploader only on what
+        // it uploaded, even before it owns a series, its volumes outside the series it
+        // owns listed (D1).
+        for (role, curated) in [
+            (Role::Admin, json!({"scope": "all"})),
+            (Role::Editor, json!({"scope": "all"})),
+            (Role::Inviter, json!({"scope": "all"})),
+            (Role::Uploader, json!({"scope": "owned", "volumes": []})),
+            (Role::Registered, json!({"scope": "none"})),
+            (Role::Processor, json!({"scope": "none"})),
+            (Role::Anonymous, json!({"scope": "none"})),
+        ] {
+            assert_eq!(permissions(role, None)["curated"], curated, "{role:?}");
+        }
         assert_eq!(
             permissions(Role::Anonymous, None)["canWriteProgress"],
             json!(false)
         );
+    }
+
+    /// bob, an uploader, in a library where alice owns `S/` and bob owns `B/`.
+    fn owners_library() -> (
+        tempfile::TempDir,
+        bunko_db::Database,
+        std::path::PathBuf,
+        User,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let library = dir.path().join("library");
+        for folder in ["S", "B"] {
+            bunko_store::fs::create_dir_all(library.join(folder)).unwrap();
+        }
+        let db = bunko_db::Database::open(dir.path().join("mokuro.db")).unwrap();
+        db.record_series_folder_owner("S", "alice").unwrap();
+        db.record_series_folder_owner("B", "bob").unwrap();
+        let bob = User {
+            id: 2,
+            username: "bob".into(),
+            role: Role::Uploader,
+            status: bunko_db::UserStatus::Active,
+            notes: String::new(),
+            created_at: "2026-10-31 00:00:00".into(),
+        };
+        (dir, db, library, bob)
+    }
+
+    fn reported(db: &bunko_db::Database, library: &std::path::Path, user: &User) -> Value {
+        identity_body(db, library, user)["permissions"].clone()
+    }
+
+    #[test]
+    fn the_series_lists_are_the_live_records() {
+        let (_dir, db, library, bob) = owners_library();
+        let p = reported(&db, &library, &bob);
+        assert_eq!(
+            p["addFiles"],
+            json!({"scope": "open", "closedSeries": ["S"]})
+        );
+        assert_eq!(
+            p["metadata"],
+            json!({"scope": "owned", "ownedSeries": ["B"]})
+        );
+    }
+
+    /// The volumes an uploader may publish the curated layer of outside the series it
+    /// owns (D1): its listed uploads in shared folders, as auth decides (the nearest
+    /// listed archive governs), and in another account's series only where the curated
+    /// layer is there already (a new one there is refused).
+    #[test]
+    fn curated_volumes_are_the_uploads_it_controls_outside_its_series() {
+        let (_dir, db, library, bob) = owners_library();
+        for folder in ["Shared", "Zeta"] {
+            bunko_store::fs::create_dir_all(library.join(folder)).unwrap();
+        }
+        db.record_series_folder_owner("Zeta", "carol").unwrap();
+        let files = [
+            ("Shared/Vol 1.cbz", Some("BOB")),
+            ("Shared/Vol 2.cbz", Some("carol")),
+            ("Shared/Vol 1.5.cbz", Some("bob")),
+            // Hides carol's `V`'s curated layer: control passes up to `V`.
+            ("Shared/V.cbz", Some("carol")),
+            ("Shared/V.curated.cbz", Some("bob")),
+            ("B/Mine.cbz", Some("bob")),
+            ("S/Old.cbz", Some("bob")),
+            ("S/Kept.cbz", Some("bob")),
+            ("S/Kept.curated.mokuro", None),
+            ("Loose.cbz", Some("bob")),
+        ];
+        for (rel, uploader) in files {
+            bunko_store::fs::write(library.join(rel), b"x").unwrap();
+            if let Some(u) = uploader {
+                db.record_volume_upload(rel, u).unwrap();
+            }
+        }
+        // Recorded, but no longer listed.
+        db.record_volume_upload("Shared/Gone.cbz", "bob").unwrap();
+        db.record_volume_upload("Elsewhere/Vol 1.cbz", "bob")
+            .unwrap();
+        let p = reported(&db, &library, &bob);
+        assert_eq!(
+            p["curated"],
+            json!({"scope": "owned", "volumes": [
+                {"series": "S", "volume": "Kept"},
+                {"series": "Shared", "volume": "Vol 1"},
+                {"series": "Shared", "volume": "Vol 1.5"},
+            ]})
+        );
+        // Unreadable upload records report none (the reader just offers no Publish).
+        db.with_writer_connection(|c| c.execute("DROP TABLE volume_uploads", []))
+            .unwrap();
+        let p = reported(&db, &library, &bob);
+        assert_eq!(p["curated"], json!({"scope": "owned", "volumes": []}));
+    }
+
+    /// A series folder renamed to another case outside Bunko is read through the
+    /// listings, as auth reads it, the same on every host: its uploads stay offered
+    /// under the listed spelling. A shadowed case variant's uploads (both spellings
+    /// listed, a case-sensitive disk) are never offered for the winner.
+    #[test]
+    fn curated_volumes_follow_the_listings_on_every_host() {
+        let (_dir, db, library, bob) = owners_library();
+        bunko_store::fs::create_dir_all(library.join("shared")).unwrap();
+        bunko_store::fs::write(library.join("shared/Vol 3.cbz"), b"x").unwrap();
+        db.record_volume_upload("shared/Vol 3.cbz", "bob").unwrap();
+        bunko_store::fs::rename(library.join("shared"), library.join("Shared")).unwrap();
+        let p = reported(&db, &library, &bob);
+        assert_eq!(
+            p["curated"],
+            json!({"scope": "owned", "volumes": [{"series": "Shared", "volume": "Vol 3"}]})
+        );
+        // Another `shared/` made beside it outside Bunko, where the store keeps both:
+        // bob's rows now spell that hidden folder, and give him nothing in `Shared/`.
+        bunko_store::fs::create_dir_all(library.join("shared")).unwrap();
+        bunko_store::fs::write(library.join("shared/Vol 4.cbz"), b"x").unwrap();
+        bunko_store::fs::write(library.join("Shared/Vol 4.cbz"), b"x").unwrap();
+        db.record_volume_upload("shared/Vol 4.cbz", "bob").unwrap();
+        let two = bunko_library::fsutil::list_dir(&library)
+            .unwrap()
+            .iter()
+            .any(|(n, _)| n == "shared");
+        let want = if two {
+            json!([])
+        } else {
+            // One folder: `shared/Vol 4.cbz` is bob's upload in `Shared/`.
+            json!([
+                {"series": "Shared", "volume": "Vol 3"},
+                {"series": "Shared", "volume": "Vol 4"},
+            ])
+        };
+        let p = reported(&db, &library, &bob);
+        assert_eq!(p["curated"], json!({"scope": "owned", "volumes": want}));
+    }
+
+    /// Owner records that cannot be read are no empty list: /me still answers (a reader
+    /// takes a failed /me for a server that enforces no owners), saying the account may
+    /// add nowhere and owns nothing until it asks again.
+    #[test]
+    fn unreadable_owner_records_close_every_series() {
+        let (_dir, db, library, bob) = owners_library();
+        db.with_writer_connection(|c| c.execute("DROP TABLE series_folder_owners", []))
+            .unwrap();
+        let p = reported(&db, &library, &bob);
+        assert_eq!(p["addFiles"], json!({"scope": "none"}));
+        assert_eq!(p["metadata"], json!({"scope": "owned", "ownedSeries": []}));
+        assert_eq!(p["canAddFiles"], json!(true));
+    }
+
+    /// A library root that cannot be listed cannot tell which records are live: every
+    /// series another account has a record for is reported closed, and none owned.
+    #[cfg(unix)]
+    #[test]
+    fn an_unlistable_root_reports_every_record_closed() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_dir, db, library, bob) = owners_library();
+        db.record_series_folder_owner("Gone", "carol").unwrap();
+        std::fs::set_permissions(&library, std::fs::Permissions::from_mode(0o311)).unwrap();
+        let listable = bunko_store::fs::read_dir(&library).is_ok(); // root reads anything
+        let p = reported(&db, &library, &bob);
+        std::fs::set_permissions(&library, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if !listable {
+            assert_eq!(
+                p["addFiles"],
+                json!({"scope": "open", "closedSeries": ["Gone", "S"]})
+            );
+            assert_eq!(p["metadata"], json!({"scope": "owned", "ownedSeries": []}));
+        }
     }
 
     #[test]

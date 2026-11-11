@@ -20,7 +20,7 @@ mod settle;
 mod status;
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -39,13 +39,13 @@ use serde_json::{Map, Value};
 use tokio::sync::{mpsc, oneshot};
 use tracing::info;
 
-use super::owed::OwedIndex;
+use super::owed::{OwedIndex, OwedVolume, PageSuffixes};
 use super::profiles::Profiles;
 use super::types::{Job, LibraryFacts, PathLocks};
 
 pub use availability::availability_of;
 pub use bench::{BenchRequest, BenchState, cpu_label, physical_cores};
-pub use claim::{catalog_can_run, supported_for};
+pub use claim::{SUFFIX_BATCH, catalog_can_run, supported_for};
 pub use registry::{
     FailedLogin, Machine, PublicNames, RegisterInput, RegisterOutcome, SocketRefusal, TransferStats,
 };
@@ -122,11 +122,18 @@ pub enum Msg {
         epoch: u64,
         index: OwedIndex,
     },
+    /// What a running walk has judged so far ([`crate::ocr::owed::walk_in_parts`]).
+    WalkedPart {
+        epoch: u64,
+        part: OwedIndex,
+    },
     /// The paced direct-replace job finished ([`crate::ocr::upgrade::Upgrade::run_direct`]).
     DirectUpgraded {
         done: u64,
         failed: u64,
     },
+    /// The paced sweep of numbered `_n` sidecars finished ([`crate::ocr::orphans::sweep`]).
+    OrphansSwept(crate::ocr::orphans::SweepReport),
     /// A frame from a processor (remote socket or local channel).
     Event {
         pid: String,
@@ -187,6 +194,29 @@ pub enum Msg {
     },
     ArchiveArrived(PathBuf),
     ArchiveRemoved(PathBuf),
+    /// A remote store's arrival, judged on a helper thread (spec §8): what it is owed
+    /// when it had the version `stamp`.
+    ArrivalJudged {
+        rel: String,
+        stamp: Option<super::types::Stamp>,
+        entry: Option<OwedVolume>,
+    },
+    /// Page suffixes read on a helper thread for `machine_reads` (spec §8: on a remote
+    /// store the actor reads no archive): per volume, its version when read and what
+    /// the read gave (`Err`: could not be read now; tried again after the next walk).
+    PageSuffixesRead(
+        Vec<(
+            String,
+            Option<super::types::Stamp>,
+            Result<PageSuffixes, String>,
+        )>,
+    ),
+    /// A local claim's archive was spooled from a remote store (spec §8, `spooling`).
+    Spooled {
+        sid: String,
+        job: Job,
+        result: Result<SpoolHold, String>,
+    },
     /// A benchmark's sample was packed on a helper thread: `(pages, volumes)`.
     BenchSample {
         machine: String,
@@ -206,7 +236,9 @@ impl std::fmt::Debug for Msg {
         let name = match self {
             Msg::Tick => "Tick",
             Msg::Walked { .. } => "Walked",
+            Msg::WalkedPart { .. } => "WalkedPart",
             Msg::DirectUpgraded { .. } => "DirectUpgraded",
+            Msg::OrphansSwept(_) => "OrphansSwept",
             Msg::Event { .. } => "Event",
             Msg::Seen { .. } => "Seen",
             Msg::Register { .. } => "Register",
@@ -220,6 +252,9 @@ impl std::fmt::Debug for Msg {
             Msg::OwnCopyRead { .. } => "OwnCopyRead",
             Msg::ArchiveArrived(_) => "ArchiveArrived",
             Msg::ArchiveRemoved(_) => "ArchiveRemoved",
+            Msg::ArrivalJudged { .. } => "ArrivalJudged",
+            Msg::PageSuffixesRead(_) => "PageSuffixesRead",
+            Msg::Spooled { .. } => "Spooled",
             Msg::BenchSample { .. } => "BenchSample",
             Msg::Apply { .. } => "Apply",
             Msg::Query(_) => "Query",
@@ -255,6 +290,25 @@ pub struct Claimed {
     /// Its result is being installed: a disconnect must not take it back.
     pub settling: bool,
     pub row: Generation,
+    /// A local claim on a remote store: the spooled archive the runner reads, pinned
+    /// until the claim settles or is returned (dropped with the claim).
+    pub spool: Option<SpoolHold>,
+}
+
+/// A pinned local copy of a remote archive ([`bunko_store::LocalPath`]).
+#[derive(Clone)]
+pub struct SpoolHold(pub Arc<bunko_store::LocalPath>);
+
+impl SpoolHold {
+    pub fn path(&self) -> &Path {
+        self.0.path()
+    }
+}
+
+impl std::fmt::Debug for SpoolHold {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SpoolHold({})", self.path().display())
+    }
 }
 
 /// Autobench bookkeeping (§14.2).
@@ -282,7 +336,19 @@ pub struct Scheduler {
     pub walking: bool,
     /// The paced direct-replace job is running.
     pub direct_running: bool,
+    /// The paced `_n` sweep is running.
+    pub orphan_sweeping: bool,
+    /// Numbered `_n` sidecars the last sweep left: not provably Bunko's.
+    pub orphans_unproven: u64,
+    /// Numbered `_n` sidecars the last sweep left because their name is listed in
+    /// another spelling, or a case-variant group freezes them.
+    pub orphans_left: u64,
+    /// Those, with the stat they were judged at: not read again while unchanged.
+    pub orphans_seen: Arc<crate::ocr::orphans::Unproven>,
     pub last_walk_at: Option<f64>,
+    /// Full walks finished (a testing build shows its admin: the interop rig waits for
+    /// passes by it).
+    pub walks: u64,
     pub machines: IndexMap<String, Machine>,
     pub lanes: Vec<Lane>,
     pub next_lane_id: u64,
@@ -300,9 +366,14 @@ pub struct Scheduler {
     pub returned_by: HashMap<Job, HashSet<String>>,
     pub eft_deadlines: EftDeadlines<Job>,
     pub left_logged: HashSet<(Job, String)>,
-    /// Page suffixes of the volumes looked into for a processor of an older release
-    /// (`machine_reads`): rel → (size, mtime_ns, suffixes).
-    pub page_suffixes: HashMap<String, (u64, i128, Arc<[String]>)>,
+    /// Volumes whose page suffixes `machine_reads` wants read on a helper thread (a
+    /// remote store; they are kept on the owed volume, [`OwedVolume::page_suffixes`]),
+    /// in the order asked (claim priority), at most [`SUFFIX_BATCH`].
+    pub suffixes_wanted: indexmap::IndexSet<String>,
+    /// A helper is reading page suffixes ([`Msg::PageSuffixesRead`]).
+    pub suffixes_reading: bool,
+    /// Volumes whose suffixes could not be read; asked again after the next walk.
+    pub suffixes_failed: HashSet<String>,
     /// `(job, machine)` already logged as a volume that machine's release cannot read.
     pub unreadable_logged: HashSet<(Job, String)>,
     pub cards: IndexMap<Job, Map<String, Value>>,
@@ -326,6 +397,8 @@ pub struct Scheduler {
     /// Ended sessions per processor, for late events: sid → when.
     pub ended_sessions: HashMap<String, f64>,
     pub hold_logged: bool,
+    /// The last [`Scheduler::storage_hold`] the tick saw (logged on change).
+    pub storage_held: Option<&'static str>,
     /// This server's own OCR has come up at least once (`LocalUp`).
     pub local_was_up: bool,
     /// An automatic update is waiting for a quiet moment: no machine gets a new claim
@@ -363,7 +436,12 @@ impl Scheduler {
             walk_epoch: 0,
             walking: false,
             direct_running: false,
+            orphan_sweeping: false,
+            orphans_unproven: 0,
+            orphans_left: 0,
+            orphans_seen: Arc::default(),
             last_walk_at: None,
+            walks: 0,
             machines: IndexMap::new(),
             lanes: Vec::new(),
             next_lane_id: 0,
@@ -381,7 +459,9 @@ impl Scheduler {
             returned_by: HashMap::new(),
             eft_deadlines: EftDeadlines::new(),
             left_logged: HashSet::new(),
-            page_suffixes: HashMap::new(),
+            suffixes_wanted: indexmap::IndexSet::new(),
+            suffixes_reading: false,
+            suffixes_failed: HashSet::new(),
             unreadable_logged: HashSet::new(),
             cards: IndexMap::new(),
             queue_generation: 0,
@@ -400,6 +480,7 @@ impl Scheduler {
             results: HashMap::new(),
             ended_sessions: HashMap::new(),
             hold_logged: false,
+            storage_held: None,
             local_was_up: false,
             update_drain: false,
             last_poll_tick: f64::NEG_INFINITY,
@@ -420,6 +501,12 @@ impl Scheduler {
 
     pub fn library(&self) -> PathBuf {
         self.deps.layout.library()
+    }
+
+    /// The library is a remote store (spec §8): the actor never reads archive or
+    /// sidecar bytes inline, and local runners read a spooled copy.
+    pub fn remote_library(&self) -> bool {
+        bunko_store::store_for(&self.library()).is_some_and(|s| s.caps().remote)
     }
 
     pub fn storage(&self) -> PathBuf {
@@ -514,13 +601,27 @@ impl Scheduler {
                 break;
             }
         }
+        self.publish_busy();
+    }
+
+    /// What the case merge must wait for (spec §5.9 "When"): the claims in flight (a
+    /// claim holds its spooled archive, and an upgrade swap settles inside it).
+    fn publish_busy(&self) {
+        if !self.remote_library() {
+            return;
+        }
+        let library = self.library();
+        let claims = self.claims.keys().map(|j| j.path(&library)).collect();
+        super::busy::set_claims(&library, claims);
     }
 
     fn dispatch(&mut self, msg: Msg) {
         match msg {
             Msg::Tick => self.tick(),
             Msg::Walked { epoch, index } => self.walked(epoch, index),
+            Msg::WalkedPart { epoch, part } => self.walked_part(epoch, part),
             Msg::DirectUpgraded { done, failed } => self.direct_upgraded(done, failed),
+            Msg::OrphansSwept(report) => self.orphans_swept(report),
             Msg::Event { pid, event } => self.on_event(&pid, event),
             Msg::Seen { pid } => self.seen(&pid),
             Msg::Register { input, reply } => {
@@ -551,6 +652,9 @@ impl Scheduler {
             Msg::OwnCopyRead { job, error, then } => self.own_copy_read(job, error, *then),
             Msg::ArchiveArrived(path) => self.archive_arrived(&path),
             Msg::ArchiveRemoved(path) => self.archive_removed(&path),
+            Msg::ArrivalJudged { rel, stamp, entry } => self.arrival_judged(rel, stamp, entry),
+            Msg::PageSuffixesRead(read) => self.page_suffixes_read(read),
+            Msg::Spooled { sid, job, result } => self.spooled(&sid, &job, result),
             Msg::BenchSample {
                 machine,
                 bid,
@@ -575,6 +679,7 @@ impl Scheduler {
             return;
         }
         self.check_sessions();
+        self.check_storage_hold();
         let now = self.mono();
         if now - self.last_poll_tick >= self.settings.poll_interval {
             self.last_poll_tick = now;
@@ -587,6 +692,33 @@ impl Scheduler {
                 lane.idle_at = None;
             }
         }
+    }
+
+    /// A remote store's hold began or ended: log it once; on release, let every lane
+    /// look for work again.
+    fn check_storage_hold(&mut self) {
+        let now = self.storage_hold();
+        if now == self.storage_held {
+            return;
+        }
+        let was = std::mem::replace(&mut self.storage_held, now);
+        match now {
+            Some(reason) => self.log(format!(
+                "OCR holds new work: the library storage is unavailable ({reason})"
+            )),
+            None => {
+                self.log(format!(
+                    "OCR takes new work again (the library storage is back from {})",
+                    was.unwrap_or("a hold")
+                ));
+                for lane in &mut self.lanes {
+                    lane.idle_at = None;
+                }
+                self.maybe_start_scan();
+            }
+        }
+        self.bump();
+        self.bump_page();
     }
 
     /// Start a full walk on a helper thread (single-flight).
@@ -606,8 +738,14 @@ impl Scheduler {
             .iter()
             .map(|(rel, v)| (rel.clone(), (v.size, v.mtime_ns, v.pages)))
             .collect();
+        // On helper threads the walk hands over its parts as it goes; inline (tests)
+        // it answers once.
+        let parts = match &self.deps.exec {
+            Exec::Threads(tx) => Some(tx.clone()),
+            Exec::Inline => None,
+        };
         self.run_background(Box::new(move || {
-            let index = super::owed::walk(
+            let index = super::owed::walk_in_parts(
                 &library,
                 &rows,
                 facts.as_ref(),
@@ -615,9 +753,40 @@ impl Scheduler {
                     .as_deref()
                     .map(|p| p as &dyn super::owed::UpgradeProbe),
                 &known,
+                super::owed::WALK_PART_EVERY,
+                &mut |part| {
+                    if let Some(tx) = &parts {
+                        let _ = tx.send(Msg::WalkedPart { epoch, part });
+                    }
+                },
             );
             Msg::Walked { epoch, index }
         }));
+    }
+
+    /// A part of the running walk: its volumes join the queue at once (the walk's end
+    /// replaces the whole index as before). A large cloud library's first walk takes
+    /// many minutes of provider reads; OCR starts on what is judged meanwhile instead of
+    /// waiting for all of it.
+    fn walked_part(&mut self, epoch: u64, part: OwedIndex) {
+        if !self.walking || epoch != self.walk_epoch {
+            return;
+        }
+        for (rel, mut v) in part.volumes {
+            if let Some(old) = self.owed.volumes.get(&rel)
+                && let Some((stamp, read)) = &old.page_suffixes
+                && *stamp == (v.size, v.mtime_ns)
+            {
+                v.page_suffixes = Some((*stamp, read.clone()));
+            }
+            self.owed.volumes.insert(rel, v);
+        }
+        for lane in &mut self.lanes {
+            lane.idle_at = None;
+        }
+        self.bump();
+        self.bump_page();
+        self.maybe_start_scan();
     }
 
     fn walked(&mut self, epoch: u64, index: OwedIndex) {
@@ -627,12 +796,99 @@ impl Scheduler {
             self.start_walk();
             return;
         }
+        let mut index = index;
+        // Page suffixes already read stay with their volume while its version does.
+        for (rel, v) in &mut index.volumes {
+            if let Some(old) = self.owed.volumes.get(rel)
+                && let Some((stamp, read)) = &old.page_suffixes
+                && *stamp == (v.size, v.mtime_ns)
+            {
+                v.page_suffixes = Some((*stamp, read.clone()));
+            }
+        }
         self.owed = index;
+        self.suffixes_failed.clear();
         self.last_walk_at = Some(self.mono());
+        self.walks += 1;
         self.bump();
         self.bump_page();
         self.maybe_start_scan();
         self.maybe_start_direct();
+        self.maybe_start_orphan_sweep();
+    }
+
+    /// Sweep the numbered `_n` sidecars the walk found ([`crate::ocr::orphans`]), on a
+    /// helper thread and paced like the direct replaces. Upgrades on or off: no 0.8
+    /// collector writes one, and a reader never matches one. On a remote store only
+    /// while its index is settled ([`index_settled`]).
+    fn maybe_start_orphan_sweep(&mut self) {
+        if self.orphan_sweeping || self.stopping || !self.store_settled() {
+            return;
+        }
+        if self.owed.orphans.is_empty() {
+            if std::mem::take(&mut self.orphans_unproven) > 0 {
+                self.bump();
+            }
+            return;
+        }
+        self.orphan_sweeping = true;
+        let (library, db, locks) = (
+            self.library(),
+            self.deps.db.clone(),
+            self.deps.locks.clone(),
+        );
+        let orphans = self.owed.orphans.clone();
+        let seen = self.orphans_seen.clone();
+        let pace = match self.deps.exec {
+            Exec::Inline => Duration::ZERO,
+            Exec::Threads(_) => DIRECT_PACE,
+        };
+        self.run_background(Box::new(move || {
+            Msg::OrphansSwept(crate::ocr::orphans::sweep_with(
+                &library,
+                db.as_deref(),
+                &locks,
+                &orphans,
+                pace,
+                &seen,
+            ))
+        }));
+    }
+
+    /// The library's store is local, or a remote one whose index is settled.
+    fn store_settled(&self) -> bool {
+        match bunko_store::store_for(&self.library()) {
+            Some(store) => index_settled(store.caps().remote, &store.health()),
+            None => true,
+        }
+    }
+
+    fn orphans_swept(&mut self, report: crate::ocr::orphans::SweepReport) {
+        self.orphan_sweeping = false;
+        if report.moved + report.removed > 0 {
+            self.log(format!(
+                "Swept {} numbered OCR file(s) an older Bunko wrote: {} renamed to the name readers match, {} removed as a second copy",
+                report.moved + report.removed,
+                report.moved,
+                report.removed
+            ));
+        }
+        // Said once per change: the sweep runs after every walk while one is left.
+        if report.unproven > 0 && report.unproven != self.orphans_unproven {
+            self.log(format!(
+                "Left {} numbered OCR file(s) (<volume>_<n>.mokuro) in place: nothing proves Bunko wrote them",
+                report.unproven
+            ));
+        }
+        self.orphans_unproven = report.unproven;
+        if report.left > 0 && report.left != self.orphans_left {
+            self.log(format!(
+                "Left {} numbered OCR file(s) (<volume>_<n>.mokuro) in place: their name is listed in another spelling, or a case-variant group holds them (run doctor)",
+                report.left
+            ));
+        }
+        self.orphans_left = report.left;
+        self.bump();
     }
 
     /// Swap in the layers the walk's census found ready, on a helper thread and paced, so
@@ -649,6 +905,8 @@ impl Scheduler {
             return;
         }
         self.direct_running = true;
+        let library = self.library();
+        super::busy::set_direct(&library, volumes.iter().map(|v| library.join(v)).collect());
         self.log(format!(
             "Upgrading {} volume(s) from layers already on disk (no OCR needed), one at a time",
             volumes.len()
@@ -665,6 +923,7 @@ impl Scheduler {
 
     fn direct_upgraded(&mut self, done: u64, failed: u64) {
         self.direct_running = false;
+        super::busy::set_direct(&self.library(), Default::default());
         let tail = if failed > 0 {
             format!(", {failed} failed (retried after the next walk)")
         } else {
@@ -742,6 +1001,10 @@ impl Scheduler {
         if !self.claims.is_empty() || !self.autobench.inflight.is_empty() {
             return;
         }
+        // A volume waits for its page suffixes: the lanes look again when they come.
+        if self.suffixes_reading || !self.suffixes_wanted.is_empty() {
+            return;
+        }
         if self.holds.values().any(|n| *n > 0) {
             return;
         }
@@ -800,6 +1063,7 @@ impl Scheduler {
             }
         }
         self.drain_autobench_requests();
+        self.start_suffix_reads();
         self.maybe_end_scan();
     }
 
@@ -862,17 +1126,23 @@ impl Scheduler {
         }
     }
 
-    /// `_prune_failure_records`.
+    /// `_prune_failure_records`. A record's archive is looked for through the store (an
+    /// index read on a cloud library, whose root never exists on disk), in any letter
+    /// case: a series or volume a record names in another case is the one the library
+    /// lists, so its record stays on every host alike.
     pub fn prune_failures(&mut self) {
         let names: Vec<String> = self.settings.rows.iter().map(|r| r.name.clone()).collect();
         let library = self.library();
+        let listed = AnyCase::default();
         let before = self.failures.len();
         let kept: Map<String, Value> = std::mem::take(&mut self.failures)
             .into_iter()
             .filter(|(_, v)| {
                 v.as_object().is_some_and(|r| {
                     bunko_sched::failures::keep_record(r, &names, |s, v| {
-                        bunko_sched::failures::archive_exists_in(&library, s, v)
+                        bunko_sched::failures::archive_exists_with(&library, s, v, |p| {
+                            bunko_store::fs::is_file(listed.spelled(&library, p))
+                        })
                     })
                 })
             })
@@ -888,6 +1158,48 @@ impl Scheduler {
             tracing::error!("could not save the OCR failure records: {e}");
         }
         self.bump_page();
+    }
+}
+
+/// Paths under a library in the spelling its folders list, each component in any
+/// letter case (the byte-smallest or the store's case winner of several, as a request
+/// reaches it). Each folder is listed once.
+#[derive(Default)]
+struct AnyCase(std::cell::RefCell<HashMap<PathBuf, Option<Vec<String>>>>);
+
+impl AnyCase {
+    /// `p` (under `library`) as listed; a component nothing folds like, or under a
+    /// folder that cannot be listed, keeps its spelling.
+    fn spelled(&self, library: &Path, p: &Path) -> PathBuf {
+        let Ok(rel) = p.strip_prefix(library) else {
+            return p.to_path_buf();
+        };
+        let mut at = library.to_path_buf();
+        for part in rel.components() {
+            let name = part.as_os_str().to_string_lossy();
+            let listed = self.listed(&at, &name);
+            at.push(listed.as_deref().unwrap_or(&name));
+        }
+        at
+    }
+
+    fn listed(&self, dir: &Path, name: &str) -> Option<String> {
+        let mut cache = self.0.borrow_mut();
+        let names = cache
+            .entry(dir.to_path_buf())
+            .or_insert_with(|| {
+                bunko_library::fsutil::list_dir(dir)
+                    .ok()
+                    .map(|entries| entries.into_iter().map(|(n, _)| n).collect())
+            })
+            .as_ref()?;
+        let folded = bunko_core::sidecar_names::fold(name);
+        let variants: Vec<String> = names
+            .iter()
+            .filter(|n| *n == name || bunko_core::sidecar_names::fold(n) == folded)
+            .cloned()
+            .collect();
+        bunko_library::fsutil::pick_winner(dir, &folded, variants)
     }
 }
 
@@ -933,5 +1245,36 @@ mod log_safe_tests {
             "x\\nINFO forged line\\r\\u{1b}[31m"
         );
         assert_eq!(log_safe("日本語 ok"), "日本語 ok");
+    }
+}
+
+/// Whether a store's index can be trusted for what is NOT there (plan X16): always on a
+/// local store; on a remote one only when steady (not a full sync, not Suspect, not held
+/// or offline). A sweep that publishes `CreateNew` at a name the index has not caught
+/// up on would re-key a row onto a file it never wrote.
+fn index_settled(remote: bool, health: &bunko_store::Health) -> bool {
+    !remote || *health == bunko_store::Health::Online
+}
+
+#[cfg(test)]
+mod orphan_gate_tests {
+    use super::index_settled;
+    use bunko_store::{Blocked, Health};
+
+    /// The `_n` sweep moves and removes files by what the store's index says is there
+    /// (plan X16): on a remote store only once it is steady.
+    #[test]
+    fn the_orphan_sweep_waits_for_a_settled_remote_index() {
+        assert!(index_settled(false, &Health::Syncing { done: 0, total: 0 }));
+        assert!(index_settled(true, &Health::Online));
+        for h in [
+            Health::Syncing { done: 3, total: 9 },
+            Health::Suspect,
+            Health::Offline,
+            Health::Blocked(Blocked::StorageFull),
+            Health::LeaseHeld { by: "x".into() },
+        ] {
+            assert!(!index_settled(true, &h), "{h:?}");
+        }
     }
 }

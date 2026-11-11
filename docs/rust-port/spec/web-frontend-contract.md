@@ -22,7 +22,9 @@ Contents: 1 Global conventions - 2 Static serving - 3 Templating - 4 Shared nav.
 - Every authenticated fetch sends `Authorization: Bearer <token>`. Basic auth is never sent by
   the pages (the server must still accept Basic on `/login/api/me` etc. for the reader).
 - localStorage keys (catalog only): `mokuro_catalog_title_lang` (native|english|folder),
-  `mokuro_catalog_sort` (title|newest|densest|rating), `mokuro_reader_url` (user override URL).
+  `mokuro_catalog_sort` (title|popular|newest|densest|rating), `mokuro_reader_url` (user override URL).
+  (0.8: `popular` is offered only when some series carries a `popular_rank`; a saved `popular`
+  without ranks sorts by title.)
 - Page-level guards (client side only): account, admin redirect to `/login` when no token;
   queue redirects to `/login` on 401 or when `public_access=false` and no token.
 - Bearer token invalid/expired/revoked: `/login/api/me` -> 401 `{authenticated:false,error}`;
@@ -95,11 +97,11 @@ application/json`, `.png/.jpg/.webp/.ico/.svg/.woff/.woff2` standard. Content-Le
 
 `/` handling (HomePageAPI, then SetupWizard in front of it):
 1. SetupWizard: `GET /` with `Accept` containing `text/html` and `needs_setup` (no admin user
-   exists) -> `302 Location: /setup`.
+   exists) -> `302 Location: /setup` (0.8: `Location: setup`, relative, see §3).
 2. HomePage: `GET /` "browser request" (Accept contains `text/html`, OR no WebDAV-ish
    User-Agent [davfs, cadaver, cyberduck, webdav, gvfs, nautilus, finder, microsoft-webdav,
    litmus] and no `Depth` header) AND `catalog.enabled && catalog.use_as_homepage` ->
-   `302 Location: /catalog/`; else serve home `index.html`. Non-browser `/` falls through to
+   `302 Location: /catalog/` (0.8: `catalog/`); else serve home `index.html`. Non-browser `/` falls through to
    WebDAV.
 3. `OPTIONS /api/health|/api/stats` -> 204 `Allow: GET, OPTIONS`; other methods -> 405
    `{"error":"Method not allowed"}`.
@@ -109,12 +111,19 @@ would serve `/_static/__init__.py`. Serve ONLY an explicit allow-list (`shared.c
 
 `/_admin` base path: Python reads it from `admin.path` config (default `/_admin`), but
 `admin/web/index.html` hard-codes `/_admin/styles.css`, `/_admin/admin.js`, and `admin.js`
-hard-codes `API_BASE = '/_admin/api'`, and nav.js links `/_admin`. The Rust server must keep
+hard-codes `API_BASE = '/_admin/api'`, and nav.js links `/_admin` (0.8: all relative to the
+injected `<base href>`, still the fixed path `_admin`). The Rust server must keep
 the path `/_admin` (a non-default `admin.path` breaks the frontend today).
 
 ---------------------------------------------------------------------------------------------
 
 ## 3. Server-side template substitution
+
+**0.8: one.** For sub-path mounts, every HTML page the server answers (not WebDAV's, not
+an API's) gets `<base href="{relative root}">` right after `<head>`: `./` at `/catalog`,
+`../` at `/catalog/` (`http/base_href.rs`). Every page and script URL is relative to it
+(`tests/web_assets.rs` refuses a root-absolute one), redirects are relative, and the setup
+session cookie has no `Path`. The rest of this section describes 0.5.2.
 
 **None.** No Python code does `.replace()`, `format`, Jinja, nonce injection, or any rewriting
 of any HTML/JS/CSS. All pages are pure static files; every dynamic value is fetched by JS from
@@ -265,7 +274,10 @@ search), `tag` (string; appended `" (tag)"` after bracket-stripping, only for al
 `community` (`{score (0-100 number), genres[string], tags, source}` - score shown as `★ x.x`,
 genres drive chips/search/sort), `latest_volume_modified` (sort "newest"), `total_pages`,
 `total_chars` (sort "densest" = chars/pages), `damaged_volumes` (int), `missing_pages` (int;
-badge + "Missing pages" filter chip only when some series has `damaged_volumes>0`).
+badge + "Missing pages" filter chip only when some series has `damaged_volumes>0`),
+`popular_rank` (0.8, int >= 1, only on series with whole downloads in the last 30 days and only
+while `analytics.enabled`; sort "popular" = rank ascending, equal ranks and unranked series by
+title; the server sends the order only, never a count).
 `volumes[]` fields read: `name`, `cover`, `ocr_pending` (bool -> "OCR pending" badge unless that
 volume is the active OCR job), `missing_pages`, `page_count` (damage badge title). Client matches
 `ocrStatus.series === series.name && ocrStatus.volume === volume.name`.
@@ -440,7 +452,7 @@ queues[{name,capacity,mean_depth,max_depth}],runs,last_run_at}`|null), `processo
 precision,precision_modes[],devices}]`, `detectors[{id,label,devices}]`, `devices[{id,label}]`,
 `patch_budgets[int]`, `precision_modes[{id,label}]`, `precision_default`, `name_pattern`
 (regex source, JS builds a `RegExp`; fallback `^[a-z0-9][a-z0-9-]{0,31}$`), `reserved_names[]`
-(`original,gcv,updated-ocr`), `reserved_prefixes[]` (`tr-`). `processors[]` (non-local only used):
+(`original,gcv,updated-ocr,edit,curated`; `edit-<n>` and `curated-<n>` too), `reserved_prefixes[]` (`tr-`). `processors[]` (non-local only used):
 `name`, `label`, `local`, `catalog.engines[]` (engine ids installed there).
 Bench state JS reads: `state` (`idle|queued|running|done|failed|cancelled`), `position`,
 `waiting_for_queue`, `autobench`, `processor`, `progress{trial,max_trials,stage_workers,pages,

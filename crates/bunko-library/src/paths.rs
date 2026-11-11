@@ -38,18 +38,20 @@ pub fn library_relative(virtual_path: &str) -> Option<String> {
     Some(relative.to_owned())
 }
 
-/// True for the ROOT `catalog.json` only (case-insensitive).
+/// True for the ROOT `catalog.json` only, in any spelling the filename fold joins
+/// (`bunko_core::names::is_fixed_name`).
 pub fn is_catalog_file_path(virtual_path: &str) -> bool {
-    library_relative(virtual_path)
-        .is_some_and(|relative| pyunicode::lower(&relative) == CATALOG_FILE_NAME)
+    library_relative(virtual_path).is_some_and(|relative| {
+        !relative.contains('/') && bunko_core::names::is_fixed_name(&relative, CATALOG_FILE_NAME)
+    })
 }
 
 /// `/mokuro-reader/<Series>/series.json` -> `<Series>` (exactly one folder
-/// level, file name case-insensitive, non-blank series).
+/// level, file name in any spelling the filename fold joins, non-blank series).
 pub fn series_title_from_series_file_path(virtual_path: &str) -> Option<String> {
     let relative = library_relative(virtual_path)?;
     let (head, tail) = relative.rsplit_once('/')?;
-    if pyunicode::lower(tail) != SERIES_FILE_NAME
+    if !bunko_core::names::is_fixed_name(tail, SERIES_FILE_NAME)
         || head.contains('/')
         || pyunicode::strip(head).is_empty()
     {
@@ -75,7 +77,7 @@ pub enum LibraryChange {
     /// A top-level entry appeared/disappeared/moved (or the path could not be
     /// classified): run the full pass, which is what prunes deleted series.
     Library,
-    /// Generated content that never feeds compilation.
+    /// The cloud-root owner's per-user tree: never compiled.
     Ignore,
 }
 
@@ -98,7 +100,6 @@ pub fn classify_change(library_root: &Path, path: &Path) -> LibraryChange {
         return LibraryChange::Library;
     }
     match parts[0].as_os_str().to_str() {
-        Some("thumbnails") => LibraryChange::Ignore,
         Some(first) => LibraryChange::Series(first.to_owned()),
         None => LibraryChange::Library,
     }
@@ -140,10 +141,8 @@ mod tests {
         // An account's reading history is never a series: no series.json under it.
         assert_eq!(library_relative("/mokuro-reader/history"), None);
         assert!(!is_series_file_path("/mokuro-reader/history/series.json"));
-        assert_eq!(
-            library_relative("/mokuro-reader/History/series.json").as_deref(),
-            Some("History/series.json")
-        );
+        // In any spelling.
+        assert_eq!(library_relative("/mokuro-reader/History/series.json"), None);
         assert_eq!(
             library_relative("/../mokuro-reader/x"),
             Some("x".to_owned())
@@ -162,10 +161,6 @@ mod tests {
             LibraryChange::Series("A".into())
         );
         assert_eq!(
-            classify_change(root, Path::new("/lib/thumbnails/x.webp")),
-            LibraryChange::Ignore
-        );
-        assert_eq!(
             classify_change(root, Path::new("/elsewhere/x")),
             LibraryChange::Library
         );
@@ -179,9 +174,18 @@ mod tests {
             classify_change(root, Path::new("/lib/history")),
             LibraryChange::Ignore
         );
+        // Reserved in any spelling.
         assert_eq!(
             classify_change(root, Path::new("/lib/History/v.cbz")),
-            LibraryChange::Series("History".into())
+            LibraryChange::Ignore
         );
+        // `thumbnails` is no reserved name in any spelling (covers live beside their
+        // archives; 0.5.2's cover cache folder is gone): a series like any, everywhere.
+        for name in ["thumbnails", "Thumbnails"] {
+            assert_eq!(
+                classify_change(root, &Path::new("/lib").join(name).join("x.webp")),
+                LibraryChange::Series(name.into())
+            );
+        }
     }
 }

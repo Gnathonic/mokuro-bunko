@@ -224,7 +224,7 @@ mod tests {
         // First run: the root sends the WebView (Accept: text/html) to the setup wizard.
         let root = get(port, "/");
         assert!(
-            root.starts_with("HTTP/1.1 302") && root.contains("/setup"),
+            root.starts_with("HTTP/1.1 302") && root.contains("location: setup\r\n"),
             "{}",
             &root[..root.len().min(300)]
         );

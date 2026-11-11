@@ -4,7 +4,7 @@
 use crate::auth::{self};
 use crate::backend::DbAuthBackend;
 use crate::core::{Core, RequestCtx};
-use crate::http::{cors, headers, static_files};
+use crate::http::{base_href, cors, headers, static_files};
 use crate::ops::dyndns::DynDnsService;
 use crate::ops::tunnel::TunnelService;
 use axum::Router;
@@ -38,6 +38,8 @@ pub struct ServeOptions {
 /// 0.5.2 `_validate_startup_environment`: directories exist and are writable; TLS
 /// material is present and valid. The message is printed as
 /// `Startup validation failed: <msg>` and the process exits 2.
+// unmounted: the std calls here touch only the TLS certificate and key paths (config).
+#[allow(clippy::disallowed_methods)]
 pub fn validate_startup(config: &Config) -> Result<(), String> {
     let layout = config.storage.layout();
     layout.ensure_directories().map_err(|e| {
@@ -47,7 +49,10 @@ pub fn validate_startup(config: &Config) -> Result<(), String> {
         )
     })?;
     StorageLayout::assert_writable_dir(&layout.base, "storage.base_path")?;
-    StorageLayout::assert_writable_dir(&layout.library(), "storage.library_path")?;
+    // A cloud library's root is a mount point, never a folder on this disk.
+    if !layout.cloud_library() {
+        StorageLayout::assert_writable_dir(&layout.library(), "storage.library_path")?;
+    }
     StorageLayout::assert_writable_dir(&layout.inbox(), "storage.inbox_path")?;
     StorageLayout::assert_writable_dir(&layout.users(), "storage.users_path")?;
     if !config.ssl.enabled {
@@ -97,6 +102,8 @@ pub struct Services {
     pub ocr: crate::ocr::OcrControl,
     /// Cover thumbnails for library volumes (started by `serve_router`).
     pub thumbs: Arc<crate::thumbs::Thumbnails>,
+    /// Usage analytics (`analytics.sqlite`; the accounting layer and the admin API).
+    pub analytics: crate::analytics::Analytics,
     pub stop: CancellationToken,
     /// Set by the admin "Update and restart" action: the binary re-execs after shutdown.
     pub restart_requested: Arc<std::sync::atomic::AtomicBool>,
@@ -106,6 +113,21 @@ pub struct Services {
     /// First-run state: the setup code and its sessions (shared with the accounts
     /// routes; [`announce_setup`] issues the code).
     pub setup: crate::accounts::SetupFlag,
+    /// A cloud library's store (`storage.library.backend` is not `local`): status for
+    /// the admin panel, the first-sync wait; `None` for a library on this disk.
+    pub storage: Option<Arc<crate::storage::StoreHandle>>,
+    /// Connect / Disconnect a cloud library (setup wizard, admin Storage panel, the
+    /// local control API).
+    pub storage_control: Arc<crate::storage::StorageControl>,
+    /// Stops the auth backend holding additions for series folder adoption
+    /// ([`DbAuthBackend::adoption_waiver`]).
+    adoption_waiver: Arc<std::sync::atomic::AtomicBool>,
+    /// A cloud library: the store's change events drop the PROPFIND listings they
+    /// touch at once (spec §10).
+    _listing_watch: Option<bunko_store::WatchGuard>,
+    /// The library root mounted (a `LocalStore`, or the cloud store) for as long as the
+    /// services live (last, so it is unmounted after everything else has been dropped).
+    _library_mount: bunko_store::MountGuard,
 }
 
 /// Counts the writing requests in flight ([`Services::writes`]).
@@ -198,19 +220,47 @@ impl Services {
         config_path: Option<PathBuf>,
         opts: &ServeOptions,
     ) -> anyhow::Result<Self> {
+        // A test-cloud setting in a build without test hooks: refuse rather than ignore.
+        crate::storage::test_cloud::refuse_if_set().map_err(anyhow::Error::msg)?;
         // Everything built here that keeps a runtime handle (the library's timers, the
         // PROPFIND cache's refreshes, the OCR control) belongs to the background runtime.
         let _background = crate::rt::enter();
         let flavor = opts.flavor;
         let db_options = DbOptions::from(&config.database);
         let layout = config.storage.layout();
-        // `/mokuro-reader/history` is each account's reading history, so a series folder
-        // of that name at the library root is out of every reader's reach until renamed.
-        warn_history_series(&layout.library());
+        // Before anything below touches the library: the cloud store (mounted at its
+        // synthetic root, which every `layout.library()` below names), or the disk.
+        let (library_mount, storage, layout) =
+            match crate::storage::open_library_store(&config, &layout)? {
+                Some((store, guard, handle)) => {
+                    let layout = layout.with_library_root(store.root());
+                    (guard, Some(handle), layout)
+                }
+                None => {
+                    for r in crate::storage::doctor::reserved_series_rows(&layout.library(), None) {
+                        tracing::warn!("[STORAGE] {}. {}", r.detail, r.hint.unwrap_or_default());
+                    }
+                    // Names held in two spellings (a case-sensitive disk): one folder walk,
+                    // off the startup path.
+                    let library = layout.library();
+                    std::thread::spawn(move || {
+                        for r in crate::storage::doctor::case_variant_rows(&library) {
+                            tracing::warn!(
+                                "[STORAGE] {}: {}. {}",
+                                r.label,
+                                r.detail,
+                                r.hint.unwrap_or_default()
+                            );
+                        }
+                    });
+                    (crate::library::mount_local(&layout.library()), None, layout)
+                }
+            };
         let db = Arc::new(Database::open_with(layout.database(), &db_options)?);
         let dyndns = DynDnsService::new(config.dyndns.clone());
         let config = Arc::new(RwLock::new(config));
         let backend = Arc::new(DbAuthBackend::new(db.clone(), layout.clone()));
+        let adoption_waiver = backend.adoption_waiver();
         let updates = crate::admin::UpdateService::from_config(config.clone(), flavor);
         // The PROPFIND cache takes half of the cache budget (server.cache_mb).
         let cache_mb = config.read().server.cache_mb.max(2) as usize;
@@ -222,14 +272,19 @@ impl Services {
             ..Default::default()
         };
         let dav = bunko_dav::Dav::new(&layout, dav_config)?;
-        let dav_hooks = Arc::new(crate::davhooks::ServerDavHooks::new(db.clone()));
-        let core = Core::new(config, config_path, backend);
+        let dav_hooks = Arc::new(crate::davhooks::ServerDavHooks::new(
+            db.clone(),
+            layout.library(),
+        ));
+        let core = Core::with_layout(config, config_path, backend, layout.clone());
+        let storage_control = crate::storage::StorageControl::for_core(&core, storage.clone());
         let late_ocr: Arc<std::sync::OnceLock<crate::ocr::OcrControl>> =
             Arc::new(std::sync::OnceLock::new());
         let library = {
             let mut deps = crate::library::RuntimeDeps::new(core.clone(), db.clone());
             deps.hooks.archive_events = Some(Arc::new(LateArchiveEvents(late_ocr.clone())));
             deps.locks = Arc::new(DavPathLocks(dav.write_locks().clone()));
+            deps.hold_until_start = storage.is_some();
             let cache = dav.propfind_cache().clone();
             deps.hooks.propfind_refresh = Some(Arc::new(move || {
                 cache.schedule_refresh(Duration::from_secs(5))
@@ -238,6 +293,8 @@ impl Services {
         };
         dav_hooks.add_listener(library.clone());
         let thumbs = Arc::new(crate::thumbs::Thumbnails::default());
+        thumbs.set_locks(Arc::new(DavPathLocks(dav.write_locks().clone())));
+        dav_hooks.add_listener(thumbs.clone());
         let ocr = {
             let store: Arc<dyn bunko_library::MetadataStore> = library.store().clone();
             let lib = library.clone();
@@ -261,7 +318,38 @@ impl Services {
         };
         let _ = late_ocr.set(ocr.clone());
         dav_hooks.add_listener(Arc::new(ocr.clone()));
+        let analytics = crate::analytics::Analytics::open(crate::analytics::AnalyticsDeps {
+            core: core.clone(),
+            db: db.clone(),
+            library: Some(library.clone()),
+        })?;
+        let listing_watch = storage
+            .as_ref()
+            .and_then(|_| watch_listings(&dav, &layout.library()));
+        if let Some(handle) = &storage {
+            // Changes made directly in the cloud run the hooks a DAV write runs (D20).
+            handle.set_hooks(Arc::new(
+                crate::storage::ServerCloudHooks::new(
+                    layout.library(),
+                    dav_hooks.clone(),
+                    library.clone(),
+                    db.clone(),
+                )
+                .with_thumbnails(thumbs.clone())
+                .with_overlays(dav.overlays()),
+            ));
+            // Case variants merge into the oldest spelling (§5.9).
+            handle.set_case_merge_policy(Arc::new(crate::storage::ServerCaseMergePolicy::new(
+                layout.library(),
+                core.clone(),
+                db.clone(),
+            )));
+        }
         Ok(Services {
+            storage,
+            storage_control,
+            adoption_waiver,
+            _listing_watch: listing_watch,
             core,
             db,
             dyndns,
@@ -272,11 +360,37 @@ impl Services {
             library,
             ocr,
             thumbs,
+            analytics,
             stop: CancellationToken::new(),
             restart_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             writes: WritesInFlight::default(),
             setup: crate::accounts::SetupFlag::default(),
+            _library_mount: library_mount,
         })
+    }
+}
+
+/// Drop the cached PROPFIND listings a store change touches (the path's own, its
+/// ancestors' and its descendants'), as a DAV write does for its own changes; a
+/// `Rescan` drops them all (spec §10). The progress user's per-user tree is in no
+/// shared listing (each caller's own is appended per request), so its changes drop
+/// nothing, as its DAV writes do not.
+fn watch_listings(dav: &bunko_dav::Dav, library: &Path) -> Option<bunko_store::WatchGuard> {
+    let store = bunko_store::store_for(library)?;
+    let (dav, root) = (dav.clone(), library.to_path_buf());
+    let sink: bunko_store::WatchSink = Arc::new(move |ev: bunko_store::WatchEvent| {
+        match ev.path().and_then(|p| crate::ocr::types::rel_of(&root, p)) {
+            Some(rel) if bunko_core::reader_tree::is_per_user_rel(&rel) => {}
+            Some(rel) => dav.invalidate_listing(&[format!("/{}/{rel}", auth::paths::READER_ROOT)]),
+            None => dav.propfind_cache().invalidate(),
+        }
+    });
+    match store.watch(sink) {
+        Ok(guard) => Some(guard),
+        Err(e) => {
+            tracing::warn!("[STORAGE] PROPFIND listings refresh on a timer only: {e}");
+            None
+        }
     }
 }
 
@@ -324,7 +438,11 @@ impl axum::extract::FromRef<FallbackState> for Core {
 }
 
 /// Authenticate + authorise (spec §4.3) then hand the request to WebDAV.
-async fn dav_fallback(State(st): State<FallbackState>, ctx: RequestCtx, req: Request) -> Response {
+async fn dav_fallback(
+    State(st): State<FallbackState>,
+    ctx: RequestCtx,
+    mut req: Request,
+) -> Response {
     let path = percent_encoding::percent_decode_str(req.uri().path())
         .decode_utf8_lossy()
         .into_owned();
@@ -335,7 +453,7 @@ async fn dav_fallback(State(st): State<FallbackState>, ctx: RequestCtx, req: Req
         .map(str::to_string);
     let anon = st.core.anonymous_access();
     let backend = st.core.backend.clone();
-    if let Err(denied) = auth::authorize(
+    let grant = match auth::authorize_grant(
         req.method(),
         &path,
         destination.as_deref(),
@@ -343,42 +461,94 @@ async fn dav_fallback(State(st): State<FallbackState>, ctx: RequestCtx, req: Req
         anon,
         backend.as_ref(),
     ) {
-        let resp = denied.into_response();
-        // A refused PUT still answers with the upload verdict JSON (spec http-webdav §9).
-        return if req.method() == http::Method::PUT {
-            bunko_dav::put_refusal_verdict(&path, resp)
-        } else {
-            resp
-        };
+        Ok(grant) => grant,
+        Err(denied) => {
+            let resp = denied.into_response();
+            // A refused PUT still answers with the upload verdict JSON (spec http-webdav §9).
+            return if req.method() == http::Method::PUT {
+                bunko_dav::put_refusal_verdict(&path, resp)
+            } else {
+                resp
+            };
+        }
+    };
+    // Without readers WebDAV only serves processors' archive fetches (also checked in
+    // `readers_gate`); the rest (`/`, `/inbox`, ...) is not mounted.
+    if !st.core.config.read().server.serve_readers {
+        if !is_reader_path(&path) {
+            return text_status(StatusCode::NOT_FOUND, "Not found");
+        }
+        if let Some(refused) = refuse_reader(req.method(), &path, &ctx.identity) {
+            return refused;
+        }
     }
     if let Some(lib) = &st.library
         && crate::library::is_series_put(req.method(), &path)
     {
         return crate::library::series_put(lib, req, ctx).await;
     }
+    req.extensions_mut().insert(grant);
     (st.dav)(req, ctx).await
 }
 
-/// The WebDAV handler over `bunko-dav`, with the server's hooks.
+/// The WebDAV handler over `bunko-dav`, with the server's hooks. `core` carries the
+/// live config: who owns the cloud root's per-user files is decided from it on every
+/// request ([`Core::owns_cloud_root`]), so an admin's change needs no restart.
 pub fn dav_handler(
     dav: bunko_dav::Dav,
     hooks: Arc<crate::davhooks::ServerDavHooks>,
+    core: Core,
 ) -> DavFallback {
     let nginx_accel = std::env::var("MOKURO_NGINX_ACCEL").is_ok_and(|v| v.trim() == "1");
     Arc::new(move |req, ctx| {
         let dav = dav.clone();
         let hooks: Arc<dyn bunko_dav::DavHooks> = hooks.clone();
+        let owns_cloud_root = core.owns_cloud_root(ctx.identity.username());
+        let grant = req.extensions().get::<auth::Grant>().copied();
+        let personal_only = grant == Some(auth::Grant::Personal);
+        let ownership_recheck =
+            (grant == Some(auth::Grant::Owner)).then(|| ownership_recheck(&core, &req, &ctx));
         Box::pin(async move {
             let dctx = bunko_dav::DavContext {
                 username: ctx.identity.username().map(str::to_string),
                 role: ctx.identity.role(),
-                owns_cloud_root: ctx.identity.owns_cloud_root,
+                owns_cloud_root,
+                personal_only,
+                ownership_recheck,
                 nginx_accel,
                 client_ip: Some(ctx.client_ip.clone()),
                 hooks,
             };
             dav.handle(req, dctx).await
         })
+    })
+}
+
+/// The same auth decision made again (series owners, 0.8): the request a grant of
+/// [`auth::Grant::Owner`] admitted, asked just before DAV writes. Blocking.
+fn ownership_recheck(core: &Core, req: &Request, ctx: &RequestCtx) -> bunko_dav::OwnershipRecheck {
+    let method = req.method().clone();
+    let path = percent_encoding::percent_decode_str(req.uri().path())
+        .decode_utf8_lossy()
+        .into_owned();
+    let destination = req
+        .headers()
+        .get("destination")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let identity = ctx.identity.clone();
+    let anon = core.anonymous_access();
+    let backend = core.backend.clone();
+    Arc::new(move || {
+        auth::authorize(
+            &method,
+            &path,
+            destination.as_deref(),
+            &identity,
+            anon,
+            backend.as_ref(),
+        )
+        .map_err(auth::Denied::into_refusal)
     })
 }
 
@@ -416,6 +586,93 @@ async fn auth_gate(
     next.run(req).await
 }
 
+/// `/mokuro-reader` and everything under it (percent-decoded).
+fn is_reader_path(path: &str) -> bool {
+    path.strip_prefix('/')
+        .and_then(|p| p.strip_prefix(auth::paths::READER_ROOT))
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+}
+
+/// Without readers, a `/mokuro-reader/` request passes only as a processor's `GET` or
+/// `HEAD` of a library file (the archive fetch, PROTOCOL.md step 5): `None`. Anything
+/// else is refused, 401 anonymous (or the credential's own 401/429), 403 signed in.
+fn refuse_reader(method: &http::Method, path: &str, identity: &auth::Identity) -> Option<Response> {
+    let fetch = matches!(method.as_str(), "GET" | "HEAD")
+        && auth::paths::is_library_path(path)
+        && identity.role() == bunko_core::Role::Processor;
+    if fetch {
+        return None;
+    }
+    if !identity.authenticated() {
+        let message = identity
+            .error
+            .clone()
+            .unwrap_or_else(|| "Authentication required".into());
+        let status = if message.contains("Too many failed attempts") {
+            StatusCode::TOO_MANY_REQUESTS
+        } else {
+            StatusCode::UNAUTHORIZED
+        };
+        return Some(
+            auth::Denied {
+                status,
+                message,
+                bearer: identity.bearer_failed,
+                detail: None,
+                retry_after: None,
+            }
+            .into_response(),
+        );
+    }
+    Some(text_status(
+        StatusCode::FORBIDDEN,
+        "This server does not serve readers (server.serve_readers is off)",
+    ))
+}
+
+fn text_status(status: StatusCode, message: &str) -> Response {
+    auth::Denied {
+        status,
+        message: message.to_string(),
+        bearer: false,
+        detail: None,
+        retry_after: None,
+    }
+    .into_response()
+}
+
+/// `server.serve_readers: false` (read per request): the catalog (`/catalog*`, its
+/// manifest included) answers 404, and `/mokuro-reader/` is limited to processors'
+/// archive fetches ([`refuse_reader`]) before the queue file or WebDAV see it. The rest
+/// of WebDAV is cut off in [`dav_fallback`].
+async fn readers_gate(
+    State(core): State<Core>,
+    req: Request,
+    next: axum::middleware::Next,
+) -> Response {
+    if core.config.read().server.serve_readers || req.method() == http::Method::OPTIONS {
+        return next.run(req).await;
+    }
+    let path = percent_encoding::percent_decode_str(req.uri().path())
+        .decode_utf8_lossy()
+        .into_owned();
+    if path == "/catalog" || path.starts_with("/catalog/") {
+        return text_status(StatusCode::NOT_FOUND, "Not found");
+    }
+    if !is_reader_path(&path) {
+        return next.run(req).await;
+    }
+    let (mut parts, body) = req.into_parts();
+    let Ok(ctx) = <RequestCtx as axum::extract::FromRequestParts<Core>>::from_request_parts(
+        &mut parts, &core,
+    )
+    .await;
+    match refuse_reader(&parts.method, &path, &ctx.identity) {
+        Some(refused) => refused,
+        None => next.run(Request::from_parts(parts, body)).await,
+    }
+}
+
 type RefusalHook = Arc<dyn Fn(&str, &str) + Send + Sync>;
 /// Where refused processor logins are reported (the registry's admin-panel list).
 static PROCESSOR_REFUSALS: std::sync::OnceLock<RefusalHook> = std::sync::OnceLock::new();
@@ -423,16 +680,19 @@ static PROCESSOR_REFUSALS: std::sync::OnceLock<RefusalHook> = std::sync::OnceLoc
 /// Assemble the router: module routers (each with its own state) in 0.5.2 precedence,
 /// then the authenticated WebDAV fallback, wrapped by CORS and security headers.
 pub fn build_router(core: Core, modules: Vec<Router>, dav: DavFallback) -> Router {
-    build_router_with(core, modules, dav, None, |r| r)
+    build_router_with(core, modules, dav, None, None, |r| r)
 }
 
 /// [`build_router`] with `inner` applied inside CORS and the security headers (for
-/// gates that must see every request, like the `/` home/setup redirect).
+/// gates that must see every request, like the `/` home/setup redirect), and the
+/// request accounting (`analytics`) as the second-outermost layer, just inside the
+/// request log: it sees every request, including those answered early.
 pub fn build_router_with(
     core: Core,
     modules: Vec<Router>,
     dav: DavFallback,
     library: Option<crate::library::LibraryDeps>,
+    analytics: Option<crate::analytics::Analytics>,
     inner: impl FnOnce(Router) -> Router,
 ) -> Router {
     let mut app: Router = Router::new()
@@ -461,17 +721,30 @@ pub fn build_router_with(
             }
         })
         .fallback_service(dav_router);
-    inner(app.layer(axum::middleware::from_fn_with_state(
+    let app = inner(app.layer(axum::middleware::from_fn_with_state(
         core.clone(),
         auth_gate,
     )))
     .layer(axum::middleware::from_fn_with_state(
         core.clone(),
+        readers_gate,
+    ))
+    // Outside the `/` gate (the home page) and every module's pages.
+    .layer(axum::middleware::from_fn(base_href::inject))
+    .layer(axum::middleware::from_fn_with_state(
+        core.clone(),
         cors::cors,
     ))
     .layer(axum::middleware::from_fn(headers::path_guard))
-    .layer(axum::middleware::from_fn(headers::security_headers))
-    .layer(axum::middleware::from_fn(
+    .layer(axum::middleware::from_fn(headers::security_headers));
+    let app = match analytics {
+        Some(a) => app.layer(axum::middleware::from_fn_with_state(
+            a,
+            crate::analytics::layer,
+        )),
+        None => app,
+    };
+    app.layer(axum::middleware::from_fn(
         |req: Request, next: axum::middleware::Next| async move {
             if headers::request_log_enabled() {
                 headers::request_log(req, next).await
@@ -540,28 +813,15 @@ pub async fn serve_router_with(
             });
         }
         services.updates.start(stop.clone());
-        services.library.start();
-        let library_dir = services.core.layout.library();
-        {
-            // 0.5.2 swept corrupt sidecars when the OCR worker started; one-shot, off the
-            // request path. The same pass lets JPEG XL volumes an older server marked
-            // `.nocover` get their cover.
-            let (lib, db) = (library_dir.clone(), services.db.clone());
-            tokio::task::spawn_blocking(move || {
-                crate::thumbs::remove_corrupt_sidecars(&lib, Some(&db));
-                crate::thumbs::clear_jxl_nocovers(&lib);
-            });
-        }
-        let thumbs = services.thumbs.spawn(
-            services.core.config.clone(),
-            library_dir,
-            stop.child_token(),
-        );
-        services.ocr.start(stop.child_token());
-        thumbs
+        services.analytics.start(stop.clone());
+        start_library_services(services, stop.clone())
     };
-    crate::serve::serve(listener, app, tls, stop, Duration::from_secs(5)).await?;
-    // Ordered shutdown (0.5.2 shutdown_app order, plus the new services).
+    let gauges = Some(services.analytics.gauges().clone());
+    crate::serve::serve_with(listener, app, tls, stop, Duration::from_secs(5), gauges).await?;
+    // Ordered shutdown (0.5.2 shutdown_app order, plus the new services). Analytics
+    // first: every response has recorded by now, and its last window is written
+    // before the library and the databases go.
+    services.analytics.stop().await;
     let _ = thumbs.await;
     services.ocr.stop().await;
     services.library.stop().await;
@@ -570,6 +830,269 @@ pub async fn serve_router_with(
     services.updates.stop().await;
     services.tunnel.stop().await;
     Ok(())
+}
+
+/// How long the library services wait for a cloud store's first sync before they start
+/// on what the index holds so far.
+pub const CLOUD_STEADY_WAIT: Duration = Duration::from_secs(15 * 60);
+/// How often that wait logs its progress.
+const CLOUD_STEADY_LOG_EVERY: Duration = Duration::from_secs(30);
+/// How often a series folder owner adoption that could not be done is tried again.
+const ADOPTION_RETRY: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// How long the metadata passes wait for a cloud store's first adoption (§9.4) before
+/// they start anyway.
+pub const CLOUD_ADOPTION_WAIT: Duration = Duration::from_secs(60 * 60);
+
+/// Start the library runtime (watcher, metadata timers), the cover loop and the OCR
+/// scheduler. The returned task ends with the cover loop (at `stop`).
+///
+/// On a library on this disk they start at once, after 0.5.2's one-shot corrupt-sidecar
+/// sweep. On a cloud library they start once the store's change feed is STEADY (or after
+/// [`CLOUD_STEADY_WAIT`], with a warning), so the first metadata compile and the
+/// scheduler's first census see the whole library; admin, health and setup are served
+/// meanwhile. The sweep is skipped (D13: corrupt sidecars are report-only on remote)
+/// and covers are made as archives arrive, not by a periodic walk.
+pub fn start_library_services(
+    services: &Services,
+    stop: CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    let config = services.core.config.clone();
+    let library_dir = services.core.layout.library();
+    let Some(storage) = services.storage.clone() else {
+        services.library.start();
+        {
+            // The series folders that existed before 0.8 get their owners first: until
+            // then uploaders' additions wait (auth answers 503). Then 0.5.2's one-shot
+            // corrupt-sidecar sweep, off the request path, and the corrections written
+            // into the shared folder before 0.8 go to their writers (after: the two
+            // sweeps would race for the same files). The same pass lets JPEG XL volumes
+            // an older server marked `.nocover` get their cover.
+            let (lib, db) = (library_dir.clone(), services.db.clone());
+            let corrections = CorrectionSweeper::of(services);
+            let first = tokio::task::spawn_blocking(move || {
+                crate::library::adopt_series_folder_owners(&db, &lib);
+                crate::thumbs::remove_corrupt_sidecars(&lib, Some(&db));
+                crate::thumbs::clear_jxl_nocovers(&lib);
+                corrections.run(true);
+            });
+            // A first try that could not adopt is tried again (F4).
+            let (lib, db, stop) = (library_dir.clone(), services.db.clone(), stop.clone());
+            tokio::spawn(async move {
+                let _ = first.await;
+                crate::library::adopt_series_folder_owners_until_done(
+                    db,
+                    lib,
+                    ADOPTION_RETRY,
+                    stop,
+                )
+                .await;
+            });
+        }
+        let thumbs = services
+            .thumbs
+            .spawn(config, library_dir, stop.child_token());
+        services.ocr.start(stop.child_token());
+        return thumbs;
+    };
+    let (library, thumbs, ocr) = (
+        services.library.clone(),
+        services.thumbs.clone(),
+        services.ocr.clone(),
+    );
+    let corrections = CorrectionSweeper::of(services);
+    let (db, owners_root) = (services.db.clone(), library_dir.clone());
+    let adoption_waiver = services.adoption_waiver.clone();
+    tokio::spawn(async move {
+        let started = std::time::Instant::now();
+        let steady = loop {
+            let h = storage.clone();
+            let wait = tokio::task::spawn_blocking(move || h.wait_steady(CLOUD_STEADY_LOG_EVERY));
+            let steady = tokio::select! {
+                _ = stop.cancelled() => return,
+                r = wait => r.unwrap_or(false),
+            };
+            if steady {
+                if storage.connected() {
+                    info!(
+                        "[STORAGE] The {} library is in sync: starting the library services",
+                        storage.backend.as_str()
+                    );
+                } else {
+                    info!(
+                        "[STORAGE] The {} library is not connected: starting the library services on an empty library",
+                        storage.backend.as_str()
+                    );
+                }
+                break true;
+            }
+            if started.elapsed() >= CLOUD_STEADY_WAIT {
+                tracing::warn!(
+                    "[STORAGE] The {} library is still not in sync after {} min ({:?}): starting the library services on what is indexed so far",
+                    storage.backend.as_str(),
+                    CLOUD_STEADY_WAIT.as_secs() / 60,
+                    storage.engine_state()
+                );
+                break false;
+            }
+            info!(
+                "[STORAGE] Waiting for the first sync of the {} library: {:?}",
+                storage.backend.as_str(),
+                storage.engine_state()
+            );
+        };
+        // Series folder owners are adopted from the whole listing only: on a store that
+        // is not in sync yet, once it is (uploaders' additions wait until then). A
+        // library that is not connected has nothing listed to adopt from, and no
+        // addition reaches its folders: additions are not held, and a later start
+        // adopts (F4).
+        if !storage.connected() {
+            adoption_waiver.store(true, std::sync::atomic::Ordering::Relaxed);
+            if db.series_folder_adoption_pending().unwrap_or(false) {
+                tracing::warn!(
+                    "[LIBRARY] The library is not connected: its series folders get their owners at a later start"
+                );
+            }
+        } else {
+            let (h, stop) = (storage.clone(), stop.clone());
+            tokio::spawn(async move {
+                if !steady {
+                    loop {
+                        let h = h.clone();
+                        let wait = tokio::task::spawn_blocking(move || {
+                            h.wait_steady(CLOUD_STEADY_LOG_EVERY)
+                        });
+                        tokio::select! {
+                            _ = stop.cancelled() => return,
+                            r = wait => if r.unwrap_or(false) { break },
+                        }
+                    }
+                }
+                crate::library::adopt_series_folder_owners_until_done(
+                    db,
+                    owners_root,
+                    ADOPTION_RETRY,
+                    stop,
+                )
+                .await;
+            });
+        }
+        // The cloud folder's corrections are the progress user's: with none chosen they
+        // are only counted, never moved out of the folder.
+        let owned = config
+            .read()
+            .storage
+            .library
+            .progress_user
+            .as_deref()
+            .is_some_and(|u| !u.is_empty());
+        if !owned {
+            tokio::task::spawn_blocking(move || corrections.run(false));
+        }
+        {
+            // doctor cannot see the cloud folder: the reserved-name finding is logged here.
+            let (lib, folder) = (library_dir.clone(), storage.folder.clone());
+            tokio::task::spawn_blocking(move || {
+                for r in crate::storage::doctor::reserved_series_rows(&lib, Some(&folder)) {
+                    tracing::warn!("[STORAGE] {}. {}", r.detail, r.hint.unwrap_or_default());
+                }
+            });
+        }
+        let covers = thumbs.spawn_remote(library_dir, stop.child_token());
+        ocr.start(stop.child_token());
+        publish_cloud_queue(ocr, storage.clone(), stop.child_token());
+        // A metadata pass before first adoption would compile series whose series.json
+        // is not read yet (each waits for its submission and is compiled again when it
+        // is answered): adoption compiles every series it ingests, the startup pass
+        // then the rest.
+        let adopting = std::time::Instant::now();
+        let mut told = false;
+        while !storage.adopted() {
+            if adopting.elapsed() >= CLOUD_ADOPTION_WAIT {
+                tracing::warn!(
+                    "[STORAGE] The {} library's series.json files are still being read after {} min: starting the metadata passes anyway",
+                    storage.backend.as_str(),
+                    CLOUD_ADOPTION_WAIT.as_secs() / 60
+                );
+                break;
+            }
+            if !told {
+                info!(
+                    "[STORAGE] Reading the {} library's series.json files before the first metadata pass",
+                    storage.backend.as_str()
+                );
+                told = true;
+            }
+            tokio::select! {
+                _ = stop.cancelled() => return,
+                _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+            }
+        }
+        library.start();
+        let _ = covers.await;
+    })
+}
+
+/// The startup sweep of physical correction files (D27): `adopt` gives each to its
+/// last writer (a library on this disk), else they are only counted. Off the request
+/// path; the count goes to the storage status.
+struct CorrectionSweeper {
+    db: Arc<Database>,
+    overlays: bunko_dav::PersonalOverlays,
+    control: Arc<crate::storage::StorageControl>,
+}
+
+impl CorrectionSweeper {
+    fn of(services: &Services) -> Self {
+        Self {
+            db: services.db.clone(),
+            overlays: services.dav.overlays(),
+            control: services.storage_control.clone(),
+        }
+    }
+
+    /// Blocking.
+    fn run(&self, adopt: bool) {
+        let sweep = crate::library::adopt_unowned_corrections(&self.db, &self.overlays, adopt);
+        self.control.set_unowned_corrections(sweep.unowned);
+    }
+}
+
+/// How often the cloud copy of the queue file is offered to the store (which writes it
+/// only on change, at most once per provider floor).
+pub const CLOUD_QUEUE_EVERY: Duration = Duration::from_secs(2);
+
+/// Keep the cloud library's `.mokuro-queue.json` current (§9.1): the scheduler's queue
+/// document, as the reader's WebDAV copy is built, until `stop`.
+fn publish_cloud_queue(
+    ocr: crate::ocr::OcrControl,
+    storage: Arc<crate::storage::StoreHandle>,
+    stop: CancellationToken,
+) {
+    if !storage.connected() {
+        return;
+    }
+    tokio::spawn(async move {
+        loop {
+            if let Some(((held, volumes, pending), now)) =
+                ocr.ask(|s| (s.queue_document(), s.now())).await
+            {
+                let doc = serde_json::Value::Object(crate::ocr::queue_file::build_document(
+                    held, volumes, pending, now,
+                ));
+                let st = storage.clone();
+                match tokio::task::spawn_blocking(move || st.publish_queue_doc(doc)).await {
+                    Ok(Err(e)) => tracing::debug!("[STORAGE] queue file not published: {e}"),
+                    Err(e) => tracing::warn!("[STORAGE] queue file task: {e}"),
+                    Ok(Ok(_)) => {}
+                }
+            }
+            tokio::select! {
+                _ = stop.cancelled() => return,
+                _ = tokio::time::sleep(CLOUD_QUEUE_EVERY) => {}
+            }
+        }
+    });
 }
 
 /// Build every module router and the WebDAV fallback for these services. Modules are
@@ -597,6 +1120,7 @@ pub fn assemble(services: &Services, opts: &ServeOptions) -> Router {
         services.db.clone(),
         services.library.clone(),
     );
+    library.popular = Some(services.analytics.popularity().clone());
     let glue = Arc::new(crate::glue::OcrGlue(ocr.clone()));
     library.ocr_status = Some(glue.clone());
     library.outlook = Some(glue);
@@ -621,14 +1145,18 @@ pub fn assemble(services: &Services, opts: &ServeOptions) -> Router {
         }) as Arc<dyn Fn() + Send + Sync>
     };
     if let Some(m) = &opts.machine {
+        let stop = services.stop.clone();
         m.attach(crate::machine::MachineHooks {
             restart: restart.clone(),
+            stop: Arc::new(move || stop.cancel()),
             ocr: ocr.clone(),
         });
     }
     accounts.machine = opts.machine.clone();
     accounts.dyndns = Some(services.dyndns.clone());
     accounts.restart = Some(restart.clone());
+    services.storage_control.set_restart(restart.clone());
+    accounts.storage = Some(services.storage_control.clone());
     let admin = crate::admin::AdminDeps {
         core: services.core.clone(),
         db: services.db.clone(),
@@ -639,6 +1167,9 @@ pub fn assemble(services: &Services, opts: &ServeOptions) -> Router {
         drop_processors: Some(drop),
         restart: Some(restart),
         machine: opts.machine.clone(),
+        storage: services.storage.clone(),
+        storage_control: Some(services.storage_control.clone()),
+        analytics: Some(services.analytics.clone()),
     };
     let mut modules: Vec<Router> = vec![
         crate::accounts::router(accounts.clone()),
@@ -655,7 +1186,11 @@ pub fn assemble(services: &Services, opts: &ServeOptions) -> Router {
         core: services.core.clone(),
         ocr: Some(ocr.clone()),
     };
-    let dav = dav_handler(services.dav.clone(), services.dav_hooks.clone());
+    let dav = dav_handler(
+        services.dav.clone(),
+        services.dav_hooks.clone(),
+        services.core.clone(),
+    );
     let catalog = library.clone();
     let writes = services.writes.clone();
     let path_case = services.dav.path_case().clone();
@@ -664,6 +1199,7 @@ pub fn assemble(services: &Services, opts: &ServeOptions) -> Router {
         modules,
         dav,
         Some(library),
+        Some(services.analytics.clone()),
         move |r| {
             r.layer(axum::middleware::from_fn_with_state(
                 queue_file,
@@ -764,6 +1300,8 @@ pub fn setup_banner(
 
 /// Running in a container (Docker's `/.dockerenv`, Podman's `/run/.containerenv`, or
 /// the images' `MOKURO_INSTALL_KIND=docker`).
+// unmounted: container marker files at the filesystem root.
+#[allow(clippy::disallowed_methods)]
 fn in_container() -> bool {
     std::path::Path::new("/.dockerenv").exists()
         || std::path::Path::new("/run/.containerenv").exists()
@@ -783,29 +1321,4 @@ pub fn not_found_json() -> Response {
         http::HeaderValue::from_static("application/json"),
     );
     r
-}
-
-/// Log once at startup when the library root holds a `history/` series folder: that path
-/// is each account's reading history now, so the series is hidden from every reader.
-fn warn_history_series(library: &std::path::Path) {
-    let dir = library.join(bunko_core::reader_tree::HISTORY_DIR);
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return;
-    };
-    let archives = entries
-        .flatten()
-        .filter(|e| {
-            e.file_name()
-                .to_string_lossy()
-                .to_lowercase()
-                .ends_with(".cbz")
-        })
-        .count();
-    if archives > 0 {
-        tracing::warn!(
-            "[STORAGE] the series folder history/ ({archives} volume{}) is hidden: /mokuro-reader/history is reserved for each account's reading history. Stop Bunko and rename the series folder {} (e.g. to \"History (series)\").",
-            if archives == 1 { "" } else { "s" },
-            dir.display()
-        );
-    }
 }

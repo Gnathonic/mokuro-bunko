@@ -48,7 +48,8 @@ fn healthy_storage_passes_core_checks() {
         s.trim_end().ends_with("warning(s) - see WARN lines above."),
         "{s}"
     );
-    assert!(env.storage().join("library").join("thumbnails").is_dir());
+    assert!(env.storage().join("library").is_dir());
+    assert!(!env.storage().join("library").join("thumbnails").exists());
     assert!(!env.storage().join(".mokuro-doctor-probe").exists());
 }
 

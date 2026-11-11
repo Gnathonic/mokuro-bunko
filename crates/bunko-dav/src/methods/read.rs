@@ -13,20 +13,26 @@ use tokio_util::io::ReaderStream;
 
 use super::{Req, XML_BODY_LIMIT, blocking, eval_if, lookup, read_body};
 use crate::conditional::{self, RangeOutcome};
+use crate::paths::Target;
 use crate::propfind::{self, Mode, PropCtx};
 use crate::resource::{FileKind, Resource, Stat, content_type};
 use crate::response::{self, DavError, DavResult, Resp};
 use crate::xml::{MULTISTATUS_CLOSE, MULTISTATUS_OPEN};
-use crate::{Inner, paths};
-use bunko_core::reader_tree;
+use crate::{DavInfo, DavTarget, Inner, Served, paths};
+use bunko_core::{Perm, Role, has_perm, reader_tree};
 
 const ALLOW_COLLECTION: &str =
     "OPTIONS, HEAD, GET, PROPFIND, DELETE, COPY, MOVE, PROPPATCH, LOCK, UNLOCK";
+const ALLOW_COLLECTION_WRITE: &str =
+    "OPTIONS, HEAD, GET, PROPFIND, PUT, MKCOL, DELETE, COPY, MOVE, PROPPATCH, LOCK, UNLOCK";
+const ALLOW_COLLECTION_PUT: &str =
+    "OPTIONS, HEAD, GET, PROPFIND, PUT, DELETE, COPY, MOVE, PROPPATCH, LOCK, UNLOCK";
 const ALLOW_FILE: &str =
     "OPTIONS, HEAD, GET, PROPFIND, PUT, DELETE, COPY, MOVE, PROPPATCH, LOCK, UNLOCK";
 const ALLOW_UNMAPPED: &str = "OPTIONS, PUT, MKCOL";
 
-/// Would a GET of this file be offloaded to nginx (spec §8.10)?
+/// Would a GET of this file be offloaded to nginx (spec §8.10)? Only where the file is
+/// on this disk (`caps().local_paths`): nginx cannot read a remote store.
 fn accel_path(inner: &Inner, req: &Req, res: &Resource) -> Option<String> {
     if !req.ctx.nginx_accel {
         return None;
@@ -36,11 +42,31 @@ fn accel_path(inner: &Inner, req: &Req, res: &Resource) -> Option<String> {
             phys,
             kind: FileKind::Library,
             ..
-        } => {
+        } if bunko_store::store_for(phys).is_none_or(|s| s.caps().local_paths) => {
             let rel = inner.roots.library_rel(phys)?;
             Some(format!("/internal-library/{}", paths::quote_path(&rel)))
         }
         _ => None,
+    }
+}
+
+/// The Allow of a collection for this account (plan X9). Advisory only: `authorize()`
+/// still decides every request. It exists so a client that reads Allow (the reader's
+/// generic WebDAV check) does not take a writable account for a read-only one.
+/// - AddFiles: `PUT, MKCOL` on every collection at or under `/mokuro-reader`.
+/// - WriteProgress alone: `PUT, MKCOL` on the reader root and its own `history/**`;
+///   `PUT` on library collections, where its personal corrections go (D27).
+/// - Anyone else, and `/`, `/inbox`: the base list.
+fn collection_allow(path: &str, role: Role) -> &'static str {
+    let adds_files = has_perm(role, Perm::AddFiles);
+    let writes_own = has_perm(role, Perm::WriteProgress);
+    match paths::classify(path) {
+        Target::ReaderRoot | Target::Progress(_) | Target::Library(_) if adds_files => {
+            ALLOW_COLLECTION_WRITE
+        }
+        Target::ReaderRoot | Target::Progress(_) if writes_own => ALLOW_COLLECTION_WRITE,
+        Target::Library(_) if writes_own => ALLOW_COLLECTION_PUT,
+        _ => ALLOW_COLLECTION,
     }
 }
 
@@ -54,7 +80,10 @@ pub(crate) async fn options(inner: &Arc<Inner>, req: &Req) -> DavResult<Resp> {
     }
     let res = lookup(inner, &req.path, req).await?;
     match &res {
-        Some(r) if r.is_collection() => response::set_header(&mut resp, "allow", ALLOW_COLLECTION),
+        Some(r) if r.is_collection() => {
+            let allow = collection_allow(&req.path, req.ctx.role);
+            response::set_header(&mut resp, "allow", allow);
+        }
         Some(r) => {
             response::set_header(&mut resp, "allow", ALLOW_FILE);
             if accel_path(inner, req, r).is_none() {
@@ -112,7 +141,8 @@ pub(crate) async fn propfind(inner: &Arc<Inner>, req: &Req, body: Body) -> DavRe
         && !matches!(paths::classify(&norm), paths::Target::Progress(_))
     {
         if let Some(hit) = inner.cache.get(&norm).await {
-            let tail = injected_progress(inner, req, &norm).await?;
+            let mut tail = injected_progress(inner, req, &norm).await?;
+            tail.push_str(&injected_personal(inner, req, &res, &hit).await?);
             return Ok(crate::cache::respond(hit, &tail, gzip));
         }
         return Err(DavError::new(StatusCode::NOT_FOUND, &req.path));
@@ -133,6 +163,7 @@ pub(crate) async fn propfind(inner: &Arc<Inner>, req: &Req, body: Body) -> DavRe
                     caller: dctx.caller(),
                     locks: Some(&inner2.locks),
                     dead: Some(&inner2.dead),
+                    hidden_personal: None,
                 };
                 propfind::walk(&inner2.roots, &res, depth, &mode, &ctx, feed);
             })
@@ -145,6 +176,7 @@ pub(crate) async fn propfind(inner: &Arc<Inner>, req: &Req, body: Body) -> DavRe
             caller: dctx.caller(),
             locks: Some(&inner2.locks),
             dead: Some(&inner2.dead),
+            hidden_personal: None,
         };
         let mut out = String::from(MULTISTATUS_OPEN);
         propfind::walk(&inner2.roots, &res, depth, &mode, &ctx, &mut |chunk| {
@@ -182,6 +214,7 @@ async fn injected_progress(inner: &Arc<Inner>, req: &Req, norm: &str) -> DavResu
             caller: dctx.caller(),
             locks: None,
             dead: None,
+            hidden_personal: None,
         };
         for name in paths::PER_USER_FILES {
             if let Some(res) = inner
@@ -209,6 +242,60 @@ async fn injected_progress(inner: &Arc<Inner>, req: &Req, norm: &str) -> DavResu
     .await
 }
 
+/// The caller's own corrections (D27) below a cached collection, appended to its
+/// shared listing: the cloud-root owner's physical ones the cache set aside, or anyone
+/// else's overlays, each beside its archive. Anonymous has none.
+async fn injected_personal(
+    inner: &Arc<Inner>,
+    req: &Req,
+    res: &Resource,
+    hit: &crate::cache::Hit,
+) -> DavResult<String> {
+    let Some(caller) = req.caller() else {
+        return Ok(String::new());
+    };
+    if caller.owns_cloud_root {
+        return Ok(hit.owner_tail().to_string());
+    }
+    let folder_rel = match res.phys() {
+        Some(phys) => match inner.roots.library_rel(phys) {
+            Some(rel) => rel,
+            None => return Ok(String::new()),
+        },
+        // `/` and `/mokuro-reader` list the whole library.
+        None => String::new(),
+    };
+    let inner = inner.clone();
+    let dctx = req.ctx.clone();
+    blocking(move || {
+        let ctx = PropCtx {
+            caller: dctx.caller(),
+            locks: None,
+            dead: None,
+            hidden_personal: None,
+        };
+        let mut out = String::new();
+        if let Some(caller) = ctx.caller {
+            for res in inner.roots.overlays_under(caller, &folder_rel) {
+                propfind::write_response(&mut out, &res, &Mode::AllProp, &ctx);
+            }
+        }
+        out
+    })
+    .await
+}
+
+/// A GET's failed open or first read: a gone (or locally unreadable) file is a 404, a
+/// file changed behind the index a 503 retry ([`DavError::from_read_io`], never 412).
+fn read_error(e: std::io::Error) -> DavError {
+    match bunko_store::classify(&e) {
+        bunko_store::ErrorClass::NotFound | bunko_store::ErrorClass::Other => {
+            DavError::new(StatusCode::NOT_FOUND, e.to_string())
+        }
+        _ => DavError::from_read_io(&e),
+    }
+}
+
 pub(crate) async fn get(inner: &Arc<Inner>, req: &Req) -> DavResult<Resp> {
     let head = req.method == Method::HEAD;
     if req.content_length() != 0 {
@@ -226,17 +313,36 @@ pub(crate) async fn get(inner: &Arc<Inner>, req: &Req) -> DavResult<Resp> {
     let res = lookup(inner, &req.path, req)
         .await?
         .ok_or_else(|| DavError::new(StatusCode::NOT_FOUND, &req.path))?;
-    let Resource::File { phys, .. } = &res else {
+    let Resource::File { phys, kind, .. } = &res else {
         return Err(DavError::new(
             StatusCode::FORBIDDEN,
             "Directory browsing is not enabled.",
         ));
     };
+    // What the path resolved to (a correction layer's name alone does not say whether
+    // it is the caller's overlay or a library primary), for the request accounting.
+    let info = DavInfo {
+        target: match kind {
+            FileKind::Library => DavTarget::Library,
+            FileKind::Progress => DavTarget::Progress,
+            FileKind::Personal => DavTarget::Personal,
+        },
+        rel: crate::analytics::dav_target_of(&req.path).1,
+        depth: None,
+    };
+    let annotate = |resp: &mut Resp, served: Option<Served>| {
+        resp.extensions_mut().insert(info.clone());
+        if let Some(served) = served {
+            resp.extensions_mut().insert(served);
+        }
+    };
     // Open first and describe what was opened: the validators match the bytes sent even
     // if an upload renames a new file into place meanwhile.
-    let mut file = tokio::fs::File::open(phys)
+    // A remote store's file has no local handle: its body streams from the store (spool
+    // or pinned ranged reads, spec §10), memory flat, with the same validators.
+    let file = bunko_store::afs::File::open(phys)
         .await
-        .map_err(|e| DavError::new(StatusCode::NOT_FOUND, e.to_string()))?;
+        .map_err(read_error)?;
     let stat = Stat::from_meta(&file.metadata().await?);
     let res = match res {
         Resource::File {
@@ -257,6 +363,12 @@ pub(crate) async fn get(inner: &Arc<Inner>, req: &Req) -> DavResult<Resp> {
             let mut resp = response::empty(StatusCode::NOT_MODIFIED);
             response::set_header(&mut resp, "etag", &format!("\"{etag}\""));
             response::set_header(&mut resp, "last-modified", &stat.last_modified_http());
+            let served = Served {
+                size: stat.size,
+                len: 0,
+                accel: false,
+            };
+            annotate(&mut resp, Some(served));
             return Ok(resp);
         }
         return Err(e);
@@ -277,10 +389,41 @@ pub(crate) async fn get(inner: &Arc<Inner>, req: &Req) -> DavResult<Resp> {
     );
 
     if let Some(accel) = accel_path(inner, req, &res) {
+        // What nginx will send: the range it honours (an `If-Range` that no longer
+        // holds gets the whole file), else the whole file. A range past the end is
+        // answered 416 here, as without offload: nginx would send no body, and the
+        // accounting must not count one.
+        let honoured = req
+            .header("if-range")
+            .is_none_or(|cond| conditional::if_range_holds(cond, &etag, last_modified));
+        let len = match req.header("range") {
+            Some(value) if stat.size > 0 && !head && honoured => {
+                match conditional::parse_range(value, stat.size) {
+                    Ok(RangeOutcome::Partial { start, end }) => end - start + 1,
+                    Ok(RangeOutcome::Full) => stat.size,
+                    Err(e) => {
+                        let mut r =
+                            DavError::new(StatusCode::RANGE_NOT_SATISFIABLE, "").into_response();
+                        response::set_header(&mut r, "content-range", &e.context);
+                        annotate(&mut r, None);
+                        return Ok(r);
+                    }
+                }
+            }
+            _ if head => 0,
+            _ => stat.size,
+        };
         // nginx serves the bytes (and any Range); Content-Length 0 keeps the upstream
         // connection reusable.
+        let headers = resp.headers_mut();
         headers.insert(CONTENT_LENGTH, HeaderValue::from_static("0"));
         response::set_header(&mut resp, "x-accel-redirect", &accel);
+        let served = Served {
+            size: stat.size,
+            len,
+            accel: true,
+        };
+        annotate(&mut resp, Some(served));
         return Ok(resp);
     }
     headers.insert(ACCEPT_RANGES, HeaderValue::from_static("bytes"));
@@ -301,6 +444,7 @@ pub(crate) async fn get(inner: &Arc<Inner>, req: &Req) -> DavResult<Resp> {
                     let mut r =
                         DavError::new(StatusCode::RANGE_NOT_SATISFIABLE, "").into_response();
                     response::set_header(&mut r, "content-range", &e.context);
+                    annotate(&mut r, None);
                     return Ok(r);
                 }
             };
@@ -320,13 +464,41 @@ pub(crate) async fn get(inner: &Arc<Inner>, req: &Req) -> DavResult<Resp> {
     };
     resp.headers_mut()
         .insert(CONTENT_LENGTH, HeaderValue::from(len));
+    annotate(
+        &mut resp,
+        Some(Served {
+            size,
+            len: if head { 0 } else { len },
+            accel: false,
+        }),
+    );
     if head {
         return Ok(resp);
     }
-    if start > 0 {
-        file.seek(SeekFrom::Start(start)).await?;
+    match file {
+        bunko_store::afs::File::Tokio(mut file) => {
+            if start > 0 {
+                file.seek(SeekFrom::Start(start)).await?;
+            }
+            let stream = ReaderStream::with_capacity(file.take(len), 64 * 1024);
+            *resp.body_mut() = Body::from_stream(stream);
+        }
+        remote => {
+            use futures_util::StreamExt;
+            let mut stream = remote.into_stream(start, len);
+            // A remote file over the blob cache streams from ranged reads, the first of
+            // them only once the body is polled: make it before the headers go out, so a
+            // file changed behind the index answers 503 (as a small one does at open)
+            // instead of a 200 whose body breaks off. Only this chunk (at most
+            // `STREAM_CHUNK`) is held; a change DURING the transfer still ends the body.
+            let first = match stream.next().await {
+                Some(Ok(chunk)) => Some(chunk),
+                Some(Err(e)) => return Err(read_error(e)),
+                None => None,
+            };
+            let head = futures_util::stream::iter(first.map(Ok::<_, std::io::Error>));
+            *resp.body_mut() = Body::from_stream(head.chain(stream));
+        }
     }
-    let stream = ReaderStream::with_capacity(file.take(len), 64 * 1024);
-    *resp.body_mut() = Body::from_stream(stream);
     Ok(resp)
 }

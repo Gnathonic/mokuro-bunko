@@ -1,5 +1,8 @@
 //! `PUT /mokuro-reader/<Series>/series.json`: the client fact update.
 
+// Fixtures are set up and checked with std::fs on purpose.
+#![allow(clippy::disallowed_methods)]
+
 mod library_support;
 
 use axum::body::Body;
@@ -177,11 +180,17 @@ async fn refused_and_malformed_requests() {
             "Permission denied: cannot submit metadata updates for this series"
         )
     );
-    // An uploader who uploaded every volume of the series may edit it.
+    // The series' recorded owner may edit it (0.8); having uploaded every volume of it
+    // is not enough.
     let uploader = env.send(put(uri, Some("uploader"), UPDATE)).await;
     assert_eq!(uploader.status, 403);
     env.db
         .record_volume_upload("Dr Stone/Volume 01.cbz", "uploader")
+        .unwrap();
+    let sole = env.send(put(uri, Some("uploader"), UPDATE)).await;
+    assert_eq!(sole.status, 403, "{}", sole.text());
+    env.db
+        .record_series_folder_owner("Dr Stone", "uploader")
         .unwrap();
     let owner = env.send(put(uri, Some("uploader"), UPDATE)).await;
     assert_eq!(owner.status, 204, "{}", owner.text());

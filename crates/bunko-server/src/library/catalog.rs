@@ -185,7 +185,30 @@ fn community_by_key(deps: &LibraryDeps) -> std::collections::HashMap<String, Val
     }
 }
 
-/// `_list_library`: the root view's one slim payload (Python `json.dumps` text).
+/// Each listed series' place in the "Popular" order (`None`: no downloads in the last
+/// 30 days), from the in-memory ranking, or nothing at all while analytics is off or
+/// there is no ranking. Only the order leaves the server, never a count.
+fn popular_ranks(deps: &LibraryDeps, names: &[&str]) -> Option<Vec<Option<u32>>> {
+    let popular = deps.popular.as_ref()?;
+    if !deps.core.config.read().analytics.enabled {
+        return None;
+    }
+    Some(crate::analytics::popular::ranks(&popular.counts(), names))
+}
+
+/// Add `popular_rank` to the series that have one.
+fn add_ranks(series: &mut [Value], ranks: Option<Vec<Option<u32>>>) {
+    let Some(ranks) = ranks else { return };
+    for (info, rank) in series.iter_mut().zip(ranks) {
+        if let (Value::Object(info), Some(rank)) = (info, rank) {
+            info.insert("popular_rank".into(), Value::from(rank));
+        }
+    }
+}
+
+/// `_list_library`: the root view's one slim payload (Python `json.dumps` text), with
+/// each series' `popular_rank` (1 = the most downloaded over the last 30 days) when
+/// analytics has one for it.
 fn list_library(deps: &LibraryDeps) -> String {
     let facts = display_facts(deps);
     let rows = deps.db.list_catalog_series().unwrap_or_else(|error| {
@@ -195,6 +218,10 @@ fn list_library(deps: &LibraryDeps) -> String {
     let mut series: Vec<Value> = Vec::new();
     if !rows.is_empty() {
         let community = community_by_key(deps);
+        let ranks = {
+            let names: Vec<&str> = rows.iter().map(|r| r.folder_name.as_str()).collect();
+            popular_ranks(deps, &names)
+        };
         for row in rows {
             let mut info = Map::new();
             info.insert("name".into(), Value::String(row.folder_name.clone()));
@@ -220,9 +247,12 @@ fn list_library(deps: &LibraryDeps) -> String {
             }
             series.push(Value::Object(info));
         }
+        add_ranks(&mut series, ranks);
     } else {
         // First boot, before the startup pass filled the table: never blank.
         let snapshot = deps.runtime.index().get_snapshot();
+        let names: Vec<&str> = snapshot.series.iter().map(|e| e.name.as_str()).collect();
+        let ranks = popular_ranks(deps, &names);
         for entry in &snapshot.series {
             let mut info = Map::new();
             info.insert("name".into(), Value::String(entry.name.clone()));
@@ -237,6 +267,7 @@ fn list_library(deps: &LibraryDeps) -> String {
             }
             series.push(Value::Object(info));
         }
+        add_ranks(&mut series, ranks);
     }
     bunko_db::pyfmt::dumps(
         &json!({ "series": series }),
@@ -289,8 +320,50 @@ fn volume_progress(job: &Map<String, Value>) -> Value {
     })
 }
 
+/// `relative` in the library's spelling, whatever case the request spells it in (the
+/// DAV paths are canonicalized the same way at the edge), so a catalog request answers
+/// the same on every host. Blocking.
+fn library_spelling(library: &std::path::Path, relative: &str) -> String {
+    bunko_dav::LibraryPathCanonicalizer::new(library).canonicalize(relative, None)
+}
+
+/// Is `relative` below a top-level name spelled like a per-user name (`history/`,
+/// `HISTORY/`)? Never the library's, in any spelling, on any host: the catalog
+/// answers 404 for it, as the DAV tree never resolves it into the library.
+fn under_per_user_name(relative: &str) -> bool {
+    let first = relative
+        .trim_start_matches(['/', '\\'])
+        .split(['/', '\\'])
+        .next()
+        .unwrap_or("");
+    bunko_core::reader_tree::is_per_user_root_name(first)
+}
+
+/// [`under_per_user_name`] for a resolved path below the resolved library `base`
+/// (`S/../history/x` included).
+fn resolves_under_per_user_name(path: &std::path::Path, base: &std::path::Path) -> bool {
+    path.strip_prefix(base)
+        .ok()
+        .and_then(|rel| rel.components().next())
+        .and_then(|first| first.as_os_str().to_str())
+        .is_some_and(bunko_core::reader_tree::is_per_user_root_name)
+}
+
 fn get_series(deps: &LibraryDeps, name: &str) -> Response {
     let library = deps.runtime.library_path();
+    if under_per_user_name(name) {
+        return json_error(404, "Series not found");
+    }
+    // The spelling the library lists. A name the index lists as spelled is that already
+    // (the walk leaves out every spelling another shadows; before the first walk, one
+    // listing of the root taken for every request); only another spelling, or a nested
+    // series before the first walk, reads the listings here, at a cost that grows with
+    // the library.
+    let name = &if deps.runtime.index().lists_series(name) {
+        name.to_owned()
+    } else {
+        library_spelling(library, name)
+    };
     let base = resolve(library).unwrap_or_else(|| library.to_path_buf());
     let Some(series_dir) = resolve(&library.join(name)) else {
         return json_error(403, "Forbidden");
@@ -298,8 +371,10 @@ fn get_series(deps: &LibraryDeps, name: &str) -> Response {
     if !is_within(&series_dir, &base) {
         return json_error(403, "Forbidden");
     }
-    let snapshot = deps.runtime.index().get_snapshot();
-    let Some(series) = snapshot.series_by_name(name) else {
+    if resolves_under_per_user_name(&series_dir, &base) {
+        return json_error(404, "Series not found");
+    }
+    let Some(series) = deps.runtime.index().series(name) else {
         return json_error(404, "Series not found");
     };
     let progress = active_progress(deps);
@@ -372,7 +447,7 @@ struct CoverFile {
 
 /// The cover's validators. The tag is DAV's file ETag (`{mtime:.6}-{size}`), so one
 /// file has one tag whichever way it is read.
-fn cover_validators(meta: &std::fs::Metadata) -> (String, Option<String>) {
+fn cover_validators(meta: &bunko_store::Meta) -> (String, Option<String>) {
     let mtime = meta
         .modified()
         .ok()
@@ -426,12 +501,29 @@ async fn serve_cover(deps: &LibraryDeps, cover: &str, headers: &HeaderMap) -> Re
     let library = deps.runtime.library_path().to_path_buf();
     let cover = cover.to_owned();
     let checked = blocking(move || -> Result<CoverFile, Response> {
+        if under_per_user_name(&cover) {
+            return Err(util::text(404, "Not found"));
+        }
+        let cover = library_spelling(&library, &cover);
         let base = resolve(&library).unwrap_or_else(|| library.clone());
         let file = resolve(&library.join(&cover)).ok_or_else(|| util::text(400, "Invalid path"))?;
         if !is_within(&file, &base) {
             return Err(util::text(403, "Forbidden"));
         }
-        let meta = std::fs::metadata(&file)
+        if resolves_under_per_user_name(&file, &base) {
+            return Err(util::text(404, "Not found"));
+        }
+        // A name the listings do not reach as spelled (nothing, or a hidden case
+        // variant's own file) is not served, on any host.
+        let rel = file
+            .strip_prefix(&base)
+            .ok()
+            .map(|r| r.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_default();
+        if !bunko_dav::LibraryPathCanonicalizer::new(&base).reaches(&rel) {
+            return Err(util::text(404, "Not found"));
+        }
+        let meta = bunko_store::fs::metadata(&file)
             .ok()
             .filter(|m| m.is_file())
             .ok_or_else(|| util::text(404, "Not found"))?;
@@ -457,17 +549,39 @@ async fn serve_cover(deps: &LibraryDeps, cover: &str, headers: &HeaderMap) -> Re
         let mut resp = Response::new(Body::empty());
         *resp.status_mut() = http::StatusCode::NOT_MODIFIED;
         cover_headers(resp.headers_mut(), &found);
+        // For the request accounting: what the 304 did not send.
+        resp.extensions_mut().insert(bunko_dav::Served {
+            size: found.size,
+            len: 0,
+            accel: false,
+        });
         return resp;
     }
-    let (file, size, content_type) = (found.file.clone(), found.size, found.content_type);
-    let Ok(handle) = tokio::fs::File::open(&file).await else {
+    let (file, mut size, content_type) = (found.file.clone(), found.size, found.content_type);
+    let Ok(handle) = bunko_store::afs::File::open(&file).await else {
         return util::text(500, "Error");
     };
-    let mut resp = Response::new(Body::from_stream(tokio_util::io::ReaderStream::new(handle)));
+    // A remote cover streams from the store; its length is the opened version's.
+    let body = match handle {
+        bunko_store::afs::File::Tokio(f) => Body::from_stream(tokio_util::io::ReaderStream::new(f)),
+        remote => {
+            let Ok(meta) = remote.metadata().await else {
+                return util::text(500, "Error");
+            };
+            size = meta.len();
+            Body::from_stream(remote.into_stream(0, size))
+        }
+    };
+    let mut resp = Response::new(body);
     let h = resp.headers_mut();
     h.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
     h.insert(header::CONTENT_LENGTH, HeaderValue::from(size));
     cover_headers(h, &found);
+    resp.extensions_mut().insert(bunko_dav::Served {
+        size,
+        len: size,
+        accel: false,
+    });
     resp
 }
 
@@ -579,9 +693,32 @@ async fn manifest(State(deps): State<LibraryDeps>, req: Request) -> Response {
 
 fn build_manifest(deps: &LibraryDeps, series: &str, volume: &str, headers: &HeaderMap) -> Response {
     let library = deps.runtime.library_path();
+    if under_per_user_name(series) {
+        return json_error(404, "Volume not found");
+    }
+    // The names as the library lists them, whatever case the request spells them in
+    // (the DAV paths are canonicalized the same way at the edge).
+    let canonical = (!series.contains(['/', '\\']) && !volume.contains(['/', '\\']))
+        .then(|| library_spelling(library, &format!("{series}/{volume}.cbz")));
+    let (series, volume, archive_file) = match canonical.as_deref().and_then(|c| c.split_once('/'))
+    {
+        Some((s, v)) => (
+            s.to_string(),
+            bunko_core::sidecar_names::cbz_stem(v)
+                .unwrap_or(volume)
+                .to_string(),
+            v.to_string(),
+        ),
+        None => (
+            series.to_string(),
+            volume.to_string(),
+            format!("{volume}.cbz"),
+        ),
+    };
+    let (series, volume) = (series.as_str(), volume.as_str());
     let base = resolve(library).unwrap_or_else(|| library.to_path_buf());
     let resolved = resolve(&library.join(series)).and_then(|dir| {
-        let archive = resolve(&dir.join(format!("{volume}.cbz")))?;
+        let archive = resolve(&dir.join(&archive_file))?;
         Some((dir, archive))
     });
     let Some((series_dir, archive)) = resolved else {
@@ -589,6 +726,9 @@ fn build_manifest(deps: &LibraryDeps, series: &str, volume: &str, headers: &Head
     };
     if !is_within(&series_dir, &base) || !is_within(&archive, &base) {
         return json_error(403, "Forbidden");
+    }
+    if resolves_under_per_user_name(&series_dir, &base) {
+        return json_error(404, "Volume not found");
     }
     if series_dir == base || volume.contains('/') || volume.contains('\\') {
         return json_error(404, "Volume not found");

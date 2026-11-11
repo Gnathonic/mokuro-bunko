@@ -151,7 +151,7 @@ fn ppocr_volume_with_bad_pages() {
             .weights
             .get("Kellenok/PP-OCRv6_manga")
             .map(String::as_str),
-        Some("ba1d479e8a61a20e8318c9758c73fbbbd290b98d")
+        Some("d65838996a00ef6b1c73ca3a700d7a8c5fbbef8a")
     );
 
     let events = Mutex::new(Vec::new());
@@ -217,6 +217,10 @@ fn ppocr_volume_with_bad_pages() {
     );
     assert_eq!(v["volume_uuid"].as_str().unwrap().len(), 36);
     assert_eq!(v["ocr_engine"]["id"], "ppocr-manga");
+    assert_eq!(
+        v["ocr_engine"]["revision"],
+        bunko_layout::sidecar::engine_revision("ppocr-manga")
+    );
     assert!(v["ocr_engine"].get("precision").is_none());
     let pages = v["pages"].as_array().unwrap();
     assert_eq!(pages.len(), 4);

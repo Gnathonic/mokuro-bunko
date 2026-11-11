@@ -249,7 +249,11 @@ CREATE INDEX IF NOT EXISTS idx_audit_actor_created       ON audit_logs(actor_use
 CREATE INDEX IF NOT EXISTS idx_volume_uploads_uploader   ON volume_uploads(uploader_username);
 CREATE INDEX IF NOT EXISTS idx_series_entry_cache_series ON series_entry_cache(series_key);
 ```
-(plus `idx_auth_tokens_username`, `idx_ocr_sidecars_volume` above). `test_audit_search.py:192-215` pins
+(plus `idx_auth_tokens_username`, `idx_ocr_sidecars_volume` above). **0.8 (Rust)** adds, with the
+series folder owner tables (schema version 7), `idx_volume_uploads_uploader_nocase ON
+volume_uploads(uploader_username COLLATE NOCASE)`: `/login/api/me` looks an uploader's archives up
+by name, matched ASCII case-insensitively as auth matches it, which the binary index above
+cannot serve. `test_audit_search.py:192-215` pins
 that the three audit indexes exist and are re-created on an existing DB where they were dropped.
 `idx_audit_created_at` is referenced by name in an `INDEXED BY` hint (8.4), so it MUST exist under
 that exact name (or the Rust query must drop the hint).
@@ -576,14 +580,14 @@ if suffix is `.CBZ`), `.mokuro.gz`, `.mokuro`, `.webp`, `.nocover` (suffix repla
 | Method | Behaviour |
 |---|---|
 | `record_volume_upload(rel, uploader, existed_before=False)` :1704 | key None -> no-op. `is_archive = rel.strip("/").lower().endswith(".cbz")`. **Non-archive** (sidecar): `UPDATE volume_uploads SET last_modified_by=?, last_modified_at=datetime('now') WHERE volume_key=?` only (never inserts: a sidecar must not capture ownership). **Archive** (either value of `existed_before`; both branches are identical): `INSERT INTO volume_uploads (volume_key, uploader_username, last_modified_by, last_modified_at) VALUES (?,?,?,datetime('now')) ON CONFLICT(volume_key) DO UPDATE SET last_modified_by = excluded.last_modified_by, last_modified_at = datetime('now')`. The original `uploader_username`/`uploaded_at` are preserved on conflict. |
-| `get_volume_owner(rel)` :1760 | key None -> None; `SELECT uploader_username FROM volume_uploads WHERE volume_key = ?`. |
-| `can_user_delete_library_path(username, virtual_path)` :1776 | `prefix="/mokuro-reader/"`; path must start with it else False; `relative = rest.strip("/")`; False if `not relative or ("/" not in relative and "." not in relative)` (root and top-level dirs never); `owner = get_volume_owner(relative)`; if None and the path is an OCR layer file `<stem>.<layer>.mokuro[.gz]` (`_layer_sidecar_volume_path`: strip optional `.gz`, require `.mokuro`, split at the last `.` in the stem, layer matches `^(?=[a-z0-9-]*[a-z])[a-z0-9-]{1,32}\Z` (at least one letter, so `Vol 01.5.mokuro` is not a layer), result `<stem-before-dot>.cbz`) then owner of that parent; return `owner == username`. BYTE-EXACT matching (deliberately not Unicode-folded). |
+| `get_volume_owner(rel)` :1760 | key None -> None; `SELECT uploader_username FROM volume_uploads WHERE volume_key = ?`. Rust 0.8: on a miss, every row is compared by the filename fold (`bunko_core::names::fold_name`: full Unicode case folding and canonical normalization; no SQL prefilter, which would fold ASCII only), the byte-smallest key first: a volume respelled outside Bunko, or a sidecar whose suffix is spelled otherwise, keeps its uploader. `get_volume_owner_where(rel, same_volume)` takes only a row for which `same_volume(key)` holds. The server (`backend::volume_owner`) decides it from listings alone (`fsutil::ListedWalk`), segment by segment from the library root, never by opening a path by name: each segment of the key resolves to the winner of the listed names that fold like it, unless the key spells a listed loser exactly (then it is that hidden entry's row); the row matches when it leads to the very entry the request does. So a volume or series folder respelled outside Bunko keeps its uploader on every host, and a row whose spelling is a separate listed entry never gives control of another. Auth and `/login/api/me` (`curated.volumes`) always use that form. `forget_volume_upload_where`, `forget_volume_uploads_under_prefix_where` and `rename_volume_upload_where` (the DAV hooks, after the file is gone or moved) also take every fold-matching row whose spelling now leads to nothing listed (`ListedWalk::leads_nowhere`: the one the fallback matched), and `record_volume_upload_where` first re-keys the row the fallback would match to the written key when the write replaced an existing file (the DAV hook passes `existed_before`): a new upload never takes over a row left behind by a volume deleted outside Bunko, and after a delete or move through Bunko a later upload of the old spelling is never credited to its old uploader. No schema change. |
+| `can_user_delete_library_path(username, virtual_path)` :1776 | `prefix="/mokuro-reader/"`; path must start with it else False; `relative = rest.strip("/")`; False if `not relative or ("/" not in relative and "." not in relative)` (root and top-level dirs never); `owner = get_volume_owner(relative)`; if None and the path is an OCR layer file `<stem>.<layer>.mokuro[.gz]` (`_layer_sidecar_volume_path`: strip optional `.gz`, require `.mokuro`, split at the last `.` in the stem, layer matches `^(?=[a-z0-9-]*[a-z])[a-z0-9-]{1,32}\Z` (at least one letter, so `Vol 01.5.mokuro` is not a layer), result `<stem-before-dot>.cbz`) then owner of that parent; return `owner == username`. Python matched BYTE-EXACT; Rust 0.8 goes through `get_volume_owner`'s fold fallback. |
 | `_volume_upload_folder_owners()` :1807 | `SELECT DISTINCT uploader_username, volume_key FROM volume_uploads`; keep rows whose key has a `/`; pair = (first path segment, uploader). |
 | `series_owners(series_title)` :1832 | `prefix = series_title.strip("/")`; empty -> empty set; owners = uploaders whose folder, folded by `_fold_series_title_key`, equals the folded `prefix`. Fold = NFC-normalize, `strip()`, collapse whitespace runs (`\s+`, Unicode whitespace) to one space, `.lower()` (NOT casefold: `ß` != `ss`). Identical to `metadata.reader_compat.normalize_volume_title_key` (pinned by `test_database.py:584-609`). |
-| `can_user_edit_series(username, series_title)` :1867 | `owners = series_owners(..)`; `bool(owners) and owners == {username}` (every tracked volume owned by exactly this user; untracked folder -> False). |
+| `can_user_edit_series(username, series_title)` :1867 | `owners = series_owners(..)`; `bool(owners) and owners == {username}` (every tracked volume owned by exactly this user; untracked folder -> False). Rust 0.8: the username compares ignoring ASCII case, as auth compares account names. |
 | `list_series_owned_by(username)` :1880 | One pass: group by folded folder key -> set of owners and set of raw folder spellings; for each key with `owners == {username}` collect ALL raw spellings; return sorted list (Python string sort: code point order). Feeds `/login/api/me` `permissions.metadata.ownedSeries`. |
 | `forget_volume_upload(rel)` :1906 | `DELETE FROM volume_uploads WHERE volume_key = ?`. |
-| `forget_volume_uploads_under_prefix(prefix)` :1914 | prefix `.strip("/")`; empty -> 0; `DELETE FROM volume_uploads WHERE volume_key LIKE ?` with `"<prefix>/%"`. QUIRK: LIKE is unescaped (`_`/`%` in a folder name are wildcards) and ASCII-case-insensitive, so it can over-delete rows of another folder (`Dr_Stone/` also deletes `Dr Stone/`, `dr stone/` rows). Contrast the OCR tables (10) which use exact `substr`. Recommend Rust use the exact `substr(volume_key,1,?) = ?` form (see open question 4). |
+| `forget_volume_uploads_under_prefix(prefix)` :1914 | prefix `.strip("/")`; empty -> 0; `DELETE FROM volume_uploads WHERE volume_key LIKE ?` with `"<prefix>/%"`. QUIRK: LIKE is unescaped (`_`/`%` in a folder name are wildcards) and ASCII-case-insensitive, so it can over-delete rows of another folder (`Dr_Stone/` also deletes `Dr Stone/`, `dr stone/` rows). Contrast the OCR tables (10) which use exact `substr`. Recommend Rust use the exact `substr(volume_key,1,?) = ?` form (see open question 4). The over-delete is a known Python bug, not a feature. |
 | `rename_volume_upload(old_rel, new_rel)` :1926 | keys via normalize; any None or equal -> no-op; `SELECT uploader_username, uploaded_at, last_modified_by FROM volume_uploads WHERE volume_key = ?` (old); none -> return; `INSERT INTO volume_uploads (volume_key, uploader_username, uploaded_at, last_modified_by, last_modified_at) VALUES (?,?,?,?,datetime('now')) ON CONFLICT(volume_key) DO UPDATE SET uploader_username=excluded.uploader_username, uploaded_at=excluded.uploaded_at, last_modified_by=excluded.last_modified_by, last_modified_at=datetime('now')`; then `DELETE ... WHERE volume_key = old`. |
 
 Known data caveat (memory note): `volume_uploads.uploader_username` is wrong for rows created before
@@ -971,17 +975,46 @@ else `revoke_auth_token(t)` -> 200 `{"revoked": true|false}` (false if unknown/a
 order in the JSON object: canWriteProgress, canAddFiles, canModifyDelete, metadata. `created_at` is the
 raw DB string. Pinned by `tests/integration/test_login_me.py`.
 
-**0.7.8 (Rust).** Both 200 bodies end with two more keys, signed in or not:
+**0.8 (Rust).** `P` gains a fifth key after `metadata`: `"curated": {"scope": C}`, who may
+publish a volume's shared `<Vol>.curated.mokuro` (D27; auth enforces it): `C` = `"all"` for a role
+with `MODIFY_DELETE`, `"owned"` for `uploader` (the volumes it uploaded; a 403 on any other is
+final), else `"none"`. Both 200 bodies end with three more keys, signed in or not:
 `"per_user_files"` = `bunko_core::reader_tree::advertised()`, i.e.
 `["volume-data.json","profiles.json","goals.json","positions.json","history/"]` (a trailing `/` is a
-per-account directory tree), then `"version"` = the running `bunko_core::VERSION` (`0.7.8`
-and on). Key order signed in: authenticated, username, role, created_at, permissions, per_user_files,
-version; anonymous: authenticated, role, permissions, per_user_files, version. The 401/429 bodies are
-unchanged. `version` is reported only by builds that keep reading history per account: the reader
-turns history sync on when its numeric core (`/^v?(\d+)\.(\d+)\.(\d+)/`, a pre-release counting as
-its core) is ≥ 0.7.8, and uses `positions.json` only when it is listed. Pinned by
-`crates/bunko-server/tests/accounts_login.rs` and the `login-me-*` contract fixtures (where `version`
-is the sentinel `0.0.0`).
+per-account directory tree), then `"per_user_layers"` = `bunko_core::sidecar_names::per_user_layers()`,
+i.e. `["edit"]` (the layer ids each account keeps its own copy of; a reader pushes its `edit` layer
+only when it is listed), then `"version"` = the running `bunko_core::VERSION` (0.7.8 and
+on, the 0.7 line without `per_user_layers`). Key order signed in: authenticated, username, role, created_at, permissions, per_user_files,
+per_user_layers, version; anonymous: authenticated, role, permissions, per_user_files,
+per_user_layers, version. The 401/429 bodies are unchanged. `version` is reported only by builds
+that keep reading history per account: the reader turns history sync on when its numeric core
+(`/^v?(\d+)\.(\d+)\.(\d+)/`, a pre-release counting as its core) is ≥ 0.7.8, and uses
+`positions.json` only when it is listed. Pinned by `crates/bunko-server/tests/accounts_login.rs` and
+the `login-me-*` contract fixtures (where `version` is the sentinel `0.0.0`).
+
+**0.8 series owners (Rust).** `P` ends with `"addFiles"`: `{"scope":"all"}` for `MODIFY_DELETE`,
+`{"scope":"open","closedSeries":[...]}` for `uploader` (the recorded folders of series another
+account owns, listed now), else `{"scope":"none"}`; an uploader's `metadata.ownedSeries` is the
+series it owns by record, listed now. What cannot be read is never reported as a shorter list (a
+reader acts on it as true, and takes a failed `/me` for a server without owners, so `/me` still
+answers 200): with the library root unlistable, every record of another account is closed and
+none is owned; with the records unreadable, `addFiles` is `{"scope":"none"}` and `ownedSeries`
+empty. Auth answers those requests 503 meanwhile; the reader's next `/me` corrects the lists.
+
+**0.8 curated volumes (Rust, D1).** With `"scope":"owned"` (and only then) `curated` gains a
+second key, `"volumes": [{"series": S, "volume": V}, ...]`: the volumes the uploader may publish
+the curated layer of outside the series it owns (those are `metadata.ownedSeries`), so a reader
+can offer Publish per volume in a shared series. `S` is the series folder as listed, `V` the
+archive's stem (the `.cbz` name without `.cbz`); sorted by `S`, then `V`, code point. An entry is
+an archive listed directly in a series folder (listed at the root, not owned by the account)
+that auth would let it publish `<V>.curated.mokuro` for: every archive governing that name
+(`sidecar_names::governing_archives`, the nearest listed one) is the account's recorded upload
+(`volume_uploads`, name matched ASCII case-insensitively, as auth matches it), and in a series
+another account owns the layer is listed already (a new one there is refused). Here a shorter
+list only offers less, so a folder or the upload records that cannot be read add nothing; an
+empty list is normal. Bunko stays the judge: a 403 on a publish stays final. Pinned by
+`accounts::login` unit tests, `tests/folder_ownership.rs` (the list agrees with auth's PUT
+decision) and the `login-me-closed-series` contract fixture.
 
 ### 15.5 `GET /api/nav/config` (:361-383) - no auth
 Response 200: `{"home_enabled": bool, "catalog_enabled": bool, "queue_show_in_nav": bool,
@@ -1058,7 +1091,7 @@ JSON conventions as in 15; status texts add 403/404.
 |---|---|---|
 | GET | `/api/account/stats` | Not authed -> 401 `{"error":"Authentication required"}`. Else 200 of an all-zero `PersonalStats`: `{"volumes":0,"pages_read":0,"characters_read":0,"reading_time_seconds":0,"reading_time_formatted":"0s"}` (placeholder; never computed from data). `_format_time`: `<60s` -> `"{s}s"`; `<60m` -> `"{m}m"`; `<24h` -> `"{h}h {m}m"`; else `"{d}d {h}h"`. |
 | POST | `/api/account/password` | Body JSON `{"current_password","new_password"}`. Order: auth (401 `Authentication required`); body: `Content-Length == 0` -> 400 `{"error":"Missing request body"}`; > 64 KiB -> 413; JSON error -> 400 `{"error":"Invalid request"}`; either field falsy -> 400 `{"error":"Missing required fields"}`; `authenticate_user(username, current_password)` fails -> 401 `{"error":"Current password is incorrect"}`; `validate_password(new)` error -> 400 `{"error": msg}`; `update_user_password` (also revokes ALL the user's tokens, including the one used for this very request); 200 `{"success":true}`. Not audited. |
-| POST | `/api/account/delete` | Body `{"password"}`. 401 / 400 `Missing request body` / 413 / 400 `Invalid request` as above; empty password -> 400 `{"error":"Password confirmation required"}`; wrong -> 401 `{"error":"Password is incorrect"}`; then audit `self_delete_account` (actor=username, target_type `user`, target_username=username), `delete_user(username)` (soft delete + token wipe), then if a storage path is configured: `users_root = <base>/users` resolved, `user_dir = users_root/username` resolved; not under `users_root` -> 400 `{"error":"Invalid username path"}` (after the soft delete already happened); else `shutil.rmtree(user_dir, ignore_errors=True)` if it exists (per-user progress data is permanently deleted); 200 `{"success":true}`. |
+| POST | `/api/account/delete` | Body `{"password"}`. 401 / 400 `Missing request body` / 413 / 400 `Invalid request` as above; empty password -> 400 `{"error":"Password confirmation required"}`; wrong -> 401 `{"error":"Password is incorrect"}`; then audit `self_delete_account` (actor=username, target_type `user`, target_username=username), `delete_user(username)` (soft delete + token wipe), then if a storage path is configured: `users_root = <base>/users` resolved, `user_dir = users_root/username` resolved; not under `users_root` -> 400 `{"error":"Invalid username path"}` (after the soft delete already happened); else `shutil.rmtree(user_dir, ignore_errors=True)` if it exists (per-user progress data is permanently deleted); 200 `{"success":true}`. Rust 0.8: when another account's name equals this one ignoring ASCII case (a database from before names were unique that way), the folder is kept and logged instead: on a case-insensitive disk it is that account's folder too. |
 | OPTIONS | `/api/account/*` | 204, `Allow: GET, POST, OPTIONS`. |
 | GET | `/account`, `/account/`, `/account/<file>` | static account page (22). Non-GET non-API falls through. |
 

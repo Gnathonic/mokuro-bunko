@@ -21,7 +21,8 @@ pub const MAX_UPDATE_BODY_BYTES: u64 = 4 * 1024 * 1024;
 pub struct SeriesUpdate {
     pub facts: SeriesFacts,
     pub spine_offset: Option<JsonNum>,
-    /// Absence is silence (inherit); presence replaces.
+    /// Absence is silence (inherit); presence (a number or null) replaces, and
+    /// `0`, `null` or a non-finite number clears. Any other type is silence.
     pub spine_offset_present: bool,
     pub volume_offsets: JsonObject,
     /// Volumes the payload named at all, first-seen order. Listed WITHOUT an
@@ -91,7 +92,7 @@ fn facts_from(raw: &JsonObject, updated_at: String) -> SeriesFacts {
 
 /// `parse_series_update(payload, now=now)`: `None` means "reject" (400).
 pub fn parse_series_update(payload: &[u8], now: f64) -> Option<SeriesUpdate> {
-    let text = std::str::from_utf8(payload).ok()?;
+    let text = pyjson::strip_bom(std::str::from_utf8(payload).ok()?);
     let JsonValue::Object(decoded) = pyjson::parse_with(
         text,
         ParseOptions {
@@ -111,7 +112,12 @@ pub fn parse_series_update(payload: &[u8], now: f64) -> Option<SeriesUpdate> {
     let updated_at = normalize_updated_at(decoded.get("updated_at"), now)?;
 
     let spine_offset = as_offset(decoded.get("spine_offset"));
-    let spine_offset_present = spine_offset.is_some();
+    // 0.5.2 read `0` as absence, so a stored offset could never be reset; the
+    // reader now sends an explicit `0` only for a deliberate reset.
+    let spine_offset_present = matches!(
+        decoded.get("spine_offset"),
+        Some(JsonValue::Null | JsonValue::Num(_))
+    );
 
     let mut volume_offsets = JsonObject::new();
     let mut listed: Vec<String> = Vec::new();
@@ -255,6 +261,69 @@ mod tests {
         assert!(update.spine_offset_present);
         assert_eq!(update.listed_uuids, vec!["u".to_owned()]);
         assert!(update.volume_offsets.is_empty());
+    }
+
+    /// Rule v1: a BOM a Windows editor left in front of the PUT body is not a reason
+    /// to refuse it.
+    #[test]
+    fn a_bom_prefixed_body_parses() {
+        let body = "\u{feff}{\"version\":2,\"updated_at\":\"2026-01-01T00:00:00Z\",\"tag\":\"HD\"}";
+        let update = parse_series_update(body.as_bytes(), NOW).unwrap();
+        assert_eq!(update.facts.tag.as_deref(), Some("HD"));
+    }
+
+    fn spine_of(body: &str) -> (bool, Option<String>) {
+        let payload = format!(r#"{{"version":2,"updated_at":"2026-01-01T00:00:00Z"{body}}}"#);
+        let update = parse_series_update(payload.as_bytes(), NOW).unwrap();
+        let value = update.spine_offset.map(|num| format!("{num:?}"));
+        (update.spine_offset_present, value)
+    }
+
+    /// A present `0` or `null` is a deliberate reset (the reader sends it only
+    /// for one); an absent key or a non-number stays silent.
+    #[test]
+    fn spine_offset_key_presence() {
+        assert_eq!(spine_of(r#","spine_offset":0"#), (true, None));
+        assert_eq!(spine_of(r#","spine_offset":null"#), (true, None));
+        assert_eq!(spine_of(r#","spine_offset":"x""#), (false, None));
+        assert_eq!(spine_of(r#","spine_offset":true"#), (false, None));
+        assert_eq!(spine_of(""), (false, None));
+        assert_eq!(
+            spine_of(r#","spine_offset":-40"#),
+            (true, Some("Int(-40)".to_owned()))
+        );
+        // Overflows float conversion: not a usable offset, so it clears.
+        let huge = format!(r#","spine_offset":{}"#, "9".repeat(400));
+        assert_eq!(spine_of(&huge), (true, None));
+    }
+
+    #[test]
+    fn a_zero_spine_offset_clears_the_stored_one() {
+        let stored = StoredSeries {
+            facts: SeriesFacts {
+                updated_at: "2026-01-01T00:00:00.000Z".into(),
+                ..Default::default()
+            },
+            index: SeriesIndexData {
+                spine_offset: Some(JsonNum::Int(-40)),
+                volume_offsets: JsonObject::new(),
+            },
+        };
+        let zero = parse_series_update(
+            br#"{"version":2,"updated_at":"2026-01-01T00:00:00Z","spine_offset":0}"#,
+            NOW,
+        )
+        .unwrap();
+        let cleared = merge_series_update(Some(&stored), &zero);
+        assert!(cleared.index.spine_offset.is_none());
+        assert!(cleared.index_changed);
+
+        let absent =
+            parse_series_update(br#"{"version":2,"updated_at":"2026-01-01T00:00:00Z"}"#, NOW)
+                .unwrap();
+        let kept = merge_series_update(Some(&stored), &absent);
+        assert!(matches!(kept.index.spine_offset, Some(JsonNum::Int(-40))));
+        assert!(!kept.index_changed);
     }
 
     #[test]

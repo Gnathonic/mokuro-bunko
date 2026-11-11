@@ -1,0 +1,48 @@
+[package]
+name = "bunko-mega"
+description = "A MEGA API client for mokuro-bunko: vendored from mega-rs 0.8.0, with ranged reads, hashcash, resumable uploads and an sc event feed"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+# Vendored from mega-rs (MIT OR Apache-2.0, see NOTICE); kept under the same terms.
+license = "MIT OR Apache-2.0"
+
+[features]
+# An in-process mock of the MEGA API (`bunko_mega::mock`), for tests here and in
+# bunko-remote.
+mock = ["dep:axum", "tokio/net"]
+
+[dependencies]
+axum = { workspace = true, optional = true }
+reqwest.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time", "fs", "io-util"] }
+futures-util.workspace = true
+bytes.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+base64.workspace = true
+rand.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tempfile.workspace = true
+httpdate = "1"
+# RustCrypto, MIT OR Apache-2.0.
+aes = "0.8"
+ctr = "0.9"
+cbc = "0.1"
+cipher = "0.4"
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+# Only `BigUint` (num-bigint-dig) for the raw RSA of the login `csid` and of RSA-wrapped
+# node keys. RUSTSEC-2023-0071 (Marvin timing side channel) is about this crate's
+# PKCS#1 decryption, which is not used; the raw modpow here is not constant-time
+# either, and runs once per login on a server-chosen value.
+rsa = { version = "0.9", default-features = false, features = ["std", "u64_digit"] }
+crc32fast = "1"
+zeroize = { version = "1", features = ["zeroize_derive"] }
+
+[dev-dependencies]
+bunko-mega = { path = ".", features = ["mock"] }
+hex.workspace = true
+sha1 = "0.10"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net"] }

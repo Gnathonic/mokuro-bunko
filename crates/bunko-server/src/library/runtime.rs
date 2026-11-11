@@ -63,6 +63,9 @@ pub struct RuntimeDeps {
     pub community: CommunitySettings,
     /// Watch the library with `notify` (tests that drive changes by hand turn it off).
     pub watch: bool,
+    /// Arm no pass before [`LibraryRuntime::start`] (a cloud library: its first sync
+    /// reports every file, and the startup pass covers them all).
+    pub hold_until_start: bool,
 }
 
 impl RuntimeDeps {
@@ -76,6 +79,7 @@ impl RuntimeDeps {
             policy: DebouncePolicy::default(),
             community: CommunitySettings::default(),
             watch: true,
+            hold_until_start: false,
         }
     }
 }
@@ -126,6 +130,7 @@ pub struct LibraryRuntime {
     community_settings: CommunitySettings,
     community: Mutex<Option<Arc<CommunityFetcher>>>,
     started: AtomicBool,
+    hold_until_start: bool,
     worker: Arc<MetadataWorker>,
 }
 
@@ -294,6 +299,7 @@ impl LibraryRuntime {
                 community_settings: deps.community,
                 community: Mutex::new(None),
                 started: AtomicBool::new(false),
+                hold_until_start: deps.hold_until_start,
                 worker: Arc::new(MetadataWorker {
                     queue: Mutex::new(WorkQueue {
                         batch_gap: batch_gap(&deps.policy),
@@ -315,7 +321,7 @@ impl LibraryRuntime {
         if let Some(path) = self.library_resolved.get() {
             return path.clone();
         }
-        match std::fs::canonicalize(&self.library) {
+        match bunko_store::fs::canonicalize(&self.library) {
             Ok(path) => self.library_resolved.get_or_init(|| path).clone(),
             Err(_) => self.library.clone(),
         }
@@ -458,6 +464,16 @@ impl LibraryRuntime {
         self.hooks_live.store(false, Ordering::SeqCst);
     }
 
+    /// [`LibraryRuntime::start`] ran.
+    pub fn is_started(&self) -> bool {
+        self.started.load(Ordering::SeqCst)
+    }
+
+    /// Not started yet, and told to arm nothing until then (`hold_until_start`).
+    fn held(&self) -> bool {
+        self.hold_until_start && !self.started.load(Ordering::SeqCst)
+    }
+
     pub fn is_stopped(&self) -> bool {
         self.timers.lock().stopped
     }
@@ -470,6 +486,9 @@ impl LibraryRuntime {
     /// period (`delay` or 10 s), never past 60 s after the first call since the last
     /// fire.
     pub fn schedule_regeneration(&self, delay: Option<Duration>) {
+        if self.held() {
+            return;
+        }
         let (Some(handle), Some(rt)) = (self.handle(), self.arc()) else {
             return;
         };
@@ -498,6 +517,9 @@ impl LibraryRuntime {
     /// Debounced single-series recompile (`schedule_series_regeneration`), keyed by
     /// `normalize_volume_title_key(title)`; the latest raw title is what compiles.
     pub fn schedule_series_regeneration(&self, series_title: &str, delay: Option<Duration>) {
+        if self.held() {
+            return;
+        }
         let (Some(handle), Some(rt)) = (self.handle(), self.arc()) else {
             return;
         };
@@ -675,7 +697,7 @@ impl LibraryRuntime {
     }
 
     /// A file inside a series recompiles that series; a top-level entry takes the full
-    /// pass, which also prunes deleted series; `thumbnails/` is ignored.
+    /// pass, which also prunes deleted series; the cloud-root owner's own tree is ignored.
     fn route_change(&self, path: &Path) {
         let root = if path.starts_with(&self.library) {
             self.library.clone()
@@ -715,8 +737,15 @@ impl LibraryRuntime {
     }
 
     /// One watcher event (also what [`on_library_write`](Self::on_library_write) feeds).
+    /// The per-user tree at the root (a cloud progress user's `history/`, whose names
+    /// may end in `.cbz`) is no library content: it reaches neither OCR nor the index,
+    /// and refreshes no shared listing.
     pub fn on_watch_event(&self, event: WatchEvent) {
-        if self.is_stopped() {
+        if self.is_stopped()
+            || event
+                .path()
+                .is_some_and(|p| crate::ocr::types::is_per_user_path(&self.library, p))
+        {
             return;
         }
         self.archive_event(&event);
@@ -740,7 +769,7 @@ impl LibraryRuntime {
             return;
         }
         self.index.invalidate();
-        let is_dir = std::fs::metadata(path)
+        let is_dir = bunko_store::fs::metadata(path)
             .map(|m| m.is_dir())
             .unwrap_or_else(|_| super::watcher::vanished_is_dir(path));
         if bunko_library::paths::is_relevant_change(path, is_dir) {
@@ -850,7 +879,7 @@ fn series_list(titles: &[String]) -> String {
     text
 }
 
-/// `total_volumes` and `pending_ocr` from the library index.
+/// `total_volumes`, `pending_ocr` and `total_series` from the library index.
 struct IndexCounts(Arc<LibraryIndexCache>);
 
 impl LibraryCounts for IndexCounts {
@@ -861,6 +890,17 @@ impl LibraryCounts for IndexCounts {
 
     fn pending_ocr(&self) -> Result<u64, String> {
         Ok(self.0.get_snapshot().pending_ocr.len() as u64)
+    }
+
+    fn total_series(&self) -> Result<u64, String> {
+        // Folder spellings of one title (case, whitespace) are one series.
+        let snapshot = self.0.get_snapshot();
+        let keys: std::collections::HashSet<String> = snapshot
+            .series
+            .iter()
+            .map(|s| bunko_db::fold_series_title_key(&s.name))
+            .collect();
+        Ok(keys.len() as u64)
     }
 }
 

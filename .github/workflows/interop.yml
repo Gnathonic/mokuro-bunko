@@ -1,0 +1,199 @@
+name: Interop
+
+# The cross-party test rig (docs/design/interop-testing.md). I0: the catalog and series
+# views on a generated 2,000-series library, held to interop/budgets.toml. I3: every
+# party as its own process (a testing server, cloudsim, rclone, processor-fake and the
+# Mokuro Reader commit interop/reader.ref pins), one leg per provider (§7.1, §9). A PR
+# that bumps interop/reader.ref runs the same legs: that is how a new reader is taken in.
+
+on:
+  push:
+    branches: [main, 0.8/remote-storage]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: interop-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  catalog-perf:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: interop/package-lock.json
+      - name: build the server (lite, release)
+        run: cargo build --release -p mokuro-bunko --no-default-features --locked
+      - name: Playwright and Chromium
+        working-directory: interop
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: catalog-perf
+        run: cargo xtask interop catalog-perf --bin target/release/mokuro-bunko --browser
+      - name: results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: catalog-perf
+          path: |
+            target/interop/catalog-perf.json
+            target/interop/work/*/serve.log
+          if-no-files-found: ignore
+
+  # Everything the legs share, built once: the testing server and cloudsim, and the
+  # pinned reader built as the rig builds it (rig/reader.rs: `npm ci`, then
+  # `vite build --mode interop`). xtask is built here for the Rust cache the legs restore.
+  rig-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # interop/reader.ref holds the 40-hex SHA of a PUSHED reader commit, the same rule
+      # as the rig's own (`parse_reader_ref`); the owner commits it after pushing the
+      # reader. Until then the rig has no reader to fetch here, and says so.
+      - name: the pinned reader
+        id: reader
+        run: |
+          if [ ! -f interop/reader.ref ]; then
+            echo "::error file=interop/reader.ref::interop/reader.ref does not exist: commit the 40-hex SHA of a pushed Mokuro Reader commit there (docs/design/interop-testing.md §9). A local run passes --reader-dir <reader checkout> instead."
+            exit 1
+          fi
+          sha=$(sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' interop/reader.ref)
+          if ! [[ $sha =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error file=interop/reader.ref::interop/reader.ref must hold one 40-hex commit SHA, not '$sha'"
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+      - name: check out the pinned reader
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Gnathonic/mokuro-reader
+          ref: ${{ steps.reader.outputs.sha }}
+          path: reader
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: interop-rig
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            interop/package-lock.json
+            reader/package-lock.json
+      - name: build the testing server, cloudsim and xtask
+        run: |
+          cargo build --release -p mokuro-bunko --no-default-features --features testing --locked
+          cargo build --release -p bunko-cloudsim --locked
+          cargo build -p xtask --locked
+      - name: build the reader (--mode interop)
+        working-directory: reader
+        run: |
+          npm ci --no-audit --no-fund
+          npx vite build --mode interop
+      # The harness checks itself (capability gate, egress route, resolver) on a stub
+      # page, no reader needed.
+      - name: Playwright and Chromium, the harness self-test
+        working-directory: interop
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+          npm run selftest
+      # One tar, so the binaries keep their mode and the reader its install (node_modules
+      # with its .bin links) and mtimes; an artifact keeps neither.
+      - name: pack
+        run: |
+          mkdir -p rig-bin
+          cp target/release/mokuro-bunko target/release/bunko-cloudsim rig-bin/
+          tar -I zstd -cf rig-build.tar.zst rig-bin reader
+          ls -l rig-build.tar.zst
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rig-build
+          path: rig-build.tar.zst
+          retention-days: 3
+
+  # One leg per row; each leg's results and every party's log are uploaded whatever
+  # its outcome. The commands are the local ones (docs/design/interop-testing.md §7.1),
+  # with the binaries and the reader rig-build made.
+  rig:
+    name: rig (${{ matrix.leg }})
+    needs: rig-build
+    runs-on: ubuntu-latest
+    # The target is 15 minutes a leg (docs/design/interop-testing.md §9); measured on a
+    # developer machine, local took 2, google 13 and mega 16, so a runner gets room.
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { leg: local, suites: "dav,api", provider: local }
+          - { leg: google, suites: "bridge,direct,shared", provider: google }
+          - { leg: microsoft, suites: "bridge,direct,shared", provider: microsoft }
+          - { leg: mega, suites: "bridge,direct,shared", provider: mega }
+          - { leg: rclone, suites: "bridge,direct,shared", provider: rclone }
+          - { leg: cloud, suites: cloud, provider: all }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: interop-rig
+          save-if: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: rig-build
+      - name: unpack
+        run: tar -I zstd -xf rig-build.tar.zst && rm rig-build.tar.zst
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            interop/package-lock.json
+            reader/package-lock.json
+      - name: Playwright and Chromium
+        working-directory: interop
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+      # rclone (the rclone and cloud legs) is the rig's pinned download, checked
+      # against its sha256.
+      - name: rig ${{ matrix.suites }} on ${{ matrix.provider }}
+        env:
+          SUITES: ${{ matrix.suites }}
+          PROVIDER: ${{ matrix.provider }}
+        run: >-
+          cargo xtask interop rig "$SUITES" --provider "$PROVIDER"
+          --bin "$GITHUB_WORKSPACE/rig-bin/mokuro-bunko"
+          --cloudsim-bin "$GITHUB_WORKSPACE/rig-bin/bunko-cloudsim"
+          --reader-dir "$GITHUB_WORKSPACE/reader"
+      - name: results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rig-${{ matrix.leg }}
+          path: target/interop/rig/
+          if-no-files-found: ignore

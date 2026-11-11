@@ -1,0 +1,275 @@
+{
+ "suites": [
+  {
+   "title": "sample.spec.mjs",
+   "file": "sample.spec.mjs",
+   "column": 0,
+   "line": 0,
+   "specs": [
+    {
+     "title": "passes",
+     "ok": true,
+     "tags": [],
+     "tests": [
+      {
+       "timeout": 120000,
+       "annotations": [],
+       "expectedStatus": "passed",
+       "projectId": "",
+       "projectName": "",
+       "results": [
+        {
+         "status": "passed",
+         "duration": 1,
+         "errors": [],
+         "annotations": []
+        }
+       ],
+       "status": "expected"
+      }
+     ],
+     "file": "sample.spec.mjs",
+     "line": 4,
+     "column": 1
+    },
+    {
+     "title": "expected failure",
+     "ok": true,
+     "tags": [],
+     "tests": [
+      {
+       "timeout": 120000,
+       "annotations": [
+        {
+         "type": "fail"
+        }
+       ],
+       "expectedStatus": "failed",
+       "projectId": "",
+       "projectName": "",
+       "results": [
+        {
+         "status": "failed",
+         "duration": 1,
+         "error": {
+          "message": "Error: known"
+         },
+         "errors": [
+          {
+           "message": "Error: known\n\n   8 |   });\n   9 | });\n> 10 | test.fail('expected failure', async () => { throw new Error('known'); });\n     |                                                   ^\n  11 | test.describe('pending', () => {\n  12 |   test.use({ needs: ['history', 'dedup'] });\n  13 |   test('skips with two caps', async ({ reader }) => { void reader; });\n    at /rig/specs/sample.spec.mjs:10:51"
+          }
+         ],
+         "annotations": [
+          {
+           "type": "fail"
+          }
+         ]
+        }
+       ],
+       "status": "expected"
+      }
+     ],
+     "file": "sample.spec.mjs",
+     "line": 10,
+     "column": 6
+    },
+    {
+     "title": "plain skip",
+     "ok": true,
+     "tags": [],
+     "tests": [
+      {
+       "timeout": 120000,
+       "annotations": [
+        {
+         "type": "skip",
+         "description": "not on this provider"
+        }
+       ],
+       "expectedStatus": "skipped",
+       "projectId": "",
+       "projectName": "",
+       "results": [
+        {
+         "status": "skipped",
+         "duration": 0,
+         "errors": [],
+         "annotations": [
+          {
+           "type": "skip",
+           "description": "not on this provider"
+          }
+         ]
+        }
+       ],
+       "status": "skipped"
+      }
+     ],
+     "file": "sample.spec.mjs",
+     "line": 15,
+     "column": 1
+    },
+    {
+     "title": "refuses",
+     "ok": true,
+     "tags": [],
+     "tests": [
+      {
+       "timeout": 120000,
+       "annotations": [
+        {
+         "type": "refused-hosts",
+         "description": "fonts.googleapis.com"
+        }
+       ],
+       "expectedStatus": "passed",
+       "projectId": "",
+       "projectName": "",
+       "results": [
+        {
+         "status": "passed",
+         "duration": 53,
+         "errors": [],
+         "annotations": [
+          {
+           "type": "refused-hosts",
+           "description": "fonts.googleapis.com"
+          },
+          {
+           "type": "stubbed-urls",
+           "description": "https://apis.google.com/js/api.js https://accounts.google.com/gsi/client"
+          }
+         ]
+        }
+       ],
+       "status": "expected"
+      }
+     ],
+     "file": "sample.spec.mjs",
+     "line": 16,
+     "column": 1
+    }
+   ],
+   "suites": [
+    {
+     "title": "outer",
+     "file": "sample.spec.mjs",
+     "line": 5,
+     "column": 6,
+     "specs": [],
+     "suites": [
+      {
+       "title": "inner",
+       "file": "sample.spec.mjs",
+       "line": 6,
+       "column": 8,
+       "specs": [
+        {
+         "title": "fails",
+         "ok": false,
+         "tags": [],
+         "tests": [
+          {
+           "timeout": 120000,
+           "annotations": [],
+           "expectedStatus": "passed",
+           "projectId": "",
+           "projectName": "",
+           "results": [
+            {
+             "status": "failed",
+             "duration": 3,
+             "error": {
+              "message": "Error: one is two\n\nexpect(received).toBe(expected) // Object.is equality\n\nExpected: 2\nReceived: 1"
+             },
+             "errors": [
+              {
+               "message": "Error: one is two\n\nexpect(received).toBe(expected) // Object.is equality\n\nExpected: 2\nReceived: 1\n\n   5 | test.describe('outer', () => {\n   6 |   test.describe('inner', () => {\n>  7 |     test('fails', async () => { expect(1, 'one is two').toBe(2); });\n     |                                                         ^\n   8 |   });\n   9 | });\n  10 | test.fail('expected failure', async () => { throw new Error('known'); });\n    at /rig/specs/sample.spec.mjs:7:57"
+              }
+             ],
+             "annotations": []
+            }
+           ],
+           "status": "unexpected"
+          }
+         ],
+         "file": "sample.spec.mjs",
+         "line": 7,
+         "column": 5
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "title": "pending",
+     "file": "sample.spec.mjs",
+     "line": 11,
+     "column": 6,
+     "specs": [
+      {
+       "title": "skips with two caps",
+       "ok": true,
+       "tags": [],
+       "tests": [
+        {
+         "timeout": 120000,
+         "annotations": [
+          {
+           "type": "pending-reader-cap",
+           "description": "history"
+          },
+          {
+           "type": "pending-reader-cap",
+           "description": "dedup"
+          },
+          {
+           "type": "skip",
+           "description": "pending reader capability: history, dedup"
+          }
+         ],
+         "expectedStatus": "skipped",
+         "projectId": "",
+         "projectName": "",
+         "results": [
+          {
+           "status": "skipped",
+           "duration": 77,
+           "errors": [],
+           "annotations": [
+            {
+             "type": "pending-reader-cap",
+             "description": "history"
+            },
+            {
+             "type": "pending-reader-cap",
+             "description": "dedup"
+            },
+            {
+             "type": "skip",
+             "description": "pending reader capability: history, dedup"
+            }
+           ]
+          }
+         ],
+         "status": "skipped"
+        }
+       ],
+       "file": "sample.spec.mjs",
+       "line": 13,
+       "column": 3
+      }
+     ]
+    }
+   ]
+  }
+ ],
+ "errors": [],
+ "stats": {
+  "duration": 835.0,
+  "expected": 3,
+  "skipped": 2,
+  "unexpected": 1,
+  "flaky": 0
+ }
+}

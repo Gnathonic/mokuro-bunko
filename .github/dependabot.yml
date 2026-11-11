@@ -45,8 +45,10 @@ updates:
     cooldown:
       default-days: 7
     ignore:
-      # The msrv job pins this action's ref to the workspace rust-version
-      # (the ref is the toolchain), so it moves with Cargo.toml, not by bot.
+      # Pinned to a commit of its master branch; the toolchain is the step's
+      # `toolchain` input (`stable`, or the workspace rust-version in the msrv
+      # job, which moves with Cargo.toml). The action has no releases to follow,
+      # so the pin is moved by hand.
       - dependency-name: dtolnay/rust-toolchain
     groups:
       actions:

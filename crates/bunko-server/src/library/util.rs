@@ -153,7 +153,7 @@ pub fn resolve(path: &Path) -> Option<PathBuf> {
     let mut existing = lexical.clone();
     let mut rest: Vec<std::ffi::OsString> = Vec::new();
     loop {
-        if let Ok(real) = std::fs::canonicalize(&existing) {
+        if let Ok(real) = bunko_store::fs::canonicalize(&existing) {
             let mut out = real;
             for part in rest.iter().rev() {
                 out.push(part);
@@ -179,6 +179,7 @@ pub fn is_within(path: &Path, base: &Path) -> bool {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // fixtures are written with std::fs
 mod tests {
     use super::*;
 

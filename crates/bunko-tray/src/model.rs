@@ -1,7 +1,7 @@
 //! What the menu and the icon show, computed from what the tray knows (GUI.md §5).
 //! Pure: the UI layer only copies these strings and flags into native menu items.
 
-use crate::status::Status;
+use crate::status::{Status, Storage};
 use crate::trayconf::role_label;
 use chrono::{DateTime, Local, NaiveDate};
 
@@ -60,7 +60,127 @@ pub struct MenuModel {
     /// Nothing runs and the tray runs nothing: "Set up…" (the chooser).
     pub show_setup: bool,
     pub library_url: Option<String>,
+    /// The cloud library needs a new sign-in: "Sign in again…" opens the admin
+    /// Storage panel (0.8).
+    pub sign_in_url: Option<String>,
     pub quit_text: String,
+}
+
+/// How long ago a unix time was: "just now", "1 min ago", "3 h ago".
+fn ago(unix: f64, now: DateTime<Local>) -> String {
+    let s = (now.timestamp() as f64 - unix).max(0.0) as i64;
+    match s {
+        0..60 => "just now".into(),
+        60..3600 => format!("{} min ago", s / 60),
+        3600..86400 => format!("{} h ago", s / 3600),
+        _ => format!("{} days ago", s / 86400),
+    }
+}
+
+/// The one library line of a cloud library (0.8 §11): "Google Drive · synced 1 min
+/// ago", "Syncing 412/1000", "Paused: MEGA transfer quota", "Needs sign-in", or the
+/// sign-in code to enter. `None` for a library on this disk.
+pub fn storage_line(st: &Storage, now: DateTime<Local>) -> Option<String> {
+    if !st.is_cloud() {
+        return None;
+    }
+    let name = st.name();
+    if let Some((code, url)) = st.live_code() {
+        let url = url
+            .trim_start_matches("https://")
+            .trim_start_matches("http://");
+        return Some(format!("Sign in to {name}: enter {code} at {url}"));
+    }
+    let h = st.health.clone().unwrap_or_default();
+    let n = |v: Option<f64>| v.map(|x| x.max(0.0) as u64).unwrap_or(0);
+    Some(match h.state.as_str() {
+        "online" => match st.synced_at {
+            Some(t) => format!("{name} · synced {}", ago(t, now)),
+            None => format!("{name} · in sync"),
+        },
+        "syncing" => match n(h.total) {
+            0 if n(h.done) == 0 => format!("{name} · connecting…"),
+            0 => format!("Syncing {} files…", n(h.done)),
+            total => format!("Syncing {}/{total}", n(h.done)),
+        },
+        "offline" => format!("{name} · offline, retrying"),
+        "degraded" => match h.retry_at {
+            Some(t) => {
+                let until = DateTime::from_timestamp(t as i64, 0)
+                    .map(|d| d.with_timezone(&Local).format("%H:%M").to_string())
+                    .unwrap_or_default();
+                format!("Paused: {name} asked to slow down, until {until}")
+            }
+            None => format!("Paused: {name} asked to slow down"),
+        },
+        "blocked" => match h.reason.as_deref() {
+            Some("StorageFull") => format!("Paused: {name} storage is full"),
+            Some("DailyLimit") => format!("Paused: {name} daily limit"),
+            _ => format!("Paused: {name} transfer quota"),
+        },
+        "needs-reauth" => "Needs sign-in".into(),
+        "lease-held" => format!(
+            "{name} · standby ({} manages it)",
+            h.by.as_deref().unwrap_or("another Bunko")
+        ),
+        "suspect" => format!("{name} · holding removals: check Storage"),
+        other => format!("{name} · {other}"),
+    })
+}
+
+/// "Action needed" notifications for a cloud library, fired on state transitions only
+/// (0.8 §11): a sign-in needed, the storage full, another Bunko holding the library.
+#[derive(Debug, Default)]
+pub struct StorageNotices {
+    last: std::collections::HashMap<String, String>,
+}
+
+impl StorageNotices {
+    /// What to notify (title, body) for this status, if its storage state just became
+    /// one that needs the owner.
+    pub fn observe(&mut self, role: &str, s: &Status) -> Option<(String, String)> {
+        let st = s
+            .library
+            .as_ref()?
+            .storage
+            .as_ref()
+            .filter(|st| st.is_cloud())?;
+        let state = match st.state() {
+            "blocked" => format!(
+                "blocked:{}",
+                st.health
+                    .as_ref()
+                    .and_then(|h| h.reason.clone())
+                    .unwrap_or_default()
+            ),
+            other => other.to_string(),
+        };
+        let prev = self.last.insert(role.to_string(), state.clone());
+        if prev.as_deref() == Some(state.as_str()) {
+            return None;
+        }
+        let name = st.name();
+        let body = match state.as_str() {
+            "needs-reauth" if st.connected == Some(false) => format!(
+                "The {name} library is not connected. Open the admin panel (Storage) to connect it."
+            ),
+            "needs-reauth" => format!(
+                "Sign in to {name} again: open the admin panel (Storage), or choose \"Sign in again…\" in the tray menu."
+            ),
+            "blocked:StorageFull" => {
+                format!("The {name} storage is full: OCR results wait until there is room.")
+            }
+            "lease-held" => format!(
+                "Another Bunko ({}) manages this library; this one waits as a standby.",
+                st.health
+                    .as_ref()
+                    .and_then(|h| h.by.clone())
+                    .unwrap_or_else(|| "?".into())
+            ),
+            _ => return None,
+        };
+        Some((crate::autoupdate::Alarm::TITLE.to_string(), body))
+    }
 }
 
 fn n(v: Option<f64>) -> String {
@@ -279,6 +399,7 @@ pub fn build(inp: &Inputs) -> MenuModel {
     let mut pausable_not_fully_paused = false; // pausing counts: "now" still helps
     let mut library_url = None;
     let mut admin_url = None;
+    let mut sign_in_url = None;
     let mut processor_up = false;
     let multi = inp.instances.len() + inp.supervised.len() > 1;
 
@@ -368,8 +489,33 @@ pub fn build(inp: &Inputs) -> MenuModel {
                         pausable_not_fully_paused = true;
                     }
                 }
+                // A cloud library (0.8): its line, a sign-in to redo, and with no
+                // readers "Open library" is the admin Storage panel.
+                let storage = s.library.as_ref().and_then(|l| l.storage.as_ref());
+                if inst.role == "server"
+                    && let Some(st) = storage.filter(|st| st.is_cloud())
+                {
+                    if let Some(l) = storage_line(st, inp.now) {
+                        status_lines.push(if multi { format!("{label}: {l}") } else { l });
+                    }
+                    if st.problems.iter().any(|p| p.severity == "fail") {
+                        attention = true;
+                    }
+                    if st.needs_sign_in() && sign_in_url.is_none() {
+                        sign_in_url = s
+                            .library_url()
+                            .map(|u| format!("{}/_admin#storage", u.trim_end_matches('/')));
+                    }
+                }
                 if library_url.is_none() {
-                    library_url = s.library_url().map(str::to_string);
+                    let no_readers = storage.is_some_and(|st| st.serve_readers == Some(false));
+                    library_url = s.library_url().map(|u| {
+                        if no_readers {
+                            format!("{}/_admin#storage", u.trim_end_matches('/'))
+                        } else {
+                            u.to_string()
+                        }
+                    });
                 }
                 stats_lines.extend(stats_for(s, multi.then_some(label)));
             }
@@ -452,6 +598,7 @@ pub fn build(inp: &Inputs) -> MenuModel {
         admin_url,
         show_setup: inp.instances.iter().all(|i| i.role == "gui") && inp.supervised.is_empty(),
         library_url,
+        sign_in_url,
         quit_text,
     }
 }
@@ -910,5 +1057,111 @@ mod tests {
         assert_eq!(group(999), "999");
         assert_eq!(group(1000), "1,000");
         assert_eq!(group(1234567), "1,234,567");
+    }
+
+    fn cloud(storage: &str) -> Status {
+        status(&format!(
+            r#"{{"role":"server","state":"idle","library":{{"url":"http://localhost:8080","connected":true,"storage":{storage}}},"urls":{{"library":"http://localhost:8080"}}}}"#
+        ))
+    }
+
+    /// The one library line of a cloud library, and the menu that goes with it.
+    #[test]
+    fn a_cloud_library_has_its_line() {
+        let synced = now().timestamp() as f64 - 75.0;
+        let m = model(&[inst(
+            cloud(&format!(
+                r#"{{"backend":"gdrive","connected":true,"serve_readers":false,"health":{{"state":"online"}},"synced_at":{synced}}}"#
+            )),
+            true,
+        )]);
+        assert!(
+            m.status_lines
+                .contains(&"Google Drive · synced 1 min ago".to_string()),
+            "{:?}",
+            m.status_lines
+        );
+        assert_eq!(
+            m.library_url.as_deref(),
+            Some("http://localhost:8080/_admin#storage")
+        );
+        assert!(m.sign_in_url.is_none());
+        assert_eq!(m.icon, IconState::Idle);
+
+        let line = |storage: &str| {
+            let m = model(&[inst(cloud(storage), true)]);
+            m.status_lines.last().cloned().unwrap()
+        };
+        assert_eq!(
+            line(r#"{"backend":"gdrive","health":{"state":"syncing","done":412,"total":1000}}"#),
+            "Syncing 412/1000"
+        );
+        assert_eq!(
+            line(r#"{"backend":"mega","health":{"state":"blocked","reason":"TransferQuota"}}"#),
+            "Paused: MEGA transfer quota"
+        );
+        assert_eq!(
+            line(r#"{"backend":"onedrive","health":{"state":"lease-held","by":"nas"}}"#),
+            "OneDrive · standby (nas manages it)"
+        );
+        // A live device code is the line, and readers served keep "Open library".
+        let m = model(&[inst(
+            cloud(
+                r#"{"backend":"gdrive","serve_readers":true,"health":{"state":"needs-reauth"},"connect":{"state":"code","user_code":"ABCD-EFGH","verification_url":"https://www.google.com/device"}}"#,
+            ),
+            true,
+        )]);
+        assert!(
+            m.status_lines.contains(
+                &"Sign in to Google Drive: enter ABCD-EFGH at www.google.com/device".to_string()
+            ),
+            "{:?}",
+            m.status_lines
+        );
+        assert_eq!(m.library_url.as_deref(), Some("http://localhost:8080"));
+        assert!(m.sign_in_url.is_none(), "a sign-in is under way");
+        // Needs sign-in: the line, attention, and "Sign in again…".
+        let m = model(&[inst(
+            cloud(
+                r#"{"backend":"gdrive","connected":true,"health":{"state":"needs-reauth"},"problems":[{"severity":"fail","text":"Sign in to Google Drive again","kind":"storage-auth"}]}"#,
+            ),
+            true,
+        )]);
+        assert!(m.status_lines.contains(&"Needs sign-in".to_string()));
+        assert_eq!(m.icon, IconState::Attention);
+        assert_eq!(
+            m.sign_in_url.as_deref(),
+            Some("http://localhost:8080/_admin#storage")
+        );
+        // A library on this disk has no such line.
+        let m = model(&[inst(
+            cloud(r#"{"backend":"local","health":{"state":"online"}}"#),
+            true,
+        )]);
+        assert_eq!(m.status_lines.len(), 1, "{:?}", m.status_lines);
+    }
+
+    /// Notifications fire on transitions only.
+    #[test]
+    fn storage_notices_fire_on_transitions() {
+        let mut n = StorageNotices::default();
+        let online = cloud(r#"{"backend":"gdrive","connected":true,"health":{"state":"online"}}"#);
+        let reauth =
+            cloud(r#"{"backend":"gdrive","connected":true,"health":{"state":"needs-reauth"}}"#);
+        assert!(n.observe("server", &online).is_none());
+        let (title, body) = n.observe("server", &reauth).unwrap();
+        assert_eq!(title, "Mokuro Bunko needs you");
+        assert!(body.contains("Sign in to Google Drive again"), "{body}");
+        assert!(
+            n.observe("server", &reauth).is_none(),
+            "not again while it lasts"
+        );
+        assert!(n.observe("server", &online).is_none());
+        assert!(n.observe("server", &reauth).is_some(), "a new transition");
+        let full =
+            cloud(r#"{"backend":"onedrive","health":{"state":"blocked","reason":"StorageFull"}}"#);
+        assert!(n.observe("server", &full).unwrap().1.contains("full"));
+        let local = cloud(r#"{"backend":"local","health":{"state":"online"}}"#);
+        assert!(n.observe("other", &local).is_none());
     }
 }

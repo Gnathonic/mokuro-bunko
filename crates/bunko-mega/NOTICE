@@ -1,0 +1,23 @@
+bunko-mega is derived from mega-rs 0.8.0 (https://github.com/Hirevo/mega-rs,
+crates.io `mega` 0.8.0, git b08711fe583893e310b6e24c69a83e880c8af94e),
+Copyright 2023 Nicolas Polomack, licensed MIT OR Apache-2.0 (LICENSE-MIT,
+LICENSE-APACHE in this directory). bunko-mega is distributed under the same terms.
+
+Modified for mokuro-bunko:
+- Kept, with panics turned into errors: the protocol types (commands, sc packets,
+  error codes), the key derivation (v1 prepare-key, v2 PBKDF2), login and the
+  session blob format, node-key and attribute decryption, the fingerprint and
+  sparse checksum, the condensed MAC, the MPI/RSA helpers.
+- Replaced: the HTTP layer (now reqwest 0.12 with rustls, request pacing, MEGA's
+  `X-Hashcash` challenge, server-busy handling), the whole-tree `Nodes` model
+  (now a streamed fetch spooled to a temporary file), download (now ranged, with
+  AES-128-CTR offset decryption and status/byte-count checks), upload (now
+  chunked and resumable from a serialisable state), and event polling (now a
+  typed `sc` feed with a persisted `sn` and a resync signal).
+- Removed: public and password-protected links, thumbnails and previews, share
+  keys, session listing.
+
+The hashcash solver is a port of `generateHashcashToken` from megajs
+(https://github.com/qgustavor/mega, lib/crypto/index.mjs), Copyright (c) 2023
+Gustavo Rodrigues, MIT (LICENSE-MEGAJS). The test vectors marked "megajs" come from that
+project's test suite.

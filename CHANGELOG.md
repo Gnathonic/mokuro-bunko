@@ -2,19 +2,653 @@
 
 ## [Unreleased]
 
-### Fixed
-- **Uploads with a stale Unicode name field are accepted.** Some zip tools store a
-  second, UTF-8 copy of each member's name (the Info-ZIP Unicode Path field). When that
-  copy no longer matched the name, upload verification refused the whole archive as "not
-  a readable zip", although the library reads it. A copy that does not match is now
-  ignored, as the library's own reader does.
+### Breaking
+- **Library names are case-insensitive and case-preserving on every host, with no
+  probing.** Linux (case-sensitive or casefold), macOS, Windows, SMB mounts and every
+  cloud store behave the same: a name that differs only in case from an existing
+  entry addresses that entry. Two names are one when any of those hosts would make
+  them one: full Unicode case folding and canonical normalization, so `Straße` and
+  `STRASSE`, `ſ` and `s`, `ς` and `σ`, `ı` and `i`, and a decomposed and a composed
+  `é` are one name too, and the Unicode default-ignorable characters do not count
+  (zero width space and joiners, direction marks, variation selectors, the soft
+  hyphen, the Hangul fillers: Linux casefold drops them all), so `Vol 1` with one of
+  them in it is `Vol 1`. Whether a name exists, and which entry it addresses, is
+  decided from folder listings, never by opening the name and seeing what the host
+  answers. Bunko makes no second spelling of a name: a PUT, or a COPY or MOVE
+  destination, whose folder lists the name only in another spelling (one a concurrent
+  request made after this one was resolved, or one of the caller's own corrections
+  listed beside it) answers 409 `case-variant` (sent again, it reaches that entry), and
+  an MKCOL of such a name answers 405, on every host. Where a case-sensitive disk
+  already holds two spellings of one name (made outside Bunko or before 0.5.3), every
+  request, the exact spelling of the other included, reads one of them: the
+  byte-smallest locally, the spelling a cloud store's case merge keeps there. The
+  others are hidden, and so are the files of a hidden archive: the sidecars, layers,
+  cover, `.nocover` and account corrections its exact stem names (`v.mokuro`,
+  `v.fast.mokuro`, `v.webp`, `v.edit.mokuro` for a hidden `v.cbz`); a read of one
+  answers 404. Each such set is **frozen** until it is merged (by hand, or by a cloud
+  store's case merge): every member, the one in use included, every file sidecar names
+  rule v1 gives or would give to an archive of the set (or to an archive whose own
+  files are such a set: `Vol.cbz` beside `VOL.mokuro` and `vol.mokuro`), and everything
+  inside a member folder. A PUT, DELETE, MKCOL, COPY, MOVE (from or onto), PROPPATCH or
+  LOCK of any of them answers 409 naming the set, new names included (`v.mokuro.gz`,
+  `V.hayai.mokuro`, an account's `V.edit.mokuro`, and a new volume whose own files would
+  take one of the set's: `V.edit.cbz` beside a held `V.edit.mokuro`), however the path
+  spells it (`S/./V.mokuro` and `%2E` segments too), and so does a DELETE, COPY or MOVE
+  of a folder holding a set, or onto one (a MOVE of such a folder no longer takes it
+  along). Bunko itself does nothing there either: no OCR is owed or installed, no
+  upgrade, no cover or `.nocover`, no orphan, kept-layer or corrupt-sidecar sweep, no
+  correction adoption, no `series.json`, and no upload, OCR or identity record is
+  re-keyed or dropped. Reads keep serving the one in use. `doctor` and the startup log
+  name each set, with the files it holds, and the merge (MIGRATING-0.7). Sidecar names
+  rule v1, shared with Mokuro Reader, is unchanged: a sidecar belongs to the archive
+  whose stem it spells up to NFC and lowercase, and a layer id is matched exactly. A
+  file that is one name with a volume's OCR, cover or layer file only by the wider
+  fold (`STRASSE.mokuro` beside `Straße.cbz`) or only by the id's case
+  (`Vol.FAST.mokuro`) is not that volume's, and Bunko writes none beside it either (it
+  would be a second spelling): that volume owes no such OCR or cover. A folder spelled
+  like a volume's OCR file or cover (`v.MOKURO/` beside `V.cbz`) takes that name the
+  same way. Whether a volume has a cover or a `.nocover` marker, and the cover size in
+  `series.json`, come only from a file its folder lists for it.
+- **The reader's per-user names are reserved in any spelling.** `History/`,
+  `Goals.json`, `Volume-Data.json` and the like are the caller's own `history/`,
+  `goals.json` and `volume-data.json`, never library paths. A series folder spelled
+  like one is hidden until it is renamed (`doctor` names it): WebDAV never shows it,
+  and the catalog neither lists it nor serves its page, covers or manifest (404). In
+  a cloud library the progress user's own entries are the canonical `history/`,
+  `goals.json`, ... in the cloud folder; while that folder holds one only in another
+  spelling (a `History/` from 0.7), that entry is the name, and the progress user's
+  writes to it are refused (409) until it is renamed, never written beside it. Under
+  `users/<u>/` a `Goals.json` or `History/` made by hand is the account's own
+  `goals.json` or `history/`, read and written in its spelling, on every host, while it
+  is the only spelling there; beside the `goals.json` or `history/` Bunko wrote it is a
+  stray, never read or written. Nothing
+  Bunko does on its own touches a series spelled like a per-user name (no OCR, covers,
+  sweeps or correction adoption).
+- **No `thumbnails/` folder in the library.** Every start made an empty
+  `library/thumbnails/` (0.5.2's cover cache; covers have long lived beside their
+  archives). 0.8 makes none. The first 0.8 start removes the empty one an earlier
+  release left (once: the storage folder then holds `.legacy-thumbnails-checked`);
+  one that holds anything, or sits beside another spelling of it, stays as an
+  ordinary folder. After that `thumbnails` is no
+  special name, in any spelling, on any store: a series `Thumbnails/` is a series like
+  any other, where before a request for it reached Bunko's own folder on a local disk,
+  and an empty `thumbnails/` series made later stays across restarts, on a local
+  library as on a cloud one.
+- **Series have owners, and an uploader controls only what is its own.** The account
+  that creates a series folder owns it. An `uploader` account can no longer add files
+  or folders to a series another account owns, in any spelling of the folder that
+  reaches it (`STRASSE/` for an owned `Straße/`); it adds new volumes to a series nobody
+  owns, as before. It can no longer add or replace a cover, an OCR file, a layer file
+  or an archive named after a volume it did not upload, unless it owns the series. A
+  file is named after a volume by sidecar names rule v1 and by the wider filename fold
+  alike (`STRASSE.webp` and `Vol1.mokuro` with a zero width space in it are named
+  after `Straße.cbz` and `Vol1.cbz`), and an uploader must control every volume either
+  names. The series owner may add, replace and delete any file in the series, whoever
+  added its volume, and may delete the series folder, but for a case-variant group
+  frozen there (409 for everyone) and the accounts' own corrections
+  (`<Volume>.edit.mokuro`), which stay each account's own: a request for one is never
+  sent to a file that is only one name with it by the wider fold. No uploader adds an archive named like a volume's correction or curated
+  layer (`V.edit.cbz`, `V.curated.cbz` beside `V.cbz`), that volume's own uploader
+  included. Editors and admins are not limited. This closes a way for an uploader to
+  take over another account's volume with an archive named after it (`V.curated.cbz`
+  beside `V.cbz`, or `Title.cbz` beside `Title.v01.cbz`).
+- **`series.json` updates need the series' owner.** An uploader may submit them only
+  for a series it owns; being the only uploader of every volume in it is no longer
+  enough. A `series.json` update for a series folder a case-variant group freezes (a
+  member folder, or a `series.json` listed in two spellings) answers 409, as WebDAV
+  writes there do.
+- **`series.json` and `catalog.json` are recognised in every spelling the filename
+  fold joins**, not only in any ASCII case: `ſeries.json`, `series` + a zero width
+  space + `.json`, `CATALOG.json` with a variation selector are those files on every
+  host, so a PUT of one is a metadata update (or refused as compiled) and never makes
+  a raw file the compiler then reads as the series' facts.
+- **No name the filename fold ties to a volume's files without rule v1 doing so is
+  written.** Every host makes `STRASSE.mokuro` one name with `Straße.mokuro`, the OCR
+  file of a listed `Straße.cbz` (likewise `ı.webp` beside `i.cbz`, a non-final `σ`
+  beside a final `Σ`, a name with a default-ignorable character in it, a layer id in
+  another case: `V.EDIT.mokuro`), but sidecar names rule v1 does not give it to that
+  volume. A PUT, MKCOL, PROPPATCH or LOCK of such a name, or a COPY or MOVE onto it,
+  answers 409 (`ambiguous-name` in a PUT's verdict) for every account; so does a name
+  only the fold gives a `.cbz`, `.mokuro`, `.mokuro.gz`, `.webp` or `.nocover` ending
+  (`V.mo` + a Kelvin sign + `uro`). Reads, DELETE and a MOVE away still work on one
+  already there, and so does the repair: a MOVE that only respells it as the name the
+  volume's file has (`STRASSE.mokuro` to `Straße.mokuro`, `Vol1.webp` with a zero width
+  space to `Vol1.webp`, `V.Fast.mokuro` to `V.fast.mokuro`), by an account that may
+  MOVE, on every host (a case-variant group still freezes it). An archive is never
+  refused for such a name already listed beside it
+  (made before the volume, by hand, or by 0.7): a new or replaced `Straße.cbz` beside a
+  `STRASSE.mokuro`, or `V.cbz` beside a `V.EDIT.mokuro`, is written as before. The
+  stray then counts as that volume's for who may write or delete it (an account that
+  does not control the volume, its maker included, no longer may), Bunko writes no file for the volume in
+  its place, and on a local library `doctor` names it with the volume ("Ambiguous name").
+- **No name the filename fold makes one with a correction or the curated layer is
+  written, its volume listed or not.** `V.ed` + a zero width space + `it.mokuro`,
+  `V.edıt.mokuro` (a dotless i), `V.EDIT.mokuro`, `V.Edit-2.mokuro`, `V.Curated.mokuro`
+  are one name with `V.edit.mokuro` or `V.curated.mokuro` on every host, but sidecar
+  names rule v1 (layer ids exact) reads no such layer in them: such a file could only
+  ever stand in for an account's own correction or the shared layer. A PUT, MKCOL,
+  PROPPATCH or LOCK of one, or a COPY or MOVE onto one, answers 409 (`ambiguous-name`)
+  for every account, before the volume exists too (where before it was written, and
+  then, once the volume came, every account's request for its own `V.edit.mokuro` read
+  and wrote that file: readers got its maker's bytes and their saves were refused). A
+  dotted volume's own primary (`V.EDIT.mokuro` beside `V.EDIT.cbz`, rule 4) is not such
+  a name. Nor is an archive written whose OCR file could only be one, `V.cbz` listed or
+  not (`V.ed` + a zero width space + `it.cbz`, `V.edıt.cbz`, `V.cura` + a zero width
+  space + `ted.cbz`; nor that OCR file beside one made by hand); `V.EDIT.cbz` is
+  governed as before. One already there (by hand, or from an earlier release) never
+  stands in for the layer: a request for `V.edit.mokuro` is each account's own
+  correction, written to its own copy and never refused for what the library lists, a
+  request for `V.curated.mokuro` never reads it, and a curated publish beside it (or,
+  on a cloud library, the progress user's own correction, which is the cloud folder's
+  file) answers 409 naming it; on a local library `doctor` names it ("Ambiguous
+  name"). The other ids reserved
+  for OCR generations (`original`, `gcv`, `updated-ocr`, `tr-*`) are ordinary layer
+  files to WebDAV, as before.
+- **One volume name per filename fold, first come, first served.** An archive's
+  volume name is its stem with every trailing `.<id>` cut off whose id the filename
+  fold reads as `edit`, `edit-<n>`, `curated` or `curated-<n>` (`STRASSE.curated.cbz`
+  is a volume `STRASSE`'s, `X.ed` + a zero width space + `it.cbz` is `X`'s, `Vol 1.5.cbz`
+  and `V.fast.cbz` are their own). Two archives in a folder are one volume name, as on
+  a case-insensitive disk, when their volume names fold alike but are not spelled
+  alike byte for byte (`STRASSE.curated.cbz` and `Straße.cbz`, `Volſ.curated.cbz` and
+  `Vols.cbz`, `ıX.curated.cbz` and `iX.cbz`, `X` + a zero width space + `.edit.cbz` and
+  `X.cbz`, `v.curated.cbz` and `V.cbz`), or when the OCR file of one, `<s>.mokuro`, is
+  one name by the fold with a layer of the other, `<t>.<r>.mokuro`, that rule v1 gives
+  to the other archive and not to the first, the layer named as a client names it,
+  from `<t>` as spelled (`X` + a zero width space + `.cbz` and `X.5.cbz`: layer `5` of
+  the first is the primary of the second on every host; `Q.cura` + a zero width space
+  + `ted.curated.cbz` and `Q.curated.cbz`, `Q.edıt.curated.cbz` and `Q.edit.cbz`: the
+  primary of the first is the curated layer of the second; `ΟΔΟς.gcv.cbz`, with a final
+  sigma, and `ΟΔΟΣ.cbz`: rule v1 lowercases a sigma by its place in the stem, so
+  `ΟΔΟΣ.gcv.mokuro` is the second's layer `gcv`, one name with the first's primary;
+  `V.cura` + a zero width space + `ted.cbz` and `V.cbz`). A personal layer (`edit`,
+  `edit-<n>`) makes no pair: each account's correction is kept in its own copy, never
+  in the library (`V.ed` + a zero width space + `it.cbz` beside `V.cbz` is not one, and
+  Bunko creates no such archive anyway). Where rule v1 itself reads the layer name as
+  the first archive's primary (`V.5.cbz` and `ΟΔΟΣ.gcv.cbz` beside `V.cbz` and
+  `ΟΔΟΣ.cbz`), or reads one volume spelled alike (`V.curated.cbz` beside `V.cbz`,
+  governed by `V`'s uploader as before), and for two spellings of one whole name (a
+  case-variant group), there is no such pair. An upload of an archive that is not
+  listed yet, or a COPY or MOVE onto one (a MOVE inside the folder judged without its
+  own source), answers 409 `ambiguous-name` when it would be one volume name with a
+  listed archive, whichever was there first, for every account the rest of the rules
+  let through, the volume's own uploader and editors included (it got 403 before for
+  a `STRASSE.curated.cbz` beside its `Straße.cbz`). This is asked when the request
+  arrives and again from the folder as it is right before the archive lands (a PUT's
+  publish, once its body is read and checked; a COPY's or MOVE's rename), one archive
+  landing per folder at a time: an upload held open while another archive of that
+  volume name lands is refused when it finishes and nothing of it stays, and of two
+  such uploads finishing together only the first to land is published. Before, the
+  later archive was written, and then its own curated, edit and OCR writes were
+  refused, and the earlier archive's uploader could no longer delete or replace it.
+  The first archive stays its uploader's to replace, delete or move as before. A pair
+  already listed (made before this release, or outside Bunko) is read as before; a
+  PUT, MKCOL, PROPPATCH or LOCK of any other name either archive governs by rule v1 or
+  the wider fold (its OCR file, layers, cover, `.nocover`, a curated publish, a name
+  nested under it), or a COPY or MOVE onto one, answers 409 `ambiguous-name` naming the
+  pair, for every account, until one of the two archives is renamed or deleted. Each
+  archive of such a pair is governed by rule v1 alone, so whoever controls it by rule
+  v1 replaces, moves and deletes it (the wider fold no longer hands `X` + a zero width
+  space + `.curated.cbz` up to the `X.cbz` beside it, which locked both accounts out of
+  it). An account's own correction still goes to its own copy (on a cloud library the
+  progress user's, the cloud folder's file, is refused too). On a local library
+  `doctor` names each pair ("Ambiguous volume names").
+- **The OCR queue file and the cloud lease marker are recognised in every spelling the
+  filename fold joins.** A write of `/mokuro-reader/.MOKURO-QUEUE.JSON`,
+  `.mokuro-queue.jſon` or one with a zero width space in it answers 405 for every
+  account, as one of `.mokuro-queue.json` does, and a GET of any of them serves the
+  generated queue document; before, a local library stored an uploader's file under
+  such a name and then served it as the queue to every reader. Any request but a GET,
+  HEAD, OPTIONS, PROPFIND or COPY from it of `.mokuro-bunko.json` in any spelling, and a
+  COPY or MOVE onto it, answers 403 for every account on a local library too, as a
+  cloud store refuses it.
+- **Existing series get owners once, at startup.** A series folder whose volumes were
+  all uploaded by one account, with no archive without a recorded uploader, becomes
+  that account's. Every other folder (volumes from several accounts, archives copied
+  in by hand, empty, and a folder listed at the root beside another spelling of its
+  name, `Kingdom/` beside `kingdom/` or `Straße/` beside `STRASSE/`, whose uploaders
+  are counted together and which is frozen anyway) has no owner and stays shared. Until this is done, an uploader's
+  new files and folders are answered "try again shortly" (503); on a cloud library it
+  is done once the first sync finishes (a library that is not connected holds nothing
+  back and is done at a later start). A database upgraded from 0.7 records schema
+  version 7.
+- **When the server cannot tell who owns a series, it says "try again shortly".** If
+  its database or the library listing fails while it checks a series owner or a
+  volume's uploader, an uploader's request is answered 503 with `Retry-After`, also
+  when that happens just before the file is written, instead of being let through or
+  refused for good.
+- **OCR generations can no longer be named `edit`, `curated`, `edit-<n>` or
+  `curated-<n>`.** Those names are readers' corrections now (see "OCR corrections have
+  their own layer names" below). A config that already names a generation one of them
+  fails to load, with an error naming that row, until it is renamed.
+
+### Added
+- **Sidecars and the queue file name the OCR's parts with versions.** A sidecar Bunko
+  writes now carries `ocr_engine.parts`, e.g. `[{"role": "recognizer", "name":
+  "Hayai Nova", "version": "2.5"}, {"role": "detector", "name": "PP-OCR Manga",
+  "version": "0.3"}]`: the recognizer, then the line or block detector, or one part
+  when the engine is its own detector. Each job in `.mokuro-queue.json` carries the same
+  list. Readers label OCR layers and pending jobs by it ("Hayai Nova 2.5 · PP-OCR Manga
+  0.3") instead of the file's mokuro version or a generic name.
+- **Two more OCR engines: `charspot-small` and `nar-small`.**
+  [manga-ocr-charspot-small](https://huggingface.co/muscgab/manga-ocr-charspot-small)
+  finds and classifies every character and has no decoder;
+  [manga-ocr-nar-small](https://huggingface.co/muscgab/manga-ocr-nar-small) writes a
+  text in one pass. Both run on ONNX Runtime on the CPU and need no backend pack, and
+  both read a whole text block at once rather than a line: the layout's blocks on a
+  line detector, the detector's own boxes on `animetext-blocks`. Their text stands as
+  read; PP-OCR's read is used only where they read nothing. On a 16-core desktop CPU a
+  12-page sample ran at 2.1 pages a second with `charspot-small` and 1.2 with
+  `nar-small`, where hayai-nova reads 0.4. Japanese only. Their weights are
+  CC BY-NC-SA 4.0 (non-commercial); they are fetched from the author's repository at a
+  pinned revision when a generation first uses them.
+  Measured on 1,000 text boxes of JMangaBench_Read with each model's own package,
+  boxes read exactly: `charspot-small` 93.5%, `nar-small` 92.0%, hayai-nova 89.1%,
+  paddle-manga 84.8%. Through this pipeline, where a detector first has to find the
+  text in each box again, `charspot-small` read 89.4% and `nar-small` 90.6% on
+  `animetext-blocks`, and PP-OCR's own reader 88.8%.
+- **Two more detectors: `ctd-lines` and `animetext-blocks`** (weights GPL-3.0).
+  `ctd-lines` is the line map of
+  [comic-text-detector](https://github.com/dmMaze/comic-text-detector): it boxes
+  dialogue tightly and leaves most sound effects and furigana out, and its lines are
+  read, merged, laid out and ordered exactly like the default detector's.
+  `animetext-blocks` is [AnimeText YOLO12-x](https://huggingface.co/deepghs/AnimeText_yolo),
+  a block detector: it boxes whole pieces of text, for the engines that read blocks
+  (`charspot-small`, `nar-small`); a generation that pairs it with another engine is
+  refused with the reason. Its repository is gated, so its file is fetched from this
+  project's `upstream-models-v1` release. Neither is the `ctd` or `animetext` detector
+  of 0.5: a row that still names one of those keeps reading with `ppocr-manga`.
+- **Model licences are shown, and restricted ones can be built out.** The admin panel
+  shows the licence beside an engine or detector whose weights are not Apache-2.0, and
+  the catalog API carries `license` and `license_class` for each. The models above are
+  opt-in and in the release builds; `xtask dist --permissive-models` (a build without
+  the `gpl-models` and `nc-models` Cargo features) makes a program that neither
+  offers, downloads nor runs them. The code that runs them is this project's own.
+- **Server analytics for the admin: what is downloaded and read, by whom, and what
+  it costs.** A new counting layer sees every request, WebDAV (any method: PROPFIND,
+  GET, PUT, MOVE, LOCK, ...) as much as the web pages and JSON APIs, and keeps, per
+  hour and per day, the requests and response and request body bytes by protocol,
+  method, category (volumes, OCR sidecars, covers, navigation and metadata, progress
+  and profile sync, uploads, ...) and status, latency histograms, errors, failed
+  sign-ins per IP and username (WebDAV Basic auth and the login page alike), the
+  slowest requests, 304 and gzip savings, aborted and resumed downloads, and who
+  downloaded which volume. Accounts are counted by name, OCR processors as bandwidth
+  only, anonymous visitors by a salted pseudonymous id (per IPv4 address or IPv6
+  `/64`, its salt replaced every IP retention period; past 10,000 a day the rest count
+  together); raw client IPs are kept only `analytics.retention.ip_days` (30). A
+  download counts once most of the file was sent, and `//` or `/./` in a path never
+  splits one. It costs no I/O on the request path: counters
+  live in memory and are written every `analytics.flush_seconds` (60) to their own
+  `analytics.sqlite` beside `mokuro.db`, rolled into daily totals hourly and pruned by
+  retention. Memory is bounded even when every request comes from a new address: what
+  a window keeps per client (its address, anonymous id, origin, a refused username cut
+  to 64 characters) shares a 10 MiB budget, origins stop at 500 a day (the rest count
+  as `(other)`), and what does not fit is counted as dropped. Every view is served
+  under `/_admin/api/analytics/` (`overview`, `traffic`, `principals`, `series`,
+  `funnel`, `reading`, `users`, `library`, `health`, `host`, `crawlers`, `clients`,
+  `geo`), and the new `analytics:` config section is editable at
+  `PUT /_admin/api/settings/analytics` and through `MOKURO_ANALYTICS_*`.
+  `analytics.enabled: false` passes requests through untouched and writes nothing
+  (no library scan, no geography download either). The main database gains an index
+  on `volume_identities(volume_uuid)`.
+- **A "Popular" order in the public catalog.** The catalog's sort menu ranks series by
+  whole downloads over the last 30 days (accounts and anonymous visitors, a repeat on
+  another day counting again, OCR processors never). `/catalog/api/library` gives each
+  ranked series a `popular_rank` (1 = the most downloaded) and nothing more: no count
+  leaves the server. The ranking is kept in memory and refreshed in the background, so
+  the catalog never reads the analytics database. With analytics off there are no
+  ranks and the option is not offered.
+- **An Analytics tab in the admin panel.** Overview, Traffic (by category, protocol,
+  method or detail, WebDAV by method, the bytes progress and profile sync and
+  navigation cost), Popular (most downloaded and read series, against the previous
+  period, with each series' completion funnel), Reading, Users, Library, Clients &
+  geography, Health, Server, Crawlers and Settings, over 24 hours to all time. The
+  charts are plain inline SVG with a hover and keyboard readout and a table view
+  under each; it works at phone width. In the bandwidth-by-visitor lists (Users,
+  and the Overview's "Most bandwidth") anonymous visitors are one row, "Anonymous
+  visitors · N visitors", ranked by their summed bytes among the accounts, so many of
+  them never push an account off the list; it opens to each visitor with their IPs
+  (`principals?anon=group|split|only`). Every visitor count, the client mix, crawl
+  detection, geography and the failed sign-ins per IP stay per visitor.
+- **Analytics: reading, active accounts and the completion funnel.** The files Mokuro
+  Reader syncs over WebDAV (any client writing them counts the same) are read back
+  about ten seconds after they are written: `positions.json` for who opened which
+  volume when, the reading history (`history/<device>/*.events`, decoded with the
+  reader's own segment format) for pages and time read, `volume-data.json` for
+  progress, finished volumes and device names. Re-uploads, other devices' merged
+  copies, a volume listed twice in one file and the reader's DELETE-then-PUT never
+  count twice. Reading shows minutes, pages and readers per day and the top readers
+  and volumes; Users the accounts active per day, week and month, and each account's
+  traffic, reading time, finished volumes, devices and apps; the funnel, per volume of
+  a series in library order, who downloaded, started and finished it, and how far
+  reads got (a quarter, half, three quarters).
+- **Analytics: file types, page formats, growth, uploads and dormant series.** A
+  background scan (2 minutes after start, every `analytics.library_scan.interval_hours`,
+  and on **Rescan now**, `POST /_admin/api/analytics/library/rescan`) counts the
+  library's files by kind (archives, OCR sidecars and layers, covers, `series.json`,
+  ...) and extension, the archive types per series and the series without any sidecar,
+  and keeps one growth snapshot a day. It lists folders and reads sizes only, so a
+  cloud library is counted from its store's index without a download. On a library on
+  this disk it also counts the page image formats inside each archive (JPEG, PNG,
+  WebP, AVIF, GIF, JPEG XL) from the zip directory alone, at most 20 archives a second,
+  each read again only when it changes; zip64 archives and self-extractors are read
+  too. Uploads per day per uploader come from the counted WebDAV uploads, and from the
+  main database's upload records for the days before analytics; a series with no
+  download and no read in 90 days is listed as dormant. Case and spelling variants of
+  a series folder are one series.
+- **Analytics: server readings and crawl detection.** The Server view charts the
+  process's memory (RSS and peak), CPU, open connections and requests in flight, per
+  minute for a day and per hour beyond, sampled every 15 s on Linux, Android, Windows
+  and macOS (Docker and musl included; in a container the cgroup memory limit is the
+  host memory shown); a time the server was down is a gap, not a zero. The Crawlers
+  view lists episodes of one IP touching at least `analytics.crawl.min_series` series
+  that are also `min_coverage` of the catalog within `window_hours`, over WebDAV or
+  HTTP: volume downloads (`download`), per-series folder listings and catalog pages
+  (`metadata`), or both (`mixed`), with the principals, client, country, volumes, bytes
+  and requests of each, and how often each IP did it. Mokuro Reader's normal sync (its
+  one depth-infinity listing, the `series.json` files it refreshes, covers, a few
+  downloads) never opens one. Reported only: nothing is blocked or slowed.
+- **Analytics: client mix and rough geography.** Each request is classified by
+  `Origin` and `User-Agent` (hand-rolled, no UA database): the hosted Mokuro Reader
+  (its configured origin), a reader on another origin, Bunko's own pages (its own
+  origin decided as the CSRF check decides it), WebDAV clients (rclone, davfs2, the
+  Windows mini-redirector, Finder, Cyberduck, GNOME Files, Kodi, Nextcloud, WinSCP), API
+  tools (curl, wget, Python, Go, Node.js) and crawler bots, with the browser and OS
+  family; requests, bytes and distinct visitors are broken down by app, client,
+  browser, OS and protocol, the WebDAV clients on their own, with the cross-origin
+  `Origin`s. The opt-in `analytics.geo` downloads DB-IP's free country database
+  (CC BY 4.0) on demand, falls back to last month's while this month's is not out,
+  caps it at 64 MiB, verifies it before it replaces the stored one, refreshes it
+  monthly and on **Refresh database**, and answers lookups in memory (`LAN` for local
+  addresses) for WebDAV and web requests alike. New dependency: `maxminddb` (ISC).
+- **`/login/api/me` says where an account may add files** (`permissions.addFiles`):
+  anywhere (`all`), everywhere but the `closedSeries` other accounts own (`open`, an
+  uploader), or nowhere (`none`). A reader can tell from it that the server enforces
+  series owners. `metadata.ownedSeries` now lists the series the account owns. When
+  the server cannot read who owns what, these lists err towards closed: a series it
+  is unsure of is reported closed and not owned.
+- **`/login/api/me` lists the volumes an uploader may publish corrections for in a
+  shared series** (`permissions.curated.volumes`, with `curated.scope` `owned`): each
+  `{series, volume}` (the series folder, the archive name without `.cbz`) of the
+  volumes it uploaded in series it does not own, so a reader can offer Publish volume
+  by volume there, not only for whole series it owns. A series another account owns
+  is listed only where the volume's curated layer exists already. Bunko still decides
+  each publish.
+- **Set a library up in Google Drive, OneDrive, MEGA or a WebDAV server.** The setup
+  wizard asks where the library lives, then connects it with one button: a browser on
+  the server signs in directly. Anywhere else (Docker, a NAS, a phone), Google Drive
+  gives a code to enter on any device, shown in the wizard, the admin panel, the tray
+  and the log; OneDrive gives its sign-in page to open on any device, then you paste
+  back the address the browser ends on (`http://localhost:…/bunko?code=…`), since personal
+  Microsoft accounts cannot sign in with a code (a code stays available for work or
+  school accounts, and a code refused for a personal account says to use the browser
+  instead). The
+  Check step counts the volumes Bunko can see; on Google Drive it asks which Mokuro
+  Reader you use and offers the other one when few volumes are visible. Readers can
+  keep reading straight from the cloud (the default for a cloud library), or connect to
+  Bunko as before. The admin panel's new **Storage** tab shows the library's health,
+  first sync, uploads, conflicts, lease and quota, and connects, signs in again,
+  changes the Drive pairing or disconnects (waiting for, exporting or discarding what
+  is not uploaded yet; nothing in the cloud is deleted). An export from the admin panel
+  goes to a new folder under Bunko's storage folder (`exports/`), named in the reply;
+  `library disconnect --export DIR` copies it into a new or empty folder of your own.
+  The same from a terminal or
+  `docker exec`: `mokuro-bunko library connect gdrive|onedrive|mega|webdav` and
+  `library disconnect`. `library connect` opens the sign-in page in the browser in a
+  desktop session, and otherwise prints a code (Google Drive) or the sign-in address
+  and asks for the address the browser ends on (OneDrive; `docker exec -it`);
+  `--browser`, `--device` and `--paste` choose instead; `doctor` checks the pairing, the spool and the credentials
+  file. The tray shows one library line ("Google Drive · synced 1 min ago") and
+  "Sign in again…" when needed.
+- **Folders and volumes whose names differ only in case are joined in a cloud
+  library.** Google Drive, MEGA and many WebDAV servers can hold `Kingdom/` beside
+  `kingdom/`; Bunko now moves the younger spelling's volumes into the oldest one by
+  itself, once neither has changed for a while and no OCR runs on them, and puts the
+  emptied folder in the provider's trash (never a permanent delete). A copy that is
+  byte-for-byte the same goes to the trash; covers, layers and OCR files only the
+  younger folder has move in under the older spelling; its `series.json` is merged into
+  the series first. When both spellings hold different OCR for the same archive, the
+  one matching the primary OCR setting becomes the main file and no copy of the other
+  is kept beside it: the younger folder's goes to the provider's trash, and the older
+  folder's is written over in place (a provider that keeps old versions keeps it).
+  Two different archives (or OCR files Bunko cannot choose between)
+  stay where they are, listed under the Storage tab's conflicts with **Keep this copy**
+  / **Keep that copy**; the tab also lists the **Recent merges**. Upload owners, OCR
+  records and volume ids follow every moved volume. A folder Mokuro Reader keeps
+  recreating is left alone after the fourth merge in a day.
+- **positions.json and reading history per account, and `/login/api/me`'s `version`,**
+  came early in 0.7.8 (see there). 0.8 carries them to cloud libraries (next entry) and
+  reserves the per-user names in any spelling (see Breaking).
+- **Per-account files on a cloud library's folder.** The account named as the readers'
+  progress account (Storage tab) now really shares its files with a reader that reads
+  the cloud folder directly: its volume-data, profiles, goals, positions and reading
+  history are the cloud folder's own, as the 0.8 design intended; every other account
+  keeps its own files on this server. A change of that account in the admin panel
+  applies at once. The cloud folder's `.mokuro-bunko.json` lists the per-account files
+  (`per_user_files`), so a reader reading the cloud directly can sync its reading
+  history there too.
+- **`/login/api/me` says where a reader's OCR corrections go.** It lists
+  `per_user_layers: ["edit"]` (each account keeps its own `edit` layer, so a reader
+  may push it) and `permissions.curated.scope`: `all` (editors, inviters, admins),
+  `owned` (an uploader, on the volumes it uploaded and every volume of a series it
+  owns) or `none`, for publishing the shared `curated` layer. A cloud folder's
+  `.mokuro-bunko.json` says `curated: true`.
+- **Internal: an interop rig that runs every party as its own process.**
+  `cargo xtask interop rig cloud --provider google|microsoft|mega|rclone|all` starts a
+  testing build of the server on cloudsim (or on rclone's WebDAV server, a pinned
+  release checked against its sha256) and checks a cold start, the first adoption of a
+  reader's `series.json`, uploads through provider faults, OCR results from the fake
+  processor, the lease handed to a second server, and the hold on a full provider; the
+  results and every party's log go to `target/interop/rig/`. A testing build reads its
+  store's lease and retry timing from `MOKURO_TEST_CLOUD_TUNE` (refused, like the other
+  test variables, by a build without the hooks). cloudsim now stamps writes on the wall
+  clock its `Date` header shows (a lease marker never looked fresh before),
+  `/_sim/mega/account` answers the account's saved session, and `DELETE
+  /_sim/violations` answers the violations it cleared.
+  The browser suites (`dav`, `api`, `bridge`, `direct`, `shared`) build Mokuro Reader
+  with `--mode interop` (from `--reader-dir`, or the commit `interop/reader.ref` pins),
+  serve it, start the parties each suite needs and run its Playwright specs from
+  `interop/e2e/rig/<suite>/`, offline (every request off the machine is refused and
+  fails the spec that made it, and the browser resolves no host but the loopback ones).
+  A spec that needs a reader capability the reader lacks fails, unless
+  `interop/pending-reader-caps.txt` lists it; `--rclone-bin` uses an installed rclone
+  of the pinned release. A spec can restart, stop and start the suite's server through
+  the runner's control port (`RIG_CONTROL_URL`), to meet a lease claim, a resume or a
+  holder gone. cloudsim answers a file's stored bytes (`GET /_sim/content`), keeps a
+  MEGA session per sign-in, and takes the thumbnail attribute megajs puts on an upload.
+  Scenarios: a first connect as every role judges read-only and reads Allow as `/me`
+  says (S7), a cleared spine offset leaves `series.json` without one and is not
+  re-sent (S8), each account's edit layer is its own while the curated layer is
+  published once for all and both follow a volume's rename and delete (S2), and each
+  account's reading history and `positions.json` stay its own, on Bunko's disk or a
+  cloud reader's folder alike, out of the catalog, `series.json` and the queue (S3),
+  renamed volumes and series keep the provenance Bunko sealed (an edited volume its
+  `edited` marker) and are not queued again (S4), and a volume renamed while its OCR
+  runs gets its sidecar under the new name, never a numbered one (S6). Duplicate
+  `mokuro-reader` folders (two at the top, an older one inside another folder that is
+  read but never merged) end in the oldest top-level one: merged by Bunko alone under
+  its lease, its marker following, with no Suspect, also while the reader syncs (S1),
+  and by the reader alone, with no Bunko and with Bunko stopped, which then restarts
+  with no hold (S9). cloudsim's `/_sim/tree` marks a node that went to the trash itself
+  `explicitly_trashed`. processor-fake
+  takes `--page-text` (every page one text block), and a testing build's
+  `/queue/api/status` tells the admin how many library walks have finished (`walks`).
+- **Internal: nightly test builds for Mokuro Reader's CI.** Every push to `main` or
+  `0.8/remote-storage`, and every night, publishes a testing server and cloudsim for
+  Linux x86_64 as the pre-release `nightly` or `nightly-0.8`, replaced each time. They
+  are test builds, never offered as an update.
 
 ### Changed
+- **PP-OCR manga v0.3.** The line detector and the CTC recognizer every engine reads
+  with are now [PP-OCRv6 manga v0.3](https://huggingface.co/Kellenok/PP-OCRv6_manga):
+  cleaner line boundaries, fewer boxes on artwork, and a dictionary that covers all of
+  JIS X 0208 levels 1 and 2 (19,053 characters, 345 more kanji). Its authors measure
+  the end-to-end error rate on manga pages at 5.98% against 6.71% for v0.2. The
+  optional language model that comes with v0.3 is not used: its authors mark it
+  experimental. The files (23 MB) are downloaded once after the update, beside the
+  v0.2 ones.
+- **Every engine's output revision is now 2**, because every engine reads the new
+  detector's lines. With `ocr.upgrade.enabled`, primary OCR written at revision 1 is
+  redone; without it nothing is redone and new volumes simply get the new models. A
+  processor still on an older release is offered no work until it is updated (the
+  library tells it; `auto_update` does it).
+- **An update keeps the installed OCR backend.** This release opens the backend packs
+  of 0.7.4 and later (it builds the same packs), so updating from those (by hand, the
+  automatic update or a new Docker image) downloads no pack; a release whose pack
+  changes still fetches its own. The packs of 0.7.1 to 0.7.3 leak a libtorch model's
+  weights on every OCR session (fixed in 0.7.4), so an update from those fetches the
+  new pack.
+- **OCR corrections have their own layer names.** Edits never touch a volume's main
+  OCR file. `<Volume>.edit.mokuro` (and `edit-2`, `edit-3`, …) are an account's own
+  corrections: any account that can save progress, `registered` included, writes,
+  deletes and renames its own, and only to another correction name (plain `.mokuro`,
+  not `.gz`); they are never listed in the volume manifest or counted as the volume's
+  layers. Each account gets its own copy at the same address, kept under
+  `users/<name>/edits/` (a cloud library's progress user's is the cloud file itself, so
+  a reader reading the cloud directly shares it); nobody sees another's. They follow
+  their volume when it is renamed, moved or merged (in Bunko or in the cloud folder; a
+  name already taken there moves in as the next free `edit-<n>`) and go when it is
+  deleted. A correction
+  or curated upload needs its volume's `.cbz` beside it (409 otherwise) and a JSON body
+  with `pages` and no `ocr_engine` (422), at most 32 MiB. `<Volume>.curated.mokuro` holds corrections shared with everyone: editors,
+  inviters and admins publish it on any volume, an uploader on the volumes it
+  uploaded, a first upload included. `curated-<n>` names are refused (a volume rename
+  still moves them along under the same name); OCR generations can no longer take any
+  of these names (see Breaking). A library on this disk
+  that already holds `<Volume>.edit.mokuro` files gives each, at start, to the account
+  the audit log shows wrote it last; the Storage tab counts the ones with no such
+  account ("N correction files have no owner"), which nobody sees. In a cloud library
+  they are the readers' progress account's, and are counted while none is chosen.
+  Layer names are matched exactly as
+  written: `Vol.EDIT.mokuro` is an ordinary shared file. When a cloud folder's two
+  spellings both have a different `curated` file, the younger one moves in as
+  `curated-2`, as `edit` already did.
+- **`history` is a reserved series name, in any spelling.** `/mokuro-reader/history`
+  is each account's reading history now, so a series folder named `history`, `History`
+  or any other spelling of it in a library on this disk can no longer be reached;
+  `doctor` warns about it (and the server logs it at startup) with the rename to make.
+  A cloud folder's `history/`, in any spelling, is never compiled, counted or
+  case-merged as a series, never OCR'd and never given covers, whatever its files are
+  named, and its changes keep the cached library listing. The server logs a cloud folder's `history/` series with the
+  rename to make once the folder is in sync.
+- **Bunko merges duplicate folders in Google Drive and MEGA libraries, and merges
+  never pause it.** Google Drive and MEGA can hold two `mokuro-reader` folders, or two
+  copies of a series folder, side by side. Bunko now merges them itself, the way
+  Mokuro Reader does, once neither has changed for a while: everything moves into one
+  copy (the oldest; for the `mokuro-reader` folders, one directly in My Drive or the
+  Cloud Drive first), a file found in both keeps its most recently written copy and
+  puts the other in the provider's trash (an edited `.mokuro` too; a `series.json` is
+  merged into the series first),
+  `volume-data.json`, `goals.json` and `positions.json` keep both copies, and each
+  emptied folder goes to the trash (never a permanent delete). The Storage tab lists
+  them under **Recent merges**; `storage.library.dedup: false` turns this off. Its
+  `.mokuro-bunko.json` says `"dedup": true`, so a reader can leave the merging to
+  Bunko. When the reader merges them instead, or both do at once, Bunko no longer stops
+  the library as if it had been wiped: the emptied copy is dropped quietly, whether
+  the merge happens while Bunko runs or while it is stopped, as long as everything it
+  held is still in the other copy. A folder
+  removed with volumes found nowhere else still pauses the library for the admin, as
+  before. Bunko now writes into the same `mokuro-reader` folder the reader does (one
+  directly in My Drive or the Cloud Drive first, then the oldest; a
+  `Backup/mokuro-reader` is still read and never merged), and follows it there when
+  another one becomes that folder; where one file exists twice it shows the most
+  recently written copy, the one either merge keeps. Deleting one copy
+  of such a file through Bunko no longer makes the volume disappear from the
+  catalog while the other copy remains.
+- **Bunko and Mokuro Reader agree on what a `.mokuro` beside a volume is.** One rule
+  now decides it everywhere Bunko looks (deleting a volume, the OCR upgrade, cloud case
+  merges, the cloud queue file, upload ownership, the OCR queue, the catalog's "OCR
+  pending"), the same rule the reader uses, with
+  shared test cases in `interop/contract/sidecar-names.json`: `.mokuro`, `.mokuro.gz`
+  and `.cbz` match in any case (`Vol 1.MOKURO`), a volume's name matches in any case or
+  Unicode form (`vol 1.mokuro` beside `Vol 1.cbz`), only a `.cbz` makes a name a volume,
+  and a layer's id is matched exactly as written (`Vol 1.Upper.mokuro` is no layer),
+  digits-only ids included (`Vol 1.5.mokuro` is layer `5` of `Vol 1` unless
+  `Vol 1.5.cbz` exists). Deleting a volume still never takes a file whose name belongs
+  to another archive, of any extension, and on a disk that can hold `Vol 1.cbz` and
+  `vol 1.cbz` side by side each keeps the files spelled exactly like it; a file spelled
+  like neither (`VOL 1.mokuro`) belongs to neither and is never deleted with one.
+- **A WebDAV library on this computer needs no "Allow http".** A plain `http://` URL
+  whose host is `localhost`, `127.x.x.x` or `[::1]` (a server on the same machine, such
+  as an rclone or Nextcloud container bound to loopback) is accepted without
+  `allow_http` / `--allow-http`, in the wizard, the admin panel, `library connect` and
+  the config file; any other `http://` URL still needs it.
+- **Internal: the library goes through a storage seam.** Every library file access in
+  the server, the WebDAV layer and the metadata compiler now passes through one
+  interface (`bunko-store`), so the library can live somewhere other than the local disk
+  in 0.8. Local libraries behave exactly as before.
+- **Upgrades no longer skip a main OCR file for an unmarked change, and keep no copy of
+  it.** With the generation upgrade on, an outdated `<Volume>.mokuro` in a family listed
+  under `ocr.upgrade.replace` is replaced outright, even if a person or Mokuro Reader
+  1.10.0 changed it without marking it edited (a file marked edited is never replaced:
+  see "an EDITED file is never replaced" below). No copy of the old file is kept: on a
+  cloud library it goes to the provider's trash, or its version history where it keeps
+  one; on a library on this disk it is gone. So corrections Mokuro Reader 1.10.0 saved
+  into a main OCR file are replaced when an admin turns upgrades on. Upgrades stay off
+  by default, and the Mokuro Reader release that pairs with 0.8 moves a device's own
+  1.10.0 corrections into its `edit` layer once. A file whose recipe cannot be read is
+  still never upgraded. Every OCR file Bunko installs now carries a seal,
+  `ocr_engine.seal`, a hash of its pages and its `ocr_engine` block (RFC 8785 canonical
+  JSON, so Mokuro Reader and other tools can check it too; test vectors in
+  `interop/contract/seal/`). Renaming the volume or series, re-saving the file with
+  other formatting, or moving the library to another Bunko keeps the seal; changing any
+  OCR text breaks it. A layer is copied in as the new main file only when its seal
+  proves Bunko wrote it and its own file carries the matching stamp (a stamp alone
+  proves nothing: anyone who can write the file can add one), and layers without a
+  stamp (a reader's edits, any hand-made layer) are never used or deleted. The admin
+  page's list of edited volumes and the "Upgrade anyway" button are gone, as is the
+  `force` option of `POST /api/ocr/upgrade/<volume>`.
+- **OCR files say which revision of their engine made them, and when.** Every file Bunko
+  installs carries `ocr_engine.revision` (an engine's output revision, raised only when
+  its output changes; a file without one, such as every 0.7 file, is revision 1) and
+  `ocr_engine.created`, both inside the seal. Processors announce the revision of each
+  engine they run, and one with an older revision than the library's is offered none of
+  that engine's work (the log and the queue say so) until it is updated; processors from
+  0.7 count as revision 1.
+- **A raised engine revision upgrades that engine's OCR; an EDITED file is never
+  replaced.** With the generation upgrade on, a main OCR file of the primary's own
+  recipe at an older revision is upgraded even if its family is not listed (Bunko's
+  sealed file is replaced with no copy), and so is a generation layer Bunko wrote at
+  an older revision, in place. A file Mokuro Reader marked edited (an `edited` block)
+  is never replaced or copied, whatever stamp or seal it carries, and never used as
+  the new main file; the admin page counts these. When its OCR is outdated, the new OCR
+  is written beside it as `<Volume>.<primary generation>.mokuro` (for example
+  `Vol 1.hayai-nova.mokuro`), sealed, and becomes the main file only if the edit mark
+  is removed. A reader's edited file does not say which OCR it started from, so with
+  `mokuro-legacy` listed (the default) each edited volume gets this once. The format is
+  in `docs/design/sidecar-provenance.md`.
+- **OCR never writes `<Volume>_1.mokuro` beside a file already there.** When a
+  `.mokuro` arrives at the destination while its OCR runs (a reader renaming a volume,
+  a person's upload), that file stays and the result is discarded (audited, not a
+  failure, and the volume is not queued again); only Bunko's own sealed output of the
+  same engine at an older revision is replaced in place. Numbered files an earlier
+  version left (`Vol 1_1.mokuro`, `Vol 1.fast_1.mokuro`) are cleaned up after each OCR
+  pass when Bunko can tell it wrote them for that volume (sealed, or in its OCR
+  records, and naming the volume it belongs to, so a volume a reader is renaming to
+  `Vol 1_2` is never taken for one): renamed to the name readers match when that is
+  free, removed when it is taken (to the provider's trash on a cloud library, and only
+  once the cloud listing is settled). Others are left alone, counted in the admin OCR
+  status (`orphans_unproven`), and not read again until they change.
+- **Renaming a volume in Mokuro Reader 1.10.0 keeps its OCR seal.** That reader
+  rewrites the main OCR file without its `ocr_engine` block when it renames a volume.
+  When such an upload over WebDAV has exactly the pages of Bunko's sealed file (the one
+  it replaces, or the one of the same volume in that folder), Bunko puts the block back
+  and seals it again, so the upgrade still knows Bunko wrote it. Corrections that reader
+  saves into the main file still land there, and an upgrade replaces them with no copy.
+- **Internal: the interop rig runs the reader against Bunko on every PR.** The
+  `Interop` workflow builds the testing server, cloudsim and the Mokuro Reader commit
+  `interop/reader.ref` pins (it fails, naming the file, until that pin exists), then
+  runs the rig in six legs: `dav,api` on a local library, `bridge,direct,shared` on
+  each of Google Drive, OneDrive, MEGA and rclone, and the `cloud` suite on all of
+  them, uploading each leg's results and logs. It also runs on pushes to
+  `0.8/remote-storage`. A PR that bumps `interop/reader.ref` is how a new reader is
+  taken in.
 - **Archives made on macOS keep their real member names.** Archive Utility writes UTF-8
   names without marking them as UTF-8. Damage reports from upload and processor
-  verification now show those names as written instead of as mojibake, and a new cover
-  for such an archive is the first image by its real names (covers already made are
-  kept).
+  verification now show those names as written instead of as mojibake, and on a local
+  library a new cover for such an archive is the first image by its real names (covers
+  already made are kept). A cloud library still picks by the names as Python's zipfile
+  reads them.
 - **A member that inflates past its declared size is damaged.** Processor verification
   passed such a member when its checksum matched; it now reports it as damaged, as the
   upload check already did.
@@ -22,6 +656,301 @@
   An extra field that runs past its directory entry used to be ignored at upload. The
   library's own archive reader already refused nearly every such archive.
 - **Dependency updates**: zip 9, rcgen 0.14, windows 0.62, windows-sys 0.61.
+
+### Fixed
+- **Windows: no console window flashes while the app runs.** The app
+  (`mokuro-bunko.exe`) and the server and processor it starts have no console, so
+  every console program they ran was given a window of its own: `nvidia-smi`, which
+  the load reading runs every five seconds on a machine with an NVIDIA driver, flashed
+  one each time. The same went for hardware detection, for `whoami` and `icacls` when a
+  processor is paired, for the `cloudflared` a server starts (its window stayed for as
+  long as the tunnel was up) and for an update being fetched. These programs now run
+  without a window (#79).
+- **A WebDAV library no longer loses files to a listing the server cut short.** rclone's
+  `serve webdav`, like most servers built on Go's WebDAV package, gives up on a folder
+  listing when a file vanishes while it walks the folder, and still answers 207 with the
+  part it had. Bunko's own uploads to such a server (written under a temporary name,
+  then moved into place) made that happen, and Bunko read every file the listing left
+  out as deleted: volumes left the catalog and answered 404 until the next poll, a
+  running OCR job was cancelled, writes still waiting to upload into those folders
+  could be dropped, and a short listing during a full sync could leave them out until
+  their files changed. Now an answer that is not one whole listing is refused, and a
+  file leaves the index only once the server, asked for it by name, says it is gone;
+  otherwise Bunko lists again.
+- **The catalog toolbar fits a phone screen.** Below 560 px wide the search box takes
+  its own row and the sort and title-language selects share the next with the reader
+  settings button; the toolbar was 553 px wide, so the page scrolled sideways at 375 px.
+- **The numbered-OCR clean-up decides from the folder listing whether a name is free.**
+  It asked the disk whether `<Vol>.<layer>.mokuro` existed: beside a `Vol.FAST.mokuro`
+  a case-insensitive disk said yes and the numbered `Vol.fast_1.mokuro` was deleted
+  (its OCR lost), a case-sensitive one said no and it became a second spelling
+  `Vol.fast.mokuro`. Now it is left in place, counted, on every host.
+- **Deleting a volume deletes only the files its folder lists for it.** It also removed
+  `<stem>.mokuro`, `<stem>.webp` and the like as built names, which a disk that folds
+  names opens as another file (`STRASSE.mokuro` beside `Straße.cbz`).
+- **A volume's cover and `.nocover` marker are written under the WebDAV write lock of
+  their name**, as OCR results are: a client writing the cover in another spelling at
+  that moment no longer races Bunko into a second spelling or an overwrite.
+- **A client's upload that lands while Bunko waits for its write lock stays.** An OCR
+  result, the upgrade's swap and edited-main layer, the numbered-OCR clean-up and a
+  stale `.nocover` removal decide again under the lock from a fresh folder listing: an
+  OCR file the client uploaded meanwhile, in any spelling, is kept and the result is
+  discarded (the clean-up replaced it with the numbered copy, and on a case-sensitive
+  disk an OCR result was written beside it in a second spelling).
+- **A folder holding two spellings of a volume, moved in the cloud, keeps both
+  uploaders' records** (the first volume's move deleted the other spelling's record).
+- **Layers an earlier beta's upgrade kept are found through the folder listings** at
+  start, in any spelling the audit log has, never by opening that spelling (a folder
+  respelled since was missed on case-sensitive disks; a hidden one was entered).
+- **A case-only rename takes effect on Linux casefold disks** (and between hard links),
+  where `rename(2)` between two names of one file does nothing: renaming `kingdom/` to
+  `Kingdom/` over WebDAV used to leave the folder as it was while the database and the
+  corrections followed the new spelling.
+- **A case-fixing MOVE onto a name another entry already holds in another spelling is
+  refused (409)** instead of deleting that entry first under `Overwrite: T`.
+- **Bunko writes no second spelling of a name.** Covers, `.nocover` markers, OCR
+  results, the OCR upgrade and per-account corrections use the spelling the folder
+  already lists (`V.WEBP`, `V.MOKURO`), when rule v1 gives that file to the volume;
+  where it does not (a hidden archive's file, a layer id in another case), nothing is
+  written. A cover Bunko made for an archive that moves goes along only to a name of
+  the archive's own, and is removed otherwise. Reading-history device folders are
+  reached in any case; the catalog's volume manifest and the admin OCR actions take a
+  series or volume in any case, and a series' cover is found in the spelling listed
+  (`v.webp` for `V.cbz`). A WebDAV COPY of a folder onto an existing one pairs their
+  members in any case: an existing member spelled otherwise receives the copy and
+  keeps its spelling. A PUT, an MKCOL, or a COPY or MOVE destination, whose folder
+  lists the name only in another spelling answers the same on every host (409
+  `case-variant`, MKCOL 405), where a case-insensitive disk wrote over the other
+  spelling's file and a case-sensitive one made a second spelling. Two MKCOLs, or an
+  MKCOL and a PUT, of two spellings of one new name cannot both succeed. The start-up
+  pass that lets JPEG XL volumes get their cover removes the `.nocover` marker in the
+  spelling the folder lists, and an OCR failure record stays while its volume is
+  listed in any case (`V1.CBZ`), on every host alike.
+- **Whether an OCR layer is done is read from the folder listing on every host.** A
+  layer file whose id is spelled in another case (`Vol.FAST.mokuro.gz`) counted as the
+  `fast` layer on a case-insensitive disk and was OCR'd again on every scan on a
+  case-sensitive one or in a cloud library; now it is no layer of the volume and
+  nothing is owed for it, everywhere.
+- **An uploader keeps control of a volume renamed to another case outside Bunko**
+  (the volume, or its series folder, ASCII letters or not), on every host: the upload
+  record is matched to the volume through the folder listings. A record whose
+  spelling is still listed as an entry of its own (a hidden case variant) never gives
+  control of another volume. Deleting or moving such a volume through Bunko takes its
+  record along, and overwriting it keeps its first uploader. A new upload is its
+  uploader's own: it never takes over a record left behind by a volume deleted
+  outside Bunko. `/login/api/me` offers curated publishing for exactly the volumes
+  auth then allows.
+- **A Depth: infinity listing shows an account's corrections under the series
+  folder's listed spelling** after the folder was renamed to another case outside
+  Bunko or in the cloud, as a Depth: 1 listing of that folder does.
+- **The temporary name of an interrupted case-only rename is hidden** (`.bunko-case-*`):
+  no WebDAV listing shows it, so no client deletes it as junk, and the OCR walk does
+  not enter it. `doctor` names it with the rename that finishes it.
+- **Deleting an account no longer deletes another account's folder** whose name differs
+  only in case (possible in databases from before such names were refused), on disks
+  that ignore case.
+- **OCR failures in a cloud library are remembered.** Bunko keeps a failure record
+  only while the volume's archive is still in the library, and looked for it on the
+  local disk, where a cloud library's archives never are. Every scan therefore dropped
+  every record: a volume in which nothing decodes was offered again, at once, to the
+  release that had just failed it, the backoff never grew, and the catalog never marked
+  the volume as failing. The archive is now looked for in the cloud library's index.
+- **Covers for JPEG XL volumes in a cloud library.** The start-up pass that clears the
+  `.nocover` marker of a JPEG XL volume did not reach a cloud library, which keeps those
+  records in Bunko's own data rather than as files beside the volumes: a volume of
+  `.jxl` pages an earlier 0.8 build had recorded as coverless stayed without a cover.
+  The first cover pass now drops those records and makes the covers.
+- **Checking a cloud volume's page formats no longer holds up the OCR queue.** Whether a
+  processor older than a page format (JPEG XL before 0.7.5) can read a volume is
+  decided from the archive's page names. In a cloud library they are now read on a
+  helper thread, not by the scheduler itself, which could wait on a download of the
+  archive while every other processor waited too; the volume waits for that answer
+  before it is offered to such a processor.
+- **A new account cannot take an existing name in other letter case.** `ALICE` could
+  register beside `alice`; on a Windows or macOS disk, which ignore case, both then
+  read and wrote one `users/alice/` folder (progress, reading history, corrections),
+  and deleting either account removed it. Registration, invites, `admin add-user`
+  and the setup wizard now refuse such a name as taken (a deleted account's name points
+  at `restore-user`). Accounts that already differ only in case are left as they are.
+- **Joining two spellings of a series leaves no duplicate cover.** In a cloud library,
+  Bunko could make a cover for a volume the case merge had just moved into the older
+  spelling, before the merge moved the volume's own cover in. The folder then held two
+  covers of one name, the admin panel blamed a reader upload, and the emptied folder
+  went to the trash only in a second merge. A volume a merge is moving now gets its
+  cover after the merge.
+- **A cover Bunko makes while a reader renames the volume moves with it.** A reader
+  renaming a volume moves its cover first and the archive last. A cover Bunko made in
+  between, from the archive still under the old name, stayed there once the archive
+  moved, and the reader then refused to rename the series, taking the stray cover for a
+  volume it did not have. A cover Bunko made lately now follows its archive: to the new
+  name, or removed when the new name has a cover already; a deleted archive takes
+  it too. Covers a reader uploaded stay where they are. This works on Windows too, and
+  wherever the storage folder is reached through a link (macOS temporary folders
+  among them). While the rename is under way Bunko no longer makes a cover for the
+  new name, as it often did on Windows: in a cloud library the moved cover was then
+  deleted and the same picture uploaded again as a new file. When the new name already
+  has a cover Bunko made (the move replaced a volume it had covered, or a rename seen
+  in the cloud reached Bunko after it covered the new name), the moved cover takes its
+  place, even while that cover is still on its way to the cloud, and a replaced
+  volume's cover no longer stays beside the volume moved over it.
+- **Deleting or renaming a cloud file while Bunko uploads it waits for the upload.**
+  A DELETE of a file Bunko was uploading at that moment (a cover, an OCR result)
+  answered at once, and the file came back when the upload finished; a rename was
+  applied too late for the upload, and the file landed under its old name. Both now
+  wait for that upload, as a move or delete already waits for other uploads (up to 30
+  seconds, then "try again shortly"), and then delete or move what it left. A write
+  that has not left yet is cancelled at once, as before, and so now is one waiting to
+  try again after its check of the cloud failed (it had sent nothing; it used to land
+  after the delete).
+- **A volume renamed while Bunko makes its cover leaves no stray cover behind.** A
+  cover made from an archive that a reader moved away meanwhile (a volume rename, then
+  its series') was still written under the old name, beside nothing, and the old
+  series folder never emptied. It is now dropped.
+- **A series whose last volume was deleted disappears from readers.** Its folder kept
+  a `series.json` listing the deleted volumes, so Mokuro Reader kept showing them.
+  Bunko now removes that file (its facts are kept for a later upload; in a cloud
+  library it goes to the trash, and only while the library is in step: otherwise
+  Bunko looks again every minute until it is). A `series.json` placed by hand with
+  facts of its own stays.
+- **A series' shelf alignment can be reset.** A `series.json` update with
+  `"spine_offset": 0` (or `null`) now clears the stored offset, and the compiled
+  `series.json` drops it; before, `0` read as "no opinion" and the old offset stayed
+  forever. An update without the key still keeps it.
+- **The web pages work under a sub-path.** Behind a proxy that serves Bunko at
+  `https://example.com/bunko/` (prefix stripped), the home, catalog, login,
+  registration, account, queue, admin and setup pages loaded their styles, scripts and
+  APIs from the site root and broke. Every page now gets a `<base href>` back to the
+  mount root, and its URLs and redirects are relative. The setup session cookie no
+  longer names `Path=/setup`. See
+  [configuration](docs/configuration.md#under-a-sub-path-httpsexamplecombunko).
+- **Catalog links open the volume with its cover.** "Open in reader" passed the cover
+  as a bare library path, which the reader fetched from its own site. The cover, the
+  archive and the manifest are now absolute URLs under the server's mount, a sub-path
+  included.
+- **A `.mokuro` or `series.json` saved with a byte-order mark is read.** Mokuro Reader
+  accepts OCR files that start with a UTF-8 byte-order mark (some Windows editors add
+  one); Bunko took them for unreadable, so it left their pages and characters out of
+  `series.json` and could OCR the volume again. They now read like any other, and
+  `mokuro_sha256` still covers the bytes as stored, and a library compiled by an earlier
+  version counts them at its next scan. A `series.json` sent with one is accepted too.
+- **The cloud queue file names a decimal volume's OCR as its own.** A finished
+  `Vol 1.5.mokuro` beside `Vol 1.5.cbz` was listed as layer `5` of `Vol 1`.
+- **A library reached through a symbolic link gets its OCR follow-ups.** When the path
+  to the library folder went through a symlink, a volume uploaded over WebDAV was not
+  queued for OCR until the next library scan, and neither the upload's answer nor the
+  volume's catalog manifest told Mokuro Reader that OCR was on its way.
+- **Mokuro Reader on another site sees what WebDAV's `OPTIONS` answers.** Bunko took
+  every `OPTIONS` request from a browser page on another site for a CORS check and
+  answered it itself, so the reader's own `OPTIONS` on the library (sent after the
+  browser's check) never got WebDAV's `Allow` and `DAV` headers, and could not have
+  read `Allow` anyway. Only a request that asks a CORS question is answered that way
+  now; the reader's request reaches WebDAV, and `Allow` is readable from the page.
+- **A folder's `Allow` lists `PUT` and `MKCOL` for an account that may write there.**
+  `OPTIONS` on a folder never listed them, so a client that judges a server by `Allow`
+  (Mokuro Reader's check for WebDAV servers other than Bunko) took every account for
+  read-only. Accounts that may add files now see `PUT, MKCOL` on every folder of the
+  library; `registered` accounts see them on `/mokuro-reader` and their `history`
+  folders, and `PUT` alone in series folders (their own corrections). Anonymous and
+  processor accounts, files and missing paths answer as before. `Allow` is a hint: what
+  a request may actually do is unchanged.
+- **The catalog and series pages no longer stall on a large library.** Every 30 seconds,
+  and after every change to the library (which during OCR is often), the next catalog or
+  series request walked the whole library folder before answering, so opening even a
+  small series could take seconds. Requests now answer at once from the last index while
+  one walk refreshes it in the background. Right after a start, before the first walk has
+  finished, a series page reads only that series' folder.
+- **Uploading through Bunko into a cloud library works.** Every WebDAV PUT into a
+  Google Drive, OneDrive, MEGA or WebDAV library failed with a server error (500, "this
+  store has no local file to open"), so neither Mokuro Reader nor an uploader could add
+  a volume or an OCR file through Bunko. The body is now staged on Bunko's disk,
+  checked (size, `Content-Digest`, the archive's CRCs) and uploaded before the answer,
+  so a 201/204 means the cloud has the file; an uploaded volume is then OCR'd like any
+  other. The client's `If-Match` / `If-None-Match: *` now travel with the upload, so a
+  file changed or created in the cloud meanwhile is a 412 instead of being
+  overwritten. A full cloud account answers 507, and an upload the library cannot take
+  right now (see below) a 503 with `Retry-After`, never a 500.
+- **A failed upload into a cloud library no longer leaves a staging file behind.** Its
+  empty staging file and record survived restarts; a start now also removes any a crash
+  left.
+- **While Bunko is still claiming a cloud library, it says so.** For about 10 minutes
+  after the first connect (on WebDAV; a minute or more elsewhere) Bunko waits to make
+  sure no other Bunko manages the library before it writes. Uploads and other changes
+  through Bunko in that time are refused with 503 and a `Retry-After` of the time left,
+  and the message says this Bunko is still claiming the library and roughly how long is
+  left, instead of "another Bunko manages this library". The admin Storage tab and
+  status show the same.
+- **Failed WebDAV requests are logged.** A request that ends in a server error (5xx),
+  uploads included, is logged with its method, path, user and cause (503s as warnings,
+  other failures as errors); before, a failed upload left no trace in the log.
+- `library connect --create` no longer asks "Create it?" before creating the folder; it
+  prints "Creating mokuro-reader/…".
+- **A `mokuro-reader` folder another device makes while Bunko runs is merged too.** In
+  a Google Drive or MEGA library, a second `mokuro-reader` folder that appeared while
+  Bunko ran went unseen until Bunko restarted: what readers wrote into it stayed out of
+  the library, and a reader that leaves the merging to Bunko never merged it either.
+  Bunko now takes such a folder in at once (one inside another folder too) and merges
+  it like any other duplicate, the library moving into it when it is the older one.
+- **A merge a reader made while Bunko was stopped no longer pauses the library.** When
+  the reader merged the library into another device's older `mokuro-reader` folder,
+  one Bunko had never seen, Bunko restarted as if its folder had been removed and held
+  the library for the admin. It now checks the folder the reader kept, and when
+  everything its own held is there, drops its emptied folder quietly.
+- **Uploads with a stale Unicode name field are accepted.** Some zip tools store a
+  second, UTF-8 copy of each member's name (the Info-ZIP Unicode Path field). When that
+  copy no longer matched the name, upload verification refused the whole archive as "not
+  a readable zip", although the library reads it. A copy that does not match is now
+  ignored, as the library's own reader does.
+- **Running the tests no longer replaces your own `config.yaml`.** A server built
+  without a config file, as most tests build one, saved an admin edit to the default
+  config path: on a developer's machine, the config of their own install. One test
+  that changes a storage setting left that file pointing at a temporary folder that
+  was deleted moments later, so the installed server then started on an empty
+  library. Such a server now keeps its settings in memory. If you have run the tests
+  on a machine where you also use Bunko, check `storage.base_path` in your config.
+- **OCR starts after the backend is installed by hand.** When the server's own
+  backend install failed (no network, say) and the pack was then installed from a
+  terminal with `mokuro-bunko install-ocr`, as the failure says to, the server's next
+  automatic retry found nothing left to install, cleared the failure and stopped
+  there: its OCR kept waiting for a backend until the server was restarted. The retry
+  now starts the OCR with what is installed.
+- **OCR starts at once on a large cloud library.** The OCR queue was filled by one
+  walk over the whole library, and on Google Drive, OneDrive or MEGA that walk read
+  each volume's zip directory (and, with extra generations, its sidecar) before it
+  queued anything: on a library of 700 volumes no OCR started for about 25 minutes
+  after connecting it. The walk now hands over each series as soon as it is judged, so
+  OCR runs on the first series while the rest is still looked at, and on a cloud
+  library it no longer opens an archive only to count its pages (the count comes from
+  the library's metadata once that has been read). The benchmark a new generation runs
+  first opened every volume of the library to choose its sample pages, a read of each
+  on a cloud library; it now opens volumes only until the sample is full.
+- **The Storage panel says why uploads are held.** Bunko writes nothing to a cloud
+  library before it has read the library's series.json files and claimed the library;
+  until then its uploads showed only as HELD. The panel now says what they wait for,
+  with how many series.json files are left to read or how long the claim has left.
+
+### Known limits
+- **Merging duplicate folders on Google Drive can trash files Bunko cannot see.**
+  Bunko and Mokuro Reader see only the files made through Mokuro Reader's Google
+  project (Drive's `drive.file` access). A duplicate folder that looks empty to them
+  can still hold files added through the Drive website; the merge moves it to Drive's
+  trash, with those files, where they stay for 30 days. Mokuro Reader's own merge does
+  the same.
+- **Progress files can stay doubled after a duplicate-folder merge.** A merge keeps
+  both copies of `volume-data.json`, `goals.json` and `positions.json`. With a
+  `progress_user`, over WebDAV that account sees the newest copy until a reader that
+  reads the cloud folder directly writes again and merges them.
+- **A merge keeps one copy of a duplicated file.** When a duplicate-folder merge finds
+  two copies of a file (an OCR file or a correction included), it keeps the strictly
+  newer one and moves the other to the provider's trash, where it can be recovered.
+  No `edit-<n>` copy is kept beside it.
+- **Changing `progress_user` hands over the cloud's corrections.** No file moves: the
+  correction files in the cloud folder become the new account's as they are, the
+  previous account's corrections kept on this server (`users/<u>/edits`) are not
+  brought into the cloud folder, and correction files without an owner are looked for
+  only when Bunko starts.
+- **Mokuro Reader tells WebDAV servers apart only by type.** Its protection for
+  edited OCR from a server counts every WebDAV server as one provider, so a second
+  WebDAV server (another Bunko included) is taken for the first.
 
 ## [0.7.11] - 2026-11-07
 

@@ -1,0 +1,32 @@
+# Hard performance budgets for `cargo xtask interop` (docs/design/interop-testing.md §8.3).
+# Each value is the most a metric's median over 5 runs may reach; one retry of the whole
+# scenario is allowed before CI fails. Changing a budget is a visible edit in the PR that
+# needs it: say why in the commit.
+
+# The catalog and series views on a generated library of 2,000 series / 20,000 volumes
+# (plus "Small Series", 3 volumes, the series under test). Linux CI runner, loopback.
+# These are answered from the database and the in-memory index, so they are milliseconds.
+[catalog]
+# GET /catalog/api/library and /catalog/api/series, after warm-up.
+library_warm_ms = 25
+series_warm_ms = 5
+# The first request after a restart, while the startup work runs.
+library_cold_ms = 250
+series_cold_ms = 50
+# While WebDAV uploads (10/s) and PROPFINDs (4/s) keep invalidating the library index,
+# for 40 s (past the index's 30 s lifetime). An index walk inside a request shows here.
+series_load_p95_ms = 25
+series_load_max_ms = 100
+library_load_p95_ms = 50
+load_errors = 0
+# The series view at 2,000 series against 200: max(t, 1 ms) / max(t, 1 ms).
+series_scale_ratio = 1.2
+# Chromium (`--browser`), from navigation start. The requests are the page, 2 stylesheets,
+# 2 scripts, then 5 API calls in parallel (nav config, login token, catalog config,
+# library, OCR status): an exact count, so a new waterfall step shows.
+catalog_first_cards_ms = 400
+catalog_requests_before_cards = 10
+# Clicking the small series' card in the loaded catalog until its volumes show.
+series_open_ms = 150
+# A pasted link to the small series, from navigation until its volumes show.
+series_rendered_ms = 400

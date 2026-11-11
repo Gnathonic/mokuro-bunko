@@ -17,7 +17,9 @@ use crate::pyjson::{dumps_indent2, read_object, write_atomic};
 pub const FAILURES_FILE: &str = ".ocr-failures.json";
 /// The longest a failed volume waits before its next try.
 pub const MAX_RETRY_DELAY_SECONDS: f64 = 3600.0;
-/// Archive extensions a record's volume may still exist under.
+/// Archive extensions a record's volume may still exist under. The same list as
+/// `bunko_core::sidecar_names::ARCHIVE_EXTENSIONS` (a test holds them equal); this
+/// crate stays free of bunko-core.
 pub const ARCHIVE_EXTENSIONS: [&str; 4] = [".cbz", ".cbr", ".zip", ".rar"];
 
 /// `failure_key(rel_cbz, row)`: the primary row keeps the bare relative
@@ -408,6 +410,18 @@ pub fn keep_record(
 
 /// `archive_still_there` against a real library directory.
 pub fn archive_exists_in(library: &Path, series: &str, volume: &str) -> bool {
+    archive_exists_with(library, series, volume, Path::is_file)
+}
+
+/// `archive_still_there` with the file test given: a library on a store (a cloud
+/// library's root is a mount that never exists on disk) answers through the store,
+/// which this crate does not know.
+pub fn archive_exists_with(
+    library: &Path,
+    series: &str,
+    volume: &str,
+    is_file: impl Fn(&Path) -> bool,
+) -> bool {
     let folder = if series.is_empty() {
         library.to_path_buf()
     } else {
@@ -415,7 +429,7 @@ pub fn archive_exists_in(library: &Path, series: &str, volume: &str) -> bool {
     };
     ARCHIVE_EXTENSIONS
         .iter()
-        .any(|ext| folder.join(format!("{volume}{ext}")).is_file())
+        .any(|ext| is_file(&folder.join(format!("{volume}{ext}"))))
 }
 
 /// `<storage>/.ocr-failures.json`.
@@ -727,6 +741,14 @@ mod tests {
         assert!(
             failure_log_line("g", "S/V.cbz", 7, 30.0, "CUDA out of memory")
                 .contains("next retry in ~3600s")
+        );
+    }
+
+    #[test]
+    fn archive_extensions_match_the_shared_list() {
+        assert_eq!(
+            ARCHIVE_EXTENSIONS,
+            bunko_core::sidecar_names::ARCHIVE_EXTENSIONS
         );
     }
 

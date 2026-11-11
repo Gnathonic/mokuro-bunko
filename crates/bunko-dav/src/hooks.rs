@@ -6,12 +6,32 @@
 //! `Database` calls they replace (spec §8.6) so the mapping stays one-to-one.
 //!
 //! **Timing:** every hook runs after the filesystem change it reports has happened
-//! (0.5.2 ran the DB calls in the same order, inside the request). Hooks are called from a
-//! blocking thread (`spawn_blocking`), so synchronous SQLite work is fine; they must not
-//! panic, and they cannot fail the request: a database error after the file is in place is
-//! the server's to log (spec 14.14: never answer 500 after commit).
+//! (0.5.2 ran the DB calls in the same order, inside the request), except the few named
+//! as running before it. Hooks are called from a blocking thread (`spawn_blocking`), so
+//! synchronous SQLite work is fine; they must not panic, and they cannot fail the
+//! request: a database error after the file is in place is the server's to log (spec
+//! 14.14: never answer 500 after commit).
 
 use std::path::{Path, PathBuf};
+
+/// What a hook told of a write about to happen keeps until that write is over: the
+/// request drops it once the write is done and its hooks ran, or as soon as the write
+/// failed, so nothing it holds outlives the request.
+#[derive(Default)]
+pub struct HookGuard(Vec<Box<dyn Send>>);
+
+impl HookGuard {
+    /// A guard that keeps `held` until the write is over.
+    pub fn new(held: impl Send + 'static) -> HookGuard {
+        HookGuard(vec![Box::new(held)])
+    }
+
+    /// Both guards, kept together.
+    pub fn and(mut self, other: HookGuard) -> HookGuard {
+        self.0.extend(other.0);
+        self
+    }
+}
 
 /// One audit row (0.5.2 `Database.log_audit_event`).
 #[derive(Debug, Clone, PartialEq)]
@@ -62,6 +82,21 @@ pub trait DavHooks: Send + Sync + 'static {
     /// A library folder was moved inside the library (its sidecars moved with it).
     fn rename_ocr_sidecars_under_prefix(&self, _old_prefix: &str, _new_prefix: &str) {}
     fn rename_volume_uuids_under_prefix(&self, _old_prefix: &str, _new_prefix: &str) {}
+    /// A client's MKCOL created the top-level library folder `rel` (a series folder):
+    /// `actor` owns it (0.8). Only for the request that created it, never for one that
+    /// found it there already.
+    fn series_folder_created(&self, _rel: &str, _actor: &str) {}
+    /// A library folder was deleted (or overwritten by a folder MOVE), or moved out of
+    /// the library.
+    fn series_folder_removed(&self, _rel: &str) {}
+    /// A library folder was moved inside the library.
+    fn series_folder_moved(&self, _old_rel: &str, _new_rel: &str) {}
+    /// A PUT of a plain `.mokuro` has staged its body at `staged` and checked it (size,
+    /// digest), and is about to publish it as `dest`. The one hook that runs BEFORE the
+    /// write: the server may rewrite the staged file (critique C5: it puts Bunko's
+    /// `ocr_engine` block back on a main an older reader regenerated without it). Called
+    /// under `dest`'s write lock; blocking; it must leave a readable file at `staged`.
+    fn ocr_sidecar_staged(&self, _dest: &Path, _staged: &Path) {}
     /// A volume's primary sidecar (`<stem>.mokuro[.gz]` with `<stem>.cbz` beside it) is
     /// about to be deleted or moved away (0.5.2 `_remember_primary_uuid`). Called BEFORE
     /// the file goes, so the server can read the volume id out of it.
@@ -72,6 +107,19 @@ pub trait DavHooks: Send + Sync + 'static {
     fn archives_removed(&self, _paths: &[PathBuf]) {}
     /// A library `.cbz` is now in place (PUT, or MOVE/COPY into place): queue its OCR.
     fn archive_arrived(&self, _cbz: &Path) {}
+    /// A file MOVE is about to rename the library `.cbz` `from` to the library `.cbz`
+    /// `to`. Called BEFORE the rename, under both paths' write locks, with `to`'s folder
+    /// in place. The guard it returns is dropped right after `archive_moved` ran, or as
+    /// soon as the rename failed (no `archive_moved` then): the archive is under `to`
+    /// for a moment before `archive_moved` runs, and a store's change event may already
+    /// have announced it there.
+    fn archive_moving(&self, _from: &Path, _to: &Path) -> HookGuard {
+        HookGuard::default()
+    }
+    /// A file MOVE renamed the library `.cbz` `from` to the library `.cbz` `to` (its
+    /// sidecars stay where they are). Called right after the rename, under both paths'
+    /// write locks, before `archives_removed`.
+    fn archive_moved(&self, _from: &Path, _to: &Path) {}
     /// After `archive_arrived` for a PUT only: the follow-up headers, if any OCR is owed.
     /// `series` is the archive's parent relative to the library (`.` for a loose root
     /// file), `volume` its stem.

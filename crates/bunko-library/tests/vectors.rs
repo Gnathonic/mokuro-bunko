@@ -1,6 +1,9 @@
 //! Golden vectors computed by Python 0.5.2 (`tests/golden/gen_vectors.py`):
 //! every pure helper must agree with the reference implementation exactly.
 
+// Fixtures are set up and checked with std::fs on purpose.
+#![allow(clippy::disallowed_methods)]
+
 use std::path::Path;
 
 use bunko_library::archive::natsort::natsorted;
@@ -266,6 +269,16 @@ fn facts_json(facts: &SeriesFacts) -> String {
     compact(&JsonValue::Object(object))
 }
 
+fn spine_offset_key_is_number_or_null(payload: &str) -> bool {
+    match pyjson::parse(payload) {
+        Ok(JsonValue::Object(object)) => matches!(
+            object.get("spine_offset"),
+            Some(JsonValue::Null | JsonValue::Num(_))
+        ),
+        _ => false,
+    }
+}
+
 #[test]
 fn update_validation_matches_python() {
     let v = vectors();
@@ -287,9 +300,15 @@ fn update_validation_matches_python() {
                     compact(get(expected, "spine_offset")),
                     "{payload}"
                 );
+                // Deliberate divergence (0.8): 0.5.2 read a present `0`, `null`
+                // or unusable number as absence, so an offset could never be
+                // reset. Now any number or null is presence, the value stays.
+                let python_present =
+                    matches!(get(expected, "spine_offset_present"), JsonValue::Bool(true));
                 assert_eq!(
                     update.spine_offset_present,
-                    matches!(get(expected, "spine_offset_present"), JsonValue::Bool(true))
+                    python_present || spine_offset_key_is_number_or_null(payload),
+                    "{payload}"
                 );
                 assert_eq!(
                     compact(&JsonValue::Object(update.volume_offsets.clone())),
@@ -414,6 +433,11 @@ fn metadata_paths_and_watcher_routing_match_python() {
         let path = s(get(case, "path"));
         let actual = paths::classify_change(Path::new("/lib"), Path::new(path));
         let expected = match s(get(case, "kind")) {
+            // 0.8 (deliberate): no `thumbnails/` cover folder is kept in the library, so
+            // `thumbnails` is a series name like any (one rule on every store).
+            "ignore" if path.starts_with("/lib/thumbnails/") => {
+                paths::LibraryChange::Series("thumbnails".to_owned())
+            }
             "series" => paths::LibraryChange::Series(s(get(case, "name")).to_owned()),
             "library" => paths::LibraryChange::Library,
             "ignore" => paths::LibraryChange::Ignore,

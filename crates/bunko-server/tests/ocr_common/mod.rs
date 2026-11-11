@@ -29,11 +29,40 @@ pub fn t0() -> f64 {
     (now + 100.0).floor()
 }
 
+/// The `engine_revisions` map of a processor that is up to date: each of `engines` at
+/// this library's current output revision (`bunko_layout::sidecar::engine_revision`).
+/// A catalog without the map announces revision 1 of every engine, and the scheduler
+/// offers a processor none of the work of an engine it runs at an older revision, so
+/// every catalog that stands for a current processor carries this.
+pub fn current_revisions<'a>(engines: impl IntoIterator<Item = &'a str>) -> serde_json::Value {
+    engines
+        .into_iter()
+        .map(|e| {
+            (
+                e.to_string(),
+                json!(bunko_layout::sidecar::engine_revision(e)),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>()
+        .into()
+}
+
+/// The engines the harness's processors run and announce.
+pub const ENGINES: [&str; 3] = ["hayai-nova", "paddle-manga", "ppocr-manga"];
+
+/// `content` as Bunko's OCR install leaves it: sealed (`bunko_layout::seal`).
+pub fn sealed(content: &str) -> String {
+    let mut v = bunko_layout::json::Value::parse(content).unwrap();
+    bunko_layout::seal::seal(&mut v).expect("an ocr_engine block to seal")
+}
+
 pub struct H {
     pub t0: f64,
     pub dir: tempfile::TempDir,
     pub s: Scheduler,
     pub clock: Arc<ManualClock>,
+    /// The database, when the harness has one ([`harness_db`]).
+    pub db: Option<Arc<bunko_db::Database>>,
 }
 
 pub fn primary() -> Generation {
@@ -72,13 +101,43 @@ pub fn harness_full(
     facts: Arc<dyn LibraryFacts>,
     upgrade: Option<UpgradeConfig>,
 ) -> H {
+    harness_inner(rows, facts, upgrade, false)
+}
+
+/// [`harness_full`] with a database (provenance rows: the proof a direct replace needs).
+pub fn harness_db(
+    rows: Vec<Generation>,
+    facts: Arc<dyn LibraryFacts>,
+    upgrade: Option<UpgradeConfig>,
+) -> H {
+    harness_inner(rows, facts, upgrade, true)
+}
+
+fn harness_inner(
+    rows: Vec<Generation>,
+    facts: Arc<dyn LibraryFacts>,
+    upgrade: Option<UpgradeConfig>,
+    with_db: bool,
+) -> H {
     let dir = tempfile::tempdir().unwrap();
     let layout = StorageLayout::new(dir.path());
     layout.ensure_directories().unwrap();
+    let db = with_db.then(|| {
+        Arc::new(
+            bunko_db::Database::open_with(
+                dir.path().join("mokuro.db"),
+                &bunko_db::DbOptions {
+                    bcrypt_cost: 4,
+                    ..bunko_db::DbOptions::default()
+                },
+            )
+            .unwrap(),
+        )
+    });
     let up = upgrade.map(|cfg| {
         let u = Arc::new(bunko_server::ocr::upgrade::Upgrade::new(
             layout.library(),
-            None,
+            db.clone(),
             facts.clone(),
             Arc::new(bunko_library::service::NoPathLocks),
             "mokuro-bunko test".into(),
@@ -91,7 +150,7 @@ pub fn harness_full(
     let s = Scheduler::new(
         SchedDeps {
             layout,
-            db: None,
+            db: db.clone(),
             facts,
             locks: Arc::new(bunko_library::service::NoPathLocks),
             clock: clock.clone(),
@@ -102,7 +161,13 @@ pub fn harness_full(
         },
         settings(rows),
     );
-    H { t0, dir, s, clock }
+    H {
+        t0,
+        dir,
+        s,
+        clock,
+        db,
+    }
 }
 
 /// A `.cbz` with `pages` image members.
@@ -137,6 +202,27 @@ impl H {
         self.dir.path().join("library")
     }
 
+    /// `bytes` written at the library path `rel` as Bunko's OCR install writes them:
+    /// sealed (the proof D4 asks for, carried by the file), with the provenance row.
+    pub fn bunko_wrote(&self, rel: &str, bytes: &str, generation: &Generation) {
+        let path = self.library().join(rel);
+        std::fs::write(&path, sealed(bytes)).unwrap();
+        let volume = format!("{}.cbz", rel.split('.').next().unwrap());
+        self.db
+            .as_ref()
+            .expect("a harness with a database")
+            .record_ocr_sidecar(&bunko_db::OcrSidecar {
+                sidecar_path: rel.into(),
+                volume_key: volume,
+                generation_id: generation.id.clone(),
+                generation_name: generation.name.clone(),
+                machine: "local".into(),
+                engine: Some(generation.engine.clone()),
+                ..Default::default()
+            })
+            .unwrap();
+    }
+
     pub fn storage(&self) -> PathBuf {
         self.dir.path().to_path_buf()
     }
@@ -167,32 +253,38 @@ impl H {
 
     /// Register + open the socket of a processor that runs every engine.
     pub fn connect(&mut self, name: &str, sessions: u32) -> Proc {
-        self.connect_with(
-            name,
-            sessions,
-            json!(["hayai-nova", "paddle-manga", "ppocr-manga"]),
-        )
+        self.connect_with(name, sessions, json!(ENGINES))
     }
 
+    /// A processor that runs `engines` (a JSON array of ids), each at its current
+    /// revision.
     pub fn connect_with(&mut self, name: &str, sessions: u32, engines: serde_json::Value) -> Proc {
-        let catalog = json!({"engines": engines, "detectors": ["ppocr-manga"], "devices": [{"id": "cpu", "label": "CPU"}]});
+        let revisions = current_revisions(
+            engines
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str),
+        );
+        let catalog = json!({"engines": engines, "detectors": ["ppocr-manga"], "devices": [{"id": "cpu", "label": "CPU"}], "engine_revisions": revisions});
         self.connect_catalog(name, sessions, catalog)
     }
 
     /// A processor with a GPU computing in `formats`, running every engine.
     pub fn connect_gpu(&mut self, name: &str, formats: &[&str]) -> Proc {
         let catalog = json!({
-            "engines": ["hayai-nova", "paddle-manga", "ppocr-manga"],
+            "engines": ENGINES,
             "detectors": ["ppocr-manga"],
             "devices": [{"id": "cpu", "label": "CPU"},
                         {"id": "gpu:0", "label": "GPU 0", "formats": formats, "provider": "cuda", "arch": "sm_89"}],
+            "engine_revisions": current_revisions(ENGINES),
         });
         self.connect_catalog(name, 1, catalog)
     }
 
     /// A processor that runs every engine and says it is mokuro-bunko `version`.
     pub fn connect_version(&mut self, name: &str, sessions: u32, version: &str) -> Proc {
-        let catalog = json!({"engines": ["hayai-nova", "paddle-manga", "ppocr-manga"], "detectors": ["ppocr-manga"], "devices": [{"id": "cpu", "label": "CPU"}]});
+        let catalog = json!({"engines": ENGINES, "detectors": ["ppocr-manga"], "devices": [{"id": "cpu", "label": "CPU"}], "engine_revisions": current_revisions(ENGINES)});
         let host = json!({"cpu": "Test CPU (8 cores)", "gpu": "Test GPU", "backend": "cuda", "version": version});
         self.connect_host(name, sessions, catalog, host)
     }

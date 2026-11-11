@@ -16,3 +16,5 @@ unicode-normalization = "0.1.24"
 
 [dev-dependencies]
 tempfile.workspace = true
+# Only to hold `failures::ARCHIVE_EXTENSIONS` equal to the shared list.
+bunko-core.workspace = true

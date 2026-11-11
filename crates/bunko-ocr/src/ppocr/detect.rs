@@ -67,24 +67,52 @@ pub struct ProbMap<'a> {
     pub data: &'a [f32],
 }
 
-/// DBNet map → `[(ordered quad, score)]` in map pixels.
+/// The thresholds of a DBNet post-process: each detector has its own.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DbParams {
+    /// A map pixel is text above this probability.
+    pub thresh: f32,
+    /// A box is kept from this mean probability up.
+    pub box_thresh: f64,
+    /// How far a box grows back from the shrunk kernel the network draws.
+    pub unclip_ratio: f64,
+    /// Boxes thinner than this (map pixels) are dropped.
+    pub min_side: f64,
+    pub max_candidates: usize,
+}
+
+/// PP-OCRv6 manga's (`ppocr.py`).
+pub const PPOCR_DB: DbParams = DbParams {
+    thresh: DB_THRESH,
+    box_thresh: DB_BOX_THRESH,
+    unclip_ratio: DB_UNCLIP_RATIO,
+    min_side: DB_MIN_SIDE,
+    max_candidates: DB_MAX_CANDIDATES,
+};
+
+/// DBNet map → `[(ordered quad, score)]` in map pixels, with PP-OCR's thresholds.
 pub fn db_postprocess(prob: &ProbMap<'_>) -> Vec<(Quad, f64)> {
-    let mask: Vec<bool> = prob.data.iter().map(|&p| p > DB_THRESH).collect();
+    db_postprocess_with(prob, &PPOCR_DB)
+}
+
+/// DBNet map → `[(ordered quad, score)]` in map pixels.
+pub fn db_postprocess_with(prob: &ProbMap<'_>, p: &DbParams) -> Vec<(Quad, f64)> {
+    let mask: Vec<bool> = prob.data.iter().map(|&v| v > p.thresh).collect();
     let contours = find_contours(&mask, prob.width, prob.height);
     let mut out = Vec::new();
-    for contour in contours.iter().take(DB_MAX_CANDIDATES) {
+    for contour in contours.iter().take(p.max_candidates) {
         let r = min_area_rect(contour);
         let (w, h) = (r.w as f64, r.h as f64);
-        if w.min(h) < DB_MIN_SIDE {
+        if w.min(h) < p.min_side {
             continue;
         }
         let score = contour_score(prob, contour);
-        if score < DB_BOX_THRESH {
+        if score < p.box_thresh {
             continue;
         }
-        let grow = 2.0 * unclip_distance(w, h, DB_UNCLIP_RATIO);
+        let grow = 2.0 * unclip_distance(w, h, p.unclip_ratio);
         let (w, h) = (w + grow, h + grow);
-        if w.min(h) < DB_MIN_SIDE + 2.0 {
+        if w.min(h) < p.min_side + 2.0 {
             continue;
         }
         out.push((

@@ -144,7 +144,7 @@ async fn register(State(d): State<AccountsDeps>, headers: HeaderMap, body: Body)
         {
             return Ok(Err(json_error(400, INVALID_INVITE_MESSAGE)));
         }
-        if db.get_user(&username)?.is_some() {
+        if db.username_taken(&username)? {
             return Ok(Err(json_error(409, "Username already exists")));
         }
         let status = if approval {

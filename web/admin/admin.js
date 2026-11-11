@@ -1,6 +1,6 @@
 // Admin Panel JavaScript
 
-const API_BASE = '/_admin/api';
+const API_BASE = '_admin/api';
 
 // State
 let users = [];
@@ -21,7 +21,7 @@ function getAuthHeaders() {
 
 async function logout() {
     await window.mokuroAuth.signOut();
-    window.location.href = '/';
+    window.location.href = './';
 }
 
 function getSessionRole() {
@@ -46,7 +46,7 @@ function trimToInvitesOnly() {
 // Initialize
 document.addEventListener('DOMContentLoaded', () => {
     if (!window.mokuroAuth.token()) {
-        window.location.href = '/login?next=' + encodeURIComponent('/_admin' + window.location.hash);
+        window.location.href = 'login?next=' + encodeURIComponent('_admin' + window.location.hash);
         return;
     }
     const isInviter = getSessionRole() === 'inviter';
@@ -97,12 +97,23 @@ function initTabs() {
             } else if ((window.location.hash || '').startsWith('#audit')) {
                 try { history.replaceState(null, '', window.location.pathname + window.location.search); } catch (_) { /* ignore */ }
             }
+            if (tabId === 'storage') {
+                loadStorage();
+                startStoragePolling();
+            } else if (typeof stopStoragePolling === 'function') {
+                stopStoragePolling();
+            }
             if (tabId === 'status') {
                 loadStatus();
                 loadUpdate(false);
                 startStatusRefresh();
             } else {
                 stopStatusRefresh();
+            }
+            if (tabId === 'analytics') {
+                window.bunkoAnalytics.open();
+            } else if (window.bunkoAnalytics) {
+                window.bunkoAnalytics.close();
             }
             if (tabId === 'connectivity') {
                 loadTunnelStatus();
@@ -253,6 +264,21 @@ function initForms() {
         }
     });
 
+    // Restore user form
+    document.getElementById('restore-user-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const form = e.target;
+        const username = form.username.value;
+        try {
+            await apiPost(`/users/${encodeURIComponent(username)}/restore`, { password: form.password.value });
+            closeModal('restore-user-modal');
+            showToast('User restored', 'success');
+            loadUsers();
+        } catch (err) {
+            showToast(err.message, 'error');
+        }
+    });
+
     // Edit notes form
     document.getElementById('edit-notes-form').addEventListener('submit', async (e) => {
         e.preventDefault();
@@ -302,7 +328,7 @@ function apiError(response, data) {
         // The tab's token expired or was revoked (a password change signs
         // every session out): sign in again rather than show errors.
         window.mokuroAuth.clear();
-        window.location.href = '/login';
+        window.location.href = 'login';
     }
     const error = new Error((data && data.error) || 'Request failed');
     error.status = response.status;
@@ -415,7 +441,11 @@ function renderUsers() {
                     <button class="btn btn--danger btn--sm" onclick="confirmDeleteUser('${escapeHtml(user.username)}')">
                         Delete
                     </button>
-                ` : ''}
+                ` : `
+                    <button class="btn btn--secondary btn--sm" onclick="showRestoreUser('${escapeHtml(user.username)}')">
+                        Restore
+                    </button>
+                `}
             </td>
         </tr>
     `).join('');
@@ -470,6 +500,13 @@ function showChangeRole(username, currentRole) {
     const known = Array.from(select.options).some((option) => option.value === currentRole);
     select.value = known ? currentRole : select.options[0].value;
     openModal('change-role-modal');
+}
+
+function showRestoreUser(username) {
+    document.getElementById('restore-user-username').value = username;
+    document.getElementById('restore-user-display').textContent = username;
+    document.getElementById('restore-user-password').value = '';
+    openModal('restore-user-modal');
 }
 
 function showEditNotes(username) {
@@ -951,6 +988,8 @@ function ocrBackendSentence(runtime, ocrConfig) {
         line = 'off (set to skip) — this server reads no volumes';
     } else if (!knows) {
         line = chosen + ' — install state not reported';
+    } else if (runtime.install && runtime.install.state === 'running') {
+        line = chosen + ' — installing';
     } else if (!runtime.installed) {
         line = chosen + ' — not installed yet';
     } else if (!installedBackend || installedBackend === configured) {
@@ -1219,10 +1258,6 @@ function initGenerations() {
     document.getElementById('gen-revert-btn').addEventListener('click', revertGenerations);
     document.getElementById('gen-save-btn').addEventListener('click', saveGenerations);
     document.getElementById('upgrade-save-btn').addEventListener('click', saveUpgrade);
-    document.getElementById('upgrade-edited').addEventListener('click', (e) => {
-        const b = e.target.closest('[data-upgrade]');
-        if (b) upgradeVolume(b.dataset.volume);
-    });
 }
 
 // ---- Upgrade old OCR: census + settings (hidden when the endpoint is 404).
@@ -1249,7 +1284,8 @@ function renderUpgrade() {
     const families = Object.assign({}, c.families || {});
     replace.forEach((f) => { if (!(f in families)) families[f] = 0; });
     document.getElementById('upgrade-families').innerHTML = Object.keys(families)
-        .filter((f) => f !== 'unknown')
+        // Neither is a recipe to choose: unknown files and EDITED ones are never replaced.
+        .filter((f) => f !== 'unknown' && f !== 'edited')
         .map((f) => '<label class="check"><input type="checkbox" data-family="' + escapeHtml(f) + '"' +
             (replace.includes(f) ? ' checked' : '') + '> ' + escapeHtml(f) + ' <span class="upgrade-n">' +
             families[f].toLocaleString() + '</span></label>').join('') +
@@ -1257,14 +1293,9 @@ function renderUpgrade() {
             ' (never upgraded)</span>' : '');
     document.getElementById('upgrade-counts').textContent = c.enabled
         ? 'Ready to replace ' + c.ready + ' · needs OCR ' + c.needs_ocr +
-          ' · skipped (missing pages) ' + c.skipped_missing_pages + ' · skipped (edited) ' + c.skipped_edited
+          ' · skipped (missing pages) ' + c.skipped_missing_pages +
+          ' · edited (never replaced) ' + (c.edited || 0)
         : 'Counts appear once upgrading is enabled and saved.';
-    const list = document.getElementById('upgrade-edited');
-    const edited = c.edited_volumes || [];
-    list.hidden = !edited.length;
-    list.innerHTML = edited.map((v) => '<li><span class="upgrade-edited__name">' + escapeHtml(v) + '</span>' +
-        '<button type="button" class="btn btn--secondary btn--sm" data-upgrade="force" data-volume="' + escapeHtml(v) +
-        '">Upgrade anyway</button></li>').join('');
 }
 
 async function saveUpgrade() {
@@ -1279,18 +1310,6 @@ async function saveUpgrade() {
     } catch (err) {
         showToast(err.message, 'error');
     }
-}
-
-async function upgradeVolume(volume) {
-    const path = '/ocr/upgrade/' + volume.split('/').map(encodeURIComponent).join('/');
-    try {
-        const r = await apiPost(path, { force: true });
-        const done = { direct: 'Replaced ', generated: 'Queued for OCR, then replaced: ', current: 'Already current: ' };
-        showToast((done[r.mode] || 'Upgrade: ') + volume, 'success');
-    } catch (err) {
-        showToast(err.message, 'error');
-    }
-    loadUpgrade();
 }
 
 async function loadGenerations() {
@@ -1717,7 +1736,7 @@ function genDefaultName(row) {
     return stem;
 }
 
-// Mirrors the server's rules exactly: grammar, reserved names, the tr- prefix,
+// Mirrors the server's rules exactly: grammar, reserved names and prefixes,
 // and uniqueness across ALL rows whether enabled or not.
 function genRowError(row) {
     const name = row.name.trim();
@@ -1728,12 +1747,13 @@ function genRowError(row) {
             message: 'Use 1–' + GEN_NAME_MAX + ' characters: lowercase letters, digits and dashes, starting with a letter or digit. No dots, spaces, capitals or underscores.',
         };
     }
-    if (genCatalog.reserved_names.indexOf(name) !== -1) {
-        return { field: 'name', message: '"' + name + '" is reserved by the reader for another kind of layer. Pick another name.' };
+    // edit-<n> and curated-<n> are numbered copies of reserved names.
+    if (genCatalog.reserved_names.indexOf(name) !== -1 || /^(edit|curated)-[0-9]+$/.test(name)) {
+        return { field: 'name', message: '"' + name + '" is reserved for another kind of layer. Pick another name.' };
     }
     const prefix = genCatalog.reserved_prefixes.find((p) => name.indexOf(p) === 0);
     if (prefix) {
-        return { field: 'name', message: 'Names starting with "' + prefix + '" are reserved by the reader for translations. Pick another name.' };
+        return { field: 'name', message: 'Names starting with "' + prefix + '" are reserved for another kind of layer. Pick another name.' };
     }
     const clash = genRows.findIndex((other) => other !== row && other.name.trim() === name);
     if (clash !== -1) {
@@ -1828,7 +1848,7 @@ function genRowHtml(row, index) {
         '<div class="gen__fields">' +
         genNameFieldHtml(row, index, shown) +
         genSelectFieldHtml(row, index, 'engine', 'Engine',
-            genCatalog.engines.map((e) => ({ value: e.id, label: e.id, title: e.label || e.id })), row.engine,
+            genCatalogOptions(genCatalog.engines), row.engine,
             false, genCatalogLabel(genCatalog.engines, row.engine),
             shown && shown.field === 'engine') +
         genDetectorFieldHtml(row, index, locked, effective, shown) +
@@ -1919,7 +1939,30 @@ function genNameRowHtml(row, index, shown) {
 function genCatalogLabel(list, value) {
     const found = (list || []).find((item) => item.id === value);
     const label = found && found.label ? String(found.label) : '';
-    return label && label !== value ? label : '';
+    const text = label && label !== value ? label : '';
+    const terms = genLicenceNote(found);
+    return text && terms ? text + ' (' + terms + ')' : (text || terms);
+}
+
+// What to know about a model whose weights are not under a permissive licence:
+// the licence, and that the weights are only fetched once a row uses the model.
+// Nothing for the default (permissive) ones.
+function genLicenceNote(item) {
+    if (!item || !item.license || !item.license_class || item.license_class === 'permissive') return '';
+    return item.license + ' weights, downloaded when a row uses it';
+}
+
+// The options of an engine or detector select: the id, with the licence beside
+// it when the weights are not permissively licensed.
+function genCatalogOptions(list) {
+    return (list || []).map((item) => {
+        const restricted = item.license && item.license_class && item.license_class !== 'permissive';
+        return {
+            value: item.id,
+            label: restricted ? item.id + ' (' + item.license + ')' : item.id,
+            title: item.label || item.id,
+        };
+    });
 }
 
 // A field's label with its description as a tooltip, and the hidden text
@@ -1967,8 +2010,13 @@ function genDetectorFieldHtml(row, index, locked, effective, shown) {
         const hint = detectorLabel
             ? detectorLabel + ' — finds the text regions this engine reads.'
             : 'Finds the text regions this engine reads.';
+        // A block detector goes only with an engine that reads blocks; the row's
+        // own detector stays listed so a mismatch can be seen and changed.
+        const engine = genEngine(row.engine);
+        const offered = genCatalog.detectors.filter((d) =>
+            d.line_level !== false || (engine && engine.reads_blocks) || d.id === row.detector);
         return genSelectFieldHtml(row, index, 'detector', 'Detector',
-            genCatalog.detectors.map((d) => ({ value: d.id, label: d.id, title: d.label || d.id })),
+            genCatalogOptions(offered),
             row.detector || '', false, hint,
             !!(shown && shown.field === 'detector'));
     }
@@ -4625,7 +4673,9 @@ function auditToHash() {
     AUDIT_KEYS.forEach((key) => { if (auditState[key]) params.set(key, auditState[key]); });
     const qs = params.toString();
     try {
-        history.replaceState(null, '', '#audit' + (qs ? '?' + qs : ''));
+        // The page's own path: a bare '#...' resolves against the injected
+        // <base href> (the mount root), so a refresh would open the home page.
+        history.replaceState(null, '', window.location.pathname + window.location.search + '#audit' + (qs ? '?' + qs : ''));
     } catch (_) { /* a sandboxed frame may refuse; the filters still apply */ }
 }
 

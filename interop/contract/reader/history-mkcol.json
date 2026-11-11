@@ -1,0 +1,14 @@
+{
+  "expect": {
+    "status": [
+      201,
+      405
+    ]
+  },
+  "request": {
+    "auth": "basic:progress",
+    "headers": {},
+    "method": "MKCOL",
+    "path": "/mokuro-reader/history/"
+  }
+}

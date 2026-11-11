@@ -106,6 +106,26 @@ fn is_child(parent: &str, child: &str) -> bool {
     child.starts_with(parent) && child[parent.len()..].starts_with(['/', '\0'])
 }
 
+/// The account a per-user key (`<path>\0<account>`) belongs to, `None` for a shared key.
+fn private_owner(key: &str) -> Option<&str> {
+    key.split_once('\0').map(|(_, owner)| owner)
+}
+
+/// A lock on another account's own copy of a per-user path (`<path>\0<other>`). It is
+/// private to that account: an operation on the shared tree above it never conflicts
+/// with it (nor names it), it only goes with the tree (`remove_tree`).
+fn private_to_other(lock: &Lock, principal: &str) -> bool {
+    private_owner(&lock.key).is_some_and(|owner| owner != principal)
+}
+
+/// The other direction: a depth-infinity lock held by anyone but the owner of the
+/// per-user `key` below it does not cover that key. The owner's own copy is outside
+/// every other principal's lock scope, so a folder lock never blocks the owner's LOCK or
+/// write of it, and the owner's own exclusive lock on it keeps guaranteeing its writes.
+fn foreign_to_key(lock: &Lock, key: &str) -> bool {
+    private_owner(key).is_some_and(|owner| owner != lock.principal)
+}
+
 #[derive(Debug, Default)]
 pub struct LockManager {
     locks: Mutex<HashMap<String, Lock>>,
@@ -163,8 +183,8 @@ impl LockManager {
         let mut conflicts = Vec::new();
         for l in map.values() {
             let direct = l.key == key;
-            let via_parent = l.infinite_depth && is_child(&l.key, key);
-            let below = infinite && is_child(key, &l.key);
+            let via_parent = l.infinite_depth && is_child(&l.key, key) && !foreign_to_key(l, key);
+            let below = infinite && is_child(key, &l.key) && !private_to_other(l, principal);
             if !(direct || via_parent || below) {
                 continue;
             }
@@ -201,8 +221,8 @@ impl LockManager {
         let mut conflicts = Vec::new();
         for l in map.values() {
             let direct = l.key == key;
-            let via_parent = l.infinite_depth && is_child(&l.key, key);
-            let below = infinite_depth && is_child(key, &l.key);
+            let via_parent = l.infinite_depth && is_child(&l.key, key) && !foreign_to_key(l, key);
+            let below = infinite_depth && is_child(key, &l.key) && !private_to_other(l, principal);
             if direct || via_parent {
                 if l.scope == Scope::Shared && scope == Scope::Shared {
                     continue;
@@ -354,5 +374,69 @@ mod tests {
         assert_eq!(parse_timeout(Some("Second-30")), 30);
         assert_eq!(parse_timeout(Some("Infinite, Second-4100000000")), -1);
         assert_eq!(parse_timeout(None), DEFAULT_TIMEOUT_SECS);
+    }
+
+    fn lock(m: &LockManager, key: &str, infinite: bool, who: &str) -> Result<Lock, AcquireError> {
+        m.acquire(key, key, Scope::Exclusive, infinite, String::new(), 60, who)
+    }
+
+    /// A per-user key `<path>\0<account>` is outside every OTHER principal's lock scope,
+    /// whichever lock came first: bob's private lock never blocks the editor's folder
+    /// LOCK, and the editor's folder lock never blocks bob's LOCK or write of his own
+    /// copy. Bob's own folder lock still covers it.
+    #[test]
+    fn a_private_key_is_outside_other_principals_locks_both_ways() {
+        let private = "/s/v.edit.mokuro\0bob";
+
+        // bob first, then the editor's folder lock.
+        let m = LockManager::new();
+        let Ok(mine) = lock(&m, private, false, "bob") else {
+            panic!("bob's lock")
+        };
+        assert!(lock(&m, "/s", true, "editor").is_ok());
+        assert!(
+            m.check_write(private, false, std::slice::from_ref(&mine.token), "bob")
+                .is_ok(),
+            "bob's token still guarantees his own write"
+        );
+        assert!(m.check_write(private, false, &[], "bob").is_err());
+        assert!(m.check_write("/s", true, &[], "editor").is_err());
+
+        // The editor's folder lock first, then bob.
+        let m = LockManager::new();
+        let Ok(folder) = lock(&m, "/s", true, "editor") else {
+            panic!("folder lock")
+        };
+        assert!(m.check_write(private, false, &[], "bob").is_ok());
+        assert!(
+            m.check_write("/s/v.edit.mokuro\0editor", false, &[], "editor")
+                .is_err()
+        );
+        assert!(
+            m.check_write(
+                "/s/v.edit.mokuro\0editor",
+                false,
+                std::slice::from_ref(&folder.token),
+                "editor"
+            )
+            .is_ok()
+        );
+        assert!(m.check_write("/s/v.mokuro", false, &[], "bob").is_err());
+        let Ok(mine) = lock(&m, private, false, "bob") else {
+            panic!("bob's lock under the editor's folder lock")
+        };
+        assert!(
+            m.check_write(private, false, std::slice::from_ref(&mine.token), "bob")
+                .is_ok()
+        );
+
+        // bob's own folder lock covers his own copy.
+        let m = LockManager::new();
+        assert!(lock(&m, "/s", true, "bob").is_ok());
+        assert!(m.check_write(private, false, &[], "bob").is_err());
+        assert!(matches!(
+            lock(&m, private, false, "bob"),
+            Err(AcquireError::Conflict(_))
+        ));
     }
 }

@@ -312,6 +312,16 @@ pub fn lenient_catalog(value: &Value) -> Catalog {
         engines: strings("engines"),
         detectors: strings("detectors"),
         devices,
+        // A malformed entry is dropped: that engine then counts as revision 1.
+        engine_revisions: value
+            .get("engine_revisions")
+            .and_then(Value::as_object)
+            .map(|m| {
+                m.iter()
+                    .filter_map(|(e, r)| Some((e.clone(), u32::try_from(r.as_u64()?).ok()?)))
+                    .collect()
+            })
+            .unwrap_or_default(),
     }
 }
 
@@ -405,11 +415,23 @@ impl Scheduler {
                 format!("host and catalog take more than {MAX_IDENTITY_BYTES} bytes"),
             );
         }
-        let held_by_another = self
-            .machines
-            .values()
-            .any(|m| !m.local && m.name == name && m.username.as_deref() != Some(&input.username));
-        if held_by_another || !self.profiles.claim(&name, &input.username) {
+        // A name stays with the account that registered it while that account is a
+        // processor (active, processor role); deleted, disabled or demoted, it frees
+        // the name, so a machine can be paired again under a new account.
+        let holds = |account: &str| match &self.deps.db {
+            Some(db) => db
+                .processor_account_stamp(account)
+                .map_or(true, |stamp| stamp.is_some()),
+            None => true,
+        };
+        let held_by_another = self.machines.values().any(|m| {
+            !m.local
+                && m.name == name
+                && m.username
+                    .as_deref()
+                    .is_none_or(|u| u != input.username && holds(u))
+        });
+        if held_by_another || !self.profiles.claim(&name, &input.username, holds) {
             return refuse(
                 409,
                 format!(
@@ -427,7 +449,14 @@ impl Scheduler {
         let now = self.now();
         let mut doomed: Vec<(String, &'static str)> = Vec::new();
         for m in self.machines.values() {
-            if m.local || m.username.as_deref() != Some(&input.username) {
+            if m.local {
+                continue;
+            }
+            if m.username.as_deref() != Some(&input.username) {
+                // The same name under an account that no longer holds it (above).
+                if m.name == name {
+                    doomed.push((m.pid.clone(), "its account is no longer a processor"));
+                }
                 continue;
             }
             if m.name == name {
@@ -481,8 +510,20 @@ impl Scheduler {
             .set_identity(&name, &host_value, &catalog_value);
         self.machines.insert(pid.clone(), machine);
         let pause = self.machines.get(&pid).and_then(|m| m.pause.clone());
+        // Said once here; the queue plan shows the same refusal per row.
+        let stale: Vec<String> = self
+            .machines
+            .get(&pid)
+            .map(|m| {
+                m.catalog
+                    .engines
+                    .iter()
+                    .filter_map(|e| super::claim::engine_revision_refusal(&m.catalog, e))
+                    .collect()
+            })
+            .unwrap_or_default();
         self.log(format!(
-            "Processor {name} registered ({pid}){}{}",
+            "Processor {name} registered ({pid}){}{}{}",
             match &pause {
                 Some(a) if a.is_installing() => {
                     "; it is still installing its OCR backend (no work until that is done)"
@@ -500,7 +541,11 @@ impl Scheduler {
                     v.processor_version, v.library_version
                 ),
                 None => String::new(),
-            }
+            },
+            stale
+                .iter()
+                .map(|why| format!("; {why} (none of its work is offered)"))
+                .collect::<String>()
         ));
         RegisterOutcome::Ok(RegisterReply {
             protocol: PROTOCOL_VERSION,

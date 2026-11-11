@@ -1,0 +1,42 @@
+{
+  "body": {
+    "authenticated": false,
+    "role": "anonymous",
+    "permissions": {
+      "canWriteProgress": false,
+      "canAddFiles": false,
+      "canModifyDelete": false,
+      "metadata": {
+        "scope": "none"
+      },
+      "curated": {
+        "scope": "none"
+      },
+      "addFiles": {
+        "scope": "none"
+      }
+    },
+    "per_user_files": [
+      "volume-data.json",
+      "profiles.json",
+      "goals.json",
+      "positions.json",
+      "history/"
+    ],
+    "per_user_layers": [
+      "edit"
+    ],
+    "version": "0.0.0"
+  },
+  "headers": {
+    "cache-control": "no-store",
+    "content-type": "application/json"
+  },
+  "request": {
+    "auth": "none",
+    "headers": {},
+    "method": "GET",
+    "path": "/login/api/me"
+  },
+  "status": 200
+}

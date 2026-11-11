@@ -105,15 +105,22 @@ optional generation upgrade (below).
 
 With `ocr.upgrade.enabled`, the scheduler compares each volume's primary
 sidecar's **recipe** (engine, effective detector, and the patch budget for
-engines that use one) with the primary row's; model revisions are not
-compared, so older weights count as current. When they differ and the
-sidecar's family is in `ocr.upgrade.replace`, the volume is either swapped
-directly (another layer already holds the target recipe made from the
-current archive) or gets an upgrade job queued behind every ordinary job. A
-volume with missing pages, or whose sidecar a person edited, is skipped. The
-swap runs under the per-path write lock shared with WebDAV: the new bytes
-replace the bare file atomically, so there is never a moment without a
-primary, and no copy of the old file is kept. The old file's `ocr_sidecars`
+engines that use one) with the primary row's; model weights are not
+compared, so older weights count as current. The sidecar is outdated when the
+recipes differ and its family is in `ocr.upgrade.replace`, or when it is the
+primary's own recipe at a lower `ocr_engine.revision` than the engine's
+(absent = 1), listed or not. An outdated volume is either swapped directly
+(another layer holds the target recipe made from the current archive, and
+its seal proves Bunko wrote it) or gets an upgrade job queued behind every
+ordinary job. A volume with missing pages is skipped. A change nobody marked
+is not a reason to skip: the bare file is model output, replaced even if a
+person changed it. A file a reader marked EDITED (an `edited` block) is never
+replaced nor swapped in; when its recipe is outdated, the new OCR is written
+beside it as `<Volume>.<primary generation>.mokuro`, sealed. The swap runs
+under the per-path write lock shared with WebDAV: the new bytes replace the
+bare file atomically, so there is never a moment without a primary, and no
+copy of the old file is kept (on a cloud library the old file goes to the
+provider's trash, or its version history). The old file's `ocr_sidecars`
 row is dropped, the new file gets its own, and an `ocr_sidecar_upgraded`
 audit event is written; `volume_uuid` is preserved. Layers 0.7.0-beta.3 kept
 of replaced files (stamped `ocr_engine.upgraded_from_primary`) are removed at
@@ -475,12 +482,14 @@ rare kanji the small recognizer gets wrong.
 
 ## Models, provenance and pins
 
-The recognizers are compiled libtorch packages of Apache-2.0 weights, one
+hayai-nova and paddle-manga are compiled libtorch packages of Apache-2.0 weights, one
 per engine, precision and device type, produced by `tools/torch_export/` (a
 Python development tool that never runs on a user's machine) and published
 as the `torch-models-v1` release assets with a manifest of sha256 hashes and
-the source model revisions; the PP-OCR files and the recognizers' host files
-are in the `models-v1` release. A full build downloads what it needs into
+the source model revisions; the recognizers' host files are in the `models-v1`
+release. The PP-OCR files, and the opt-in models (`ctd-lines`, `charspot-small`,
+`nar-small`), are fetched from their authors' repositories at a pinned revision
+and checked against the hashes compiled into the program. A full build downloads what it needs into
 `<storage>/models/`, verifies it and unpacks the packages there (see
 [configuration](configuration.md#ocr-models) and
 [`rust-port/TORCH-BACKEND.md`](rust-port/TORCH-BACKEND.md)). Every source
@@ -494,6 +503,7 @@ this is how a reader tells server OCR from a layer a person edited:
 ```json
 "ocr_engine": {
   "id": "hayai-nova",
+  "revision": 2,
   "recognizer": "JustANormalTinkerer/hayai-ocr-v2.5-nova",
   "detector": "ppocr-manga",
   "generator": "mokuro-bunko 0.7.0",

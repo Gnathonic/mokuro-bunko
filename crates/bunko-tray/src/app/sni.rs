@@ -164,6 +164,9 @@ impl ksni::Tray for Sni {
             items.push(self.item(id::PROCESSOR, "Open processor", true));
         }
         items.push(self.item(id::LIBRARY, "Open library", m.library_url.is_some()));
+        if m.sign_in_url.is_some() {
+            items.push(self.item(id::SIGN_IN, "Sign in again…", true));
+        }
         if m.show_setup {
             items.push(self.item(id::SETUP, "Set up…", true));
         }

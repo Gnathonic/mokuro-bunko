@@ -1,0 +1,15 @@
+{
+  "body_text": "Too many failed attempts. Retry in 900s",
+  "headers": {
+    "content-type": "text/plain; charset=utf-8"
+  },
+  "request": {
+    "auth": "basic:reader",
+    "headers": {
+      "depth": "0"
+    },
+    "method": "PROPFIND",
+    "path": "/mokuro-reader/"
+  },
+  "status": 429
+}

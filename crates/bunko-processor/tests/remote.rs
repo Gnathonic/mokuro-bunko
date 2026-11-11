@@ -361,6 +361,11 @@ async fn register_socket_volume_upload_done_close_exit() {
     assert_eq!(request.public_name.as_deref(), Some("the big box"));
     assert_eq!(request.max_sessions, 2);
     assert_eq!(request.catalog.engines, ["fake"]);
+    assert_eq!(
+        request.catalog.engine_revisions,
+        [("fake".to_string(), 1)].into(),
+        "each listed engine's revision is announced"
+    );
     assert_eq!(request.host.version, env!("CARGO_PKG_VERSION"));
 
     let archive = lib.0.lock().archive.clone();
@@ -373,6 +378,7 @@ async fn register_socket_volume_upload_done_close_exit() {
     let sidecar: serde_json::Value = serde_json::from_slice(body).unwrap();
     assert_eq!(sidecar["pages"].as_array().unwrap().len(), 3);
     assert_eq!(sidecar["title"], "Series A");
+    assert_eq!(sidecar["ocr_engine"]["revision"], 1);
     for (_, event) in &events {
         match event {
             Event::Fetch { state, detail, .. } => {

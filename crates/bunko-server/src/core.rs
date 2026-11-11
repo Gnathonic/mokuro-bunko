@@ -17,6 +17,8 @@ pub struct Core(Arc<CoreInner>);
 
 pub struct CoreInner {
     pub config: Arc<RwLock<Config>>,
+    /// The file admin edits are saved to; `None` for a server with no file (tests):
+    /// see [`Core::save_config`].
     pub config_path: Option<PathBuf>,
     pub layout: StorageLayout,
     pub proxies: RwLock<TrustedProxies>,
@@ -40,13 +42,19 @@ impl Core {
         config_path: Option<PathBuf>,
         backend: Arc<dyn AuthBackend>,
     ) -> Self {
-        let (layout, proxies) = {
-            let c = config.read();
-            (
-                c.storage.layout(),
-                TrustedProxies::new(&c.server.trusted_proxies),
-            )
-        };
+        let layout = config.read().storage.layout();
+        Self::with_layout(config, config_path, backend, layout)
+    }
+
+    /// [`Core::new`] over a given layout: a cloud library's carries the root its store
+    /// is mounted at (`StorageLayout::with_library_root`).
+    pub fn with_layout(
+        config: Arc<RwLock<Config>>,
+        config_path: Option<PathBuf>,
+        backend: Arc<dyn AuthBackend>,
+        layout: StorageLayout,
+    ) -> Self {
+        let proxies = TrustedProxies::new(&config.read().server.trusted_proxies);
         Core(Arc::new(CoreInner {
             config,
             config_path,
@@ -73,10 +81,34 @@ impl Core {
         }
     }
 
-    /// Persist the live config (admin edits).
+    /// Does `username` own the cloud root's per-user files (0.8 §10): the library this
+    /// server mounted is in the cloud, and the live `storage.library.progress_user`
+    /// names the account. Read per request, so the admin's change (`PUT
+    /// /api/storage/readers`) applies to the next one. The mount, not the configured
+    /// backend, decides "cloud": a connect or disconnect waiting for its restart must
+    /// not move anyone's files onto (or off) a library that is not the mounted one.
+    /// Bound to the name, which is safe because a name is never reused: a deleted
+    /// account is only marked deleted and its name refused to a new one (bunko-db
+    /// `insert_user`), and usernames cannot be renamed.
+    pub fn owns_cloud_root(&self, username: Option<&str>) -> bool {
+        self.layout.cloud_library()
+            && username.is_some_and(|u| {
+                self.config.read().storage.library.progress_user.as_deref() == Some(u)
+            })
+    }
+
+    /// Persist the live config (admin edits) to this server's config file.
+    ///
+    /// A server built without one keeps its settings in memory and writes nothing. It
+    /// must not fall back to the default path as `bunko_core::config::save_config`
+    /// does for the command line: that is the user's own `config.yaml`, and the
+    /// servers built without a file are the tests'.
     pub fn save_config(&self) -> Result<(), bunko_core::ConfigError> {
+        let Some(path) = self.config_path.as_deref() else {
+            return Ok(());
+        };
         let snapshot = self.config.read().clone();
-        bunko_core::config::save_config(&snapshot, self.config_path.as_deref())
+        bunko_core::config::save_config(&snapshot, Some(path))
     }
 }
 
@@ -102,7 +134,8 @@ impl RequestCtx {
     /// [`resolve`](Self::resolve) when the identity needs no I/O
     /// ([`auth::authenticate_without_io`]); `None` otherwise.
     pub fn resolve_without_io(core: &Core, parts: &Parts) -> Option<Self> {
-        let identity = auth::authenticate_without_io(&parts.headers, core.backend.as_ref())?;
+        let mut identity = auth::authenticate_without_io(&parts.headers, core.backend.as_ref())?;
+        identity.owns_cloud_root = core.owns_cloud_root(identity.username());
         let peer = Self::peer_of(parts);
         let client_ip = core.proxies.read().client_ip_text(peer, &parts.headers);
         Some(RequestCtx {
@@ -115,12 +148,13 @@ impl RequestCtx {
     pub fn resolve(core: &Core, parts: &Parts) -> Self {
         let peer = Self::peer_of(parts);
         let client_ip = core.proxies.read().client_ip_text(peer, &parts.headers);
-        let identity = auth::authenticate(
+        let mut identity = auth::authenticate(
             &parts.headers,
             &client_ip,
             core.backend.as_ref(),
             &core.dav_limiter,
         );
+        identity.owns_cloud_root = core.owns_cloud_root(identity.username());
         RequestCtx {
             peer,
             client_ip,
@@ -157,6 +191,11 @@ where
                     })
             }
         };
+        // The request accounting's slot (outside every authenticating layer): the
+        // identity, once. No behaviour hangs on it.
+        if let Some(slot) = parts.extensions.get::<crate::analytics::AnalyticsSlot>() {
+            slot.fill(&ctx);
+        }
         parts.extensions.insert(ctx.clone());
         Ok(ctx)
     }

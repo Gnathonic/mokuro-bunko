@@ -1,0 +1,17 @@
+{
+  "body": {
+    "authenticated": false,
+    "error": "Too many failed attempts. Retry in 900s"
+  },
+  "headers": {
+    "cache-control": "no-store",
+    "content-type": "application/json"
+  },
+  "request": {
+    "auth": "basic:reader",
+    "headers": {},
+    "method": "GET",
+    "path": "/login/api/me"
+  },
+  "status": 429
+}

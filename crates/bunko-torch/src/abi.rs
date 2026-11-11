@@ -227,19 +227,53 @@ pub struct PackManifest {
     /// What the host must provide (only the fields the loader reads).
     #[serde(default)]
     pub requires: PackRequires,
-    /// The mokuro-bunko release the pack belongs to. A pack runs only with the binary
-    /// of the same release ([`PackManifest::check`]); empty in a pack built outside a
-    /// release (a development pack), which any build accepts.
+    /// The mokuro-bunko release the pack was built by. A build opens the packs of
+    /// [`OLDEST_PACK_RELEASE`] up to its own release ([`PackManifest::check_release`]);
+    /// empty in a pack built outside a release (a development pack), which any build
+    /// accepts.
     #[serde(default)]
     pub bunko_version: String,
 }
 
-/// Whether a pack built by mokuro-bunko `pack_version` belongs with this build
-/// (`release`): the same version, a leading `v` ignored; an empty version is a
-/// development pack and passes.
-pub fn same_release(pack_version: &str, release: &str) -> bool {
+/// The oldest mokuro-bunko release whose backend packs (libtorch and Vulkan) a build of
+/// this source opens. A pack is compiled from bunko-torch, bunko-vlm, bunko-vulkan and
+/// bunko-ncnn, with the libtorch, wheels, ncnn and layout that xtask's `torch_specs.rs`,
+/// `torch_pack.rs` and `vulkan_pack.rs` pin; bunko-ocr is no part of its cdylib and is an
+/// input only for its model manifests (`torch_models.json`, `vulkan_models.json`). While
+/// none of that changes, the packs of earlier releases are the packs this release would
+/// build, and an update keeps the installed one instead of downloading gigabytes again.
+///
+/// When a change to those sources is one an older pack lacks (a fix inside the cdylib, a
+/// new libtorch), set this to the release being made: older packs are then refused and
+/// `install-ocr` fetches this release's. The test `pack_inputs` (bunko-torch) fails on
+/// any change to those files until it is decided either way. Packs of 0.7.0 differ (0.7.1
+/// changed bunko-torch and the pack script); packs of 0.7.1 to 0.7.3 leak a libtorch
+/// recognizer's weights on every session (0.7.4 frees them when the recognizer is dropped).
+pub const OLDEST_PACK_RELEASE: &str = "0.7.4";
+
+/// Whether a build of mokuro-bunko `release` opens a pack built by `pack_version`: a
+/// release from [`OLDEST_PACK_RELEASE`] up to `release` itself (never a later one: an
+/// older build cannot know what a newer pack changed), a leading `v` ignored. An empty
+/// version is a development pack and passes; a version that is not semver passes only
+/// when it is exactly `release`.
+pub fn release_opens_pack(pack_version: &str, release: &str) -> bool {
+    opens(pack_version, release, OLDEST_PACK_RELEASE)
+}
+
+fn opens(pack_version: &str, release: &str, oldest: &str) -> bool {
     let p = pack_version.trim().trim_start_matches('v');
-    p.is_empty() || p == release.trim().trim_start_matches('v')
+    let r = release.trim().trim_start_matches('v');
+    if p.is_empty() || p == r {
+        return true;
+    }
+    let (Ok(p), Ok(r), Ok(oldest)) = (
+        semver::Version::parse(p),
+        semver::Version::parse(r),
+        semver::Version::parse(oldest),
+    ) else {
+        return false;
+    };
+    oldest <= p && p <= r
 }
 
 /// `pack.json` `requires` (the loader's part of it).
@@ -272,7 +306,7 @@ pub enum PackError {
     #[error("pack.json format {0} is not supported (this build reads format {PACK_FORMAT})")]
     Format(u32),
     #[error(
-        "the backend pack is from mokuro-bunko {found}, this is {wanted}: each release runs only its own pack; run 'mokuro-bunko install-ocr' (with automatic updates on, an update installs it)"
+        "the backend pack is from mokuro-bunko {found}, this is {wanted}, which opens the packs of {OLDEST_PACK_RELEASE} to {wanted}; run 'mokuro-bunko install-ocr' (with automatic updates on, an update installs it)"
     )]
     Release { found: String, wanted: String },
     #[error("the pack implements backend ABI {found}, this mokuro-bunko needs ABI {wanted}")]
@@ -331,10 +365,10 @@ impl PackManifest {
         Ok(())
     }
 
-    /// [`same_release`] against `release` (the loading binary's version; the loader in
+    /// [`release_opens_pack`] for `release` (the loading binary's version; the loader in
     /// bunko-engines runs this before [`PackManifest::check`]).
     pub fn check_release(&self, release: &str) -> Result<(), PackError> {
-        if same_release(&self.bunko_version, release) {
+        if release_opens_pack(&self.bunko_version, release) {
             Ok(())
         } else {
             Err(PackError::Release {
@@ -822,10 +856,10 @@ mod tests {
         }
     }
 
-    const RELEASE: &str = "0.7.0-test.1";
+    const RELEASE: &str = "0.8.0-test.1";
 
     #[test]
-    fn packs_are_locked_to_their_release() {
+    fn a_build_opens_the_packs_of_releases_that_build_the_same_pack() {
         let mut m = manifest();
         m.check_release(RELEASE).unwrap();
         m.bunko_version = format!("v{RELEASE}");
@@ -833,6 +867,35 @@ mod tests {
         // A development pack (built outside a release) passes.
         m.bunko_version = String::new();
         m.check_release(RELEASE).unwrap();
+        // The releases from the oldest that builds the same pack up to the build's own.
+        for v in ["0.7.1", "0.7.3", "v0.7.3", "0.8.0-beta.1", "0.8.0"] {
+            assert!(opens(v, "0.8.0", "0.7.1"), "{v}");
+        }
+        assert!(opens("0.8.0-beta.1", "0.8.0-beta.2", "0.7.1"));
+        // Older ones, and any newer than the build: it cannot know what those changed.
+        for v in [
+            "0.7.0",
+            "0.7.0-beta.6",
+            "0.6.9",
+            "0.8.1",
+            "0.8.0-rc.1",
+            "0.9.0-alpha.1",
+        ] {
+            assert!(!opens(v, "0.8.0-beta.1", "0.7.1"), "{v}");
+        }
+        // A version that is not semver opens only in its own build.
+        assert!(opens("custom", "custom", "0.7.1"));
+        assert!(!opens("custom", "0.8.0", "0.7.1"));
+        assert!(!opens("0.8.0", "custom", "0.7.1"));
+        // This source's own floor and version.
+        let this = env!("CARGO_PKG_VERSION");
+        assert!(release_opens_pack(OLDEST_PACK_RELEASE, this));
+        assert!(
+            semver::Version::parse(OLDEST_PACK_RELEASE).unwrap()
+                <= semver::Version::parse(this).unwrap(),
+            "OLDEST_PACK_RELEASE {OLDEST_PACK_RELEASE} is later than this release {this}"
+        );
+
         m.bunko_version = "0.6.9".into();
         let e = m.check_release(RELEASE).unwrap_err();
         assert_eq!(
@@ -845,13 +908,11 @@ mod tests {
         let text = e.to_string();
         assert!(
             text.starts_with(&format!(
-                "the backend pack is from mokuro-bunko 0.6.9, this is {RELEASE}: "
+                "the backend pack is from mokuro-bunko 0.6.9, this is {RELEASE}, which opens the packs of {OLDEST_PACK_RELEASE} to {RELEASE}; "
             )),
             "{text}"
         );
         assert!(text.contains("install-ocr"), "{text}");
-        assert!(same_release("0.7.0", "v0.7.0"));
-        assert!(!same_release("0.7.0-alpha.1", "0.7.0-alpha.2"));
     }
 
     #[test]

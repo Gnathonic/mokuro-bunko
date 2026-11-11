@@ -1,0 +1,17 @@
+{
+  "headers": {
+    "cache-control": "no-cache",
+    "content-type": "application/json",
+    "etag": "\"etag\"",
+    "vary": "Accept-Encoding"
+  },
+  "request": {
+    "auth": "basic:reader",
+    "headers": {
+      "if-none-match": "\"etag\""
+    },
+    "method": "GET",
+    "path": "/mokuro-reader/.mokuro-queue.json"
+  },
+  "status": 304
+}

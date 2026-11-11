@@ -112,6 +112,28 @@ pub(super) async fn create_user(s: &AdminState, req: &ApiRequest) -> Response {
         Ok(r) => r,
         Err(e) => return db_error(e),
     };
+    // A deleted account keeps its name, whatever case a new one is typed in (names are
+    // unique ignoring ASCII case): this page brings it back (Restore on its row).
+    let db = s.db();
+    let u = username.clone();
+    match blocking(move || db.get_user_ignoring_case(&u)).await {
+        Ok(Ok(Some(user))) if user.status == bunko_db::UserStatus::Deleted => {
+            let account = if user.username == username {
+                "a deleted account".to_string()
+            } else {
+                format!("the deleted account '{}'", user.username)
+            };
+            return error(
+                409,
+                format!(
+                    "Username '{username}' belongs to {account}: bring it back with Restore on its row"
+                ),
+            );
+        }
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => return db_error(e),
+        Err(r) => return r,
+    }
     let db = s.db();
     let actor = req.actor();
     let result = blocking(move || -> Result<Value, DbError> {
@@ -293,6 +315,34 @@ pub(super) async fn disable_user(s: &AdminState, req: &ApiRequest, username: &st
             user_after(s, req, "admin_disable_user", username, None).await
         }
         Ok(Ok(false)) => error(404, format!("User '{username}' not found")),
+        Ok(Err(e)) => db_error(e),
+        Err(r) => r,
+    }
+}
+
+/// `POST /api/users/<u>/restore` `{password}`: bring a deleted account back, active,
+/// with a new password and its old role.
+pub(super) async fn restore_user(s: &AdminState, req: &ApiRequest, username: &str) -> Response {
+    let data = match req.json() {
+        Ok(d) => d,
+        Err(r) => return r,
+    };
+    let password = data
+        .get("password")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    if password.is_empty() {
+        return error(400, "Password is required");
+    }
+    if let Some(msg) = validate_password(&password) {
+        return error(400, msg);
+    }
+    let db = s.db();
+    let u = username.to_string();
+    match blocking(move || db.restore_user(&u, &password, None)).await {
+        Ok(Ok(true)) => user_after(s, req, "admin_restore_user", username, None).await,
+        Ok(Ok(false)) => error(404, format!("User '{username}' is not a deleted account")),
         Ok(Err(e)) => db_error(e),
         Err(r) => r,
     }

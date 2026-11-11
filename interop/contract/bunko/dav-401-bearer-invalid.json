@@ -1,0 +1,16 @@
+{
+  "body_text": "Invalid or expired token",
+  "headers": {
+    "content-type": "text/plain; charset=utf-8",
+    "www-authenticate": "Bearer realm=\"mokuro-bunko\", error=\"invalid_token\""
+  },
+  "request": {
+    "auth": "raw:Bearer not-a-real-token",
+    "headers": {
+      "depth": "0"
+    },
+    "method": "PROPFIND",
+    "path": "/mokuro-reader/"
+  },
+  "status": 401
+}

@@ -2,11 +2,13 @@
 //! series/volumes exist, their covers and OCR layers, what still needs OCR or
 //! a thumbnail. Feeds the catalog, home/health counts and the OCR queue.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use bunko_core::sidecar_names::{self, Folder, LayerClass};
 use parking_lot::Mutex;
 
 use crate::fsutil;
@@ -91,6 +93,9 @@ fn scan_dir(
     let Ok(entries) = fsutil::list_dir(dir) else {
         return Vec::new();
     };
+    // Folders and archives another listed spelling shadows are never reached: not
+    // walked, not volumes. Their sidecars stay in the listing rule v1 reads.
+    let losers = fsutil::case_losers(dir, entries.iter().map(|(n, _)| n.as_str()));
     let mut subdirs = Vec::new();
     let mut filenames: HashSet<String> = HashSet::new();
     for (name, path) in entries {
@@ -100,7 +105,7 @@ fn scan_dir(
             filenames.insert(name);
         }
     }
-    subdirs.retain(|(name, _)| !name.starts_with('.'));
+    subdirs.retain(|(name, _)| !name.starts_with('.') && !losers.contains(name));
     subdirs.sort_by(|a, b| a.0.cmp(&b.0));
     if series_name.starts_with('.') {
         return subdirs;
@@ -110,7 +115,7 @@ fn scan_dir(
     sorted_names.sort();
     let volume_names: BTreeSet<String> = sorted_names
         .iter()
-        .filter(|name| crate::pyunicode::lower(name).ends_with(".cbz"))
+        .filter(|name| crate::pyunicode::lower(name).ends_with(".cbz") && !losers.contains(**name))
         .map(|name| name.chars().take(name.chars().count() - 4).collect())
         .collect();
     let mut layers_by_stem: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
@@ -118,27 +123,73 @@ fn scan_dir(
         let Some((stem, layer)) = split_layer_sidecar(name) else {
             continue;
         };
-        if volume_names.contains(&format!("{stem}.{layer}")) {
+        // A personal correction is one account's own, never the volume's (D27).
+        if volume_names.contains(&format!("{stem}.{layer}"))
+            || sidecar_names::layer_class(layer) == LayerClass::Personal
+        {
             continue;
         }
         layers_by_stem.entry(stem).or_default().insert(layer);
     }
 
-    // Stems with an archive, its extension in any case (`Vol 1.CBZ`).
-    let archive_stems: HashSet<&str> = filenames
+    // Stems with an archive, its extension in any case (`Vol 1.CBZ`), to its name.
+    let archive_stems: HashMap<&str, &str> = filenames
         .iter()
-        .filter(|name| crate::sidecar::is_cbz_name(name))
-        .map(|name| &name[..name.len() - 4])
+        .filter(|name| crate::sidecar::is_cbz_name(name) && !losers.contains(*name))
+        .map(|name| (&name[..name.len() - 4], name.as_str()))
         .collect();
+    // What rule v1 reads: the names a request reaches, and every shadowed archive. A
+    // shadowed archive is no volume here, but the files its exact stem names stay its
+    // own (as the OCR walk and the writers read them), never the volume's that shadows
+    // it.
+    let listed: Vec<&str> = sorted_names
+        .iter()
+        .map(|name| name.as_str())
+        .filter(|name| !losers.contains(*name) || crate::sidecar::is_cbz_name(name))
+        .collect();
+    let folder = Folder::new(&listed);
     let mut volumes = Vec::new();
     let mut series_cover = None;
     for volume_name in &volume_names {
         let has = |suffix: &str| filenames.contains(&format!("{volume_name}{suffix}"));
-        let has_cbz = archive_stems.contains(volume_name.as_str());
-        let has_mokuro = has(".mokuro");
-        let has_mokuro_gz = has(".mokuro.gz");
-        let has_webp = has(".webp");
-        let cover = has_webp.then(|| format!("{series_name}/{volume_name}.webp"));
+        let archive = archive_stems.get(volume_name.as_str());
+        let has_cbz = archive.is_some();
+        let mut has_mokuro = has(".mokuro");
+        let mut has_mokuro_gz = has(".mokuro.gz");
+        // Rule v1: the primary in another spelling of the stem (`V.MOKURO` on a
+        // case-sensitive disk) is the volume's too; the OCR walk agrees.
+        if !has_mokuro
+            && !has_mokuro_gz
+            && let Some(primary) = archive.and_then(|name| folder.primary_of(name))
+        {
+            match sidecar_names::split_mokuro(primary) {
+                Some((_, true)) => has_mokuro_gz = true,
+                _ => has_mokuro = true,
+            }
+        }
+        // The cover and the marker in any spelling of the stem (rule v1: `V.WEBP`), as
+        // the thumbnail worker finds them: listed under their own names.
+        let files = archive
+            .map(|name| folder.volume_files(name))
+            .unwrap_or_default();
+        let listed_as = |wanted: fn(&sidecar_names::VolumeFile) -> bool, suffix: &str| {
+            let exact = format!("{volume_name}{suffix}");
+            if filenames.contains(&exact) {
+                return Some(exact);
+            }
+            files
+                .iter()
+                .find(|(_, f)| wanted(f))
+                .map(|(n, _)| (*n).to_string())
+        };
+        let cover_name = listed_as(|f| matches!(f, sidecar_names::VolumeFile::Cover), ".webp");
+        let has_webp = cover_name.is_some();
+        let has_nocover = listed_as(
+            |f| matches!(f, sidecar_names::VolumeFile::NoCover),
+            ".nocover",
+        )
+        .is_some();
+        let cover = cover_name.map(|name| format!("{series_name}/{name}"));
         if series_cover.is_none() {
             series_cover.clone_from(&cover);
         }
@@ -147,7 +198,7 @@ fn scan_dir(
                 .pending_ocr
                 .push((series_name.to_owned(), volume_name.clone()));
         }
-        if has_cbz && !has_webp && !has(".nocover") {
+        if has_cbz && !has_webp && !has_nocover {
             snapshot.pending_thumbnails += 1;
         }
         volumes.push(VolumeSnapshot {
@@ -174,7 +225,9 @@ fn scan_dir(
 
 /// Scan the whole library tree once (`_scan_library`): a top-down walk,
 /// sibling directories by name, hidden directories (and their subtrees)
-/// skipped, symlinked directories listed but not descended.
+/// skipped, symlinked directories listed but not descended. A top-level folder spelled
+/// like a per-user name (`history/`, `History/`: the cloud-root owner's own tree, or a
+/// legacy folder) is never a series, as in the compiled catalog.
 pub fn scan_library(library_path: &Path) -> LibrarySnapshot {
     let mut snapshot = LibrarySnapshot::default();
     if !fsutil::is_dir(library_path) {
@@ -185,7 +238,12 @@ pub fn scan_library(library_path: &Path) -> LibrarySnapshot {
     while let Some((dir, name)) = stack.pop() {
         let subdirs = scan_dir(&dir, &name, &mut snapshot);
         for (child, path) in subdirs.into_iter().rev() {
-            if std::fs::symlink_metadata(&path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+            if name == "." && bunko_core::reader_tree::is_per_user_root_name(&child) {
+                continue;
+            }
+            if bunko_store::fs::symlink_metadata(&path)
+                .is_ok_and(|meta| meta.file_type().is_symlink())
+            {
                 continue;
             }
             let child_name = if name == "." {
@@ -197,6 +255,31 @@ pub fn scan_library(library_path: &Path) -> LibrarySnapshot {
         }
     }
     snapshot
+}
+
+/// The series `name` (a relative `/` path) as [`scan_library`] would list it, reading
+/// only its folder: `None` where the walk would not reach it (a hidden or symlinked
+/// folder on the way) or would not list it (no volumes).
+fn scan_one_series(library_path: &Path, name: &str) -> Option<SeriesSnapshot> {
+    let mut dir = library_path.to_path_buf();
+    if bunko_core::reader_tree::is_per_user_root_name(name.split('/').next().unwrap_or("")) {
+        return None;
+    }
+    for part in name.split('/') {
+        if part.is_empty() || part == "." || part == ".." || part.starts_with('.') {
+            return None;
+        }
+        dir.push(part);
+        if bunko_store::fs::symlink_metadata(&dir).is_ok_and(|meta| meta.file_type().is_symlink()) {
+            return None;
+        }
+    }
+    if !fsutil::is_dir(&dir) {
+        return None;
+    }
+    let mut snapshot = LibrarySnapshot::default();
+    scan_dir(&dir, name, &mut snapshot);
+    snapshot.series.pop()
 }
 
 struct CacheState {
@@ -214,15 +297,28 @@ struct CacheState {
 }
 
 /// Time-based cached scanner (`LibraryIndexCache`).
-pub struct LibraryIndexCache {
+///
+/// Once there is a snapshot, a read never walks the library: a stale or expired index
+/// answers at once with the last snapshot and starts one background walk. (0.5.2 walked
+/// inside the read, so a catalog or series view took as long as a whole-library scan
+/// whenever the TTL had passed or a file had changed, which under OCR load is often.)
+/// Only the very first read waits. [`get_snapshot_fresh`](Self::get_snapshot_fresh)
+/// still waits, for a caller that must see a change it just made.
+pub struct LibraryIndexCache(Arc<Inner>);
+
+struct Inner {
     library_path: PathBuf,
     ttl: Duration,
     max_bytes: usize,
     state: Mutex<CacheState>,
-    /// One scan at a time: while one runs, other readers of a stale index get the last
-    /// snapshot at once (they wait only when there has never been one) instead of each
-    /// walking the whole library, or waiting for a scan a busy background caller began.
+    /// One scan at a time: a reader that must wait for a walk waits for the one in
+    /// progress instead of starting its own.
     scanning: Mutex<()>,
+    /// A background walk is queued or running (at most one at a time).
+    refreshing: AtomicBool,
+    /// Before the first walk lands: the library root's names a request reaches, from one
+    /// listing taken by the first [`LibraryIndexCache::lists_series`] that needs it.
+    root_names: Mutex<Option<Arc<HashSet<String>>>>,
 }
 
 impl LibraryIndexCache {
@@ -230,7 +326,7 @@ impl LibraryIndexCache {
     /// is still served (the index cannot work without it) but logged, so an
     /// operator can see the library outgrew the configured cache.
     pub fn new(library_path: impl Into<PathBuf>, ttl: Duration, max_bytes: usize) -> Self {
-        Self {
+        Self(Arc::new(Inner {
             library_path: library_path.into(),
             ttl,
             max_bytes,
@@ -244,17 +340,19 @@ impl LibraryIndexCache {
                 scans: 0,
             }),
             scanning: Mutex::new(()),
-        }
+            refreshing: AtomicBool::new(false),
+            root_names: Mutex::new(None),
+        }))
     }
 
     pub fn library_path(&self) -> &Path {
-        &self.library_path
+        &self.0.library_path
     }
 
-    /// The library changed: a cheap scan is redone on the next read; a slow
-    /// one keeps serving until it is `RESCAN_FACTOR` scans old.
+    /// The library changed: a cheap scan is redone (in the background) on the next
+    /// read; a slow one keeps serving until it is `RESCAN_FACTOR` scans old.
     pub fn invalidate(&self) {
-        let mut state = self.state.lock();
+        let mut state = self.0.state.lock();
         state.stale = true;
         state.changes += 1;
         if state.scan_duration < SLOW_SCAN {
@@ -262,29 +360,134 @@ impl LibraryIndexCache {
         }
     }
 
-    /// A recent snapshot, rescanning when stale.
+    /// A recent snapshot; never waits for a walk once there is one.
     pub fn get_snapshot(&self) -> Arc<LibrarySnapshot> {
         self.get_snapshot_counted().0
     }
 
     /// `get_snapshot` and the scan count that produced it, read together.
     pub fn get_snapshot_counted(&self) -> (Arc<LibrarySnapshot>, u64) {
-        if let Some(hit) = self.servable() {
+        if let Some(hit) = self.0.servable() {
             return hit;
         }
-        let _scan = match self.scanning.try_lock() {
-            Some(guard) => guard,
-            None => {
-                let state = self.state.lock();
-                if let Some(last) = &state.last {
-                    return (Arc::clone(last), state.scans);
-                }
-                drop(state);
-                self.scanning.lock()
-            }
+        let last = {
+            let state = self.0.state.lock();
+            state
+                .last
+                .as_ref()
+                .map(|last| (Arc::clone(last), state.scans))
         };
-        // A scan that finished while this one waited serves it too.
-        if let Some(hit) = self.servable() {
+        match last {
+            Some(last) => {
+                self.refresh_in_background();
+                last
+            }
+            None => self.0.scan(false),
+        }
+    }
+
+    /// A snapshot that includes every change [`invalidate`](Self::invalidate)d before
+    /// this call, walking the library (or waiting for the walk in progress) if needed.
+    pub fn get_snapshot_fresh(&self) -> Arc<LibrarySnapshot> {
+        match self.0.fresh() {
+            Some((snapshot, _)) => snapshot,
+            None => self.0.scan(true).0,
+        }
+    }
+
+    /// One series as [`get_snapshot`](Self::get_snapshot) would list it. Before the
+    /// first walk has finished, only that series' folder is listed (and the walk starts
+    /// in the background), so a series view right after startup does not wait for the
+    /// whole library.
+    pub fn series(&self, name: &str) -> Option<SeriesSnapshot> {
+        let walked = self.0.state.lock().last.is_some();
+        if walked {
+            return self.get_snapshot().series_by_name(name).cloned();
+        }
+        self.refresh_in_background();
+        scan_one_series(&self.0.library_path, name)
+    }
+
+    /// Is `name` spelled as the series folder a request for it reaches? Never walks.
+    /// The walk leaves out every spelling another listed one shadows
+    /// ([`fsutil::case_losers`], the rule requests are resolved by), so a series the
+    /// last walk lists is spelled so. Before the first walk lands, a top-level name is
+    /// looked up in one listing of the library root ([`fsutil::listed_groups`], the
+    /// same rule), taken once and kept until the walk replaces it: a request right
+    /// after a start lists the root once, not once per request. False for anything
+    /// else: the caller resolves the spelling from the listings itself.
+    pub fn lists_series(&self, name: &str) -> bool {
+        let last = self.0.state.lock().last.clone();
+        if let Some(snapshot) = last {
+            return snapshot.series_by_name(name).is_some();
+        }
+        !name.contains('/') && self.0.root_names().contains(name)
+    }
+
+    /// The last snapshot, however old, without ever scanning.
+    pub fn cached_snapshot(&self) -> Option<Arc<LibrarySnapshot>> {
+        self.0.state.lock().snapshot.clone()
+    }
+
+    /// How many scans have produced a snapshot.
+    pub fn scans(&self) -> u64 {
+        self.0.state.lock().scans
+    }
+
+    /// Start one background walk, unless one is already queued or running.
+    fn refresh_in_background(&self) {
+        if self.0.refreshing.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let inner = Arc::clone(&self.0);
+        let spawned = std::thread::Builder::new()
+            .name("library-index".into())
+            .spawn(move || {
+                inner.scan(false);
+                inner.refreshing.store(false, Ordering::Release);
+            });
+        if let Err(error) = spawned {
+            self.0.refreshing.store(false, Ordering::Release);
+            tracing::warn!(%error, "library index: could not start a background walk");
+        }
+    }
+}
+
+impl Inner {
+    /// The library root's names a request reaches (folders and files alike: what is
+    /// asked for is a spelling): every listed name no other spelling shadows. Taken on
+    /// first use and kept until a walk lands; empty when the root cannot be listed.
+    fn root_names(&self) -> Arc<HashSet<String>> {
+        let mut cached = self.root_names.lock();
+        if let Some(names) = cached.as_ref() {
+            return Arc::clone(names);
+        }
+        let names = Arc::new(
+            fsutil::listed_groups(&self.library_path, true)
+                .map(|(entries, groups)| {
+                    entries
+                        .into_iter()
+                        .map(|(name, _)| name)
+                        .filter(|name| !groups.is_hidden(name))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        );
+        *cached = Some(Arc::clone(&names));
+        names
+    }
+
+    /// Walk the library (one walk at a time) and keep the result. A walk that finished
+    /// while this one waited for the lock serves it instead: one that may be served
+    /// (`fresh_only` false) or one with every change seen (`fresh_only` true).
+    fn scan(&self, fresh_only: bool) -> (Arc<LibrarySnapshot>, u64) {
+        let _scan = self.scanning.lock();
+        let done = if fresh_only {
+            self.fresh()
+        } else {
+            self.servable()
+        };
+        if let Some(hit) = done {
             return hit;
         }
         let changes = self.state.lock().changes;
@@ -308,6 +511,8 @@ impl LibraryIndexCache {
         state.snapshot = (!state.stale || duration >= SLOW_SCAN).then(|| Arc::clone(&snapshot));
         state.last = Some(Arc::clone(&snapshot));
         state.scans += 1;
+        // The walk answers from now on.
+        *self.root_names.lock() = None;
         (snapshot, state.scans)
     }
 
@@ -322,13 +527,97 @@ impl LibraryIndexCache {
         (fresh || slow_and_recent).then(|| (Arc::clone(snapshot), state.scans))
     }
 
-    /// The last snapshot, however old, without ever scanning.
-    pub fn cached_snapshot(&self) -> Option<Arc<LibrarySnapshot>> {
-        self.state.lock().snapshot.clone()
+    /// The cached snapshot when no change has landed since it was taken.
+    fn fresh(&self) -> Option<(Arc<LibrarySnapshot>, u64)> {
+        let state = self.state.lock();
+        let snapshot = state.snapshot.as_ref()?;
+        (!state.stale).then(|| (Arc::clone(snapshot), state.scans))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Sidecar names rule v1: a primary in another spelling of the stem (`V.MOKURO`,
+    /// `v.mokuro.gz`) means the volume is not pending OCR. (Two archives whose stems fold
+    /// alike are bunko-core's synthetic-listing vectors.)
+    #[test]
+    fn a_primary_in_any_spelling_is_not_pending() {
+        let dir = tempfile::tempdir().unwrap();
+        let series = dir.path().join("S");
+        bunko_store::fs::create_dir(&series).unwrap();
+        for name in [
+            "A.cbz",
+            "A.MOKURO",
+            "B.cbz",
+            "b.mokuro.gz",
+            "C.cbz",
+            "D.cbz",
+            "D.mokuro",
+        ] {
+            bunko_store::fs::write(series.join(name), b"{}").unwrap();
+        }
+        let snapshot = scan_library(dir.path());
+        let pending: Vec<&str> = snapshot
+            .pending_ocr
+            .iter()
+            .map(|(_, v)| v.as_str())
+            .collect();
+        assert_eq!(pending, ["C"]);
+        let volumes = &snapshot.series[0].volumes;
+        let flags = |name: &str| {
+            let v = volumes.iter().find(|v| v.name == name).unwrap();
+            (v.has_mokuro, v.has_mokuro_gz)
+        };
+        assert_eq!(flags("A"), (true, false));
+        assert_eq!(flags("B"), (false, true));
+        assert_eq!(flags("C"), (false, false));
+        assert_eq!(flags("D"), (true, false));
     }
 
-    /// How many scans have produced a snapshot.
-    pub fn scans(&self) -> u64 {
-        self.state.lock().scans
+    /// A cover or a no-cover marker in another spelling of the stem (`a.WEBP`) is the
+    /// volume's on every host: the catalog shows it under its listed name, and the volume
+    /// is not waiting for a thumbnail the worker will never make.
+    #[test]
+    fn a_cover_in_any_spelling_is_the_volumes() {
+        let dir = tempfile::tempdir().unwrap();
+        let series = dir.path().join("S");
+        bunko_store::fs::create_dir(&series).unwrap();
+        for name in ["A.cbz", "a.WEBP", "B.cbz", "b.NOCOVER", "C.cbz"] {
+            bunko_store::fs::write(series.join(name), b"x").unwrap();
+        }
+        let snapshot = scan_library(dir.path());
+        assert_eq!(snapshot.pending_thumbnails, 1);
+        let covers: Vec<Option<&str>> = snapshot.series[0]
+            .volumes
+            .iter()
+            .map(|v| v.cover.as_deref())
+            .collect();
+        assert_eq!(covers, [Some("S/a.WEBP"), None, None]);
+        assert_eq!(snapshot.series[0].cover.as_deref(), Some("S/a.WEBP"));
+    }
+
+    /// D27: a personal correction is one account's own, never a layer of the volume.
+    #[test]
+    fn sidecars_exclude_personal_corrections() {
+        let dir = tempfile::tempdir().unwrap();
+        let series = dir.path().join("S");
+        bunko_store::fs::create_dir(&series).unwrap();
+        for name in [
+            "V.cbz",
+            "V.hayai.mokuro",
+            "V.curated.mokuro",
+            "V.edit.mokuro",
+            "V.edit-2.mokuro.gz",
+            "V.mine.mokuro",
+        ] {
+            bunko_store::fs::write(series.join(name), b"{}").unwrap();
+        }
+        let snapshot = scan_library(dir.path());
+        assert_eq!(
+            snapshot.series[0].volumes[0].sidecars,
+            ["curated", "hayai", "mine"]
+        );
     }
 }
