@@ -71,7 +71,12 @@ test('the poller asks with If-None-Match, shows the held job, and pulls the OCR 
             },
             { timeout: 30_000, intervals: [500, 1000] },
         )
-        .toMatchObject({ title: 'Server OCR', lines: [{ fullName: 'Text' }] });
+        // The job's name: "Text" from an older reader, the generation's parts
+        // ("Hayai Nova 2.5 · PP-OCR Manga 0.3", from the queue file's `parts`) from later ones.
+        .toMatchObject({
+            title: 'Server OCR',
+            lines: [{ fullName: expect.stringMatching(/^(Text|Hayai Nova\b.*)$/) }],
+        });
     const looks = polls.slice(before);
     expect(looks.length).toBeGreaterThan(0);
     for (const p of looks) {
