@@ -15,6 +15,10 @@
 //!   configured provider, pairing and folder is used; its `account_id` is part of the id.
 //! * **mega**: the session on file (`mega_session`, from `library connect mega`);
 //!   the password is never stored, so a lapsed session means a new sign-in.
+//! * **folder**: `storage.library.path`, a folder on this computer opened exactly like
+//!   a cloud folder (the folder plays the role Drive's `mokuro-reader` folder plays).
+//!   The account id is the path ([`bunko_remote::folder::account_id`]); its
+//!   credentials entry holds no secret and is written when missing ([`folder`]).
 //!
 //! A cloud library that cannot be opened (not signed in, no password, the pairing
 //! changed) is not a startup failure: an [`UnconnectedStore`] is mounted instead, the
@@ -29,6 +33,7 @@ pub mod connect;
 mod control;
 pub mod disconnect;
 pub mod doctor;
+pub mod folder;
 pub mod hooks;
 mod unconnected;
 
@@ -102,7 +107,11 @@ pub fn pairing_of(lib: &LibraryConfig) -> String {
 fn poll_intervals(lib: &LibraryConfig) -> (Duration, Duration) {
     let (active, idle) = match lib.backend {
         LibraryBackend::GDrive => (30, 300),
-        _ => (60, 300),
+        LibraryBackend::Local
+        | LibraryBackend::OneDrive
+        | LibraryBackend::Mega
+        | LibraryBackend::WebDav
+        | LibraryBackend::Folder => (60, 300),
     };
     (
         Duration::from_secs(u64::from(lib.poll.active_s.unwrap_or(active).max(1))),
@@ -254,6 +263,8 @@ pub struct StoreHandle {
     pub account: Option<String>,
     /// The Google pairing (D25); `None` for other providers.
     pub pairing: Option<String>,
+    /// A folder library's folder (`storage.library.path`, as the store id names it).
+    pub path: Option<PathBuf>,
     store: Option<Arc<dyn CloudStore>>,
     /// Why there is no store.
     problem: Option<String>,
@@ -268,6 +279,8 @@ pub struct StoreHandle {
     quota: parking_lot::Mutex<Option<(std::time::Instant, Value)>>,
     #[cfg(feature = "testing")]
     fake: Option<Arc<RemoteStore<bunko_remote::fake::FakeBackend>>>,
+    #[cfg(feature = "testing")]
+    folder_store: Option<Arc<RemoteStore<bunko_remote::folder::FolderBackend>>>,
     // Last: the store (and its runtime) goes first.
     _connect_rt: Option<ConnectRuntime>,
 }
@@ -288,6 +301,7 @@ impl StoreHandle {
             root,
             account: None,
             pairing: (lib.backend == LibraryBackend::GDrive).then(|| pairing_of(lib)),
+            path: folder_path(lib),
             store: None,
             problem: Some(problem),
             pairing_change: None,
@@ -296,6 +310,8 @@ impl StoreHandle {
             quota: parking_lot::Mutex::new(None),
             #[cfg(feature = "testing")]
             fake: None,
+            #[cfg(feature = "testing")]
+            folder_store: None,
             _connect_rt: None,
         }
     }
@@ -374,6 +390,12 @@ impl StoreHandle {
     #[cfg(feature = "testing")]
     pub fn fake_store(&self) -> Option<&Arc<RemoteStore<bunko_remote::fake::FakeBackend>>> {
         self.fake.as_ref()
+    }
+
+    /// A folder library's store (feature `testing`): its outbox, failpoints and feed.
+    #[cfg(feature = "testing")]
+    pub fn folder_store(&self) -> Option<&Arc<RemoteStore<bunko_remote::folder::FolderBackend>>> {
+        self.folder_store.as_ref()
     }
 
     /// The admin status's `library.storage` block (§11): what the store is, its
@@ -471,6 +493,7 @@ impl StoreHandle {
             "account": self.account,
             "pairing": self.pairing,
             "pairing_label": self.pairing.as_deref().map(connect::pairing_label),
+            "path": self.path,
             "pairing_change": self.pairing_change.as_ref().map(|(configured, connected)| json!({
                 "configured": configured, "connected": connected,
             })),
@@ -745,6 +768,11 @@ enum Plan {
         account: Option<String>,
         session: bunko_remote::mega::SessionBlob,
     },
+    Folder {
+        id: String,
+        path: PathBuf,
+        account: String,
+    },
     #[cfg(feature = "testing")]
     Fake {
         id: String,
@@ -752,6 +780,17 @@ enum Plan {
         tune: Option<testing::Tune>,
     },
     Unconnected(String),
+}
+
+/// A folder library's folder as the store id names it (`None` for other backends, or
+/// no path set).
+fn folder_path(lib: &LibraryConfig) -> Option<PathBuf> {
+    if lib.backend != LibraryBackend::Folder {
+        return None;
+    }
+    lib.path
+        .as_deref()
+        .map(|p| PathBuf::from(bunko_remote::folder::account_id(p)))
 }
 
 enum OAuthBackend {
@@ -814,6 +853,7 @@ pub fn open_library_store(
         root,
         account,
         pairing: pairing.clone(),
+        path: folder_path(lib),
         store: None,
         problem: None,
         pairing_change: None,
@@ -822,6 +862,8 @@ pub fn open_library_store(
         quota: parking_lot::Mutex::new(None),
         #[cfg(feature = "testing")]
         fake: None,
+        #[cfg(feature = "testing")]
+        folder_store: None,
         _connect_rt: None,
     };
     let opened: (Arc<dyn LibraryStore>, StoreHandle) = match plan {
@@ -920,6 +962,37 @@ pub fn open_library_store(
                 }
             }
         }
+        Plan::Folder { id, path, account } => {
+            let (root, rc) = open_remote(&id);
+            folder::ensure_stub(&cloud, &id, &account);
+            let cfg = bunko_remote::folder::FolderConfig {
+                path,
+                root_name: lib.folder.clone(),
+                state_dir: rc.dir.clone(),
+                watch: true,
+            };
+            match connect_on_own_runtime(bunko_remote::folder::FolderBackend::connect(cfg)) {
+                Ok((backend, rt)) => {
+                    let store = RemoteStore::open(rc, backend)?;
+                    let mut h = handle_of(id, root, Some(account));
+                    h.store = Some(store.clone());
+                    #[cfg(feature = "testing")]
+                    {
+                        h.folder_store = Some(store.clone());
+                    }
+                    h._connect_rt = Some(rt);
+                    (store, h)
+                }
+                Err(e) => {
+                    let problem = format!("could not open the library folder: {e}");
+                    let store = Arc::new(UnconnectedStore::new(unconnected_root.clone(), &problem));
+                    (
+                        store,
+                        StoreHandle::unconnected(lib, unconnected_root, problem),
+                    )
+                }
+            }
+        }
         #[cfg(feature = "testing")]
         Plan::Fake { id, fake, tune } => {
             let (root, mut rc) = open_remote(&id);
@@ -937,12 +1010,19 @@ pub fn open_library_store(
     handle.cloud_dir = cloud.clone();
     handle.pairing_change = pairing_change(lib, &cloud);
     if let Some(id) = &handle.store_id {
-        tracing::info!(
-            "[STORAGE] Library: {} folder {:?} (store {id}) mounted at {}",
-            handle.backend.as_str(),
-            handle.folder,
-            handle.root.display()
-        );
+        match &handle.path {
+            Some(path) => tracing::info!(
+                "[STORAGE] Library: the folder {} (store {id}) mounted at {}",
+                path.display(),
+                handle.root.display()
+            ),
+            None => tracing::info!(
+                "[STORAGE] Library: {} folder {:?} (store {id}) mounted at {}",
+                handle.backend.as_str(),
+                handle.folder,
+                handle.root.display()
+            ),
+        }
     }
     let guard = bunko_store::mount(store.clone());
     Ok(Some((store, guard, Arc::new(handle))))
@@ -968,6 +1048,7 @@ pub fn describe_offline(config: &Config) -> Value {
         Ok(Plan::WebDav { id, account, .. }) => (Some(id), Some(account), None),
         Ok(Plan::OAuth { id, account, .. }) => (Some(id), account, None),
         Ok(Plan::Mega { id, account, .. }) => (Some(id), account, None),
+        Ok(Plan::Folder { id, account, .. }) => (Some(id), Some(account), None),
         #[cfg(feature = "testing")]
         Ok(Plan::Fake { id, .. }) => (Some(id), None, None),
         Ok(Plan::Unconnected(why)) => (None, None, Some(why)),
@@ -980,6 +1061,7 @@ pub fn describe_offline(config: &Config) -> Value {
         "store_id": id,
         "account": account,
         "pairing": pairing,
+        "path": folder_path(lib),
         "problem": problem,
         "store_dir": dir,
         "indexed": dir.as_ref().is_some_and(|d| d.join("index.sqlite").is_file()),
@@ -1036,6 +1118,18 @@ fn plan_inner(lib: &LibraryConfig, layout: &StorageLayout) -> io::Result<Plan> {
             })
         }
         LibraryBackend::GDrive | LibraryBackend::OneDrive => signed_in_plan(lib, &cloud),
+        LibraryBackend::Folder => {
+            let Some(path) = lib.path.as_deref().filter(|p| !p.as_os_str().is_empty()) else {
+                return Ok(Plan::Unconnected("storage.library.path must be set".into()));
+            };
+            let path = match folder::check_path(path, &layout.base) {
+                Ok(p) => p,
+                Err(why) => return Ok(Plan::Unconnected(why)),
+            };
+            let account = bunko_remote::folder::account_id(&path);
+            let id = store_id(folder::PROVIDER, "", &account, &lib.folder);
+            Ok(Plan::Folder { id, path, account })
+        }
     }
 }
 
@@ -1106,7 +1200,10 @@ fn signed_in_plan(lib: &LibraryConfig, cloud: &Path) -> io::Result<Plan> {
     let name = match lib.backend {
         LibraryBackend::GDrive => "Google Drive",
         LibraryBackend::Mega => "MEGA",
-        _ => "OneDrive",
+        LibraryBackend::OneDrive => "OneDrive",
+        LibraryBackend::Local | LibraryBackend::WebDav | LibraryBackend::Folder => {
+            connect::provider_name(lib.backend)
+        }
     };
     Ok(Plan::Unconnected(
         if other_pairing && lib.backend == LibraryBackend::GDrive {
@@ -1450,6 +1547,67 @@ mod tests {
                 .is_some_and(|p| p.contains("another pairing")),
             "{:?}",
             beta.problem()
+        );
+    }
+
+    /// A folder library: the store id names the path; the credentials stub is written
+    /// when missing (an env-only setup); the status names the path. Without a path, or
+    /// with one inside Bunko's own folder, an unconnected library says why.
+    #[test]
+    fn a_folder_library_opens_by_its_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let manga = outside.path().join("manga");
+        bunko_store::fs::create_dir_all(&manga).unwrap();
+        let mut c = cloud_config(dir.path(), LibraryBackend::Folder);
+        let (_s, _g, h) = open_library_store(&c, &c.storage.layout())
+            .unwrap()
+            .unwrap();
+        assert!(!h.connected());
+        assert_eq!(h.problem(), Some("storage.library.path must be set"));
+        drop((_s, _g, h));
+        c.storage.library.path = Some(dir.path().join("cloud"));
+        let (_s, _g, h) = open_library_store(&c, &c.storage.layout())
+            .unwrap()
+            .unwrap();
+        assert!(!h.connected());
+        assert!(
+            h.problem()
+                .is_some_and(|p| p.contains("Bunko's own folder")),
+            "{:?}",
+            h.problem()
+        );
+        drop((_s, _g, h));
+
+        c.storage.library.path = Some(manga.join("."));
+        let account = manga.to_string_lossy().into_owned();
+        let id = store_id("folder", "", &account, "mokuro-reader");
+        let offline = describe_offline(&c);
+        assert_eq!(offline["store_id"], id.as_str());
+        assert_eq!(offline["account"], account.as_str());
+        assert_eq!(offline["path"], account.as_str());
+        let layout = c.storage.layout();
+        let (store, _guard, handle) = open_library_store(&c, &layout).unwrap().unwrap();
+        assert!(handle.connected(), "{:?}", handle.problem());
+        assert_eq!(handle.store_id.as_deref(), Some(id.as_str()));
+        assert_eq!(handle.account.as_deref(), Some(account.as_str()));
+        assert_eq!(handle.path.as_deref(), Some(manga.as_path()));
+        assert_eq!(
+            store.root(),
+            layout.cloud_dir().join(&id).join("library").as_path()
+        );
+        let st = handle.status_json();
+        assert_eq!(st["backend"], "folder");
+        assert_eq!(st["provider"], "the library folder");
+        assert_eq!(st["folder"], "mokuro-reader");
+        assert_eq!(st["path"], account.as_str());
+        let creds = bunko_remote::auth::CredentialStore::open(&layout.cloud_dir()).unwrap();
+        let cred = creds.get(&id).unwrap().expect("the stub is written");
+        assert_eq!(cred.provider, "folder");
+        assert_eq!(cred.account_id.as_deref(), Some(account.as_str()));
+        assert_eq!(
+            poll_intervals(&c.storage.library).0,
+            Duration::from_secs(60)
         );
     }
 

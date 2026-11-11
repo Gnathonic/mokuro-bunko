@@ -129,6 +129,18 @@ impl ProviderOps for FakeOps {
                 return Err(BErr::AuthRevoked);
             }
             let (_, check) = check_backend(&*self.fake, folder, create, ours).await?;
+            // A folder's account is its path, as the live driver's.
+            if let Auth::Folder { path } = auth {
+                let id = bunko_remote::folder::account_id(path);
+                let probe = bunko_remote::folder::FolderProbe::default();
+                return Ok((
+                    AccountInfo {
+                        id: id.clone(),
+                        label: id,
+                    },
+                    folder_report(check, path, &probe, false),
+                ));
+            }
             Ok((self.account.lock().clone(), check))
         })
     }
@@ -1359,4 +1371,88 @@ fn bad_requests_never_start() {
         );
         assert_eq!(e.connector.status().state, "idle");
     });
+}
+
+/// A local folder: the path is the account and the store id's account; the credentials
+/// entry is a stub without a secret; `storage.library` gets `backend: folder` and the
+/// path, while the root keeps the configured name. A path inside Bunko's own folder, a
+/// relative one and none at all are refused before anything is written.
+#[tokio::test]
+async fn a_folder_connects_by_its_path() {
+    let e = env_with(library(), LibraryConfig::default(), None, 5);
+    // Bunko's own folder is `e.dir`: the library folder is elsewhere.
+    let outside = tempfile::tempdir().unwrap();
+    let manga = outside.path().join("manga");
+    bunko_store::fs::create_dir_all(&manga).unwrap();
+    let r = |path: &str| ConnectRequest {
+        provider: "folder".into(),
+        path: Some(path.into()),
+        // Ignored for a folder: the root is the folder at `path`.
+        folder: Some("elsewhere".into()),
+        ..ConnectRequest::default()
+    };
+    let shown = manga.to_string_lossy().into_owned();
+    e.connector
+        .start(r(&format!("{shown}/")), RequestOrigin::cli())
+        .unwrap();
+    let s = settle(&e.connector).await;
+    assert_eq!(s.state, "connected", "{s:?}");
+    assert_eq!(s.provider, Some("folder"));
+    assert_eq!(s.flow, Some("form"));
+    assert_eq!(s.account.as_deref(), Some(shown.as_str()));
+    let check = s.check.clone().unwrap();
+    assert_eq!(check.folder, shown);
+    assert_eq!((check.volumes, check.series), (3, 2));
+    assert_eq!(
+        check.summary,
+        format!("Found {shown}: 3 volumes in 2 series.")
+    );
+    let id = store_id("folder", "", &shown, "mokuro-reader");
+    assert_eq!(s.store_id.as_deref(), Some(id.as_str()));
+    let cred = e.creds().get(&id).unwrap().unwrap();
+    assert_eq!(cred.provider, "folder");
+    assert_eq!(cred.account_id.as_deref(), Some(shown.as_str()));
+    assert_eq!(cred.account_label.as_deref(), Some(shown.as_str()));
+    assert!(cred.refresh_token.is_none() && cred.webdav_password.is_none());
+    let choice = e.applied.lock().last().cloned().unwrap();
+    assert_eq!(choice.backend, LibraryBackend::Folder);
+    assert_eq!(choice.folder, "mokuro-reader");
+    assert_eq!(choice.path.as_deref(), Some(manga.as_path()));
+    let mut lib = LibraryConfig::default();
+    choice.apply_to(&mut lib);
+    assert_eq!(lib.backend, LibraryBackend::Folder);
+    assert_eq!(lib.path.as_deref(), Some(manga.as_path()));
+    {
+        let held = e.connector.0.held.lock();
+        let held = held.as_ref().unwrap();
+        assert!(matches!(&held.auth, Auth::Folder { path } if path == &manga));
+        assert_eq!(held.store_id, id);
+    }
+
+    // Refusals: nothing more is written.
+    let inside = e.dir.path().join("cloud").to_string_lossy().into_owned();
+    e.connector.start(r(&inside), RequestOrigin::cli()).unwrap();
+    let s = settle(&e.connector).await;
+    assert_eq!(s.state, "failed");
+    assert!(s.error.unwrap().contains("part of Bunko's own folder"));
+    e.connector.start(r("manga"), RequestOrigin::cli()).unwrap();
+    let s = settle(&e.connector).await;
+    assert_eq!(s.state, "failed");
+    assert!(s.error.unwrap().contains("starts with / or a drive letter"));
+    let gone = outside
+        .path()
+        .join("gone/manga")
+        .to_string_lossy()
+        .into_owned();
+    e.connector.start(r(&gone), RequestOrigin::cli()).unwrap();
+    let s = settle(&e.connector).await;
+    assert_eq!(s.state, "failed");
+    assert!(s.error.unwrap().contains("is missing too"));
+    assert_eq!(
+        e.connector
+            .start(r("  "), RequestOrigin::cli())
+            .unwrap_err(),
+        "Enter the folder's full path."
+    );
+    assert_eq!(e.creds().store_ids().unwrap(), vec![id]);
 }
