@@ -933,6 +933,12 @@
   ever managed it, with different contents. A claim now writes into the marker file
   that is there, as it always did on providers with unique names, and the Bunko that
   holds the library moves any second, stale marker file to the provider's trash.
+- **Long names no longer break the queue page's list.** A long series name took the
+  whole row, so the volume name beside it stood one character wide and the generation
+  label broke into single letters, one row filling the screen; on a phone the page
+  scrolled sideways. The series name now gives way first and is cut with an ellipsis,
+  the volume name takes the rest of the row, the generation label stays whole, and the
+  full names show on hover.
 
 ### Known limits
 - **Merging duplicate folders on Google Drive can trash files Bunko cannot see.**

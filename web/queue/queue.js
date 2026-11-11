@@ -952,6 +952,9 @@
     setText(node.querySelector(".pending-list__position"), String(index + 1));
     setText(node.querySelector(".pending-list__series"), item.series || "");
     setText(node.querySelector(".pending-list__volume"), item.volume || "");
+    // Both may be cut with an ellipsis: the full names on hover.
+    node.querySelector(".pending-list__series").title = item.series || "";
+    node.querySelector(".pending-list__volume").title = item.volume || "";
     fillGen(node.querySelector(".pending-list__gen"), item);
     var attempt = node.querySelector(".pending-list__attempt");
     setText(attempt, item.attempts ? "attempt " + (item.attempts + 1) : "");

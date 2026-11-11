@@ -971,12 +971,27 @@ body[data-level="detailed"] .job__detail {
 .pending-list__series {
     color: var(--text-muted);
     font-size: 0.8125rem;
-    flex-shrink: 0;
+    /* A long series name is cut, never the volume beside it: it gives way
+       first and takes at most 40% of the row (the full name is the tooltip). */
+    flex: 0 1 auto;
+    min-width: 0;
+    max-width: 40%;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .pending-list__volume {
     color: var(--text-primary);
     font-weight: 500;
+    /* The rest of the row, on one line: a name that breaks after any character
+       (Japanese) would otherwise stand one character wide. */
+    flex: 1 1 auto;
+    min-width: 4rem;
+    max-width: 100%;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 /* When this volume will be done, on the reader's own clock. Pushed to the
@@ -1148,6 +1163,11 @@ body[data-level="detailed"] .job__detail {
         gap: 0.125rem 0.5rem;
     }
 
+    /* Wrapped onto lines of their own, the names may use the whole width. */
+    .pending-list__series {
+        max-width: 100%;
+    }
+
     /* Six columns do not fit a phone. The bar drops to its own full-width
        row under the labels rather than being squeezed or dropped: it is the
        part of the row that carries the reading. */
@@ -1188,6 +1208,14 @@ body[data-level="detailed"] .job__detail {
     flex-wrap: wrap;
     gap: 0.4rem;
     min-width: 0;
+    flex-shrink: 0;
+}
+
+/* A generation's name is read as one word: it does not break into letters
+   when the row is short of room (the names beside it give way instead). */
+.pending-list__gen .badge--gen {
+    white-space: nowrap;
+    overflow-wrap: normal;
 }
 
 .pending-list__gen:empty {
