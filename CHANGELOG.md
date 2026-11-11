@@ -666,6 +666,16 @@
   processor is paired, for the `cloudflared` a server starts (its window stayed for as
   long as the tunnel was up) and for an update being fetched. These programs now run
   without a window (#79).
+- **A remote processor no longer waits seconds for each cloud archive.** A processor
+  fetches a cloud library's archive with a plain GET, and Bunko read it from the
+  provider one 256 KiB block at a time until sixteen reads had proven the reader
+  sequential; only then did one download of the whole file start. On Google Drive each
+  of those reads is a round trip of about 0.4 s, so every archive cost 6 to 7 seconds
+  before its bytes flowed, whatever its size, and a fast GPU sat idle between volumes.
+  Now a GET body, a copy or a whole-file read tells the store up front what it is
+  about to read: a whole file, or a span of at least 4 MiB, is one download (or large
+  read-ahead) from its first read. A short Range (one page) still fetches only its
+  blocks, and a zip reader moving around an archive still reads block by block.
 - **A WebDAV library no longer loses files to a listing the server cut short.** rclone's
   `serve webdav`, like most servers built on Go's WebDAV package, gives up on a folder
   listing when a file vanishes while it walks the folder, and still answers 207 with the

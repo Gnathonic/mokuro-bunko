@@ -12,7 +12,11 @@
 //!   0 (a whole-file consumer such as a copy or an HTTP GET) joins or starts the
 //!   spool, falling back to ranged passthrough when the spool budget is full. One
 //!   read, wherever it lands (a magic sniff at 0, a zip reader's local headers), never
-//!   starts a download or reads ahead.
+//!   starts a download or reads ahead. A caller that declares the span it reads
+//!   straight through ([`RemoteFile::will_read`]: an HTTP GET body, a copy) is proven
+//!   sequential from its first read when that span is the whole file or at least
+//!   [`SEQ_BYTES`] long: on a slow provider, sixteen one-block reads before the
+//!   download starts cost seconds per file.
 //! - [`PendingFile`]: the staged bytes of a pending Deferred write.
 //! - [`StagingFile`]: the local staging file `open_with` hands out.
 //!
@@ -133,6 +137,9 @@ pub struct ArchiveFile<B: Backend> {
     run_start: u64,
     run_reads: u32,
     readahead: u64,
+    /// The span `[start, end)` the caller declared it reads straight through
+    /// ([`RemoteFile::will_read`]), when long enough to count as sequential.
+    declared: Option<(u64, u64)>,
 }
 
 impl<B: Backend> ArchiveFile<B> {
@@ -153,13 +160,23 @@ impl<B: Backend> ArchiveFile<B> {
             run_start: 0,
             run_reads: 0,
             readahead: BLOCK,
+            declared: None,
         }
     }
 
     /// The read run has proven sequential: contiguous reads, enough of them, over a
-    /// large enough span.
+    /// large enough span; or it is the run the caller declared.
     fn sequential(&self) -> bool {
-        self.run_reads >= SEQ_READS && self.pos - self.run_start >= SEQ_BYTES
+        self.declared_end().is_some()
+            || (self.run_reads >= SEQ_READS && self.pos - self.run_start >= SEQ_BYTES)
+    }
+
+    /// The end of the declared span, while the current run is the one declared: it
+    /// started where the span starts and has not left it.
+    fn declared_end(&self) -> Option<u64> {
+        self.declared
+            .filter(|&(start, end)| self.run_start == start && self.pos < end)
+            .map(|(_, end)| end)
     }
 
     fn pinned(&self, range: (u64, u64)) -> io::Result<Vec<u8>> {
@@ -211,11 +228,14 @@ impl<B: Backend> ArchiveFile<B> {
                 .attach(&self.v.key())
                 .map(|p| (p, None));
         }
-        // A download of the whole file only for a proven whole-file reader.
-        if self.spool.is_none()
-            && !self.spool_start_tried
-            && self.run_start == 0
-            && self.sequential()
+        // A download of the whole file only for a proven whole-file reader. A declared
+        // span is one only when it runs to the end: a long Range from offset 0 reads
+        // ahead within itself instead.
+        let whole_file_run = match self.declared_end() {
+            Some(end) => end == self.v.size,
+            None => self.sequential(),
+        };
+        if self.spool.is_none() && !self.spool_start_tried && self.run_start == 0 && whole_file_run
         {
             self.spool_start_tried = true;
             self.spool = self.store.spool_for(&self.v, false)?.map(|p| (p, None));
@@ -275,7 +295,11 @@ impl<B: Backend> ArchiveFile<B> {
                     self.readahead = BLOCK;
                     1
                 };
-                let end = size.min(pos.saturating_add((buf.len() as u64).max(ahead)));
+                let mut end = size.min(pos.saturating_add((buf.len() as u64).max(ahead)));
+                // A declared span's reader reads no further than it said.
+                if let Some(span_end) = self.declared_end() {
+                    end = end.min(span_end.max(pos + buf.len() as u64));
+                }
                 let b_last = (end - 1) / BLOCK;
                 let mut b1 = b0;
                 while b1 < b_last && !core.blocks.contains(pid, cver, b1 + 1) {
@@ -396,6 +420,18 @@ impl<B: Backend> Write for ArchiveFile<B> {
 impl<B: Backend> RemoteFile for ArchiveFile<B> {
     fn metadata(&self) -> io::Result<Meta> {
         Ok(self.meta.clone())
+    }
+
+    /// A span that is the whole file, or at least [`SEQ_BYTES`], is a proven
+    /// sequential run from its first read: the whole file starts (or joins) the spool
+    /// at once, any other such span reads ahead at once, never past its end. A
+    /// shorter span (one page by Range) changes nothing: it fetches just its blocks.
+    fn will_read(&mut self, start: u64, len: u64) {
+        let size = self.v.size;
+        let end = start.saturating_add(len).min(size);
+        let whole = start == 0 && end == size;
+        self.declared =
+            (start < end && (whole || end - start >= SEQ_BYTES)).then_some((start, end));
     }
 
     fn sync_all(&self) -> io::Result<()> {

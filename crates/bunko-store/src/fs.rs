@@ -85,7 +85,9 @@ pub fn read(p: impl AsRef<Path>) -> io::Result<Vec<u8>> {
         Some(s) if !s.caps().remote => std::fs::read(p),
         Some(s) => {
             let mut v = Vec::new();
-            s.open(p)?.read_to_end(&mut v)?;
+            let mut f = s.open(p)?;
+            f.will_read(0, u64::MAX);
+            f.read_to_end(&mut v)?;
             Ok(v)
         }
     }
@@ -260,6 +262,7 @@ pub fn copy(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<u64> {
         (Some(s), None) if !s.caps().remote => std::fs::copy(from, to),
         (Some(s), None) => {
             let mut src = s.open(from)?;
+            src.will_read(0, u64::MAX);
             let mut dst = std::fs::File::create(to)?;
             io::copy(&mut src, &mut dst)
         }

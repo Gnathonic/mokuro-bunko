@@ -681,6 +681,150 @@ fn spool_budget_admission() {
     drop(held);
 }
 
+const BLOCK: u64 = 256 << 10;
+
+/// `len` bytes of `p` from `start`, streamed as the WebDAV GET streams a body
+/// (`afs::File::into_stream`, on a runtime of its own).
+fn stream(p: &Path, start: u64, len: u64) -> Vec<u8> {
+    use futures_util::StreamExt;
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let p = p.to_path_buf();
+    rt.block_on(async move {
+        let f = bunko_store::afs::File::open(&p).await.unwrap();
+        assert!(matches!(f, bunko_store::afs::File::Stream(_)));
+        let mut s = f.into_stream(start, len);
+        let mut out = Vec::new();
+        while let Some(chunk) = s.next().await {
+            out.extend_from_slice(&chunk.unwrap());
+        }
+        out
+    })
+}
+
+/// The bytes of a ranged read in the log (`size`: the file's).
+fn ranged_bytes(log: &[bunko_remote::fake::FakeRead], size: u64) -> u64 {
+    log.iter()
+        .map(|r| match r.range {
+            Some((first, Some(last))) => last + 1 - first,
+            Some((first, None)) => size - first,
+            None => panic!("a whole-file read: {log:?}"),
+        })
+        .sum()
+}
+
+/// A whole-file GET of an archive (a remote OCR processor's fetch) is one download
+/// from its first read, not sixteen one-block reads proving it sequential first: on
+/// Drive each of those is a round trip, seconds per archive before bytes flow.
+#[test]
+fn a_whole_file_stream_is_one_download_from_its_first_read() {
+    let (zip, _) = archive(3, 2 << 20, 23);
+    let size = zip.len() as u64;
+    assert!(size > 16 * BLOCK);
+    let t = start(FakeBackend::drive_like(), &[("S/v.cbz", &zip)], |_| {});
+    let p = t.abs("S/v.cbz");
+    t.fake().reset_calls();
+    let got = stream(&p, 0, size);
+    assert!(got == zip, "the archive's bytes");
+    let log = t.fake().read_log();
+    assert_eq!(log.len(), 1, "one provider read: {log:?}");
+    assert_eq!(log[0].range, None, "the whole file: {log:?}");
+    assert_eq!(t.store.cache_stats().spools, 1);
+}
+
+/// One page by Range (a short span in the middle) fetches just its blocks: no
+/// download, no read-ahead past it.
+#[test]
+fn a_short_range_stream_fetches_only_its_blocks() {
+    let (zip, _) = archive(3, 2 << 20, 24);
+    let size = zip.len() as u64;
+    let t = start(FakeBackend::drive_like(), &[("S/v.cbz", &zip)], |_| {});
+    let p = t.abs("S/v.cbz");
+    t.fake().reset_calls();
+    let (at, len) = (12 * BLOCK + (100 << 10), 300 << 10);
+    let got = stream(&p, at, len);
+    assert!(got == zip[at as usize..(at + len) as usize]);
+    let log = t.fake().read_log();
+    let fetched = ranged_bytes(&log, size);
+    assert!(fetched <= 2 * BLOCK, "{fetched} bytes in {log:?}");
+    assert_eq!(t.store.cache_stats().spools, 0, "no download");
+}
+
+/// A long span that does not start at 0 reads ahead from its first read (no spool:
+/// that downloads from offset 0), and no further than its end.
+#[test]
+fn a_long_range_stream_reads_ahead_at_once_within_its_span() {
+    let (zip, _) = archive(6, 2 << 20, 25);
+    let size = zip.len() as u64;
+    let t = start(FakeBackend::drive_like(), &[("S/v.cbz", &zip)], |_| {});
+    let p = t.abs("S/v.cbz");
+    t.fake().reset_calls();
+    let (at, len) = ((1 << 20) + 5, 5 << 20);
+    let got = stream(&p, at, len);
+    assert!(got == zip[at as usize..(at + len) as usize]);
+    let log = t.fake().read_log();
+    // 512 KiB, 1, 2, 4 MiB: doubling from the first read, not 16 single blocks.
+    assert!(log.len() <= 5, "{log:?}");
+    let fetched = ranged_bytes(&log, size);
+    assert!(fetched <= len + 2 * BLOCK, "{fetched} bytes in {log:?}");
+    assert_eq!(t.store.cache_stats().spools, 0, "no download");
+}
+
+/// A long span from offset 0 that stops short of the end reads ahead within itself:
+/// it does not download the whole file.
+#[test]
+fn a_long_range_stream_from_zero_downloads_no_more_than_it_asked() {
+    let (zip, _) = archive(6, 2 << 20, 28);
+    let size = zip.len() as u64;
+    let t = start(FakeBackend::drive_like(), &[("S/v.cbz", &zip)], |_| {});
+    let p = t.abs("S/v.cbz");
+    t.fake().reset_calls();
+    let len = 6 << 20;
+    let got = stream(&p, 0, len);
+    assert!(got == zip[..len as usize]);
+    let log = t.fake().read_log();
+    assert!(log.len() <= 5, "{log:?}");
+    let fetched = ranged_bytes(&log, size);
+    assert!(fetched <= len + BLOCK, "{fetched} bytes in {log:?}");
+    assert_eq!(t.store.cache_stats().spools, 0, "no download");
+}
+
+/// With no room in the spool budget, a whole-file stream falls back to ranged reads,
+/// reading ahead (doubling) from its first read.
+#[test]
+fn a_whole_file_stream_without_spool_room_reads_ahead_at_once() {
+    let (zip, _) = archive(3, 2 << 20, 26);
+    let size = zip.len() as u64;
+    let t = start(FakeBackend::drive_like(), &[("S/v.cbz", &zip)], |cfg| {
+        cfg.spool_bytes = 1 << 20;
+    });
+    let p = t.abs("S/v.cbz");
+    t.fake().reset_calls();
+    let got = stream(&p, 0, size);
+    assert!(got == zip);
+    let log = t.fake().read_log();
+    // 512 KiB, 1, 2, 4 MiB (to the end), and the zip tail cached for later readers.
+    assert!(log.len() <= 5, "{log:?}");
+    let fetched = ranged_bytes(&log, size);
+    assert!(fetched <= size + BLOCK, "{fetched} bytes in {log:?}");
+    assert_eq!(t.store.cache_stats().spools, 0);
+}
+
+/// `fs::read` declares the whole file too: one download.
+#[test]
+fn fs_read_of_an_archive_is_one_download() {
+    let (zip, _) = archive(3, 2 << 20, 27);
+    let t = start(FakeBackend::drive_like(), &[("S/v.cbz", &zip)], |_| {});
+    t.fake().reset_calls();
+    assert!(fs::read(t.abs("S/v.cbz")).unwrap() == zip);
+    let log = t.fake().read_log();
+    assert_eq!(log.len(), 1, "{log:?}");
+    assert_eq!(log[0].range, None);
+}
+
 #[test]
 fn watch_events_arrive_for_a_reader_upload() {
     let t = start(
