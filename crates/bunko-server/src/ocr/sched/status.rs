@@ -723,7 +723,20 @@ impl Scheduler {
                         progress = json!(bunko_sched::py::round_to((d / t).clamp(0.0, 1.0), 3));
                     }
                 }
-                out.push(json!({"kind": if row.primary { "ocr" } else { "layer" }, "id": row.name, "state": state, "eta": eta, "progress": progress}));
+                // What a reader labels the job by, as the finished file will carry it
+                // (`ocr_engine.parts`): recognizer, then detector, with versions.
+                let parts: Vec<Value> =
+                    bunko_core::engines::parts(&row.engine, row.effective_detector())
+                        .iter()
+                        .map(|p| {
+                            let mut part = json!({"role": p.role, "name": p.name});
+                            if !p.version.is_empty() {
+                                part["version"] = json!(p.version);
+                            }
+                            part
+                        })
+                        .collect();
+                out.push(json!({"kind": if row.primary { "ocr" } else { "layer" }, "id": row.name, "parts": parts, "state": state, "eta": eta, "progress": progress}));
             }
             if !out.is_empty() {
                 volumes.push(json!({"series": series, "volume": volume, "jobs": out}));

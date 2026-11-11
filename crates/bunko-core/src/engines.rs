@@ -44,6 +44,10 @@ impl LicenseClass {
 pub struct EngineSpec {
     pub id: &'static str,
     pub label: &'static str,
+    /// The short display name a sidecar's `ocr_engine.parts` carries for readers.
+    pub name: &'static str,
+    /// The model's version for display (`2.5`); empty when it has none.
+    pub version: &'static str,
     /// Hugging Face id of the source model the ONNX export was made from.
     pub recognizer: &'static str,
     /// SPDX id of the weights' licence.
@@ -122,6 +126,8 @@ pub const ENGINES: &[EngineSpec] = &[
     EngineSpec {
         id: "hayai-nova",
         label: "hayai-ocr v2.5 Nova",
+        name: "Hayai Nova",
+        version: "2.5",
         recognizer: "JustANormalTinkerer/hayai-ocr-v2.5-nova",
         license: "Apache-2.0",
         class: LicenseClass::Permissive,
@@ -135,6 +141,8 @@ pub const ENGINES: &[EngineSpec] = &[
     EngineSpec {
         id: "paddle-manga",
         label: "PaddleOCR-VL 1.6 manga LoRA",
+        name: "Paddle Manga",
+        version: "3",
         recognizer: "sorryhyun/paddleocr-vl-1.6-manga-lora",
         license: "Apache-2.0",
         class: LicenseClass::Permissive,
@@ -148,6 +156,8 @@ pub const ENGINES: &[EngineSpec] = &[
     EngineSpec {
         id: "ppocr-manga",
         label: "PP-OCRv6 manga (CTC)",
+        name: "PP-OCR Manga",
+        version: "0.3",
         recognizer: "Kellenok/PP-OCRv6_manga",
         license: "Apache-2.0",
         class: LicenseClass::Permissive,
@@ -163,6 +173,8 @@ pub const ENGINES: &[EngineSpec] = &[
     EngineSpec {
         id: "charspot-small",
         label: "manga-ocr-charspot-small (muscgab)",
+        name: "Charspot Small",
+        version: "",
         recognizer: "muscgab/manga-ocr-charspot-small",
         license: "CC-BY-NC-SA-4.0",
         class: LicenseClass::NonCommercial,
@@ -176,6 +188,8 @@ pub const ENGINES: &[EngineSpec] = &[
     EngineSpec {
         id: "nar-small",
         label: "manga-ocr-nar-small (muscgab)",
+        name: "NAR Small",
+        version: "",
         recognizer: "muscgab/manga-ocr-nar-small",
         license: "CC-BY-NC-SA-4.0",
         class: LicenseClass::NonCommercial,
@@ -192,6 +206,10 @@ pub const ENGINES: &[EngineSpec] = &[
 pub struct DetectorSpec {
     pub id: &'static str,
     pub label: &'static str,
+    /// The short display name a sidecar's `ocr_engine.parts` carries for readers.
+    pub name: &'static str,
+    /// The model's version for display (`0.3`); empty when it has none.
+    pub version: &'static str,
     /// SPDX id of the weights' licence.
     pub license: &'static str,
     pub class: LicenseClass,
@@ -203,6 +221,8 @@ pub const DETECTORS: &[DetectorSpec] = &[
     DetectorSpec {
         id: "ppocr-manga",
         label: "PP-OCRv6 manga line detector (Kellenok)",
+        name: "PP-OCR Manga",
+        version: "0.3",
         license: "Apache-2.0",
         class: LicenseClass::Permissive,
         line_level: true,
@@ -214,6 +234,8 @@ pub const DETECTORS: &[DetectorSpec] = &[
     DetectorSpec {
         id: "ctd-lines",
         label: "comic-text-detector line detector (dmMaze)",
+        name: "Comic Text Detector",
+        version: "",
         license: "GPL-3.0",
         class: LicenseClass::Gpl,
         line_level: true,
@@ -225,6 +247,8 @@ pub const DETECTORS: &[DetectorSpec] = &[
     DetectorSpec {
         id: "animetext-blocks",
         label: "AnimeText YOLO12-x block detector (deepghs)",
+        name: "AnimeText",
+        version: "12x",
         license: "GPL-3.0",
         class: LicenseClass::Gpl,
         line_level: false,
@@ -267,6 +291,44 @@ pub const REMOVED_DETECTORS: &[(&str, &str)] = &[
 
 pub const PATCH_BUDGETS: &[u32] = &[256, 384, 512];
 pub const DEFAULT_PATCH_BUDGET: u32 = 512;
+
+/// One part of a generation's OCR as a reader names it: `role` is `recognizer` or
+/// `detector`, `version` is empty when the model has none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Part {
+    pub role: &'static str,
+    pub name: &'static str,
+    pub version: &'static str,
+}
+
+/// What a sidecar's `ocr_engine.parts` lists for `engine` on `detector`, in display
+/// order: the recognizer, then the detector, unless the engine is its own detector
+/// (PP-OCR read alone). Unknown ids are left out.
+///
+/// The versions are the shipped models': `ppocr-manga`'s follows
+/// `bunko_ocr::models::PPOCR_REVISION`, `hayai-nova`'s the recognizer repo.
+pub fn parts(engine_id: &str, detector_id: &str) -> Vec<Part> {
+    let mut out = Vec::new();
+    let spec = engine(engine_id);
+    if let Some(e) = spec {
+        out.push(Part {
+            role: "recognizer",
+            name: e.name,
+            version: e.version,
+        });
+    }
+    if spec.is_some_and(|e| e.detector == Some(detector_id)) {
+        return out;
+    }
+    if let Some(d) = detector(detector_id) {
+        out.push(Part {
+            role: "detector",
+            name: d.name,
+            version: d.version,
+        });
+    }
+    out
+}
 
 pub fn engine(id: &str) -> Option<&'static EngineSpec> {
     ENGINES.iter().find(|e| e.id == id)
@@ -349,6 +411,38 @@ pub fn normalize_precision_mode(value: Option<&str>) -> Result<&'static str, Str
 
 #[cfg(test)]
 mod tests {
+
+    /// What a reader labels a generation's OCR by: recognizer then detector, each
+    /// with its version; one part when the engine is its own detector.
+    #[test]
+    fn a_generation_names_its_parts_with_versions() {
+        let shown = |e: &str, d: &str| -> Vec<String> {
+            parts(e, d)
+                .iter()
+                .map(|p| format!("{}:{}:{}", p.role, p.name, p.version))
+                .collect()
+        };
+        assert_eq!(
+            shown("hayai-nova", "ppocr-manga"),
+            ["recognizer:Hayai Nova:2.5", "detector:PP-OCR Manga:0.3"]
+        );
+        assert_eq!(
+            shown("ppocr-manga", "ppocr-manga"),
+            ["recognizer:PP-OCR Manga:0.3"]
+        );
+        assert_eq!(
+            shown("charspot-small", "animetext-blocks"),
+            ["recognizer:Charspot Small:", "detector:AnimeText:12x"]
+        );
+        assert!(shown("gone", "gone").is_empty());
+        for e in ENGINES {
+            assert!(!e.name.is_empty(), "{}", e.id);
+        }
+        for d in DETECTORS {
+            assert!(!d.name.is_empty(), "{}", d.id);
+        }
+    }
+
     use super::*;
 
     /// paddle-manga runs on the CPU (0.5.2 parity) with a note; the setup and settings

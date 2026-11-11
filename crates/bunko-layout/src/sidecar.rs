@@ -285,6 +285,9 @@ pub struct OcrEngine {
     pub weights: Vec<(String, String)>,
     /// What the recognizer computed in; omitted when none loaded (ppocr-manga).
     pub precision: Option<String>,
+    /// The parts a reader names the OCR by, in display order: `(role, name,
+    /// version)`, the version empty when the model has none. Omitted when empty.
+    pub parts: Vec<(String, String, String)>,
 }
 
 impl OcrEngine {
@@ -306,6 +309,7 @@ impl OcrEngine {
             patch_budget: PATCH_BUDGET_ENGINES.contains(&engine).then_some(patches),
             weights: Vec::new(),
             precision: None,
+            parts: Vec::new(),
         }
     }
 
@@ -336,6 +340,22 @@ impl OcrEngine {
         }
         if let Some(p) = self.precision.as_ref().filter(|p| !p.is_empty()) {
             items.push(("precision".to_string(), Value::Str(p.clone())));
+        }
+        if !self.parts.is_empty() {
+            let part = |(role, name, version): &(String, String, String)| {
+                let mut fields = vec![
+                    ("role".to_string(), Value::Str(role.clone())),
+                    ("name".to_string(), Value::Str(name.clone())),
+                ];
+                if !version.is_empty() {
+                    fields.push(("version".to_string(), Value::Str(version.clone())));
+                }
+                Value::Object(fields)
+            };
+            items.push((
+                "parts".to_string(),
+                Value::Array(self.parts.iter().map(part).collect()),
+            ));
         }
         Value::Object(items)
     }
@@ -608,6 +628,40 @@ mod tests {
         let across = vec![read_line("OK", 100.0, 100.0, 180.0, 140.0, false)];
         assert!(!blocks_page(&[across], 1000, 1400, "0.2.5").blocks[0].vertical);
         assert!(blocks_page(&[], 10, 10, "0.2.5").blocks.is_empty());
+    }
+
+    /// The parts a reader labels the OCR by close the block; a part without a version
+    /// has no `version` key.
+    #[test]
+    fn engine_block_lists_its_parts_last() {
+        let mut e = OcrEngine::new("charspot-small", None, 0);
+        e.detector = "animetext-blocks".into();
+        e.parts = vec![
+            ("recognizer".into(), "Charspot Small".into(), String::new()),
+            ("detector".into(), "AnimeText".into(), "12x".into()),
+        ];
+        let v = e.to_value();
+        let Value::Object(items) = &v else {
+            panic!("{v:?}")
+        };
+        assert_eq!(items.last().map(|(k, _)| k.as_str()), Some("parts"));
+        let Some(Value::Array(parts)) = v.get("parts") else {
+            panic!("{v:?}")
+        };
+        assert_eq!(parts.len(), 2);
+        assert!(parts[0].get("version").is_none());
+        assert_eq!(parts[1].get("version"), Some(&Value::Str("12x".into())));
+        assert_eq!(
+            parts[0].get("name"),
+            Some(&Value::Str("Charspot Small".into()))
+        );
+        // None: no key at all, as before.
+        assert!(
+            OcrEngine::new("hayai-nova", None, 512)
+                .to_value()
+                .get("parts")
+                .is_none()
+        );
     }
 
     #[test]

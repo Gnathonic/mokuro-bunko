@@ -223,6 +223,13 @@
   fails to load, with an error naming that row, until it is renamed.
 
 ### Added
+- **Sidecars and the queue file name the OCR's parts with versions.** A sidecar Bunko
+  writes now carries `ocr_engine.parts`, e.g. `[{"role": "recognizer", "name":
+  "Hayai Nova", "version": "2.5"}, {"role": "detector", "name": "PP-OCR Manga",
+  "version": "0.3"}]`: the recognizer, then the line or block detector, or one part
+  when the engine is its own detector. Each job in `.mokuro-queue.json` carries the same
+  list. Readers label OCR layers and pending jobs by it ("Hayai Nova 2.5 · PP-OCR Manga
+  0.3") instead of the file's mokuro version or a generic name.
 - **Two more OCR engines: `charspot-small` and `nar-small`.**
   [manga-ocr-charspot-small](https://huggingface.co/muscgab/manga-ocr-charspot-small)
   finds and classifies every character and has no decoder;

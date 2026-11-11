@@ -19,6 +19,18 @@
           {
             "kind": "ocr",
             "id": "hayai-nova",
+            "parts": [
+              {
+                "role": "recognizer",
+                "name": "Hayai Nova",
+                "version": "2.5"
+              },
+              {
+                "role": "detector",
+                "name": "PP-OCR Manga",
+                "version": "0.3"
+              }
+            ],
             "state": "held",
             "eta": null,
             "progress": null
