@@ -162,6 +162,8 @@ impl std::fmt::Debug for FolderBackend {
 struct Knobs {
     granularity_ns: std::sync::atomic::AtomicI64,
     stop_case_rename: std::sync::atomic::AtomicBool,
+    /// Check spellings against folder listings, as on a case-folding filesystem.
+    spell_exact: std::sync::atomic::AtomicBool,
     /// Runs once in the next replace, after its copy and before its rename.
     before_replace: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
@@ -510,6 +512,10 @@ impl Inner {
     /// Whether a lookup can succeed in another spelling than the one on disk (or it
     /// is not known yet): `stat` then checks every segment against its folder.
     fn needs_exact(&self) -> bool {
+        #[cfg(feature = "testing")]
+        if self.knobs.spell_exact.load(Ordering::Relaxed) {
+            return true;
+        }
         let g = self.probe.read();
         !g.1.ran || g.0.folds_case || g.0.rewrites_names || g.1.folds_unicode
     }
@@ -630,9 +636,10 @@ impl Inner {
         self.dirs.lock().clear();
     }
 
-    /// The names in `dir` (cached for [`DIR_CACHE_TTL`]).
-    fn dir_names(&self, dir: &Path) -> std::io::Result<Arc<HashSet<OsString>>> {
-        if let Some((at, names)) = self.dirs.lock().get(dir)
+    /// The names in `dir` (cached for [`DIR_CACHE_TTL`]; read afresh when `fresh`).
+    fn dir_names(&self, dir: &Path, fresh: bool) -> std::io::Result<Arc<HashSet<OsString>>> {
+        if !fresh
+            && let Some((at, names)) = self.dirs.lock().get(dir)
             && at.elapsed() < DIR_CACHE_TTL
         {
             return Ok(names.clone());
@@ -748,11 +755,17 @@ impl Inner {
         if self.needs_exact() {
             let mut dir = self.root.clone();
             for seg in &segs {
-                match self.dir_names(&dir) {
-                    Ok(names) if names.contains(OsStr::new(seg)) => {}
-                    Ok(_) => return Ok(None),
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-                    Err(e) => return Err(io_err(&e, Act::Read, pid)),
+                let mut fresh = false;
+                loop {
+                    match self.dir_names(&dir, fresh) {
+                        Ok(names) if names.contains(OsStr::new(seg)) => break,
+                        // The file is there but the listing read a moment ago lacks the
+                        // name: made since then, or spelled otherwise. Read it again.
+                        Ok(_) if !fresh => fresh = true,
+                        Ok(_) => return Ok(None),
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                        Err(e) => return Err(io_err(&e, Act::Read, pid)),
+                    }
                 }
                 dir.push(seg);
             }
@@ -1777,6 +1790,12 @@ impl FolderBackend {
     /// probe found).
     pub fn force_mtime_granularity(&self, ns: i64) {
         self.inner.knobs.granularity_ns.store(ns, Ordering::Relaxed);
+    }
+
+    /// Tests: check every spelling against folder listings, as on a filesystem that
+    /// folds case (macOS, Windows), whatever the probe found.
+    pub fn force_exact_spelling(&self) {
+        self.inner.knobs.spell_exact.store(true, Ordering::Relaxed);
     }
 
     /// Tests: the next case-only rename stops after its first rename, as a crash

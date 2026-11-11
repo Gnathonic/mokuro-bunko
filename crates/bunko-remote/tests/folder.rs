@@ -437,6 +437,40 @@ async fn an_empty_file_is_a_write_in_progress_until_it_settles() {
     assert!(shown(&b, "S/Vol 3.cbz").await);
 }
 
+/// `items` with every folder's times set to 0.
+fn without_folder_times(items: &[ChangeItem]) -> Vec<ChangeItem> {
+    let mut items = items.to_vec();
+    for i in &mut items {
+        if let ChangeItem::Upsert(n) = i
+            && n.is_dir
+        {
+            n.base_mtime_ms = 0;
+            n.created_ms = 0;
+        }
+    }
+    items
+}
+
+/// Where a filesystem folds case, every lookup checks the name's spelling against the
+/// folder's listing, kept a moment. A file made since that listing was read is found
+/// all the same.
+#[tokio::test]
+async fn a_file_made_just_after_a_lookup_is_found() {
+    let lib = Lib::new();
+    lib.put("S/a.cbz", b"a");
+    let b = lib.open().await;
+    b.force_exact_spelling();
+    assert!(b.stat("S/a.cbz").await.unwrap().is_some());
+    lib.put("S/b.cbz", b"b");
+    assert!(b.stat("S/b.cbz").await.unwrap().is_some());
+    assert!(shown(&b, "S/b.cbz").await);
+    // A folder made since, and a file in it.
+    lib.put("S/new/c.cbz", b"c");
+    assert!(b.stat("S/new").await.unwrap().is_some());
+    assert!(b.stat("S/new/c.cbz").await.unwrap().is_some());
+    assert_eq!(b.stat("S/nothing.cbz").await.unwrap(), None);
+}
+
 /// A network share's clock may run ahead of this computer's: a time a little ahead is
 /// a write just made, one far ahead is a wrong clock and hides nothing.
 #[tokio::test]
@@ -1163,9 +1197,11 @@ async fn changes_report_what_happened_outside() {
             .iter()
             .all(|i| matches!(i, ChangeItem::Removed { .. }))
     );
-    // At least once: the same cursor again gives the same items.
+    // At least once: the same cursor again gives the same items. A folder's times may
+    // have moved: NTFS refreshes the times a listing shows for a folder lazily, after
+    // a file was written into it.
     let (again, c1b) = page(&b, &c0).await;
-    assert_eq!(again, items);
+    assert_eq!(without_folder_times(&again), without_folder_times(&items));
     assert_eq!(c1b, c1);
     // Moving on: nothing new.
     let (items, c2) = page(&b, &c1).await;
