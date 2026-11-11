@@ -1676,3 +1676,127 @@ fn a_queued_write_never_lands_in_a_replacement_folder() {
     assert_eq!(t.s().outbox()[0].state, "CONFLICT");
     assert!(t.fake.node_at(&format!("{FOLDER}/S/v.mokuro")).is_none());
 }
+
+// ---- The Status fast path (queue file v2 §6.6) ----------------------------------
+
+const QUEUE_FILE: &str = ".mokuro-series-queue.json";
+
+fn status() -> WriteIntent {
+    deferred(Origin::Status, Mode::Replace { base: None })
+}
+
+/// What one Status write of `bytes` to `rel` cost: governed calls in the api log,
+/// and the provider's `find_named`, `stat` and upload calls.
+fn status_write(t: &T, rel: &str, bytes: &[u8]) -> (u64, usize, usize, usize) {
+    t.idle();
+    let calls = t.s().api_stats().total_hour().calls;
+    t.fake.reset_calls();
+    t.publish(rel, bytes, status());
+    t.idle();
+    assert_eq!(t.remote_bytes(rel).as_deref(), Some(bytes), "{rel}");
+    (
+        t.s().api_stats().total_hour().calls - calls,
+        t.fake.calls(FakeOp::FindNamed),
+        t.fake.calls(FakeOp::Stat),
+        t.fake.calls(FakeOp::Upload),
+    )
+}
+
+#[test]
+fn a_drive_status_write_is_one_call_and_a_missing_file_falls_back_to_a_create() {
+    let t = T::new(FakeBackend::drive_like(), &[("S/S 1.cbz", b"zip")]);
+    t.wait_steady();
+    let rel = format!("S/{QUEUE_FILE}");
+    // The first write creates the file: the parent is asked for the name first.
+    assert_eq!(status_write(&t, &rel, b"{\"rev\":1}"), (2, 1, 0, 1));
+    let pid = t.fake.node_at(&format!("{FOLDER}/{rel}")).unwrap().pid;
+    // A file the index holds is overwritten by id: one call in the governor's log.
+    assert_eq!(status_write(&t, &rel, b"{\"rev\":2}"), (1, 0, 0, 1));
+    assert_eq!(t.fake.node_at(&format!("{FOLDER}/{rel}")).unwrap().pid, pid);
+    t.sync_feed();
+    assert!(
+        fs::metadata(t.abs(&rel)).unwrap().own(),
+        "the fast write is in the ledger"
+    );
+    assert_eq!(status_write(&t, &rel, b"{\"rev\":3}"), (1, 0, 0, 1));
+    // Deleted behind the feed's back: the overwrite's 404 falls back to the full path,
+    // which creates the file again.
+    t.fake.reader_delete_pid(&pid);
+    assert_eq!(status_write(&t, &rel, b"{\"rev\":4}"), (3, 1, 0, 2));
+    let pid2 = t.fake.node_at(&format!("{FOLDER}/{rel}")).unwrap().pid;
+    assert_ne!(pid2, pid);
+    // Trashed: the same.
+    t.fake.reader_trash_pid(&pid2);
+    assert_eq!(status_write(&t, &rel, b"{\"rev\":5}"), (3, 1, 0, 2));
+    assert_eq!(t.remote_named("S", QUEUE_FILE).len(), 1);
+    // And the new file is the one the next write overwrites.
+    assert_eq!(status_write(&t, &rel, b"{\"rev\":6}"), (1, 0, 0, 1));
+    assert!(
+        t.s()
+            .outbox()
+            .iter()
+            .all(|o| o.state == "CONFIRMED" || o.state == "COMMITTED"),
+        "{:?}",
+        t.s().outbox()
+    );
+}
+
+#[test]
+fn a_webdav_status_write_makes_no_stat() {
+    for fake in [FakeBackend::webdav_cas(), FakeBackend::webdav_plain()] {
+        let t = T::new(fake, &[("S/S 1.cbz", b"zip")]);
+        t.wait_steady();
+        let rel = format!("S/{QUEUE_FILE}");
+        assert_eq!(status_write(&t, &rel, b"{\"rev\":1}"), (2, 1, 0, 1));
+        assert_eq!(status_write(&t, &rel, b"{\"rev\":2}"), (1, 0, 0, 1));
+        assert_eq!(status_write(&t, &rel, b"{\"rev\":3}"), (1, 0, 0, 1));
+    }
+}
+
+#[test]
+fn a_status_write_over_a_changed_file_takes_the_full_path() {
+    let t = T::new(FakeBackend::webdav_cas(), &[("S/S 1.cbz", b"zip")]);
+    t.wait_steady();
+    let rel = format!("S/{QUEUE_FILE}");
+    status_write(&t, &rel, b"{\"rev\":1}");
+    // Someone else's bytes, which the feed has not brought yet: If-Match fails, the
+    // full path finds the file and overwrites it (a Status file is Bunko's).
+    t.fake
+        .reader_put(&format!("{FOLDER}/{rel}"), b"{\"theirs\":true}");
+    assert_eq!(status_write(&t, &rel, b"{\"rev\":2}"), (3, 1, 0, 2));
+    assert_eq!(status_write(&t, &rel, b"{\"rev\":3}"), (1, 0, 0, 1));
+}
+
+#[test]
+fn a_mega_status_write_leaves_one_node() {
+    let t = T::new(FakeBackend::mega_like(), &[("S/S 1.cbz", b"zip")]);
+    t.wait_steady();
+    let rel = format!("S/{QUEUE_FILE}");
+    status_write(&t, &rel, b"{\"rev\":1}");
+    // A replace is a new node; the old one goes (MEGA has no write by id).
+    let (_, find, _, up) = status_write(&t, &rel, b"{\"rev\":2}");
+    assert_eq!((find, up), (0, 1));
+    status_write(&t, &rel, b"{\"rev\":3}");
+    assert_eq!(t.remote_named("S", QUEUE_FILE).len(), 1);
+}
+
+#[test]
+fn a_status_write_never_overwrites_another_spelling_in_place() {
+    let t = T::new(
+        FakeBackend::drive_like(),
+        &[
+            ("S/S 1.cbz", b"zip"),
+            ("S/.Mokuro-Series-Queue.json", b"{\"old\":true}"),
+        ],
+    );
+    t.wait_steady();
+    let rel = format!("S/{QUEUE_FILE}");
+    // Another spelling of the name is never the file the write overwrites: the
+    // folder is asked for the exact name, which is created.
+    let (_, find, _, up) = status_write(&t, &rel, b"{\"rev\":1}");
+    assert_eq!((find, up), (1, 1));
+    assert_eq!(
+        t.remote_bytes("S/.Mokuro-Series-Queue.json").as_deref(),
+        Some(&b"{\"old\":true}"[..])
+    );
+}

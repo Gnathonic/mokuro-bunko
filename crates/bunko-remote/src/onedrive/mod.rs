@@ -975,6 +975,46 @@ impl Inner {
         Ok(self.node(&it))
     }
 
+    /// The Status fast path (queue file v2 §6.6): a small file's new bytes in one
+    /// `PUT /items/{id}/content`, with `If-Match` when a version is given, instead of
+    /// an upload session. A larger one goes the usual way.
+    async fn overwrite(
+        &self,
+        pid: &str,
+        if_cver: Option<&str>,
+        src: UploadSource<'_>,
+        op: &mut OpCtx,
+    ) -> Result<RNode, BErr> {
+        let UploadSource::File { path, size, .. } = src;
+        if size == 0 || size > SIMPLE_UPLOAD_MAX || op.resume.is_some() {
+            return self
+                .upload(UploadTarget::Replace { pid, if_cver }, src, op)
+                .await;
+        }
+        let data = tokio::fs::read(path).await.map_err(io_err)?;
+        let c = Call::new(
+            Method::PUT,
+            format!("{}/content", self.item_url(pid)),
+            units::UPLOAD,
+        )
+        .if_match(if_cver)
+        .raw(Bytes::from(data));
+        let it: Item = self.json(c).await?;
+        let mut local = LocalHash {
+            path: path.to_path_buf(),
+            value: None,
+        };
+        if let Some(q) = it.quickxor()
+            && !quickxor::same_hash(q, &local.get().await?)
+        {
+            return Err(BErr::Fatal(format!(
+                "onedrive: stored bytes of {} do not match the upload (quickXorHash)",
+                it.id
+            )));
+        }
+        Ok(self.node(&it))
+    }
+
     // ---- copy ----
 
     async fn copy(&self, pid: &str, parent: &str, name: &str) -> Result<RNode, BErr> {
@@ -1308,6 +1348,16 @@ impl Backend for OneDriveBackend {
         op: &mut OpCtx,
     ) -> Result<RNode, BErr> {
         self.0.upload(to, src, op).await
+    }
+
+    async fn overwrite(
+        &self,
+        pid: &str,
+        if_cver: Option<&str>,
+        src: UploadSource<'_>,
+        op: &mut OpCtx,
+    ) -> Result<RNode, BErr> {
+        self.0.overwrite(pid, if_cver, src, op).await
     }
 
     async fn mkdir(&self, parent: &str, name: &str, _op: &OpCtx) -> Result<RNode, BErr> {

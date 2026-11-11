@@ -293,6 +293,27 @@ pub trait Backend: Send + Sync + 'static {
         src: UploadSource<'_>,
         op: &mut OpCtx,
     ) -> impl Future<Output = Result<RNode, BErr>> + Send;
+    /// New bytes for the file `pid` that the caller's index holds, in as few requests
+    /// as the provider allows (the Status fast path, queue file v2 §6.6): no preflight
+    /// read, no same-content check, and where the write's answer describes the new
+    /// version, no stat after it. `if_cver` goes along only where `cas_overwrite`.
+    ///
+    /// `NotFound` (the file is gone) and `PreconditionFailed` (it changed) tell the
+    /// caller to take the full path. A provider that lets a trashed file be written
+    /// (Drive) answers with the node as it is, trashed or moved: the caller checks.
+    /// By default this is a [`UploadTarget::Replace`].
+    fn overwrite(
+        &self,
+        pid: &str,
+        if_cver: Option<&str>,
+        src: UploadSource<'_>,
+        op: &mut OpCtx,
+    ) -> impl Future<Output = Result<RNode, BErr>> + Send {
+        async move {
+            self.upload(UploadTarget::Replace { pid, if_cver }, src, op)
+                .await
+        }
+    }
     fn mkdir(
         &self,
         parent: &str,

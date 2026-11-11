@@ -14,7 +14,11 @@
 //!   are uncommitted. Compiler and status ops coalesce by destination.
 //!
 //! PREFLIGHT lists the parent for the destination name (never recreating a missing
-//! parent) and decides the upload target from the op's mode and base; a conflict
+//! parent) and decides the upload target from the op's mode and base. A Status put
+//! of a file the index holds under the destination's parent skips that listing (the
+//! Status fast path, queue file v2 §6.6): it overwrites the file by id
+//! ([`Backend::overwrite`], one provider write) and falls back to the full path
+//! when the file is gone, changed, trashed or moved. A conflict
 //! goes to the origin's handler (Ocr: discard and `ocr_discarded`; Thumbs: drop
 //! ours; Compiler `series.json`: capture a submission and `series_submission`;
 //! Compiler/Status elsewhere: overwrite the foreign version; Upgrade, Dav, Admin:
@@ -1291,6 +1295,9 @@ impl<B: Backend> Core<B> {
                 .on_conflict(op, "the destination folder was replaced".into(), None)
                 .await);
         }
+        if !uncertain && let Some(step) = self.status_fast_put(op, &dest, &parent).await? {
+            return Ok(step);
+        }
         let existing = match self.backend.find_named(&parent, &name).await {
             Ok((nodes, _)) => nodes,
             Err(BErr::NotFound) => {
@@ -1367,31 +1374,9 @@ impl<B: Backend> Core<B> {
         op.target_pid = target.as_ref().map(|n| n.pid.clone());
         let _ = self.save_op(op);
         self.fail_at("UPLOADING")?;
-        let Some(staged) = self.staged_path(op) else {
-            return Ok(Some(self.give_up(op, "the op has no staged bytes".into())));
-        };
-        // The bytes must still be the ones hashed at STAGED (a writer that kept its
-        // handle open, a truncated or tampered outbox file).
-        let digest = {
-            let p = staged.clone();
-            tokio::task::spawn_blocking(move || digest_file(&p))
-                .await
-                .map_err(io::Error::other)
-                .and_then(|r| r)
-        };
-        let digest = match digest {
-            Ok(d) if d.size == op.size && Some(d.sha256) == op.sha256 => d,
-            Ok(_) => {
-                return Ok(Some(self.give_up(
-                    op,
-                    "the staged bytes changed after they were staged".into(),
-                )));
-            }
-            Err(e) => {
-                return Ok(Some(
-                    self.give_up(op, format!("the staged bytes cannot be read: {e}")),
-                ));
-            }
+        let (staged, digest) = match self.staged_bytes(op).await {
+            Ok(x) => x,
+            Err(step) => return Ok(Some(step)),
         };
         let sha = digest.sha256;
         let if_cver = target
@@ -1440,6 +1425,138 @@ impl<B: Backend> Core<B> {
                 Ok(Some(step))
             }
             Err(e) => Ok(self.on_error(op, e, current).await),
+        }
+    }
+
+    /// The op's staged file, its bytes still the ones hashed at STAGED (a writer that
+    /// kept its handle open, a truncated or tampered outbox file fail the op).
+    async fn staged_bytes(&self, op: &mut Op) -> Result<(PathBuf, Digests), Step> {
+        let Some(staged) = self.staged_path(op) else {
+            return Err(self.give_up(op, "the op has no staged bytes".into()));
+        };
+        let digest = {
+            let p = staged.clone();
+            tokio::task::spawn_blocking(move || digest_file(&p))
+                .await
+                .map_err(io::Error::other)
+                .and_then(|r| r)
+        };
+        match digest {
+            Ok(d) if d.size == op.size && Some(d.sha256) == op.sha256 => Ok((staged, d)),
+            Ok(_) => {
+                Err(self.give_up(op, "the staged bytes changed after they were staged".into()))
+            }
+            Err(e) => Err(self.give_up(op, format!("the staged bytes cannot be read: {e}"))),
+        }
+    }
+
+    /// The Status fast path (queue file v2 §6.6). A Status replace whose destination
+    /// the index holds as a file under the destination's parent is overwritten by id:
+    /// no listing of the parent first, and the provider's one write
+    /// ([`Backend::overwrite`]; `if_cver` where the provider has CAS). Only a first,
+    /// certain attempt takes it: an op that overwrote a foreign version, or whose
+    /// upload may have landed, goes the full way.
+    ///
+    /// `Ok(None)`: take the full path — it does not apply (the index holds no file
+    /// of exactly that name under that parent), or the file is gone
+    /// (`NotFound`), changed (`PreconditionFailed`), or the write found it trashed or
+    /// moved (Drive writes into a trashed file; what landed there is not at the
+    /// destination, so the full path writes it again).
+    async fn status_fast_put(
+        self: &Arc<Self>,
+        op: &mut Op,
+        dest: &RelPath,
+        parent: &str,
+    ) -> Result<Option<Option<Step>>, Crash> {
+        if op.origin != Origin::Status
+            || op.reconcile_only
+            || op.overwrites > 0
+            || !matches!(op.mode, Mode::Replace { base: None })
+        {
+            return Ok(None);
+        }
+        let known = {
+            let idx = self.index.lock();
+            idx.lookup(dest)
+                .filter(|e| !e.is_dir)
+                .and_then(|e| e.winner_pid)
+                .and_then(|pid| idx.node(&pid))
+        };
+        // The very name: an entry whose winner is another spelling (a case merge) is
+        // not overwritten in place (the full path writes the exact name, and the sink
+        // tidies the other).
+        let Some(known) = known.filter(|n| {
+            !n.is_dir && n.parent.as_deref() == Some(parent) && nfc(&n.name_raw) == last_name(dest)
+        }) else {
+            return Ok(None);
+        };
+        let (staged, digest) = match self.staged_bytes(op).await {
+            Ok(x) => x,
+            Err(step) => return Ok(Some(Some(step))),
+        };
+        op.state = OpState::Uploading;
+        op.parent_pid = Some(parent.to_string());
+        op.target_pid = Some(known.pid.clone());
+        let _ = self.save_op(op);
+        self.fail_at("UPLOADING")?;
+        let if_cver = self.caps.cas_overwrite.then(|| known.cver.clone());
+        let mut ctx = OpCtx {
+            op_id: op.op_id(),
+            resume: None,
+        };
+        let r = self
+            .backend
+            .overwrite(
+                &known.pid,
+                if_cver.as_deref(),
+                UploadSource::File {
+                    path: &staged,
+                    size: op.size,
+                    sha256: digest.sha256,
+                },
+                &mut ctx,
+            )
+            .await;
+        let back_to_preflight = |this: &Self, op: &mut Op| {
+            op.state = OpState::Preflight;
+            op.target_pid = None;
+            let _ = this.save_op(op);
+        };
+        match r {
+            Ok(node)
+                if node.trashed
+                    || node.is_dir
+                    || node.parent.as_deref().is_some_and(|p| p != parent) =>
+            {
+                tracing::info!(
+                    op = op.id,
+                    dest = %op.dest,
+                    pid = %node.pid,
+                    "status fast path: the file is no longer at the destination"
+                );
+                back_to_preflight(self, op);
+                Ok(None)
+            }
+            Ok(mut node) => {
+                self.fail_at("uploaded")?;
+                if node.created_ms == 0 {
+                    node.created_ms = known.created_ms;
+                }
+                if self.hash_proof(&node, op, Some(&digest)) == Proof::Mismatch {
+                    return Ok(Some(Some(self.corrupt_upload(op, node, false).await)));
+                }
+                let step = self.commit_put(op, node.clone(), parent)?;
+                if node.pid != known.pid && !self.caps.atomic_replace {
+                    self.supersede(op, &known).await;
+                }
+                Ok(Some(Some(step)))
+            }
+            Err(e @ (BErr::NotFound | BErr::PreconditionFailed)) => {
+                tracing::debug!(op = op.id, dest = %op.dest, "status fast path: {e}; the full path");
+                back_to_preflight(self, op);
+                Ok(None)
+            }
+            Err(e) => Ok(Some(self.on_error(op, e, None).await)),
         }
     }
 

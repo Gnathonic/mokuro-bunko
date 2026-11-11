@@ -1328,6 +1328,24 @@ impl<B: Backend> Backend for Governed<B> {
             .map(|(n, _)| n)
     }
 
+    async fn overwrite(
+        &self,
+        pid: &str,
+        if_cver: Option<&str>,
+        src: UploadSource<'_>,
+        op: &mut OpCtx,
+    ) -> Result<RNode, BErr> {
+        let size = upload_size(&src);
+        self.gov
+            .run_bytes(
+                CallKind::Upload,
+                size,
+                self.inner.overwrite(pid, if_cver, src, op),
+            )
+            .await
+            .map(|(n, _)| n)
+    }
+
     async fn mkdir(&self, parent: &str, name: &str, op: &OpCtx) -> Result<RNode, BErr> {
         self.gov
             .run(CallKind::Create, self.inner.mkdir(parent, name, op))
