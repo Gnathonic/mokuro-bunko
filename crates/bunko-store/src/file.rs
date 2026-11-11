@@ -18,6 +18,12 @@ pub trait RemoteFile: Read + Write + Seek + Send + fmt::Debug {
     /// later `publish` takes. Anything else (a stream from the provider) gives itself
     /// back.
     fn into_local(self: Box<Self>) -> Result<std::fs::File, Box<dyn RemoteFile>>;
+    /// The caller is about to read `len` bytes from `start` straight through (an HTTP
+    /// GET body, a copy, a whole-file read; `len` may run past the end, `u64::MAX`
+    /// meaning "to the end"). A file that reads over the network can fetch that span
+    /// in large requests from the first read instead of first proving the reader
+    /// sequential one block at a time. Only a hint: reads may still go anywhere.
+    fn will_read(&mut self, _start: u64, _len: u64) {}
 }
 
 /// `std::fs::File`, or a remote store's file.
@@ -110,6 +116,13 @@ impl File {
         match self {
             File::Std(f) => Ok(f),
             File::Remote(f) => f.into_local().map_err(File::Remote),
+        }
+    }
+
+    /// [`RemoteFile::will_read`]; nothing for a local file.
+    pub fn will_read(&mut self, start: u64, len: u64) {
+        if let File::Remote(f) = self {
+            f.will_read(start, len);
         }
     }
 

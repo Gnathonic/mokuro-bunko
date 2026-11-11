@@ -389,6 +389,41 @@ async fn the_bridge_lists_and_streams_a_cloud_library() {
     assert_eq!(v["volume_count"], 1);
 }
 
+/// A whole-archive GET (what a remote OCR processor's fetch is) costs the provider one
+/// download, made from the first read: not sixteen one-block reads first, each a
+/// round trip on Drive, before the body is known to be read straight through.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_whole_archive_get_is_one_provider_download() {
+    let env = Env::new(true).await;
+    let fake = env.fake().backend().clone();
+    let pid = fake
+        .node_at(&format!("{ROOT}/Series/Vol 1.cbz"))
+        .unwrap()
+        .pid;
+    // Let the startup's background readers finish first.
+    let mut seen = usize::MAX;
+    loop {
+        let n = fake.read_log().len();
+        if n == seen {
+            break;
+        }
+        seen = n;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    fake.reset_calls();
+    let url = "/mokuro-reader/Series/Vol%201.cbz";
+    let full = env.request(Some("gpu"), "GET", url, &[]).await;
+    assert_eq!(full.status, StatusCode::OK);
+    assert!(full.body == env.lib.vol1, "the archive's bytes");
+    let reads: Vec<_> = fake
+        .read_log()
+        .into_iter()
+        .filter(|r| r.pid == pid)
+        .collect();
+    assert_eq!(reads.len(), 1, "{reads:?}");
+    assert_eq!(reads[0].range, None, "the whole file: {reads:?}");
+}
+
 /// Spec §3.5: a lapsed sign-in answers the bridge client 503 (never 401), and the
 /// governor then holds every provider call until the admin signs in again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

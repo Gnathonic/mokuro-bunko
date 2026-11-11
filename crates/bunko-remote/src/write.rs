@@ -323,6 +323,7 @@ impl<B: Backend> RemoteStore<B> {
         if fresh && indexed.is_some() && !o.truncate {
             // Opened to modify: start from the current bytes.
             let mut src = self.open(p)?;
+            src.will_read(0, u64::MAX);
             let mut dst = std::fs::File::create(&local)?;
             io::copy(&mut src, &mut dst)?;
         }
@@ -806,7 +807,9 @@ impl<B: Backend> RemoteStore<B> {
     /// `from`'s bytes, so the rename that follows publishes it (spec §3.4).
     pub(crate) fn copy_impl(&self, from: &Path, to: &Path) -> io::Result<u64> {
         let mut src: Box<dyn Read> = if from.starts_with(&self.cfg.root) {
-            Box::new(self.open(from)?)
+            let mut f = self.open(from)?;
+            f.will_read(0, u64::MAX);
+            Box::new(f)
         } else {
             self.check_local_source(from)?;
             Box::new(std::fs::File::open(from)?)

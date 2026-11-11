@@ -87,3 +87,5 @@ time.workspace = true
 # tests/read_path.rs: real zips, parsed by the library's own reader.
 zip.workspace = true
 bunko-library.workspace = true
+# tests/read_path.rs: remote bodies streamed as the WebDAV GET streams them.
+bunko-store = { workspace = true, features = ["tokio"] }
