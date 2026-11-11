@@ -700,6 +700,14 @@
   can take longer, and a processor that gave up registered again, which only added to
   the scheduler's queue. 90 s stays under the 100 s a Cloudflare tunnel holds a request
   open.
+- **`mokuro-bunko tunnel cloudflare` keeps running without a terminal.** Started
+  detached or as a service (stdin not a terminal), it printed the tunnel URL, read end of
+  input at "Add tunnel URL to CORS allowed origins?", aborted, and took cloudflared down
+  with it. The question is now asked only on a terminal. Without one, the command says
+  that it adds nothing and that `--cors yes` adds the URL, and the tunnel stays up. The
+  new `--cors yes|no|ask` option (default `ask`) answers the question ahead. A "no", a
+  Ctrl-D at the question, or a config file that cannot be saved also leaves the tunnel
+  running.
 - **Windows: no console window flashes while the app runs.** The app
   (`mokuro-bunko.exe`) and the server and processor it starts have no console, so
   every console program they ran was given a window of its own: `nvidia-smi`, which

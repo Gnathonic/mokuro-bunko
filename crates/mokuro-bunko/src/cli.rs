@@ -366,7 +366,19 @@ pub enum TunnelCmd {
         /// Local port to tunnel (auto-detects from config)
         #[arg(long)]
         port: Option<u16>,
+        /// Add the tunnel URL to the CORS allowed origins: yes, no, or ask (asks only
+        /// when stdin is a terminal, and adds nothing otherwise)
+        #[arg(long, value_enum, default_value = "ask")]
+        cors: CorsAnswer,
     },
+}
+
+/// The answer `tunnel cloudflare --cors` gives to "Add tunnel URL to CORS allowed origins?".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum CorsAnswer {
+    Yes,
+    No,
+    Ask,
 }
 
 #[derive(Subcommand, Debug)]
