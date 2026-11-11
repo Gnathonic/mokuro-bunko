@@ -553,6 +553,7 @@
     function folderPicker() {
         const box = $('folder-picker');
         const input = $('folder-path');
+        showError($('connect-error'), '');
         const el = (tag, cls, text) => {
             const e = document.createElement(tag);
             if (cls) e.className = cls;
