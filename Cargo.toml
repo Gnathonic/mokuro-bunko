@@ -47,7 +47,7 @@ clap = { version = "4", features = ["derive", "env"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
 bcrypt = "0.17"
 rand = "0.9"
-sha2 = "0.10"
+sha2 = "0.11"
 hex = "0.4"
 base64 = "0.22"
 time = { version = "0.3", features = ["formatting", "parsing", "macros", "serde"] }
