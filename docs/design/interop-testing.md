@@ -881,11 +881,13 @@ On a folder (`rig/folder.rs`: `<work>/folder/Library`, a root not named
 series of its own for the rename) the suite also runs three scenarios that skip
 themselves elsewhere: **reader-writes** (a new volume written as Chromium's File System
 Access writes, an empty file and its bytes in `<name>.crswap` until the write closes:
-the catalog does not list it for the 6 s the write stays open, and lists it within 10 s
-of the swap, the bridge serving its bytes; then a sidecar replaced the same way is
-served with its old bytes until the swap and with the new ones within 10 s),
-**reader-rename** (a series renamed as the reader's Local Folder renames, per file a
-copy then a delete, the archive before its sidecar: the catalog moves the volume, two
+neither the catalog nor the bridge has it for the 6 s the write stays open; the bridge
+serves the reader's bytes within 10 s of the swap, and the catalog lists it within 30 s,
+since it compiles a series only after 10 s of quiet; then a sidecar replaced the same
+way is served with its old bytes until the swap and with the new ones within 10 s),
+**reader-rename** (a series renamed as the reader's Local Folder renames: per syncable
+file, archive, sidecar, cover and `series.json`, a copy then a delete, and the old
+folder pruned only if empty by then: the catalog moves the volume, two
 walks later nothing of either name is queued, its sidecar moved with it and no numbered
 sidecar exists) and, last, **unplug** (the folder's parent renamed away: the store goes
 offline and the catalog stays as it was; renamed back: the store is online and holds the
