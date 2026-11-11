@@ -268,6 +268,68 @@ html {
     text-overflow: ellipsis;
 }
 
+/* A name cut in its middle (queue.js setName): the head gives way with an
+   ellipsis, the tail -- where a volume number sits -- keeps its width. Short
+   of even that, a long head keeps its first few characters and the tail is
+   cut at ITS start: right-to-left box, left-to-right text (the <bdi>). */
+.mid {
+    display: flex;
+    min-width: 0;
+    white-space: nowrap;
+}
+
+/* Over each name's own `display: block`. */
+.job__series.mid,
+.job__volume.mid,
+.machine__next-text.mid,
+.mline__what.mid,
+.mline__next-text.mid,
+.pc__what.mid {
+    display: flex;
+}
+
+.pending-list__series.mid,
+.pending-list__volume.mid {
+    display: inline-flex;
+}
+
+.mid__head {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.mid--keep > .mid__head {
+    min-width: min(5.5em, 50%);
+}
+
+/* Never shrunk by the row (even a share of a pixel would show its "…"):
+   only capped, at what the head leaves it. */
+.mid__tail {
+    flex: none;
+    box-sizing: border-box;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    direction: rtl;
+}
+
+.mid--keep > .mid__tail {
+    max-width: calc(100% - min(5.5em, 50%));
+}
+
+.mid__tail > bdi {
+    direction: ltr;
+    unicode-bidi: isolate;
+}
+
+/* The tail starts a word: the space before it, kept outside the cut head
+   (and inside the tail's cap). */
+.mid__tail--word {
+    padding-left: 0.25em;
+}
+
 /* On deck: the label, then the next volume -- or "None" -- in the rest of
    the one line. */
 .machine__next {
@@ -1161,6 +1223,13 @@ body[data-level="detailed"] .job__detail {
     .pending-list__item {
         flex-wrap: wrap;
         gap: 0.125rem 0.5rem;
+    }
+
+    /* A failed or skipped row is a column: wrapped, its one line took the
+       width of its longest name and ran off the side of the screen. */
+    .pending-list__item--failed,
+    .pending-list__item--skipped {
+        flex-wrap: nowrap;
     }
 
     /* Wrapped onto lines of their own, the names may use the whole width. */
