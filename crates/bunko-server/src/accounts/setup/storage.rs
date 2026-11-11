@@ -23,6 +23,7 @@ pub(super) fn routes() -> Router<AccountsDeps> {
         .route("/setup/api/storage/connect/account", post(account))
         .route("/setup/api/storage/connect/create", post(create))
         .route("/setup/api/storage/local", post(local))
+        .route("/setup/api/fs", get(fs))
 }
 
 /// The gate: setup still needed, and this caller may run it.
@@ -216,6 +217,37 @@ async fn create(
     match c.connector().create_folder().await {
         Ok(check) => json_response(200, json!({"check": check})),
         Err(e) => json_error(400, &e),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct FsQuery {
+    path: Option<String>,
+}
+
+/// `GET /setup/api/fs?path=…`: Browse… for the library folder, the subfolders of a
+/// folder on this machine. A caller on this machine only (403 for any other, a setup
+/// code holder included: it would show them what is on this disk).
+async fn fs(
+    State(d): State<AccountsDeps>,
+    client: Client,
+    parts: Parts,
+    axum::extract::Query(q): axum::extract::Query<FsQuery>,
+) -> Response {
+    if let Err(r) = allowed(&d, &client, &parts).await {
+        return r;
+    }
+    if !is_local(&client) {
+        return json_error(403, crate::fs_browse::REMOTE_REFUSAL);
+    }
+    let dir = match crate::fs_browse::requested(q.path.as_deref()) {
+        Ok(p) => p,
+        Err(e) => return json_error(400, &e),
+    };
+    match blocking(move || crate::fs_browse::list_dir(&dir, &[])).await {
+        Ok(Ok(v)) => json_response(200, v),
+        Ok(Err(e)) => json_error(400, &e),
+        Err(r) => r,
     }
 }
 

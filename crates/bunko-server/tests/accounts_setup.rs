@@ -826,3 +826,94 @@ async fn a_server_open_to_the_network_needs_the_admin_password() {
     );
     assert!(env.db.get_user("owner").unwrap().is_none());
 }
+
+/// `?path=` for a path: every byte but `A-Za-z0-9-_.~/` percent-encoded.
+fn fs_query(p: &std::path::Path) -> String {
+    let mut q = String::from("/setup/api/fs?path=");
+    for b in p.to_string_lossy().bytes() {
+        if b.is_ascii_alphanumeric() || b"-_.~/".contains(&b) {
+            q.push(b as char);
+        } else {
+            q.push_str(&format!("%{b:02X}"));
+        }
+    }
+    q
+}
+
+/// Browse… for a library in a folder you choose: the subfolders of a folder on this
+/// machine, for a browser on this machine only. Elsewhere the path is typed: a setup
+/// code holder gets 403 too, as the listing would show them the server's disk.
+#[tokio::test]
+async fn the_folder_browser_answers_this_computer_only() {
+    let env = Env::new();
+    let root = env.dir.path().join("disk");
+    std::fs::create_dir_all(root.join("Manga").join("Series A")).unwrap();
+    std::fs::create_dir_all(root.join(".cache")).unwrap();
+    std::fs::write(root.join("notes.txt"), "x").unwrap();
+    let r = env.send(empty(req("GET", &fs_query(&root)))).await;
+    assert_eq!(r.status, 200, "{}", r.text());
+    let v = r.json();
+    assert_eq!(v["dirs"], json!(["Manga"]));
+    assert_eq!(v["files"], json!([]));
+    assert!(v["path"].as_str().unwrap().ends_with("disk"), "{v}");
+    assert!(v["parent"].as_str().is_some());
+    // Not a folder, missing, not a full path: 400 naming it.
+    let r = env
+        .send(empty(req("GET", &fs_query(&root.join("notes.txt")))))
+        .await;
+    assert_eq!(r.status, 400);
+    assert!(
+        r.json()["error"]
+            .as_str()
+            .unwrap()
+            .ends_with("is a file, not a folder")
+    );
+    let r = env
+        .send(empty(req("GET", &fs_query(&root.join("nope")))))
+        .await;
+    assert_eq!(r.status, 400);
+    let r = env
+        .send(empty(req("GET", "/setup/api/fs?path=manga")))
+        .await;
+    assert_eq!(r.status, 400);
+    assert!(
+        r.json()["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("manga: not a full path")
+    );
+
+    // Another computer: refused without the code, and with it.
+    let far = "203.0.113.10";
+    let r = env
+        .send(empty(from_peer("GET", &fs_query(&root), far)))
+        .await;
+    assert_eq!((r.status, r.json()), (403, remote_refusal()));
+    let code = normalize_code(&env.deps.setup.issue_code());
+    let r = env
+        .send(empty(
+            from_peer("GET", &fs_query(&root), far).header("x-setup-code", code.as_str()),
+        ))
+        .await;
+    assert_eq!(
+        (r.status, r.json()),
+        (
+            403,
+            json!({"error": "Browse works on this computer only: type the folder's path."})
+        )
+    );
+    // The options tell the page whether to offer Browse… at all.
+    let r = env
+        .send(empty(
+            from_peer("GET", "/setup/api/options", far).header("x-setup-code", code.as_str()),
+        ))
+        .await;
+    assert_eq!(r.json()["local"], false);
+
+    // Once set up, nobody browses through setup.
+    let r = complete(&env, req("POST", "/setup/api/complete")).await;
+    assert_eq!(r.status, 201, "{}", r.text());
+    let r = env.send(empty(req("GET", &fs_query(&root)))).await;
+    assert_eq!(r.status, 410);
+    assert!(!r.text().contains("Manga"));
+}

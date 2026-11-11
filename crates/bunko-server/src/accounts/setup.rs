@@ -483,6 +483,7 @@ async fn options(State(d): State<AccountsDeps>, client: Client, parts: Parts) ->
                 "ssl": env_pin("MOKURO_SSL_ENABLED").map(|_| ssl),
                 "serve_readers": env_pin("MOKURO_SERVE_READERS").map(|_| serve_readers),
                 "backend": env_pin("MOKURO_LIBRARY_BACKEND"),
+                "path": env_pin("MOKURO_LIBRARY_PATH"),
             },
             // The storage step (0.8): where the library lives now.
             "library": library,
