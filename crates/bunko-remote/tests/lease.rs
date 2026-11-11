@@ -822,3 +822,23 @@ async fn a_standby_bunko_trashes_nothing() {
     assert!(env.fake.trashed_log().is_empty());
     assert_eq!(env.markers().await.len(), 2, "standby writes nothing");
 }
+
+/// Drive's name search can lag behind its files. A heartbeat whose listing misses the
+/// holder's own marker file still rewrites that file (it knows its id), and never
+/// writes a second one beside it.
+#[tokio::test(start_paused = true)]
+async fn a_search_that_misses_our_marker_writes_no_second_file() {
+    let env = Env::new(FakeBackend::drive_like()).await;
+    let mut a = env.lease_mem(cfg("aaaa", "a-boot"), 0);
+    assert_eq!(a.claim().await.unwrap(), LeaseState::Holder);
+    let file = env.markers().await[0].0.pid.clone();
+    env.fake.hide_from_search(&file);
+    tokio::time::advance(Duration::from_secs(300)).await;
+    assert_eq!(a.heartbeat().await.unwrap(), Heartbeat::Held);
+    env.fake.search_catches_up();
+    let all = env.markers().await;
+    assert_eq!(all.len(), 1, "{all:?}");
+    assert_eq!(all[0].0.pid, file, "the same file");
+    assert_eq!(all[0].1.instance_id, "aaaa");
+    assert!(env.fake.deleted_log().is_empty() && env.fake.trashed_log().is_empty());
+}

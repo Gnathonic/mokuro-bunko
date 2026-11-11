@@ -810,6 +810,22 @@ impl<B: Backend> Lease<B> {
                 nodes.extend(found);
                 server_now = server_now.max(now);
             }
+            // A name search can lag behind the files (Drive's does): the file this
+            // install recorded as its marker is looked up by id when the search left
+            // it out, so a claim or heartbeat never takes it for missing and writes a
+            // second file beside it.
+            let recorded = self.record.lock().marker_pid.clone();
+            if let Some(pid) = recorded
+                && !nodes.iter().any(|n| n.pid == pid)
+                && let Some(n) = self.backend.stat(&pid).await?
+                && !n.trashed
+                && !n.is_dir
+                && n.name_raw == MARKER_NAME.as_bytes()
+                && n.parent.as_ref().is_some_and(|p| roots.contains(p))
+            {
+                tracing::debug!(pid, "lease: the name search missed our marker; read by id");
+                nodes.push(n);
+            }
             let mut set = MarkerSet {
                 nodes: Vec::new(),
                 others: Vec::new(),
