@@ -1070,7 +1070,7 @@ mod folder_library {
         assert!(e.contains("is not inside the folders"), "{e}");
 
         let mut said = Vec::new();
-        for p in [root.join("a-file"), root.join("gone/manga")] {
+        for p in [root.join("a-file"), root.join("gone").join("manga")] {
             c.start(folder_req(&p), far).unwrap();
             let s = settle(&c).await;
             assert_eq!(s.state, "failed", "{p:?}: {s:?}");
