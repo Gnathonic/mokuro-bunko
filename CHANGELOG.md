@@ -729,7 +729,10 @@
   its claim went back no longer returns another processor's claim of that volume to the
   queue (that processor's result was then thrown away as late). A benchmark of this
   server cut short by turning it off now says "OCR on this machine was turned off"
-  instead of "local disconnected".
+  instead of "local disconnected". Turning it off, or stopping the server, no longer
+  logs each volume it was reading as a failure (a WARN "volume failed: the OCR pipeline
+  stopped before this volume did" and an ERROR "the pipeline failed"): a stop is an
+  INFO "cancelled" line, and a pipeline that really breaks is still an error.
 - **A processor that drops off leaves no uploaded result behind.** A processor that
   disconnected (or whose account was disabled or deleted) after uploading a result but
   before saying the volume was done left that result in `.processing` for good: the

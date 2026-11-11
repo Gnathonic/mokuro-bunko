@@ -329,7 +329,7 @@ impl EngineRunner {
                 }
                 self.feed.done(ticket);
             });
-            let result = self.sink(&vol, &rx, &pages, progress, cancel, &fed, &feeder);
+            let result = sink(&vol, &rx, &pages, progress, cancel, &fed, &feeder);
             if result.is_err() {
                 vol.cancelled.store(true, Ordering::SeqCst);
             }
@@ -352,93 +352,102 @@ impl EngineRunner {
             stats: Some(stats),
         })
     }
+}
 
-    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
-    fn sink(
-        &self,
-        vol: &Arc<VolumeCtx>,
-        rx: &std::sync::mpsc::Receiver<Finished>,
-        pages: &[String],
-        progress: &dyn Fn(PageProgress),
-        cancel: &CancelToken,
-        fed: &AtomicU64,
-        feeder: &std::thread::ScopedJoinHandle<'_, ()>,
-    ) -> Result<(Vec<(String, Page)>, u32), RunError> {
-        let total = pages.len();
-        let mut held: HashMap<usize, Finished> = HashMap::new();
-        let mut results: Vec<(String, Page)> = Vec::with_capacity(total);
-        let mut failed = 0u32;
-        let mut next = 0usize;
-        let mut last_seen = Instant::now();
-        let mut page_started = Instant::now();
-        while next < total {
-            if cancel.is_cancelled() {
-                return Err(RunError::Cancelled);
+/// Collect a volume's pages from the pipeline in page order until every page is back
+/// (or the volume is cancelled, or the pipeline stopped feeding it).
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn sink(
+    vol: &Arc<VolumeCtx>,
+    rx: &std::sync::mpsc::Receiver<Finished>,
+    pages: &[String],
+    progress: &dyn Fn(PageProgress),
+    cancel: &CancelToken,
+    fed: &AtomicU64,
+    feeder: &std::thread::ScopedJoinHandle<'_, ()>,
+) -> Result<(Vec<(String, Page)>, u32), RunError> {
+    let total = pages.len();
+    let mut held: HashMap<usize, Finished> = HashMap::new();
+    let mut results: Vec<(String, Page)> = Vec::with_capacity(total);
+    let mut failed = 0u32;
+    let mut next = 0usize;
+    let mut last_seen = Instant::now();
+    let mut page_started = Instant::now();
+    while next < total {
+        if cancel.is_cancelled() {
+            return Err(RunError::Cancelled);
+        }
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(f) => {
+                last_seen = Instant::now();
+                held.insert(f.index, f);
             }
-            match rx.recv_timeout(Duration::from_millis(100)) {
-                Ok(f) => {
-                    last_seen = Instant::now();
-                    held.insert(f.index, f);
-                }
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    // The feeder stopped early (pipeline closed): nothing more comes.
-                    let all_fed = fed.load(Ordering::SeqCst) as usize;
-                    if feeder.is_finished() && all_fed <= next && held.is_empty() {
-                        return Err(RunError::Fatal(
-                            "the OCR pipeline stopped before this volume did".into(),
-                        ));
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                // The feeder stopped early (pipeline closed): nothing more comes.
+                let all_fed = fed.load(Ordering::SeqCst) as usize;
+                if feeder.is_finished() && all_fed <= next && held.is_empty() {
+                    // The feeder also stops on a cancel that came while this waited for
+                    // a page: a stop asked for is no broken pipeline.
+                    if cancel.is_cancelled() {
+                        return Err(RunError::Cancelled);
                     }
-                    if last_seen.elapsed() <= PAGE_LOST_AFTER || !feeder.is_finished() {
-                        continue;
-                    }
-                    // Only a panicking stage loses a page: give it up and go on.
-                    error!(claim = %vol.claim, "page {} never came back", pages[next]);
-                    last_seen = Instant::now();
-                    held.entry(next).or_insert_with(|| Finished {
-                        index: next,
-                        rel: pages[next].clone(),
-                        outcome: Err(crate::page::Failure {
-                            error: "the page was lost in the pipeline".into(),
-                            size: None,
-                        }),
-                    });
+                    return Err(RunError::Fatal(
+                        "the OCR pipeline stopped before this volume did".into(),
+                    ));
                 }
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                    return Err(RunError::Fatal("the OCR pipeline went away".into()));
+                if last_seen.elapsed() <= PAGE_LOST_AFTER || !feeder.is_finished() {
+                    continue;
                 }
-            }
-            while let Some(f) = held.remove(&next) {
-                match f.outcome {
-                    Ok(page) => {
-                        debug!(
-                            claim = %vol.claim,
-                            "page {}/{} {} blocks={} ({:.2}s)",
-                            next + 1,
-                            total,
-                            f.rel,
-                            page.blocks.len(),
-                            page_started.elapsed().as_secs_f64()
-                        );
-                        results.push((f.rel, page));
-                    }
-                    Err(failure) => {
-                        failed += 1;
-                        error!(claim = %vol.claim, "page {}: {}", f.rel, failure.error);
-                        if let Some((w, h)) = failure.size {
-                            results.push((f.rel, Page::blank(w, h)));
-                        }
-                    }
-                }
-                page_started = Instant::now();
-                next += 1;
-                progress(PageProgress::Page {
-                    done: next as u32,
-                    total: total as u32,
+                // Only a panicking stage loses a page: give it up and go on.
+                error!(claim = %vol.claim, "page {} never came back", pages[next]);
+                last_seen = Instant::now();
+                held.entry(next).or_insert_with(|| Finished {
+                    index: next,
+                    rel: pages[next].clone(),
+                    outcome: Err(crate::page::Failure {
+                        error: "the page was lost in the pipeline".into(),
+                        size: None,
+                    }),
                 });
             }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                if cancel.is_cancelled() {
+                    return Err(RunError::Cancelled);
+                }
+                return Err(RunError::Fatal("the OCR pipeline went away".into()));
+            }
         }
-        Ok((results, failed))
+        while let Some(f) = held.remove(&next) {
+            match f.outcome {
+                Ok(page) => {
+                    debug!(
+                        claim = %vol.claim,
+                        "page {}/{} {} blocks={} ({:.2}s)",
+                        next + 1,
+                        total,
+                        f.rel,
+                        page.blocks.len(),
+                        page_started.elapsed().as_secs_f64()
+                    );
+                    results.push((f.rel, page));
+                }
+                Err(failure) => {
+                    failed += 1;
+                    error!(claim = %vol.claim, "page {}: {}", f.rel, failure.error);
+                    if let Some((w, h)) = failure.size {
+                        results.push((f.rel, Page::blank(w, h)));
+                    }
+                }
+            }
+            page_started = Instant::now();
+            next += 1;
+            progress(PageProgress::Page {
+                done: next as u32,
+                total: total as u32,
+            });
+        }
     }
+    Ok((results, failed))
 }
 
 /// `ready.stage_device`: the stages that hold a model.
@@ -470,5 +479,49 @@ mod tests {
         let e = t.ticket();
         cancel.cancel();
         assert!(!t.wait(e, &cancel));
+    }
+
+    /// The volume's pages as `sink` sees them when the volume is stopped while it waits
+    /// for a page: the feeder sees the cancel and ends without feeding the rest.
+    fn stopped_while_waiting(cancel_it: bool) -> Result<(Vec<(String, Page)>, u32), RunError> {
+        let (tx, rx) = std::sync::mpsc::channel::<Finished>();
+        let vol = Arc::new(VolumeCtx {
+            claim: "c1".into(),
+            cancelled: AtomicBool::new(false),
+            results: Mutex::new(tx),
+        });
+        let pages = vec!["001.png".to_string(), "002.png".to_string()];
+        let cancel = CancelToken::new();
+        let fed = AtomicU64::new(0);
+        std::thread::scope(|scope| {
+            let feeder = scope.spawn(|| {
+                // Past the sink's own check of the token: it waits for a page now.
+                std::thread::sleep(Duration::from_millis(20));
+                if cancel_it {
+                    cancel.cancel();
+                }
+            });
+            sink(&vol, &rx, &pages, &|_| {}, &cancel, &fed, &feeder)
+        })
+    }
+
+    /// A volume stopped on purpose (the session abandoned: OCR on this machine turned
+    /// off, the server stopping) is cancelled, not a pipeline failure. Each such stop
+    /// logged WARN "volume failed: the OCR pipeline stopped before this volume did" and
+    /// the processor ERROR "the pipeline failed". A feeder that stops with no cancel
+    /// asked for is still a failure.
+    #[test]
+    fn a_volume_stopped_on_purpose_is_cancelled_not_failed() {
+        assert!(
+            matches!(stopped_while_waiting(true), Err(RunError::Cancelled)),
+            "{:?}",
+            stopped_while_waiting(true).err()
+        );
+        match stopped_while_waiting(false) {
+            Err(RunError::Fatal(e)) => {
+                assert_eq!(e, "the OCR pipeline stopped before this volume did");
+            }
+            other => panic!("{:?}", other.err()),
+        }
     }
 }
