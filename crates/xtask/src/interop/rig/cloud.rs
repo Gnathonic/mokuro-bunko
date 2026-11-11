@@ -683,8 +683,12 @@ const WRITES_SERIES: &str = "Reader Writes";
 /// How long a write in progress is watched: past a few of Bunko's polls (2 s each)
 /// and its watcher's quiet wait (2 s).
 const MID_WRITE: Duration = Duration::from_secs(6);
-/// How soon a finished reader write must show (plan: within 10 s).
+/// How soon a finished reader write must be in Bunko's view of the folder (served by
+/// the bridge): within 10 s.
 const PICKUP: Duration = Duration::from_secs(10);
+/// How soon the catalog must list it: the store's pickup plus the metadata service's
+/// quiet wait (10 s by default) before it compiles the series, with room to spare.
+const CATALOG_PICKUP: Duration = Duration::from_secs(30);
 
 /// The catalog's volume count for `series` (0 when it lists no such series).
 fn volume_count(server: &Server, series: &str) -> Result<u64> {
@@ -779,8 +783,10 @@ fn walks_after(server: &Server, n: u64) -> Result<()> {
 
 /// A reader writes into a folder library the way Chromium's File System Access does
 /// (an empty or old file, the new bytes in `<name>.crswap` until the write closes).
-/// A new volume shows only after the swap, and within 10 s of it; a replaced sidecar
-/// is served with its old bytes until the swap, and with the new ones within 10 s.
+/// A new volume is neither served nor listed while it is written; after the swap the
+/// bridge serves it within 10 s and the catalog lists it once its series is compiled.
+/// A replaced sidecar is served with its old bytes until the swap, and with the new
+/// ones within 10 s.
 fn reader_writes(rig: &mut Rig) -> Result<Option<String>> {
     let Some(folder) = rig.folder() else {
         return Ok(Some(
@@ -797,23 +803,26 @@ fn reader_writes(rig: &mut Rig) -> Result<Option<String>> {
             if n != 0 {
                 bail!("{cbz_rel} was listed ({n} volumes) while the reader was still writing it");
             }
+            if let Some(b) = served(a, &cbz_rel)? {
+                bail!(
+                    "the bridge served {cbz_rel} ({} bytes) while the reader was still writing it",
+                    b.len()
+                );
+            }
             std::thread::sleep(Duration::from_millis(500));
         }
         Ok(())
     })?;
     wait_for(
         PICKUP,
-        &format!("{cbz_rel} never showed after the reader's write closed"),
+        &format!("{cbz_rel} was not served with the reader's bytes after its write closed"),
+        || Ok((served(a, &cbz_rel)?.as_deref() == Some(&cbz[..])).then_some(())),
+    )?;
+    wait_for(
+        CATALOG_PICKUP,
+        &format!("the catalog never listed {cbz_rel} after the reader's write closed"),
         || Ok((volume_count(a, WRITES_SERIES)? == 1).then_some(())),
     )?;
-    let got = served(a, &cbz_rel)?;
-    if got.as_deref() != Some(&cbz[..]) {
-        bail!(
-            "the bridge serves {cbz_rel} as {:?} bytes, want the reader's {}",
-            got.map(|b| b.len()),
-            cbz.len()
-        );
-    }
 
     // A sidecar the reader writes, then replaces.
     let doc_rel = format!("{WRITES_SERIES}/Vol 1.mokuro");
@@ -851,10 +860,11 @@ fn reader_writes(rig: &mut Rig) -> Result<Option<String>> {
     Ok(None)
 }
 
-/// The reader renames a series in a folder library as its Local Folder does: per file,
-/// a copy (a swap write) then a delete of the source, the archive before its sidecar.
-/// The catalog moves the volume, and two walks later nothing is queued for it (its
-/// OCR came with it), and no numbered sidecar was made.
+/// The reader renames a series in a folder library as its Local Folder does
+/// (`renameFolder`): per syncable file (archives, sidecars, covers, `series.json`), a
+/// copy (a swap write) then a delete of the source, and the old folder pruned only if
+/// it is empty by then. The catalog moves the volume, and two walks later nothing is
+/// queued for it (its OCR came with it), and no numbered sidecar was made.
 fn reader_rename(rig: &mut Rig) -> Result<Option<String>> {
     let Some(folder) = rig.folder() else {
         return Ok(Some(
@@ -870,16 +880,24 @@ fn reader_rename(rig: &mut Rig) -> Result<Option<String>> {
     let sidecar = folder
         .bytes(&format!("{RENAME_FROM}/Vol 1.mokuro"))
         .context("the seeded sidecar is gone")?;
-    for name in ["Vol 1.cbz", "Vol 1.mokuro"] {
+    let mut names: Vec<String> = std::fs::read_dir(folder.path(RENAME_FROM))?
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| reader_syncable(n))
+        .collect();
+    // The archive before its sidecar, as the reader's listing has them.
+    names.sort();
+    for name in names {
         let from = format!("{RENAME_FROM}/{name}");
-        let bytes = folder
-            .bytes(&from)
-            .with_context(|| format!("{from} is gone"))?;
+        let Some(bytes) = folder.bytes(&from) else {
+            continue; // Bunko replaced or removed it meanwhile
+        };
         folder.swap_write(&format!("{RENAME_TO}/{name}"), &bytes, || Ok(()))?;
-        std::fs::remove_file(folder.path(&from))?;
+        let _ = std::fs::remove_file(folder.path(&from));
     }
-    // The reader prunes the emptied folder.
-    std::fs::remove_dir(folder.path(RENAME_FROM))?;
+    // The reader prunes the old folder only when it is empty, best effort.
+    let _ = std::fs::remove_dir(folder.path(RENAME_FROM));
     wait_for(
         Duration::from_secs(30),
         &format!("the catalog never moved the volume to {RENAME_TO}"),
@@ -916,6 +934,17 @@ fn reader_rename(rig: &mut Rig) -> Result<Option<String>> {
         bail!("{} is not the sidecar the reader moved", want[1]);
     }
     Ok(None)
+}
+
+/// Whether the reader's Local Folder moves `name` in a folder rename (its
+/// `isSyncableFile`, for a file inside a series folder): archives, OCR sidecars, cover
+/// images and `series.json`.
+fn reader_syncable(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    [".cbz", ".mokuro", ".mokuro.gz", ".webp", ".jpg", ".jpeg"]
+        .iter()
+        .any(|ext| lower.ends_with(ext))
+        || lower == "series.json"
 }
 
 /// The library folder goes away (its parent renamed, as an unplugged drive or a share
@@ -973,4 +1002,30 @@ fn unplug(rig: &mut Rig) -> Result<Option<String>> {
         bail!("after the folder came back it holds {back:?}, was {files:?}");
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reader_syncable;
+
+    #[test]
+    fn a_reader_rename_moves_what_its_listing_holds() {
+        for name in [
+            "Vol 1.cbz",
+            "Vol 1.mokuro",
+            "Vol 1.WEBP",
+            "series.json",
+            "c.jpeg",
+        ] {
+            assert!(reader_syncable(name), "{name}");
+        }
+        for name in [
+            "notes.txt",
+            "my-series.json",
+            "Vol 1.cbz.crswap",
+            "Vol 1.png",
+        ] {
+            assert!(!reader_syncable(name), "{name}");
+        }
+    }
 }
