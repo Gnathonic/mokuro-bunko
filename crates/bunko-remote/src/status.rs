@@ -1270,14 +1270,16 @@ impl<B: Backend> Lease<B> {
             // writes into the marker file that is there (another Bunko's, stale or
             // the holder's) rather than beside it. Two Bunkos claiming at once then
             // write the same file, and the settle re-read decides between them.
-            (None, _) if let Some(t) = existing_marker_node(set) => self.put_replace(m, &t).await?,
-            (None, _) => match self.put(m, Target::New).await {
-                Ok(n) => Some(n),
-                // A unique-name provider already has a node by this name.
-                Err(LeaseError::Backend(BErr::NameConflict | BErr::PreconditionFailed)) => {
-                    self.replace_existing(m).await?
-                }
-                Err(e) => return Err(e),
+            (None, _) => match existing_marker_node(set) {
+                Some(t) => self.put_replace(m, &t).await?,
+                None => match self.put(m, Target::New).await {
+                    Ok(n) => Some(n),
+                    // A unique-name provider already has a node by this name.
+                    Err(LeaseError::Backend(BErr::NameConflict | BErr::PreconditionFailed)) => {
+                        self.replace_existing(m).await?
+                    }
+                    Err(e) => return Err(e),
+                },
             },
         };
         let Some(node) = written else {
