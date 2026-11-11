@@ -56,10 +56,6 @@ pub const DEFAULT_TTL: Duration = Duration::from_secs(900);
 /// The TTL on MEGA (`ttl_s` 3600); the caller picks it for that provider.
 pub const MEGA_TTL: Duration = Duration::from_secs(3600);
 
-/// Another Bunko's marker not rewritten for this long belongs to an install that
-/// stopped for good: the holder moves it to the provider's trash (readers already
-/// ignore any stale marker; this only tidies the folder).
-pub const ABANDONED_AFTER: Duration = Duration::from_secs(7 * 24 * 3600);
 /// The shortest CLAIM_LEASE settle wait (`max(60 s, 2 × feed interval)`).
 pub const CLAIM_SETTLE_MIN: Duration = Duration::from_secs(60);
 /// A same-named node larger than this is not read: it is not a marker.
@@ -246,6 +242,18 @@ impl MarkerSet {
     pub fn max_epoch(&self) -> u64 {
         self.nodes.iter().map(|n| n.marker.epoch).max().unwrap_or(0)
     }
+}
+
+/// The marker file a claim writes into when it has none of its own: the
+/// top-ranked node holding a marker (fresh or not), else a same-named file that
+/// holds none; `None` when the folder has no such file.
+fn existing_marker_node(set: &MarkerSet) -> Option<RNode> {
+    let mut nodes: Vec<&MarkerNode> = set.nodes.iter().collect();
+    nodes.sort_by(|a, b| rank(&a.marker, &b.marker).then_with(|| a.node.pid.cmp(&b.node.pid)));
+    nodes
+        .first()
+        .map(|n| n.node.clone())
+        .or_else(|| set.others.first().cloned())
 }
 
 // ---- configuration, clocks, persisted state ----------------------------------
@@ -1025,7 +1033,7 @@ impl<B: Backend> Lease<B> {
             next.heartbeat_at = self.now_iso();
             if let Some(node) = self.write_marker(&next, &set, WriteMode::Heartbeat).await? {
                 self.become_holder(next, &node, ok_at)?;
-                self.trash_abandoned(&set).await;
+                self.trash_stale_duplicates(&set, &node.pid).await;
                 return Ok(Heartbeat::Held);
             }
         }
@@ -1127,17 +1135,18 @@ impl<B: Backend> Lease<B> {
         }
     }
 
-    /// Move another install's markers to the trash once they have not been rewritten
-    /// for [`ABANDONED_AFTER`] (the holder only, after a heartbeat). The trash, not a
-    /// permanent delete: the file is not ours. A node rewritten since the listing is
-    /// left alone (`if_cver`).
-    async fn trash_abandoned(&mut self, set: &MarkerSet) {
-        let after = i64::try_from(ABANDONED_AFTER.as_millis()).unwrap_or(i64::MAX);
-        let abandoned: Vec<(Pid, String, String)> = set
+    /// Move every other stale marker file to the trash (the holder only): a library
+    /// has one marker file, and copies under the same name left by an earlier Bunko
+    /// (one that wrote its own file beside another's) go once this one holds the
+    /// lease. Readers ignore a stale marker already. The trash, not a permanent
+    /// delete: the file is not ours. A node rewritten since the listing stays
+    /// (`if_cver`), and so does any fresh one.
+    async fn trash_stale_duplicates(&mut self, set: &MarkerSet, keep: &str) {
+        let stale: Vec<(Pid, String, String)> = set
             .nodes
             .iter()
-            .filter(|n| !self.is_ours(&n.marker))
-            .filter(|n| set.server_now.0.saturating_sub(n.node.base_mtime_ms) >= after)
+            .filter(|n| n.node.pid != keep && !self.is_ours(&n.marker))
+            .filter(|n| !n.is_fresh(set.server_now))
             .map(|n| {
                 (
                     n.node.pid.clone(),
@@ -1146,18 +1155,18 @@ impl<B: Backend> Lease<B> {
                 )
             })
             .collect();
-        for (pid, cver, name) in abandoned {
+        for (pid, cver, name) in stale {
             match self.backend.trash(&pid, Some(&cver)).await {
                 Ok(()) | Err(BErr::NotFound) => {
                     tracing::info!(
                         pid,
                         instance = %name,
-                        "lease: moved a marker untouched for a week to the trash (a Bunko \
-                         that stopped for good)"
+                        "lease: moved a second, stale marker file to the trash (a library \
+                         keeps one)"
                     );
                     self.cache.remove(&pid);
                 }
-                Err(e) => tracing::debug!(pid, error = %e, "lease: an abandoned marker stays"),
+                Err(e) => tracing::debug!(pid, error = %e, "lease: a stale marker file stays"),
             }
         }
     }
@@ -1241,6 +1250,11 @@ impl<B: Backend> Lease<B> {
             }
             (Some(o), _) => self.put_replace(m, o).await?,
             (None, WriteMode::Release) => return Ok(None),
+            // One marker file per library, on every provider: a claim or a take-over
+            // writes into the marker file that is there (another Bunko's, stale or
+            // the holder's) rather than beside it. Two Bunkos claiming at once then
+            // write the same file, and the settle re-read decides between them.
+            (None, _) if let Some(t) = existing_marker_node(set) => self.put_replace(m, &t).await?,
             (None, _) => match self.put(m, Target::New).await {
                 Ok(n) => Some(n),
                 // A unique-name provider already has a node by this name.
