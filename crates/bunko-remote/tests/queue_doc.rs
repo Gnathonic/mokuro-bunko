@@ -149,13 +149,54 @@ fn truncated_when_fewer_waiting_listed_than_pending() {
     assert_eq!(out["pending_volumes"], 837);
     assert_eq!(out["volumes"].as_array().unwrap().len(), 101);
 
-    // More than 100 waiting in the input: capped at 100.
+    // More than 100 waiting in the input (a backstop: the server lists at most 100
+    // waiting jobs, and so at most 100 waiting volumes plus those about to start):
+    // capped at 100.
     let many: Vec<Value> = (0..150)
         .map(|i| volume("S", &format!("V{i}"), vec![job("queued", Value::Null)]))
         .collect();
     let out = cloud_queue_doc(&server_doc(many, 150, NOW), "i", &[], usize::MAX);
     assert_eq!(out["volumes"].as_array().unwrap().len(), 100);
     assert_eq!(out["truncated"], true);
+}
+
+/// The server orders volumes by their soonest job and each volume's jobs running first,
+/// then soonest. The cloud copy keeps that order: it never sorts by name or kind.
+#[test]
+fn keeps_the_servers_order_of_volumes_and_jobs() {
+    let job_at = |kind: &str, id: &str, state: &str, eta: &str| json!({"kind": kind, "id": id, "state": state, "eta": eta, "progress": null});
+    let vols = vec![
+        volume("S", "R", vec![job("running", json!(0.25))]),
+        volume(
+            "S",
+            "Y",
+            vec![
+                job_at("layer", "lines", "queued", "2026-10-12T10:01:40Z"),
+                job_at("ocr", "hayai", "queued", "2026-10-12T10:15:00Z"),
+            ],
+        ),
+        volume(
+            "S",
+            "X",
+            vec![job_at("ocr", "hayai", "queued", "2026-10-12T10:03:20Z")],
+        ),
+    ];
+    let out = cloud_queue_doc(&server_doc(vols, 2, NOW), "i", &[], QUEUE_DOC_MAX_BYTES);
+    let names: Vec<&str> = out["volumes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["volume"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["R", "Y", "X"]);
+    let y: Vec<&str> = out["volumes"][1]["jobs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|j| j["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(y, ["layer", "ocr"]);
+    assert_eq!(out["truncated"], false);
 }
 
 #[test]

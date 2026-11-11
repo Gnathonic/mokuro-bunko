@@ -506,16 +506,26 @@ The manifest is read with exactly the rules of the volume's `.cbz` (anonymous
 download setting, credentials, 401 challenge) and gets the same CORS
 headers, whether or not `catalog.enabled` is on. A missing `series` or
 `volume` parameter is 400, a series or volume that resolves outside the
-library is 403, and a missing volume is 404.
+library is 403, and a missing volume is 404. When the OCR queue does not
+answer within a second, the manifest is 503 with `Retry-After: 5` rather
+than an empty `pending`, which would read as "nothing left to run".
 
 #### OCR queue file
 
 `GET /mokuro-reader/.mokuro-queue.json` (also `HEAD`) is the head of the
-pending OCR queue, one entry per volume, for a reader to poll instead of a
-timer per volume. It lists every volume with a job running, then at most the
-next 100 waiting volumes in queue order. `pending_volumes` counts all waiting
-volumes, so a reader can tell when the list is cut short (an unlisted
-volume's timing is in its manifest):
+pending OCR queue, grouped by volume, for a reader to poll instead of a
+timer per volume. It lists every running job, the jobs about to start
+(claimed by a machine that is still fetching the archive or opening its
+session: `queued`, with no `eta`), then the next 100 waiting jobs by when
+they will finish, to the nearest five minutes (jobs in the same five minutes
+keep queue order; jobs the queue cannot time yet come after every timed
+one, in queue order). A volume carries only its listed jobs, running ones
+first, then soonest first; volumes come in the order of their soonest job,
+those with a job running first. A listed volume also shows its jobs no
+connected machine can run, as `held`. A job that is not listed is still
+owed, not done: the volume's manifest names every job it owes.
+`pending_volumes` counts every volume with a job waiting and none running,
+listed or not, so a reader can tell when the list is cut short:
 
 ```json
 {"version": 1, "generated_at": "2026-09-28T16:00:00Z", "held": null, "next_check_after": 95,
@@ -537,7 +547,7 @@ It carries `Cache-Control: no-cache` and a strong `ETag`, with a 304 on
 `If-None-Match`, and is gzipped when accepted. It is rebuilt at most once
 a second, and an ETA is republished only when it moves by a minute or
 more, so ETA jitter alone does not change the ETag; a running job's
-`progress` does, as pages complete. With the 100-volume cap, the file does
+`progress` does, as pages complete. With the 100-job cap, the file does
 not grow with the queue.
 
 A `.cbz` written over WebDAV (PUT, or MOVE/COPY into place) joins the OCR

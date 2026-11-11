@@ -1876,14 +1876,26 @@ exception` → "engine error"; else "failed — will retry".
   `If-None-Match` → 304.
 - Content (`OcrControl.queue_document`, `control.py:313-412`): `running =
   _with_known_totals(read_running_jobs)`; `pending = pending_within(1.0) or []`;
-  plan over `plan_items(pending, running)` (exceptions → unpriced). Volumes in
-  order of first appearance (running first, then pending). For each listed volume:
-  rows = owed rows (from `owed_by_volume`, the shared walk) ∪ rows of listed jobs;
-  sorted (primary first, then rank). State: running if a running card matches;
-  `held` if unpriced (not in the list, e.g. backoff), whole queue held, or the item
-  is `held`; else `queued`. `eta = eta_at` unless held. `progress = done/total`
-  for running. All running volumes are listed, waiting volumes only the first
-  100; `pending_volumes` counts all waiting ones.
+  plan over `plan_items(pending, running)` (exceptions → unpriced). The window
+  (`bunko_sched::queue_window`): every running job; then every job claimed whose
+  card has not begun (session opening, archive spooling), `queued` with
+  `eta: null`; then the first 100 waiting jobs (`QUEUE_REPORT_LIMIT`, deduplicated
+  by series, volume and row, first in plan order wins) sorted by
+  `(unpriced, floor(eta_at / 300 s), plan position)`. The 300 s buckets keep the
+  window and the ETag still while the plan re-prices by seconds; unpriced jobs (a
+  blocked tail, or a row hold) come after every priced one, in plan order. A
+  waiting job a row hold keeps (`held` on the item) that falls outside the 100 is
+  attached when its volume is listed anyway; it adds no volume. Volumes come in
+  the order of their first job by `(running, claimed, waiting)` then that key; a
+  volume carries only its listed jobs, in the same order. An owed row with no plan
+  item (failure backoff, parked, attempted this scan) is not listed; the manifest
+  (`volume_pending`) still lists it with `eta: null`. State: `running` for a
+  running card, `queued` for a claim, `held` if the whole queue is held or the item
+  is `held`, else `queued`. `eta = eta_at` unless held or claimed.
+  `progress = done/total` for running. `pending_volumes` counts every volume with a
+  planned or claimed job and none running, listed or not. (0.5.2 listed the first
+  100 waiting volumes in plan order, each with every owed row, primary first, an
+  unplanned row as `held`.)
 - `queue_hold()` (`control.py:296-311`): `no-processor` if `processing_hold`;
   else if every machine held → `benchmarking` if a benchmark holds the queue else
   `paused`; else None.

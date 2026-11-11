@@ -1522,7 +1522,9 @@ impl Drop for LeaseHandle {
 
 /// The cloud queue file's size cap (§9.1).
 pub const QUEUE_DOC_MAX_BYTES: usize = 64 * 1024;
-/// Waiting volumes listed at most (`QUEUE_REPORT_LIMIT`).
+/// Waiting volumes listed at most: a backstop; the server lists at most 100 waiting
+/// jobs (`QUEUE_REPORT_LIMIT`), so at most 100 waiting volumes besides those about to
+/// start.
 pub const QUEUE_WAITING_LIMIT: usize = 100;
 /// `done[]` holds at most this many completions …
 pub const DONE_LIMIT: usize = 100;
@@ -1632,9 +1634,10 @@ fn assemble(
 /// `progress` to 0.1, and keeps the compact JSON within `max_bytes`
 /// ([`QUEUE_DOC_MAX_BYTES`]).
 ///
-/// - `volumes`: every running volume plus the first [`QUEUE_WAITING_LIMIT`] waiting
-///   ones, in the server's order. `truncated` is true when fewer waiting volumes are
-///   listed than `pending_volumes`.
+/// - `volumes`: in the server's order (every running job, the jobs about to start,
+///   then the next 100 waiting jobs, by volume), at most [`QUEUE_WAITING_LIMIT`]
+///   waiting volumes. `truncated` is true when fewer waiting volumes are listed than
+///   `pending_volumes`; a volume listed with only some of its jobs does not count.
 /// - `done`: entries from the [`DONE_WINDOW`] before the document's `generated_at`
 ///   (every entry when it has none), newest first, at most [`DONE_LIMIT`].
 /// - Over the cap, waiting volumes go first (from the end), then the oldest `done`

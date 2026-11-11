@@ -536,15 +536,6 @@ impl Scheduler {
         bunko_core::generations::primary_generation(&self.settings.rows)
     }
 
-    /// `_generation_rank`: row id → position among the enabled rows.
-    pub fn rank(&self) -> HashMap<String, usize> {
-        self.enabled_rows()
-            .iter()
-            .enumerate()
-            .map(|(i, r)| (r.id.clone(), i))
-            .collect()
-    }
-
     pub fn bump(&mut self) {
         self.queue_generation += 1;
         self.pending_cache = None;

@@ -142,6 +142,16 @@ struct Inner {
 #[derive(Clone)]
 pub struct OcrControl(Arc<Inner>);
 
+/// What [`OcrControl::ask_within`] got back.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Asked<T> {
+    Answer(T),
+    /// The scheduler is running but did not answer in time (busy, or starting).
+    TimedOut,
+    /// The scheduler is not running.
+    Gone,
+}
+
 /// `generator`: `mokuro-bunko <version>`.
 pub fn generator() -> String {
     format!("mokuro-bunko {}", bunko_core::VERSION)
@@ -580,14 +590,31 @@ impl OcrControl {
         wait: Duration,
         f: impl FnOnce(&mut Scheduler) -> T + Send + 'static,
     ) -> Option<T> {
+        match self.ask_within(wait, f) {
+            Asked::Answer(t) => Some(t),
+            Asked::TimedOut | Asked::Gone => None,
+        }
+    }
+
+    /// [`Self::ask_blocking`] that tells a scheduler too busy to answer within `wait`
+    /// from one that is not running.
+    pub fn ask_within<T: Send + 'static>(
+        &self,
+        wait: Duration,
+        f: impl FnOnce(&mut Scheduler) -> T + Send + 'static,
+    ) -> Asked<T> {
         let (reply, rx) = std::sync::mpsc::channel();
         let q: sched::Query = Box::new(move |s: &mut Scheduler| {
             let _ = reply.send(f(s));
         });
         if !self.send(Msg::Query(q)) {
-            return None;
+            return Asked::Gone;
         }
-        rx.recv_timeout(wait).ok()
+        match rx.recv_timeout(wait) {
+            Ok(t) => Asked::Answer(t),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Asked::TimedOut,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Asked::Gone,
+        }
     }
 
     // --- hooks the DAV layer calls (from blocking threads) ------------------------------------

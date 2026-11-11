@@ -667,6 +667,15 @@
 - **Dependency updates**: zip 9, rcgen 0.14, windows 0.62, windows-sys 0.61.
 
 ### Fixed
+- **The OCR queue file lists the next 100 jobs, soonest first.** It listed the next
+  100 waiting volumes with every job each still owed, so a volume near the front
+  brought along jobs planned days later. It now lists every running job, the jobs about
+  to start and the 100 waiting jobs that finish soonest (to the nearest five minutes,
+  so small re-pricings do not reorder the file), grouped by volume, and each volume
+  carries only those jobs. A listed volume still shows the jobs no connected machine
+  can run, as held. A job left out is still owed, and the volume's manifest lists every
+  one. A manifest whose OCR queue does not answer within a second is now 503 with
+  `Retry-After` instead of saying nothing is pending, which a reader took as "done".
 - **Windows: no console window flashes while the app runs.** The app
   (`mokuro-bunko.exe`) and the server and processor it starts have no console, so
   every console program they ran was given a window of its own: `nvidia-smi`, which

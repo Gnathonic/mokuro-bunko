@@ -1,7 +1,7 @@
 //! Adapters between the OCR scheduler and the library/catalog runtime.
 
 use crate::library::{ArchiveEvents, OcrStatusSource, OutlookSource, VolumeOutlook};
-use crate::ocr::OcrControl;
+use crate::ocr::{Asked, OcrControl};
 use serde_json::{Map, Value};
 use std::path::Path;
 use std::time::Duration;
@@ -28,19 +28,26 @@ impl OutlookSource for OcrGlue {
         let ocr = self.0.clone();
         // 0.5.2 waited at most 1 s for the pending list when serving a manifest.
         let answer = blocking(move || {
-            ocr.ask_blocking(Duration::from_secs(1), move |s| {
+            ocr.ask_within(Duration::from_secs(1), move |s| {
                 (s.volume_pending(&rel, None), s.now())
             })
         });
         match answer {
-            Some((pending, now)) => {
+            Asked::Answer((pending, now)) => {
                 let recheck = bunko_sched::outlook::recheck_after(&pending, now);
                 VolumeOutlook {
                     pending,
                     recheck_after: recheck.map(Value::from),
+                    busy: false,
                 }
             }
-            None => VolumeOutlook::default(),
+            // Unknown is not "nothing pending": a reader told `[]` takes the volume as
+            // finished and stops watching it.
+            Asked::TimedOut => VolumeOutlook {
+                busy: true,
+                ..VolumeOutlook::default()
+            },
+            Asked::Gone => VolumeOutlook::default(),
         }
     }
 }
