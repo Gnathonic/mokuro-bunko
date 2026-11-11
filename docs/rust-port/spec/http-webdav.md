@@ -1496,7 +1496,7 @@ Document (`build_document`, `queue_file.py:64-95`; `json.dumps(..., separators=(
  "generated_at": "YYYY-MM-DDTHH:MM:SSZ",          # UTC, excluded from the ETag
  "held": null | {"reason": <plain code string>},
  "next_check_after": null | <int seconds>,        # recheck_after(all jobs, now) (section 9)
- "pending_volumes": <int>,                        # ALL waiting volumes; `volumes` lists running + only the next 100 waiting
+ "pending_volumes": <int>,                        # every waiting volume (a job waiting, none running); volumes list every running job + the next 100 waiting jobs, soonest first
  "volumes": [ {"series": s, "volume": v,
                "path": "/mokuro-reader/<enc s>/<enc v>.cbz",          # percent-encoded, safe "!*'()"
                "manifest": "/catalog/api/manifest?series=<enc>&volume=<enc>",

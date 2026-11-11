@@ -62,6 +62,13 @@ impl Stat {
     }
 }
 
+/// The strong ETag a GET of this file is served with, quoted (`"<mtime:.6>-<size>"`):
+/// the OCR scheduler names it in a volume op, so a processor can tell whether a copy it
+/// kept is still the library's file.
+pub fn strong_file_etag(meta: &Meta) -> String {
+    format!("\"{}\"", Stat::from_meta(meta).file_etag())
+}
+
 fn split_time(t: Option<SystemTime>) -> (i64, u32) {
     match t {
         Some(t) => match t.duration_since(UNIX_EPOCH) {

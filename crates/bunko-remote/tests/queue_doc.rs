@@ -18,6 +18,11 @@ fn job(state: &str, progress: Value) -> Value {
     json!({"kind": "ocr", "id": "hayai", "state": state, "eta": null, "progress": progress})
 }
 
+/// A waiting job with a finishing time.
+fn priced() -> Value {
+    json!({"kind": "ocr", "id": "hayai", "state": "queued", "eta": "2026-10-12T11:00:00Z", "progress": null})
+}
+
 fn volume(series: &str, vol: &str, jobs: Vec<Value>) -> Value {
     json!({
         "series": series,
@@ -149,13 +154,80 @@ fn truncated_when_fewer_waiting_listed_than_pending() {
     assert_eq!(out["pending_volumes"], 837);
     assert_eq!(out["volumes"].as_array().unwrap().len(), 101);
 
-    // More than 100 waiting in the input: capped at 100.
+    // More than 100 waiting in the input (a backstop: the server lists at most 100
+    // waiting jobs, and so at most 100 waiting volumes plus those about to start):
+    // capped at 100.
     let many: Vec<Value> = (0..150)
-        .map(|i| volume("S", &format!("V{i}"), vec![job("queued", Value::Null)]))
+        .map(|i| volume("S", &format!("V{i}"), vec![priced()]))
         .collect();
     let out = cloud_queue_doc(&server_doc(many, 150, NOW), "i", &[], usize::MAX);
     assert_eq!(out["volumes"].as_array().unwrap().len(), 100);
     assert_eq!(out["truncated"], true);
+}
+
+/// Finding: the server lists the jobs claimed but not started (`queued`, no `eta`)
+/// besides its 100 waiting jobs. Counting their volumes against the cap dropped as
+/// many waiting volumes off the end of the cloud copy.
+#[test]
+fn volumes_about_to_start_do_not_count_toward_the_cap() {
+    let mut vols = vec![
+        volume("S", "Run", vec![job("running", json!(0.5))]),
+        volume("S", "Claimed", vec![job("queued", Value::Null)]),
+    ];
+    vols.extend((0..100).map(|i| volume("S", &format!("V{i}"), vec![priced()])));
+    let out = cloud_queue_doc(&server_doc(vols, 101, NOW), "i", &[], QUEUE_DOC_MAX_BYTES);
+    let names: Vec<&str> = out["volumes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["volume"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names.len(),
+        102,
+        "the running, the claimed and all 100 waiting"
+    );
+    assert_eq!(names[101], "V99");
+    assert_eq!(out["truncated"], false);
+}
+
+/// The server orders volumes by their soonest job and each volume's jobs running first,
+/// then soonest. The cloud copy keeps that order: it never sorts by name or kind.
+#[test]
+fn keeps_the_servers_order_of_volumes_and_jobs() {
+    let job_at = |kind: &str, id: &str, state: &str, eta: &str| json!({"kind": kind, "id": id, "state": state, "eta": eta, "progress": null});
+    let vols = vec![
+        volume("S", "R", vec![job("running", json!(0.25))]),
+        volume(
+            "S",
+            "Y",
+            vec![
+                job_at("layer", "lines", "queued", "2026-10-12T10:01:40Z"),
+                job_at("ocr", "hayai", "queued", "2026-10-12T10:15:00Z"),
+            ],
+        ),
+        volume(
+            "S",
+            "X",
+            vec![job_at("ocr", "hayai", "queued", "2026-10-12T10:03:20Z")],
+        ),
+    ];
+    let out = cloud_queue_doc(&server_doc(vols, 2, NOW), "i", &[], QUEUE_DOC_MAX_BYTES);
+    let names: Vec<&str> = out["volumes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["volume"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["R", "Y", "X"]);
+    let y: Vec<&str> = out["volumes"][1]["jobs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|j| j["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(y, ["layer", "ocr"]);
+    assert_eq!(out["truncated"], false);
 }
 
 #[test]

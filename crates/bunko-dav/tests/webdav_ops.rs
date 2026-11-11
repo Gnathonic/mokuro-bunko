@@ -725,6 +725,23 @@ async fn put_preconditions() {
     );
 }
 
+/// The OCR scheduler names an archive's ETag in a volume op ([`strong_file_etag`]): a
+/// processor keeps a copy for a volume's next job and matches it by that ETag, so it
+/// must be the one a GET serves.
+#[tokio::test]
+async fn the_volume_op_etag_is_the_one_the_archive_is_served_with() {
+    let env = Env::new();
+    let r = env
+        .req(None, "GET", "/mokuro-reader/series/vol1.cbz", &[], b"")
+        .await;
+    assert_eq!(r.code(), 200);
+    let meta = bunko_store::fs::metadata(env.lib("series/vol1.cbz")).unwrap();
+    assert_eq!(
+        r.header("etag"),
+        Some(bunko_dav::strong_file_etag(&meta).as_str())
+    );
+}
+
 #[tokio::test]
 async fn put_overwrite_returns_the_new_etag() {
     let env = Env::new();

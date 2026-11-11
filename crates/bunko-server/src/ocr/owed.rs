@@ -26,15 +26,17 @@ pub struct OwedVolume {
     pub mtime: f64,
     /// Row ids owed, in list (= run) order.
     pub rows: Vec<Arc<str>>,
+    /// The rows of `rows` owed because their layer is Bunko's own output at an older
+    /// engine revision ([`UpgradeProbe::layer_outdated`]), not because it is missing.
+    /// They are upgrades: the queue runs them after that row's missing files. Their
+    /// result replaces that file in place, a Sync write, as an upgrade's swap is.
+    pub outdated: Vec<Arc<str>>,
     /// Non-primary rows withheld because the supplied `.mokuro` names pages the archive
     /// lacks (never a failure, no record).
     pub skipped: Vec<Arc<str>>,
     pub missing_pages: i64,
     /// The primary row is owed a generation upgrade (generate, then swap).
     pub upgrade: bool,
-    /// Rows owed again over their own outdated layer (critique C10): the result
-    /// replaces that file in place, a Sync write, as an upgrade's swap is.
-    pub refresh: Vec<Arc<str>>,
     /// The metadata cache's page count, else the zip directory's own.
     pub pages: Option<i64>,
     /// The page suffixes read from the archive at that version (`(size, mtime_ns)`),
@@ -230,7 +232,7 @@ fn compute_in(
         return None;
     }
     let enabled: Vec<&Generation> = bunko_core::generations::enabled_generations(rows).collect();
-    let mut refresh: Vec<Arc<str>> = Vec::new();
+    let mut outdated: Vec<Arc<str>> = Vec::new();
     let mut owed: Vec<&Generation> = enabled
         .iter()
         .copied()
@@ -238,11 +240,12 @@ fn compute_in(
             if !row_done(cbz, r, folder) {
                 return true;
             }
-            let again = upgrade.is_some_and(|p| p.layer_outdated(cbz, r));
-            if again {
-                refresh.push(Arc::from(r.id.as_str()));
+            // Done, but Bunko's own output at an older revision: an upgrade of the row.
+            let stale = upgrade.is_some_and(|p| p.layer_outdated(cbz, r));
+            if stale {
+                outdated.push(Arc::from(r.id.as_str()));
             }
-            again
+            stale
         })
         .filter(|r| writable(&r.sidecar_suffix()))
         .collect();
@@ -262,6 +265,7 @@ fn compute_in(
             owed.retain(|r| r.primary);
         }
     }
+    outdated.retain(|id| owed.iter().any(|r| *r.id == **id));
     let mut wants_upgrade = false;
     if let Some(probe) = upgrade
         && primary_done
@@ -274,7 +278,6 @@ fn compute_in(
     if owed.is_empty() && skipped.is_empty() && !wants_upgrade {
         return None;
     }
-    refresh.retain(|g| owed.iter().any(|r| *r.id == **g));
     let mtime = meta
         .modified()
         .ok()
@@ -285,10 +288,10 @@ fn compute_in(
         mtime_ns: mtime_ns(&meta),
         mtime,
         rows: owed.iter().map(|r| Arc::from(r.id.as_str())).collect(),
+        outdated,
         skipped,
         missing_pages,
         upgrade: wants_upgrade,
-        refresh,
         pages: None,
         page_suffixes: None,
     })

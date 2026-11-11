@@ -225,6 +225,14 @@ ocr:
   # the derived settings and benchmark by hand". At startup.
   autobench: true
 
+  # How the queue takes work. generation: each generation runs across the
+  # library in the order of `generations` below, downloading a volume's archive
+  # for each of its jobs. volume: one machine runs every job of a volume back
+  # to back from one download of its archive (a job it cannot run goes to
+  # another machine). Unset or auto: volume on a MEGA library, whose transfer
+  # quota counts every download, generation otherwise. Live (Admin -> OCR).
+  # queue_order: volume
+
   # Replace OLD primary OCR with the current primary generation's: the new
   # file replaces the old primary file (no copy is kept); files a person
   # edited are skipped. Off by default: an upgrade rewrites what readers see.

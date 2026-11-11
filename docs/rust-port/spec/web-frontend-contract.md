@@ -393,13 +393,16 @@ UI state is kept in the URL hash `#audit?q=..&actor=..` (client only).
 | `PUT /_admin/api/settings/cors` | `{enabled, allowed_origins:[string]}` | `error` |
 | `PUT /_admin/api/settings/catalog` | `{enabled, use_as_homepage, reader_url}` | `error` |
 | `PUT /_admin/api/settings/queue` | `{show_in_nav, public_access, display}` display in `minimal\|normal\|detailed` | `error` (400 also has `field:"display"`) |
-| `PUT /_admin/api/settings/ocr` | `{poll_interval: int>=1}` | `applied`, `restart_required`, `installing`, `reason` (toast text; `restart_required` -> warning style). 400 `error` |
+| `PUT /_admin/api/settings/ocr` | `{poll_interval: int>=1}`; Rust also `upgrade: {enabled, replace:[family]}` and `queue_order: "auto"\|"generation"\|"volume"\|null` (each optional) | `applied`, `restart_required`, `installing`, `reason` (toast text; `restart_required` -> warning style); with `queue_order` sent, `ocr.{queue_order, queue_order_effective}`. 400 `error` (`"queue_order must be auto, generation or volume"`, `"upgrade must be an object"`, ...) |
 | `PUT /_admin/api/settings/dyndns` | `{provider, domain, update_url, interval, token?}` (token only when typed; masked `****` never accepted back) | `error` |
 
 `GET /_admin/api/settings` JS reads: `registration.{mode, default_role, allow_anonymous_browse,
 allow_anonymous_download, require_login(legacy fallback)}`, `cors.{enabled, allowed_origins[]}`,
 `catalog.{enabled, use_as_homepage, reader_url}`, `queue.{show_in_nav, public_access, display}`,
-`ocr.{poll_interval, backend}`, `dyndns.{provider, domain, update_url, interval}`, and
+`ocr.{poll_interval, backend}` (Rust also `ocr.upgrade.{enabled, replace[]}`, `ocr.queue_order`
+= `auto|generation|volume` as configured, `auto` when unset, and `ocr.queue_order_effective` =
+`generation|volume`, the order in force: unset means by volume on a MEGA library),
+`dyndns.{provider, domain, update_url, interval}`, and
 `ocr_runtime` = `{available, configured_backend, installed, installed_backend, env_path,
 engines_env_path, engines_installed, detector_ready, supported_backends[], cli_hint, driver_hint,
 active_generations|generations|active_engines|engines (array of name strings or {name|id}),

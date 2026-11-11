@@ -305,6 +305,51 @@ whatever the outcome (`watcher.py:2830-2833`); in memory only.
 
 `_generation_rank()` = `{row.id: index}` over enabled rows (`watcher.py:1425-1427`).
 
+> **Rust:** the queue orders by group, not by row. `Scheduler::order_rank` ranks
+> enabled row i's missing files `row.id` at 2i and its upgrades
+> `row.id + "\u{1}upgrade"` at 2i+1; `Scheduler::job_key` puts the primary's
+> upgrade (swap) job and a layer Bunko wrote at an older engine revision
+> (`OwedVolume.outdated`) in the upgrade group. Each group has its own positions
+> and its own `last_served` cursor. A session on row i drains for a job ranked
+> before 2i that the machine would take, unless that job is left for a faster
+> lane or the machine gave it back.
+
+> **Rust, by volume** (`ocr.queue_order: volume`, `Settings.by_volume`; the
+> default on a MEGA library): `candidates` regroups the `order_jobs` order by
+> volume (`Scheduler::volume_order`): owned volumes first, then volumes started
+> earlier (`volumes_started`), then the rest, each class in the order of its
+> volumes' first job, a volume's jobs together in group order. The lane that
+> takes a volume's job holds the volume (`Scheduler::volume_owners`, an ordered
+> list per volume, `sched/by_volume.rs`): the first holder is its owner; a
+> machine already holding it only moves to the new lane. `claim()` splits the
+> queue into the lane's own jobs (walked first, never left to another lane) and
+> the jobs open to it: a held volume's job is the first holder's whose machine
+> can run it (`holder_for`; `Elsewhere` for every other lane), open only when no
+> holder can, and whoever takes an open job is appended as the next holder. An
+> unheld volume's later job is open only when no connected machine can run its
+> first. The rank-based preemption is off; instead a session drains when the
+> lane's next job is of another row. The `last_served` cursor moves only on a
+> volume's first claim. `pump()` prunes holders first, in order: gone, nothing
+> left they would get (a job they can run that no holder kept before them can),
+> or 600 s without a claim of the volume while able (holds and their own
+> autobench do not count); the next holder then owns the volume. A holder keeps
+> a local claim's spooled archive (`VolumeOwner.spool`) for its next job of the
+> volume; a remote claim says `keep_archive` when more of the volume follows on
+> that processor, and `kept_archives` names every archive it holds (every remote
+> op carries it, empty by generation). A holder waits for its machine through
+> that machine's benchmark or hold: the volume's jobs it can run are offered to
+> no other machine meanwhile (owner decision). The submit-time stamp of a remote
+> claim (`SessionJob.sent_stamp`) is the version a reused copy holds: a `fetch
+> ready` with `reused` sets the claim's stamp to it (not the file's stamp now), so
+> an archive changed since has its result discarded at collection (`DISCARDED`)
+> and the job goes back. No claim-level cancel is sent: a bunko processor abandons
+> the whole session on one, and `end_session` would blame its oldest delivered
+> claim.
+> `apply_settings` switching by volume on makes each claim in flight hold its
+> volume (`hold_volumes_in_flight`, with its spooled archive).
+> The plan (`PlanInputs.by_volume`) keeps a volume's jobs on the lane that took
+> its first.
+
 `_ocr_candidates(exclude, reset_stale_failures)` (`watcher.py:1592-1623`) =
 eligible − exclude → `order_jobs(..., last_served=copy)`. `_upcoming_ocr_jobs` =
 `_ocr_candidates(exclude=inflight ∪ attempted)` — the single source for claims
@@ -1513,6 +1558,13 @@ card's own `eta_seconds` is used only as a hint by EFT lanes.
   CLI) — **DROP** in Rust (always False) (`watcher.py:2057-2074`);
 - `refusal_for(gen, machine)` = `_machine_precision_refusal` memoised;
   `hold_for(gen)` = `hold_reason(row.precision)` (`watcher.py:1860-1882`).
+  **Rust:** while some machine takes work, a machine that takes no new work (held
+  on its own by its benchmark, paused, or a remote one whose download breaker is
+  open) refuses every row, so its lanes take no waiting job: priced on its idle
+  lanes at "now + run time", those jobs' ETAs would move with the clock while the
+  others' stay put, and the queue file's 300 s buckets would reorder. Its running
+  cards stay priced. A row only such machines can run is held, `hold_for` naming
+  them. When every machine is held nothing is refused (the queue hold below).
 
 ### 20.2 Running jobs → lanes (`lanes_from_running`, `eta.py:902-993`)
 
@@ -1602,6 +1654,21 @@ None without a worker; `[]` if nothing owed; if `queue_hold()` is not None, no
 pricing (all ETAs null); else `volume_plan(..., pending_within(wait))`
 (exceptions → unpriced). Callers: PUT (wait 0.005 s, max 300 items), volume
 manifest (wait 1.0 s, unbounded) (`catalog/api.py:32`, `237-252`).
+
+> **Rust:** the manifest asks the scheduler thread with a 1 s wait
+> (`OcrGlue::volume_outlook`). When that times out it answers from the owed
+> board the scheduler thread publishes on its tick (`actor::OwedBoard`, rebuilt
+> when the queue generation moved and 5 s passed, or every 60 s): the volume's
+> owed rows with `eta: null`, `recheck_after` 300. The manifest is 503 with
+> `Retry-After: 5` before the first publish, and for a volume that arrived after
+> the board was built and that the board lists nothing for
+> (`actor::FreshArrivals`: `OcrControl::archive_arrived` notes it before the
+> scheduler hears of it; the actor settles it once a board built after the
+> scheduler took it in is published). On a remote library the live answer is 503
+> too while the arrival is being judged on a helper (`Scheduler::judging`, until
+> `ArrivalJudged`, at most 300 s) and nothing is owed yet. (0.5.2 answered `pending: []` on a
+> timeout, which a reader takes as "finished"; a 503 instead would make a
+> deep link import the volume without its layers.)
 
 ---
 
@@ -1867,14 +1934,30 @@ exception` → "engine error"; else "failed — will retry".
   `If-None-Match` → 304.
 - Content (`OcrControl.queue_document`, `control.py:313-412`): `running =
   _with_known_totals(read_running_jobs)`; `pending = pending_within(1.0) or []`;
-  plan over `plan_items(pending, running)` (exceptions → unpriced). Volumes in
-  order of first appearance (running first, then pending). For each listed volume:
-  rows = owed rows (from `owed_by_volume`, the shared walk) ∪ rows of listed jobs;
-  sorted (primary first, then rank). State: running if a running card matches;
-  `held` if unpriced (not in the list, e.g. backoff), whole queue held, or the item
-  is `held`; else `queued`. `eta = eta_at` unless held. `progress = done/total`
-  for running. All running volumes are listed, waiting volumes only the first
-  100; `pending_volumes` counts all waiting ones.
+  plan over `plan_items(pending, running)` (exceptions → unpriced). The window
+  (`bunko_sched::queue_window`): every running job; then every job claimed whose
+  card has not begun (session opening, archive spooling), `queued` with
+  `eta: null`; then the first 100 waiting jobs (`QUEUE_REPORT_LIMIT`, deduplicated
+  by series, volume and row, first in plan order wins) sorted by
+  `(unpriced, floor(eta_at / 300 s), plan position)`. The 300 s buckets keep the
+  window and the ETag still while the plan re-prices by seconds; unpriced jobs (a
+  blocked tail, or a row hold) come after every priced one, in plan order. While
+  `queue_hold()` is set the bucket is ignored (`queue_window(.., timed: false)`):
+  the plan still prices waiting jobs on the held machines' idle lanes at
+  "now + run time", so every `eta_at` moves with the clock and jobs on two lanes
+  would cross bucket boundaries in turn; the window then follows plan position. A
+  waiting job a row hold keeps (`held` on the item) that falls outside the 100 is
+  attached when its volume is listed anyway; it adds no volume. Volumes come in
+  the order of their first job by `(running, claimed, waiting)` then that key; a
+  volume carries only its listed jobs, in the same order. An owed row with no plan
+  item (failure backoff, parked, attempted this scan) is not listed; the manifest
+  (`volume_pending`) still lists it with `eta: null`. State: `running` for a
+  running card, `queued` for a claim, `held` if the whole queue is held or the item
+  is `held`, else `queued`. `eta = eta_at` unless held or claimed.
+  `progress = done/total` for running. `pending_volumes` counts every volume with a
+  planned or claimed job and none running, listed or not. (0.5.2 listed the first
+  100 waiting volumes in plan order, each with every owed row, primary first, an
+  unplanned row as `held`.)
 - `queue_hold()` (`control.py:296-311`): `no-processor` if `processing_hold`;
   else if every machine held → `benchmarking` if a benchmark holds the queue else
   `paused`; else None.

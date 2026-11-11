@@ -431,6 +431,7 @@ fn plan_queue_matches_python() {
             } else {
                 None
             },
+            by_volume: false,
         };
         let plan = plan_queue(&running, &pending, &inputs);
         let got = json!({
