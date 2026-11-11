@@ -897,12 +897,35 @@ impl Scheduler {
                 .vols
                 .insert(stem, jobs);
         }
+        // Volumes finished lately and owing nothing again: a file names them done
+        // even when it never showed them (a job queued and finished between looks).
+        let day = bunko_sched::series_queue::DONE_KEEP_SECONDS as f64;
+        let mut finished: std::collections::BTreeMap<
+            String,
+            (String, std::collections::BTreeMap<String, f64>),
+        > = Default::default();
+        for (rel, at) in &self.recent_finished {
+            if *at + day <= now || board.volumes.contains_key(rel.as_str()) {
+                continue;
+            }
+            let job = Job::new(rel, "");
+            let folder = job.series();
+            if folder == "." || folder.contains('/') {
+                continue;
+            }
+            finished
+                .entry(bunko_core::names::fold_name(folder))
+                .or_insert_with(|| (folder.to_string(), Default::default()))
+                .1
+                .insert(job.volume().to_string(), *at);
+        }
         Snapshot {
             now,
             rows: descs,
             held,
             held_rows,
             series,
+            finished,
         }
     }
 }

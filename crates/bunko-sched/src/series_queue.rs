@@ -227,6 +227,11 @@ pub struct Snapshot {
     pub held_rows: BTreeSet<String>,
     /// Series fold key → its owed jobs. Series owing nothing are absent.
     pub series: BTreeMap<String, SeriesLive>,
+    /// Series fold key → the volumes whose last owed job finished lately (within
+    /// [`DONE_KEEP_SECONDS`]), each with when: `(folder, stem → time)`. A job queued
+    /// and finished between two looks of a sink was never shown; this is how it still
+    /// leaves a `done` entry ([`Snapshot::unshown_finishes`]).
+    pub finished: BTreeMap<String, (String, BTreeMap<String, f64>)>,
 }
 
 // --- what a sink published ----------------------------------------------------------------------
@@ -386,6 +391,11 @@ impl Snapshot {
             return s;
         }
         s.now += offset;
+        for (_, stems) in s.finished.values_mut() {
+            for at in stems.values_mut() {
+                *at += offset;
+            }
+        }
         for live in s.series.values_mut() {
             for jobs in live.vols.values_mut() {
                 for job in jobs {
@@ -403,6 +413,63 @@ impl Snapshot {
             }
         }
         s
+    }
+}
+
+/// A `done` entry covers a finish up to this much after it: a store's clock offset
+/// that moves a little between two snapshots never makes one finish two writes.
+pub const UNSHOWN_SLACK: i64 = 60;
+
+impl Snapshot {
+    /// The base a sink judges and renders series `key` against when volumes of it
+    /// finished without ever being shown (queued and done between two looks, or
+    /// before a write window came): what it published, plus each such volume as a job
+    /// that is gone, so the dirty test calls it a hard change and the render leaves
+    /// its `done` entry (§5.3), as for any finished job. None when there is none.
+    ///
+    /// Ask only once the series is settled: the entry tells a reader the volume's
+    /// sidecar and `series.json` are in the store. A volume the file still lists, or
+    /// already names as done (since it finished, give or take [`UNSHOWN_SLACK`]), is
+    /// not one; nor is one older than
+    /// the `done` tail keeps (a day, or the oldest of a full tail), so a finish the
+    /// tail dropped never comes back.
+    pub fn unshown_finishes(
+        &self,
+        key: &str,
+        published: Option<&Published>,
+        clock: &Clock,
+    ) -> Option<Published> {
+        let (folder, stems) = self.finished.get(key)?;
+        let live = self.series.get(key);
+        let now_s = self.now.floor() as i64;
+        let floor = published
+            .filter(|p| p.done.len() >= DONE_MAX)
+            .and_then(|p| p.done.values().min().copied());
+        let fresh: Vec<&String> = stems
+            .iter()
+            .filter(|(stem, at)| {
+                let at = at.floor() as i64;
+                at + DONE_KEEP_SECONDS > now_s
+                    && floor.is_none_or(|f| at > f)
+                    && !live.is_some_and(|l| l.vols.contains_key(*stem))
+                    && !published.is_some_and(|p| {
+                        p.vols.contains_key(*stem)
+                            || p.done.get(*stem).is_some_and(|d| *d + UNSHOWN_SLACK >= at)
+                    })
+            })
+            .map(|(stem, _)| stem)
+            .collect();
+        if fresh.is_empty() {
+            return None;
+        }
+        let mut base = published
+            .cloned()
+            .unwrap_or_else(|| Published::empty(folder, clock, self.now));
+        for stem in fresh {
+            base.vols
+                .insert(stem.clone(), vec![(String::new(), Tuple::Queued(None))]);
+        }
+        Some(base)
     }
 }
 
@@ -846,16 +913,26 @@ impl Sink {
         let keys: BTreeSet<String> = snap
             .series
             .keys()
+            .chain(snap.finished.keys())
             .chain(self.series.keys())
             .cloned()
             .collect();
         for key in keys {
             let live = snap.series.get(&key);
-            let published = self.series.get(&key);
             let folder = live
                 .map(|l| l.folder.as_str())
-                .or(published.map(|p| p.folder.as_str()))
-                .unwrap_or_default();
+                .or(self.series.get(&key).map(|p| p.folder.as_str()))
+                .or(snap.finished.get(&key).map(|(f, _)| f.as_str()))
+                .unwrap_or_default()
+                .to_string();
+            // Volumes finished unseen join once the series is settled.
+            let unshown = if snap.finished.contains_key(&key) && settled(&folder) {
+                snap.unshown_finishes(&key, self.series.get(&key), &clock)
+            } else {
+                None
+            };
+            let published = unshown.as_ref().or(self.series.get(&key));
+            let folder = folder.as_str();
             // Asked only when a published job is no longer owed.
             let gone = published.is_some_and(|p| {
                 p.vols.iter().any(|(stem, jobs)| {

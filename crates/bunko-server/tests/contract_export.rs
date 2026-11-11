@@ -399,6 +399,7 @@ fn series_queue_shapes() -> Value {
         )]
         .into_iter()
         .collect(),
+        finished: Default::default(),
     };
     let mut sink = Sink::new(0, None);
     sink.clock = Some(Clock::identity(t0 as i64));

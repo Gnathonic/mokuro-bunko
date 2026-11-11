@@ -247,6 +247,14 @@ Until then the job renders as `r`, with its published `t0` and `e = max(publishe
 
 When the volume's last job leaves, `done[stem] = now`.
 
+A volume whose jobs were queued and finished between two looks of a sink (a fast
+machine, or a write window that had not come yet) was never shown, so no job of it
+ever "leaves". The scheduler keeps the volumes it finished in the last day
+(`Scheduler::recent_finished`, at most 4,096), and the snapshot carries them
+(`Snapshot::finished`). Once S is settled, each one the file neither lists nor
+already names done gets `done[stem] = now` the same way (one hard write). Without
+this, a reader on the series page, and a watch, never learnt such a volume finished.
+
 So by the time a job disappears, the store already has the sidecar **and** the `series.json` carrying its `mokuro_sha256`. A reader's upgrade pass then finds it on the first scoped listing.
 
 ### 5.4 Over HTTP on a local library
@@ -625,7 +633,8 @@ This replaces "absent from the truncated file, so ask the manifest" and "`done[]
 | Restart | The published state and clock are persisted, so nothing is rewritten; the refit absorbs the downtime. |
 | File deleted by a user or a sync tool | The feed event marks it P0. The fast path's 404 falls back to a create. Meanwhile the reader shows no labels. |
 | Store offline, auth failure, quota | No writes, and the marker goes stale. The cloud reader shows nothing, as today. Over HTTP, `live.held = storage-*`. |
-| Arrival Bunko has not judged yet | Absent and not in `done`, so nothing is shown. The watch schedule covers it (§8.7). |
+| Arrival Bunko has not judged yet | Absent and not in `done`, so nothing is shown. The watch schedule covers it (§8.7), also while the series page is open (it then uses the page's last read). |
+| Volume queued and finished within one window | Never listed, but named in `done` once S settles (§5.3). A reader whose previous read found no file counts a `done` entry newer than that read as a completion. |
 
 ---
 

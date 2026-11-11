@@ -718,20 +718,26 @@ impl SeriesQueueSink {
             let keys: BTreeSet<String> = snap
                 .series
                 .keys()
+                .chain(snap.finished.keys())
                 .chain(st.landed.keys())
                 .chain(st.staged.keys())
                 .cloned()
                 .collect();
             for key in keys {
                 let live = snap.series.get(&key);
-                let base = st.base(&key).cloned();
+                let mut base = st.base(&key).cloned();
                 let folder = live
                     .map(|l| l.folder.clone())
                     .or_else(|| base.as_ref().map(|b| b.folder.clone()))
+                    .or_else(|| snap.finished.get(&key).map(|(f, _)| f.clone()))
                     .unwrap_or_default();
-                let is_settled = !gone(base.as_ref(), live)
-                    || (!busy.contains(&key) && !src.regeneration_pending(&folder));
-                settled.insert(key.clone(), is_settled);
+                let calm = !busy.contains(&key) && !src.regeneration_pending(&folder);
+                settled.insert(key.clone(), calm);
+                if calm && let Some(b) = snap.unshown_finishes(&key, base.as_ref(), &clock) {
+                    // Finished between two looks, never shown: its `done` entry.
+                    base = Some(b);
+                }
+                let is_settled = !gone(base.as_ref(), live) || calm;
                 let mut class = classify(base.as_ref(), live, &snap, is_settled, &clock, drift);
                 if st.forced.contains(&key) {
                     if live.is_some() || base.as_ref().is_some_and(|b| !b.expired(snap.now)) {
@@ -884,7 +890,9 @@ impl SeriesQueueSink {
             .map(|e| e.name)
     }
 
-    /// One window's burst: at most B tasks, in backlog order (§6.4).
+    /// One window's burst: at most B tasks, in backlog order (§6.4). `calm`: per
+    /// series, no OCR or Compiler write of it is left in the outbox and no recompile
+    /// is pending for it (the settle rule, §5.3).
     async fn flush<B: Backend>(
         &self,
         core: &Arc<Core<B>>,
@@ -915,10 +923,14 @@ impl SeriesQueueSink {
                     let staged = {
                         let mut st = self.st.lock();
                         let priority = st.backlog.get(&task).map_or(Priority::P0, |m| m.priority);
-                        let base = st.base(key).cloned();
                         let live = snap.series.get(key);
-                        let is_settled = settled.get(key).copied().unwrap_or(true);
+                        let calm = settled.get(key).copied().unwrap_or(true);
                         let clock = self.clock_in(&mut st, snap.now);
+                        let mut base = st.base(key).cloned();
+                        if calm && let Some(b) = snap.unshown_finishes(key, base.as_ref(), &clock) {
+                            base = Some(b);
+                        }
+                        let is_settled = !gone(base.as_ref(), live) || calm;
                         let next_rev = (st.rev + 1).max(u64::try_from(now_ms()).unwrap_or(0));
                         let file = render(base.as_ref(), live, snap, is_settled, &clock, next_rev);
                         (file, priority, st.forced.contains(key), next_rev)

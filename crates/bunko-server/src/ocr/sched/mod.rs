@@ -431,7 +431,15 @@ pub struct Scheduler {
     /// Arrivals taken into the owed index (or judged) since the actor last took this
     /// list: the actor's owed board, built after it took them, knows them.
     pub settled_arrivals: Vec<String>,
+    /// Volumes whose last owed job ended lately (finished, or found done at claim),
+    /// with when (the wall clock), oldest first: the queue file v2 names them `done`
+    /// even when no series file ever showed them (`series_queue_snapshot`). At most
+    /// [`RECENT_FINISHED_MAX`], none older than a day.
+    pub recent_finished: IndexMap<String, f64>,
 }
+
+/// How many lately finished volumes the scheduler keeps ([`Scheduler::recent_finished`]).
+pub const RECENT_FINISHED_MAX: usize = 4096;
 
 impl Scheduler {
     pub fn new(deps: SchedDeps, settings: Settings) -> Scheduler {
@@ -513,6 +521,7 @@ impl Scheduler {
             volumes_started: HashSet::new(),
             judging: HashMap::new(),
             settled_arrivals: Vec::new(),
+            recent_finished: IndexMap::new(),
             deps,
         }
     }

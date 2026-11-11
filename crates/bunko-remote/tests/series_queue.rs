@@ -431,6 +431,64 @@ fn a_finished_job_stays_running_until_its_series_settles() {
 }
 
 #[test]
+fn a_volume_finished_before_any_file_showed_it_is_named_done_once_settled() {
+    // Regression (rig S4/S6): a volume OCR'd within one write window never reached a
+    // series file, so no reader ever learnt it finished.
+    let t = T::new(
+        FakeBackend::drive_like(),
+        &[("Beta/Beta 1.cbz", b"zip")],
+        |c| c.retry_base = Duration::from_secs(3),
+    );
+    t.connect();
+    quiet(&t, Duration::from_millis(600));
+    assert!(t.file("Beta").is_none());
+    // Its sidecar is on its way (the first try failed), and the scheduler already
+    // counts the volume finished: the series is not settled.
+    t.fake.fail_next(
+        FakeOp::Upload,
+        BErr::Transient("a dropped connection".into()),
+    );
+    let local = t.tmp.path().join("Beta 1.mokuro");
+    std::fs::write(&local, b"{}").unwrap();
+    fs::publish(
+        &local,
+        t.abs("Beta/Beta 1.mokuro"),
+        &WriteIntent::new(
+            Mode::CreateNew,
+            Origin::Ocr { claim: "c1".into() },
+            Durability::Deferred,
+        ),
+    )
+    .unwrap();
+    wait_until("the sidecar's first try", || {
+        t.s().outbox().iter().any(|o| o.last_error.is_some())
+    });
+    let at = wall() - 1.0;
+    t.src.set(|s| {
+        s.finished.insert(
+            "beta".into(),
+            ("Beta".into(), BTreeMap::from([("Beta 1".to_string(), at)])),
+        );
+    });
+    std::thread::sleep(Duration::from_millis(800));
+    assert!(t.file("Beta").is_none(), "nothing before the sidecar lands");
+    wait_until("the sidecar", || {
+        t.fake
+            .node_at(&format!("{FOLDER}/Beta/Beta 1.mokuro"))
+            .is_some()
+    });
+    wait_until("Beta's file", || t.file("Beta").is_some());
+    let b = t.file("Beta").unwrap();
+    assert_eq!(b["vols"], json!({}), "{b}");
+    assert_eq!(b["rows"], json!([]), "{b}");
+    assert!(b["done"]["Beta 1"].as_i64().unwrap() >= at as i64, "{b}");
+    // Written once.
+    let n = t.uploads();
+    assert_eq!(n, 1);
+    quiet(&t, Duration::from_millis(1500));
+}
+
+#[test]
 fn foreign_files_are_rewritten_and_leftovers_deleted() {
     let foreign = br#"{"v":2,"instance_id":"another-bunko","rev":1,"vols":{}}"#;
     let t = T::new(
@@ -785,5 +843,47 @@ fn series_json_and_the_queue_file_never_wait_for_each_other() {
         "U/.mokuro-series-queue.json",
     ] {
         assert!(t.fake.node_at(&format!("{FOLDER}/{p}")).is_some(), "{p}");
+    }
+}
+
+/// On every provider shape: a file rewritten in place (the Status fast path, or MEGA's
+/// new node per write) is still this sink's own once the feed has listed it again, so
+/// a quiet queue never writes again (a version the feed reports differently from the
+/// write's answer would read as foreign and be rewritten forever).
+#[test]
+fn a_rewritten_file_stays_own_through_feed_polls_on_every_provider() {
+    for (name, fake) in [
+        ("webdav_cas", FakeBackend::webdav_cas()),
+        ("webdav_plain", FakeBackend::webdav_plain()),
+        ("onedrive_like", FakeBackend::onedrive_like()),
+        ("mega_like", FakeBackend::mega_like()),
+        ("drive_like", FakeBackend::drive_like()),
+    ] {
+        let t = T::new(fake, &[("Gamma/Gamma 1.cbz", b"zip")], no_tune);
+        t.src
+            .set(|s| put_series(s, "Gamma", vec![("Gamma 1", queued(None))]));
+        t.connect();
+        wait_until("Gamma's file", || t.file("Gamma").is_some());
+        t.idle();
+        t.src.set(|s| {
+            put_series(
+                s,
+                "Gamma",
+                vec![("Gamma 1", queued(None)), ("Gamma 2", queued(None))],
+            )
+        });
+        wait_until("Gamma 2", || {
+            t.file("Gamma")
+                .is_some_and(|g| g["vols"].get("Gamma 2").is_some())
+        });
+        t.idle();
+        let n = t.uploads();
+        for _ in 0..3 {
+            t.s().feed().poll_now();
+            std::thread::sleep(Duration::from_millis(400));
+        }
+        quiet(&t, Duration::from_millis(1200));
+        assert_eq!(t.uploads(), n, "{name}: written again");
+        assert_eq!(n, 2, "{name}: one write per change");
     }
 }

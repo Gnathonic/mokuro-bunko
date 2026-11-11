@@ -41,6 +41,7 @@ fn snap(now: f64, series: &[(&str, &[Vol<'_>])]) -> Snapshot {
                 )
             })
             .collect(),
+        finished: BTreeMap::new(),
     }
 }
 
@@ -457,6 +458,93 @@ fn the_settle_rule_keeps_a_finished_job_running_until_settled() {
     );
 }
 
+/// `snap` plus volumes finished lately: `(folder, stem, when)`.
+fn with_finished(mut s: Snapshot, finished: &[(&str, &str, f64)]) -> Snapshot {
+    for (folder, stem, at) in finished {
+        s.finished
+            .entry(folder.to_lowercase())
+            .or_insert_with(|| (folder.to_string(), BTreeMap::new()))
+            .1
+            .insert(stem.to_string(), *at);
+    }
+    s
+}
+
+#[test]
+fn a_job_queued_and_finished_between_two_looks_still_leaves_a_done_entry() {
+    // Regression (rig S4/S6): a volume OCR'd faster than one write window never
+    // reached a file, so no `done` entry ever told a reader it finished.
+    let mut sink = Sink::new(0, None);
+    assert!(sink.refresh(&snap(T0, &[]), &always).written.is_empty());
+    let s = with_finished(snap(T0 + 30.0, &[]), &[("A", "A 1", T0 + 20.0)]);
+    // Its series is not settled yet (its sidecar is on its way): nothing yet.
+    let r = sink.refresh(&s, &|_| false);
+    assert!(r.written.is_empty(), "{r:?}");
+    // Settled: a file naming it done, and listing nothing.
+    let r = sink.refresh(&s, &always);
+    assert_eq!(r.written, vec![("a".to_string(), Class::Hard)]);
+    let p = sink.series["a"].clone();
+    assert_eq!(p.folder, "A");
+    assert!(p.vols.is_empty() && p.rows.is_empty());
+    assert_eq!(p.done["A 1"], T0 as i64 + 30);
+    // Once is enough: the same finish is never written again …
+    for later in [60.0, 600.0, 3600.0] {
+        let s = with_finished(snap(T0 + later, &[]), &[("A", "A 1", T0 + 20.0)]);
+        let r = sink.refresh(&s, &always);
+        assert!(r.written.is_empty(), "{later}: {r:?}");
+    }
+    // … and a file that lists other jobs gains it too, in one write.
+    let s = snap(T0, &[("B", &[("B 2", vec![q("main", None)])])]);
+    let mut sink = Sink::new(0, None);
+    sink.refresh(&s, &always);
+    let s = with_finished(
+        snap(T0 + 30.0, &[("B", &[("B 2", vec![q("main", None)])])]),
+        &[("B", "B 1", T0 + 25.0)],
+    );
+    let r = sink.refresh(&s, &always);
+    assert_eq!(r.written, vec![("b".to_string(), Class::Hard)]);
+    let p = &sink.series["b"];
+    assert_eq!(p.done["B 1"], T0 as i64 + 30);
+    assert!(p.vols.contains_key("B 2") && !p.vols.contains_key("B 1"));
+    assert_eq!(p.rows.len(), 1, "no row for the unshown job");
+    assert!(sink.refresh(&s, &always).written.is_empty());
+}
+
+#[test]
+fn an_unshown_finish_is_not_one_the_file_already_knows() {
+    let clock = Clock::identity(T0 as i64);
+    // Still listed: the normal path (settle, then done) has it.
+    let s = with_finished(
+        snap(T0, &[("A", &[("A 1", vec![q("main", None)])])]),
+        &[("A", "A 1", T0)],
+    );
+    assert!(s.unshown_finishes("a", None, &clock).is_none());
+    let p = render(None, s.series.get("a"), &s, true, &clock, 1);
+    let s = with_finished(snap(T0 + 10.0, &[]), &[("A", "A 1", T0 + 5.0)]);
+    assert!(
+        s.unshown_finishes("a", Some(&p), &clock).is_none(),
+        "published: the settle path"
+    );
+    // Named done since it finished: nothing; finished again after it: again.
+    let mut p = p.clone();
+    p.vols.clear();
+    p.done.insert("A 1".into(), T0 as i64 + 8);
+    assert!(s.unshown_finishes("a", Some(&p), &clock).is_none());
+    let again = with_finished(snap(T0 + 99.0, &[]), &[("A", "A 1", T0 + 90.0)]);
+    assert!(again.unshown_finishes("a", Some(&p), &clock).is_some());
+    // Older than a day, or than the oldest of a full tail: dropped for good.
+    let old = with_finished(snap(T0 + 90_000.0, &[]), &[("A", "A 2", T0)]);
+    assert!(old.unshown_finishes("a", None, &clock).is_none());
+    let mut full = p.clone();
+    full.done = (0..DONE_MAX as i64)
+        .map(|i| (format!("X {i}"), T0 as i64 + 100 + i))
+        .collect();
+    let s = with_finished(snap(T0 + 500.0, &[]), &[("A", "A 3", T0 + 100.0)]);
+    assert!(s.unshown_finishes("a", Some(&full), &clock).is_none());
+    let s = with_finished(snap(T0 + 500.0, &[]), &[("A", "A 3", T0 + 400.0)]);
+    assert!(s.unshown_finishes("a", Some(&full), &clock).is_some());
+}
+
 #[test]
 fn the_done_tail_keeps_a_day_and_the_newest_64() {
     let clock = Clock::identity(T0 as i64);
@@ -649,8 +737,10 @@ fn a_shifted_snapshot_moves_every_time_and_nothing_else() {
             state: LiveState::Claimed,
         }],
     );
+    let s = with_finished(s, &[("A", "A 0", T0 - 30.0)]);
     let m = s.shifted(-100.0);
     assert_eq!(m.now, T0 - 100.0);
+    assert_eq!(m.finished["a"].1["A 0"], T0 - 130.0);
     let a = &m.series["a"];
     assert_eq!(
         a.vols["A 1"][0].state,

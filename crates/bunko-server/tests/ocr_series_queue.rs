@@ -206,3 +206,46 @@ fn the_sink_follows_a_volume_through_its_run() {
     assert!(sink.series["a"].vols.is_empty());
     assert_eq!(sink.series["a"].done["A 1"], (h.t0 + 45.0) as i64);
 }
+
+/// A volume queued, run and finished with no look of a sink in between (a fast
+/// machine, a write window not yet come): the snapshot still names it finished, so its
+/// series' file gets a `done` entry for it (regression: the rig's S4/S6 waited for an
+/// OCR no series file ever announced).
+#[test]
+fn a_volume_finished_between_two_looks_is_still_named_done() {
+    let mut h = harness(vec![primary()]);
+    h.add("A/A 1.cbz", 4);
+    h.at(0.0);
+    let mut sink = Sink::new(0, None);
+    let settled = |_: &str| true;
+    // The sink's first look is before the volume arrives …
+    let mut empty = h.s.series_queue_snapshot();
+    empty.series.clear();
+    assert!(sink.refresh(&empty, &settled).written.is_empty());
+    // … and its next after it was finished.
+    let mut p = h.connect("box", 1);
+    let ops = p.drain();
+    let sid = opened(&ops)[0].clone();
+    let claim = volumes(&ops)[0].1.clone();
+    h.event(&p, ready(&sid));
+    h.at(5.0);
+    h.event(&p, started(&sid, &claim, 4));
+    h.at(25.0);
+    h.done(&p, &sid, &claim, "A 1.mokuro", 4, 20.0);
+    let snap = h.s.series_queue_snapshot();
+    assert!(!snap.series.contains_key("a"), "nothing owed: {snap:?}");
+    assert_eq!(snap.finished["a"].0, "A");
+    assert_eq!(snap.finished["a"].1["A 1"], h.t0 + 25.0);
+    // Not settled yet: nothing; settled: one write naming it done.
+    assert!(sink.refresh(&snap, &|_| false).written.is_empty());
+    let r = sink.refresh(&snap, &settled);
+    assert_eq!(r.written.len(), 1, "{r:?}");
+    let a = &sink.series["a"];
+    assert!(a.vols.is_empty());
+    assert_eq!(a.done["A 1"], (h.t0 + 25.0) as i64);
+    assert!(
+        sink.refresh(&h.s.series_queue_snapshot(), &settled)
+            .written
+            .is_empty()
+    );
+}
