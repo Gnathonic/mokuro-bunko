@@ -127,6 +127,9 @@ struct State {
     change_pages: usize,
     fail: HashMap<FakeOp, VecDeque<BErr>>,
     latency: Duration,
+    /// Nodes `find_named` leaves out: a provider's name search lagging behind its
+    /// files (Drive's `files.list` with a `q`).
+    search_hidden: std::collections::HashSet<Pid>,
     throttle_until: Option<Instant>,
     reorder: bool,
     reverse_lists: bool,
@@ -323,6 +326,17 @@ impl FakeBackend {
     /// Every backend call waits this long first.
     pub fn set_latency(&self, d: Duration) {
         self.state.lock().latency = d;
+    }
+
+    /// `find_named` leaves `pid` out until [`FakeBackend::search_catches_up`]: a name
+    /// search lagging behind the files, as Drive's can. `stat` and reads still see it.
+    pub fn hide_from_search(&self, pid: &str) {
+        self.state.lock().search_hidden.insert(pid.to_string());
+    }
+
+    /// The name search sees every file again.
+    pub fn search_catches_up(&self) {
+        self.state.lock().search_hidden.clear();
     }
 
     /// The next call of `op` fails with `e` (queued: several calls fail in order).
@@ -1388,6 +1402,7 @@ impl Backend for FakeBackend {
             .iter()
             .filter(|c| st.nodes[*c].name == name.as_bytes())
             .map(|c| st.rnode(&self.profile, c))
+            .filter(|n: &RNode| !st.search_hidden.contains(&n.pid))
             .collect();
         Ok((found, ServerTime(self.now_ms())))
     }

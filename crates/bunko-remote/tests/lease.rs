@@ -763,3 +763,82 @@ async fn the_marker_carries_dedup() {
     let v = serde_json::json!({"kind": "mokuro-bunko", "instance_id": "x", "epoch": 1});
     assert!(!Marker::parse(v.to_string().as_bytes()).unwrap().dedup);
 }
+
+/// A library has one marker file. A Bunko claiming a library whose marker is another
+/// install's, gone stale, writes into that file instead of beside it, on every
+/// provider (Drive and MEGA allow two files of one name; others do not).
+#[tokio::test(start_paused = true)]
+async fn a_claim_takes_the_stale_marker_file_over() {
+    for (name, make) in profiles() {
+        let env = Env::new(make()).await;
+        let mut old = env.lease_mem(cfg("oldd", "o-boot"), 0);
+        assert_eq!(old.claim().await.unwrap(), LeaseState::Holder, "{name}");
+        let file = env.markers().await[0].0.pid.clone();
+        drop(old);
+        tokio::time::advance(Duration::from_secs(3 * 3600)).await;
+        let mut a = env.lease_mem(cfg("aaaa", "a-boot"), 0);
+        assert_eq!(a.claim().await.unwrap(), LeaseState::Holder, "{name}");
+        assert_eq!(a.heartbeat().await.unwrap(), Heartbeat::Held, "{name}");
+        let all = env.markers().await;
+        assert_eq!(all.len(), 1, "{name}: one marker file: {all:?}");
+        assert_eq!(all[0].1.instance_id, "aaaa", "{name}");
+        assert_eq!(all[0].1.epoch, 2, "{name}: max(seen) + 1");
+        if name != "mega_like" {
+            // MEGA has no in-place update: a rewrite is a new node.
+            assert_eq!(all[0].0.pid, file, "{name}: the same file");
+        }
+    }
+}
+
+/// Copies an earlier Bunko left beside the marker (it wrote its own file next to
+/// another's) go to the trash once this one holds the lease; a fresh one stays.
+#[tokio::test(start_paused = true)]
+async fn the_holder_trashes_stale_duplicate_marker_files() {
+    let env = Env::new(FakeBackend::drive_like()).await;
+    let first = env.inject(&foreign("oldd", 1, env.fake.now_ms())).await;
+    let second = env.inject(&foreign("ynge", 2, env.fake.now_ms())).await;
+    tokio::time::advance(Duration::from_secs(3 * 3600)).await;
+    let mut a = env.lease_mem(cfg("aaaa", "a-boot"), 0);
+    assert_eq!(a.claim().await.unwrap(), LeaseState::Holder);
+    assert_eq!(a.heartbeat().await.unwrap(), Heartbeat::Held);
+    let all = env.markers().await;
+    assert_eq!(all.len(), 1, "{all:?}");
+    assert_eq!(all[0].1.instance_id, "aaaa");
+    // It took over the top-ranked file (epoch 2) and trashed the other.
+    assert_eq!(all[0].0.pid, second.pid);
+    assert_eq!(env.fake.trashed_log(), std::slice::from_ref(&first.pid));
+}
+
+/// Only the holder tidies: a Bunko in standby touches no marker file.
+#[tokio::test(start_paused = true)]
+async fn a_standby_bunko_trashes_nothing() {
+    let env = Env::new(FakeBackend::drive_like()).await;
+    env.inject(&foreign("oldd", 1, env.fake.now_ms())).await;
+    tokio::time::advance(Duration::from_secs(3 * 3600)).await;
+    env.inject(&foreign("hold", 5, env.fake.now_ms())).await;
+    let mut b = env.lease_mem(cfg("bbbb", "b-boot"), 0);
+    let s = b.claim().await.unwrap();
+    assert_eq!(holder_of(&s).unwrap().instance_id, "hold");
+    assert!(env.fake.trashed_log().is_empty());
+    assert_eq!(env.markers().await.len(), 2, "standby writes nothing");
+}
+
+/// Drive's name search can lag behind its files. A heartbeat whose listing misses the
+/// holder's own marker file still rewrites that file (it knows its id), and never
+/// writes a second one beside it.
+#[tokio::test(start_paused = true)]
+async fn a_search_that_misses_our_marker_writes_no_second_file() {
+    let env = Env::new(FakeBackend::drive_like()).await;
+    let mut a = env.lease_mem(cfg("aaaa", "a-boot"), 0);
+    assert_eq!(a.claim().await.unwrap(), LeaseState::Holder);
+    let file = env.markers().await[0].0.pid.clone();
+    env.fake.hide_from_search(&file);
+    tokio::time::advance(Duration::from_secs(300)).await;
+    assert_eq!(a.heartbeat().await.unwrap(), Heartbeat::Held);
+    env.fake.search_catches_up();
+    let all = env.markers().await;
+    assert_eq!(all.len(), 1, "{all:?}");
+    assert_eq!(all[0].0.pid, file, "the same file");
+    assert_eq!(all[0].1.instance_id, "aaaa");
+    assert!(env.fake.deleted_log().is_empty() && env.fake.trashed_log().is_empty());
+}
