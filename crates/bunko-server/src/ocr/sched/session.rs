@@ -757,7 +757,7 @@ impl Scheduler {
                     let mut u = Map::new();
                     u.insert("delivered".into(), json!(true));
                     self.update_card(&job, u);
-                    self.download_delivered(pid, &sid, &id, &job, &detail, sent);
+                    self.download_delivered(pid, &job, &detail, sent);
                 }
             }
             Event::VolumeReturned {

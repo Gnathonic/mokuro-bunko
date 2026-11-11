@@ -640,27 +640,42 @@ fn switching_to_generation_order_lets_kept_copies_go() {
     }
 }
 
+/// The `fetch ready` detail of a copy the processor kept from the volume's earlier job.
+fn reused() -> BTreeMap<String, Value> {
+    let mut d = BTreeMap::new();
+    d.insert("bytes".into(), json!(1000));
+    d.insert("requests".into(), json!(0));
+    d.insert("reused".into(), json!(true));
+    d
+}
+
+/// The claim of `claim` id, if the scheduler still holds it.
+fn claim_of<'a>(h: &'a H, claim: &str) -> Option<&'a bunko_server::ocr::sched::Claimed> {
+    h.s.claims
+        .values()
+        .find(|c| c.claim.as_deref() == Some(claim))
+}
+
 /// Finding: a copy a processor kept is the archive as it was when the op was sent (its
 /// ETag matched the op's), but the claim took the archive's version when the processor
 /// said it had it. An archive replaced outside WebDAV in between (no arrival cancels
-/// the claim) then had the old version's result accepted for the new one. A reused copy
-/// of an archive that changed since the op was sent sends the job back.
+/// the claim) then had the old version's result accepted for the new one. The claim of
+/// a reused copy keeps the version the op was sent at, so the result is discarded when
+/// it comes back and the job goes back to the queue. Nothing is cancelled: a processor
+/// takes a cancel naming a claim for one of its whole session (see
+/// [`a_reused_copy_of_a_changed_archive_blames_nobody_in_its_session`]).
 #[test]
 fn a_reused_copy_of_an_archive_changed_since_the_op_is_sent_back() {
     let mut h = by_volume(vec![primary(), lines()]);
     let path = h.add("A/V1.cbz", 3);
+    let sent = bunko_server::ocr::types::stamp_of(&path);
     h.at(0.0);
     let mut a = h.connect("a", 1);
     let first = volume_ops(&a.drain()).remove(0);
-    let reused = || -> BTreeMap<String, Value> {
-        let mut d = BTreeMap::new();
-        d.insert("bytes".into(), json!(1000));
-        d.insert("requests".into(), json!(0));
-        d.insert("reused".into(), json!(true));
-        d
-    };
+    h.event(&a, ready(&first.sid));
     // Replaced outside WebDAV: another size, so another stamp.
     ocr_common::write_cbz(&path, 4);
+    assert_ne!(bunko_server::ocr::types::stamp_of(&path), sent);
     h.event(
         &a,
         Event::Fetch {
@@ -670,20 +685,40 @@ fn a_reused_copy_of_an_archive_changed_since_the_op_is_sent_back() {
             detail: reused(),
         },
     );
-    assert!(
-        !h.s.claims
-            .values()
-            .any(|c| c.claim.as_deref() == Some(first.claim.as_str())),
-        "the claim on the old copy is released"
-    );
     let ops = a.drain();
     assert!(
-        ops.iter().any(|o| matches!(
-            o,
-            Op::Cancel { claim: Some(c), .. } if *c == first.claim
-        )),
-        "{ops:?}"
+        !ops.iter().any(|o| matches!(o, Op::Cancel { .. })),
+        "nothing is cancelled: {ops:?}"
     );
+    assert_eq!(
+        claim_of(&h, &first.claim).expect("still claimed").stamp,
+        sent,
+        "the claim is of the version the op was sent at"
+    );
+    // The old version's result comes back: it is discarded and the job is queued again.
+    h.event(&a, started(&first.sid, &first.claim, 3));
+    h.done(&a, &first.sid, &first.claim, &first.sidecar_name, 3, 1.0);
+    assert!(
+        claim_of(&h, &first.claim).is_none(),
+        "the claim is released"
+    );
+    assert!(
+        !h.library().join("A").join(&first.sidecar_name).exists(),
+        "the old version's result is not installed"
+    );
+    assert!(h.s.failures.is_empty(), "{:?}", h.s.failures);
+    assert!(h.s.strikes.is_empty(), "{:?}", h.s.strikes);
+    h.event(&a, exit(&first.sid, Some(0)));
+    h.at(1.0);
+    let again = volume_ops(&a.drain());
+    assert!(
+        again
+            .iter()
+            .any(|o| o.archive.ends_with("A/V1.cbz") && o.sidecar_name == first.sidecar_name),
+        "the job is offered again: {again:?}"
+    );
+    assert!(h.s.failures.is_empty(), "{:?}", h.s.failures);
+    assert!(h.s.strikes.is_empty(), "{:?}", h.s.strikes);
 
     // The same version: the reused copy is taken, under the stamp the op was sent at.
     let mut h = by_volume(vec![primary(), lines()]);
@@ -701,10 +736,124 @@ fn a_reused_copy_of_an_archive_changed_since_the_op_is_sent_back() {
             detail: reused(),
         },
     );
-    let claim =
-        h.s.claims
-            .values()
-            .find(|c| c.claim.as_deref() == Some(first.claim.as_str()))
-            .expect("still claimed");
-    assert_eq!(claim.stamp, sent);
+    assert_eq!(
+        claim_of(&h, &first.claim).expect("still claimed").stamp,
+        sent
+    );
+    h.event(&a, ready(&first.sid));
+    h.event(&a, started(&first.sid, &first.claim, 3));
+    h.done(&a, &first.sid, &first.claim, &first.sidecar_name, 3, 1.0);
+    assert!(
+        h.library().join("A").join(&first.sidecar_name).exists(),
+        "the result of the version sent is installed"
+    );
+}
+
+/// Finding: the fix above first cancelled the claim of a reused copy of a changed
+/// archive. A bunko processor takes a cancel naming a claim for one of its whole
+/// session: it abandons the session and says only `exit`, and the library, seeing a
+/// session die with a volume running, blamed that innocent volume (a failure, and a
+/// strike towards stopping its row on the machine). A session running one volume with
+/// a reused copy of a changed archive queued behind it blames nobody.
+#[test]
+fn a_reused_copy_of_a_changed_archive_blames_nobody_in_its_session() {
+    let mut h = by_volume(vec![primary()]);
+    h.add("A/V1.cbz", 3);
+    h.add("B/V1.cbz", 3);
+    h.add("C/V1.cbz", 3);
+    h.at(0.0);
+    let mut a = h.connect("a", 1);
+    let mut ops = volume_ops(&a.drain());
+    let running = ops[0].clone();
+    h.event(&a, ready(&running.sid));
+    let mut d = BTreeMap::new();
+    d.insert("bytes".into(), json!(1000));
+    d.insert("requests".into(), json!(1));
+    h.event(
+        &a,
+        Event::Fetch {
+            sid: running.sid.clone(),
+            id: running.claim.clone(),
+            state: "ready".into(),
+            detail: d,
+        },
+    );
+    h.event(&a, started(&running.sid, &running.claim, 3));
+    h.at(1.0);
+    ops.extend(volume_ops(&a.drain()));
+    assert!(ops.len() >= 2, "two claims in one session: {ops:?}");
+    let queued = ops[1].clone();
+    assert_eq!(queued.sid, running.sid, "one session");
+    assert_ne!(queued.archive, running.archive);
+
+    // The queued volume's archive is replaced outside WebDAV, then reported as a copy
+    // the processor kept.
+    let path = h
+        .library()
+        .join(queued.archive.trim_start_matches("/mokuro-reader/"));
+    ocr_common::write_cbz(&path, 4);
+    h.event(
+        &a,
+        Event::Fetch {
+            sid: queued.sid.clone(),
+            id: queued.claim.clone(),
+            state: "ready".into(),
+            detail: reused(),
+        },
+    );
+    let sent = a.drain();
+    if sent
+        .iter()
+        .any(|o| matches!(o, Op::Cancel { sid: Some(s), .. } if *s == running.sid))
+    {
+        // What a bunko processor does with any cancel of its session's work.
+        h.event(&a, exit(&running.sid, None));
+    } else {
+        h.done(
+            &a,
+            &running.sid,
+            &running.claim,
+            &running.sidecar_name,
+            3,
+            1.0,
+        );
+        h.event(&a, started(&queued.sid, &queued.claim, 3));
+        h.done(&a, &queued.sid, &queued.claim, &queued.sidecar_name, 3, 1.0);
+        h.event(&a, exit(&running.sid, Some(0)));
+    }
+    assert!(
+        h.s.failures.is_empty(),
+        "nobody is blamed: {:?}",
+        h.s.failures
+    );
+    assert!(h.s.strikes.is_empty(), "no strike: {:?}", h.s.strikes);
+    assert!(
+        !sent.iter().any(|o| matches!(o, Op::Cancel { .. })),
+        "nothing is cancelled: {sent:?}"
+    );
+    let rel = |op: &VolumeOp| op.archive.trim_start_matches("/mokuro-reader/").to_string();
+    let dir = |op: &VolumeOp| {
+        h.library()
+            .join(rel(op))
+            .parent()
+            .unwrap()
+            .join(&op.sidecar_name)
+    };
+    assert!(dir(&running).exists(), "the running volume finished");
+    assert!(
+        !dir(&queued).exists(),
+        "the changed archive's result is discarded"
+    );
+    assert!(
+        claim_of(&h, &queued.claim).is_none(),
+        "its claim is released"
+    );
+    h.at(2.0);
+    let again = volume_ops(&a.drain());
+    assert!(
+        again.iter().any(|o| o.archive == queued.archive),
+        "its job is offered again: {again:?}"
+    );
+    assert!(h.s.failures.is_empty(), "{:?}", h.s.failures);
+    assert!(h.s.strikes.is_empty(), "{:?}", h.s.strikes);
 }

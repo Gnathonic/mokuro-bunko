@@ -1155,11 +1155,14 @@ fn run_local_claim(refuse: bool) {
     );
 }
 
-/// A spool with room for two of [`local_volume_jobs`]' archives, not three.
+/// A spool with room for two of [`local_volume_jobs`]' archives, not three. A new
+/// archive may wait for room while the download that filled the one it evicts still
+/// holds it (it lets go just after the fill ends): the wait is long enough for a
+/// loaded machine, and ends as soon as the room is freed.
 fn two_archive_spool(c: &mut bunko_remote::RemoteStoreConfig) {
     c.lease = false;
     c.spool_bytes = cbz(3, 1000).len() as u64 * 5 / 2;
-    c.spool_wait = Duration::from_millis(500);
+    c.spool_wait = Duration::from_secs(30);
 }
 
 /// By volume, this server's own OCR on a cloud library fetches a volume's archive once
@@ -1173,8 +1176,8 @@ fn local_volume_mode_fetches_a_cloud_archive_once_for_all_its_jobs() {
 }
 
 /// Run both jobs (main file, then a layer) of `Series/Vol 2.cbz` on this server's own
-/// OCR, spooling two other archives between them: how many times the provider sent
-/// the whole archive.
+/// OCR, spooling other archives between them: how many times the provider sent the
+/// whole archive.
 fn local_volume_jobs(by_volume: bool) -> usize {
     let dir = tempfile::tempdir().unwrap();
     let base = dir.path().join("storage");
@@ -1301,11 +1304,36 @@ fn local_volume_jobs(by_volume: bool) -> usize {
         by_volume,
         "by volume the owner keeps the archive spooled between the jobs"
     );
-    // Other work fills the spool meanwhile.
-    for f in ["F1", "F2"] {
-        let path = layout.library().join(format!("Filler/{f}.cbz"));
-        drop(store.local_path(&path, None).unwrap());
+    // Other work fills the spool meanwhile. By generation nothing pins the copy, so the
+    // pressure evicts it: the spool evicts the least recently used copy, but it times
+    // uses in milliseconds, and a filler used in the same millisecond as the copy may go
+    // first. The pressure goes on until the copy's file is gone (an evicted copy's file
+    // is removed). By volume the owner's hold keeps it through more of the same.
+    let copy = std::path::Path::new(&first.archive);
+    assert!(copy.exists(), "the first job's copy is spooled");
+    for round in 1.. {
+        for f in ["F1", "F2"] {
+            let path = layout.library().join(format!("Filler/{f}.cbz"));
+            drop(store.local_path(&path, None).unwrap());
+        }
+        let enough = if by_volume {
+            round == 3
+        } else {
+            !copy.exists()
+        };
+        if enough {
+            break;
+        }
+        assert!(
+            round < 50,
+            "the copy stayed spooled through {round} rounds of other work"
+        );
     }
+    assert_eq!(
+        copy.exists(),
+        by_volume,
+        "by volume the copy outlasts the other work"
+    );
     event(&mut sched, exit(&sid, Some(0)));
     let (sid, second) = run_next(&mut sched, &mut ops);
     assert_eq!(sched.sessions[&sid].row.id, "g-2");

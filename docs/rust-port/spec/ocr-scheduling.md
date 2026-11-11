@@ -340,8 +340,11 @@ whatever the outcome (`watcher.py:2830-2833`); in memory only.
 > that machine's benchmark or hold: the volume's jobs it can run are offered to
 > no other machine meanwhile (owner decision). The submit-time stamp of a remote
 > claim (`SessionJob.sent_stamp`) is the version a reused copy holds: a `fetch
-> ready` with `reused` for an archive whose stamp has changed since cancels the
-> claim and sends the job back.
+> ready` with `reused` sets the claim's stamp to it (not the file's stamp now), so
+> an archive changed since has its result discarded at collection (`DISCARDED`)
+> and the job goes back. No claim-level cancel is sent: a bunko processor abandons
+> the whole session on one, and `end_session` would blame its oldest delivered
+> claim.
 > `apply_settings` switching by volume on makes each claim in flight hold its
 > volume (`hold_volumes_in_flight`, with its spooled archive).
 > The plan (`PlanInputs.by_volume`) keeps a volume's jobs on the lane that took

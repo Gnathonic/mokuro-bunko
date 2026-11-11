@@ -391,13 +391,16 @@ keeps its copy, by archive path, size and ETag, at most one copy per session
 slot (the oldest goes first); the volume's next claim uses it when its size
 and ETag still match, and its `fetch ready` says `reused` (the library does
 not count it as a download). The copy is the archive as it was when the op
-was sent; if the library's file has changed since (replaced outside WebDAV,
-so nothing cancelled the claim), the library cancels the claim and the job
-goes back to the queue. The library may wait hours for the volume's next job
-(a storage hold, a benchmark), so a copy has no short time limit: every
-remote op names the archives the library still runs on that processor
-(`kept_archives`, empty by generation), and a copy of any other archive is
-dropped then. A copy kept 6 hours with no job of its volume goes on its own
+was sent, so the claim is of that version: if the library's file has changed
+since (replaced outside WebDAV, so nothing cancelled the claim), the result is
+discarded when it comes back and the job goes back to the queue. Nothing is
+cancelled: a processor takes a cancel naming a claim for one of its whole
+session, and the session's other volumes would be blamed for its end. The
+library may wait hours for the volume's next job (a storage hold, a
+benchmark), so a copy has no short time limit: every remote op names the
+archives the library still runs on that processor (`kept_archives`, empty by
+generation), and a copy of any other archive is dropped then. A copy kept 6
+hours with no job of its volume goes on its own
 (a processor that got no further op). A kept copy also gives way to a new
 download that needs its room: a RAM copy when the machine is short of memory
 (not when only the RAM budget is full: the new archive then goes to disk, a

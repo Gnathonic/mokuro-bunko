@@ -236,13 +236,14 @@
   (older processors download it for each job). Only a job that finished keeps its copy,
   and the copy goes once the library no longer runs the volume there (every job it
   sends says which it does, none by generation), when the connection ends, or after 6
-  hours with no job of the volume; a copy of an archive replaced outside WebDAV since
-  the job was sent is not used, and the job goes back to the queue. A volume waits for
-  its machine through that machine's benchmark or hold. On a MEGA library this is the
-  default, because its transfer quota counts every download; elsewhere the queue still
-  runs generation by generation unless set. The cost is throughput: a machine loads
-  each generation's models again for every volume and takes no volume ahead. The queue
-  page, the reader's queue file and the ETAs follow the order.
+  hours with no job of the volume; the result of a copy of an archive replaced outside
+  WebDAV since the job was sent is discarded, and the job goes back to the queue. A
+  volume waits for its machine through that machine's benchmark or hold. On a MEGA
+  library this is the default, because its transfer quota counts every download;
+  elsewhere the queue still runs generation by generation unless set. The cost is
+  throughput: a machine loads each generation's models again for every volume and takes
+  no volume ahead. The queue page, the reader's queue file and the ETAs follow the
+  order.
 - **Sidecars and the queue file name the OCR's parts with versions.** A sidecar Bunko
   writes now carries `ocr_engine.parts`, e.g. `[{"role": "recognizer", "name":
   "Hayai Nova", "version": "2.5"}, {"role": "detector", "name": "PP-OCR Manga",

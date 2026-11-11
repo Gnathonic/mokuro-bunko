@@ -433,40 +433,27 @@ impl Scheduler {
 
     // --- returned claims and the download breaker -------------------------------------------
 
-    /// `_download_delivered`: the processor has the verified archive (claim `claim` of
-    /// session `sid`). `sent`: the archive's stamp when the op was sent.
+    /// `_download_delivered`: the processor has the verified archive. `sent`: the
+    /// archive's stamp when the op was sent.
     pub fn download_delivered(
         &mut self,
         pid: &str,
-        sid: &str,
-        claim: &str,
         job: &Job,
         detail: &std::collections::BTreeMap<String, Value>,
         sent: Option<Stamp>,
     ) {
         // A copy kept from the volume's earlier job was not downloaded: it is the
-        // archive as it was when the op was sent (its ETag matched the op's).
+        // archive as it was when the op was sent (its ETag matched the op's), so the
+        // claim is of that version. When the archive was replaced since (outside WebDAV:
+        // no arrival cancelled the claim), the result is discarded when it comes back
+        // and the job goes back to the queue. No cancel is sent: a processor takes a
+        // cancel naming a claim for one of its whole session, and the session's other
+        // volumes would be blamed for its end.
         let reused = detail.get("reused").and_then(Value::as_bool) == Some(true);
-        let stamp = stamp_of(&job.path(&self.library()));
-        if reused && sent.is_some() && sent != stamp {
-            // Replaced since (outside WebDAV: no arrival cancelled the claim). Its result
-            // would be taken for the new version: the job goes back to the queue.
-            if let Some(m) = self.machines.get(pid) {
-                m.send(bunko_proto::Op::Cancel {
-                    sid: Some(sid.to_string()),
-                    claim: Some(claim.to_string()),
-                    bid: None,
-                });
-            }
-            self.pop_job(sid, claim);
-            self.drop_result(sid, claim);
-            self.release(
-                job,
-                "its archive was replaced after it was sent to the processor",
-                true,
-            );
-            return;
-        }
+        let stamp = match sent {
+            Some(sent) if reused => Some(sent),
+            _ => stamp_of(&job.path(&self.library())),
+        };
         if let Some(c) = self.claims.get_mut(job) {
             c.stamp = stamp;
         }
