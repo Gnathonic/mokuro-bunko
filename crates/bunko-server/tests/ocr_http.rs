@@ -2651,3 +2651,29 @@ async fn a_stop_right_after_turning_this_servers_ocr_off_waits_for_its_wind_down
     run.ocr.restart_local("an install ended").await;
     assert_eq!(run.starts(), 1);
 }
+
+/// Removing this machine's OCR backend turns OCR on this machine off and waits for it
+/// to have stopped before its files go: turning it off says how many volumes went back
+/// to the queue, and the wait returns only once its processor has ended (its engine
+/// freed) and its scratch directory is empty, however slow that is.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn turning_off_to_remove_the_backend_waits_until_this_servers_ocr_stopped() {
+    let run = LocalRun::start().await;
+    run.factory
+        .end_delay_ms
+        .store(1000, std::sync::atomic::Ordering::SeqCst);
+    let applied = run.set_local(false).await;
+    assert_eq!(applied["returned"], 2, "{applied}");
+    assert_eq!(run.ended(), 0, "still winding down");
+
+    let ocr = run.ocr.clone();
+    tokio::task::spawn_blocking(move || ocr.wait_local_stopped("its OCR backend is being removed"))
+        .await
+        .unwrap();
+
+    assert_eq!(run.ended(), 1, "returned before this server's OCR ended");
+    assert!(run.scratch().is_empty(), "{:?}", run.scratch());
+    assert_eq!(run.local_state().await, (false, false, false, false));
+    run.stop.cancel();
+    run.ocr.stop().await;
+}

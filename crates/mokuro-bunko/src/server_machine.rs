@@ -101,6 +101,9 @@ impl ServerMachine {
 
 impl Machine for ServerMachine {
     fn attach(&self, hooks: MachineHooks) {
+        // OCR started again after its loaded pack was removed restarts the server.
+        #[cfg(feature = "ocr")]
+        crate::pack_removal::set_restart(hooks.restart.clone());
         *self.hooks.lock() = Some(hooks);
     }
 
@@ -167,6 +170,15 @@ impl Machine for ServerMachine {
             let _ = reinstall;
             Err("This build runs no OCR of its own (lite build)".into())
         }
+    }
+
+    fn remove_refused(&self) -> Option<String> {
+        #[cfg(feature = "ocr")]
+        {
+            full::remove_refused(self)
+        }
+        #[cfg(not(feature = "ocr"))]
+        Some("This build runs no OCR of its own (lite build)".into())
     }
 
     fn remove(&self) -> Result<Value, String> {
@@ -467,16 +479,30 @@ mod full {
         out
     }
 
-    /// The pack this process has loaded (None: no OCR ran yet, or none opened).
-    /// (its folder, its variant, the release it belongs to).
+    /// The libtorch pack this process has loaded (None: no OCR ran yet, none opened,
+    /// or it was removed since). (its folder, its variant, the release it belongs to).
     fn loaded() -> Option<(PathBuf, String, String)> {
-        bunko_engines::torch::backend_if_open().map(|b| {
-            (
-                b.pack.dir.clone(),
-                b.pack.manifest.variant.clone(),
-                b.pack.manifest.bunko_version.clone(),
-            )
-        })
+        bunko_engines::torch::backend_if_open()
+            .filter(|b| b.pack.dir.is_dir())
+            .map(|b| {
+                (
+                    b.pack.dir.clone(),
+                    b.pack.manifest.variant.clone(),
+                    b.pack.manifest.bunko_version.clone(),
+                )
+            })
+    }
+
+    /// Every pack whose libraries this process has loaded (libtorch, Vulkan).
+    fn loaded_dirs() -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        if let Some(b) = bunko_engines::torch::backend_if_open() {
+            out.push(b.pack.dir.clone());
+        }
+        if let Some(b) = bunko_engines::vulkan::backend_if_open() {
+            out.push(b.pack.dir.clone());
+        }
+        out
     }
 
     fn same_dir(a: &Path, b: &Path) -> bool {
@@ -493,6 +519,7 @@ mod full {
         let mut packs = Vec::new();
         let mut seen: Vec<PathBuf> = Vec::new();
         let own = t.backends_dir();
+        let removing = crate::pack_removal::pending(&own);
         for dir in t.backends_dirs() {
             for (p, man) in bunko_update::backend::installed(&dir) {
                 if seen.contains(&p) {
@@ -512,6 +539,8 @@ mod full {
                     "current": man.bunko_version == bunko_core::VERSION,
                     "removable": dir == own,
                     "in_use": loaded.as_ref().is_some_and(|(d, _, _)| same_dir(d, &p)),
+                    // Removed while loaded here: it goes when the server next starts.
+                    "removing": dir == own && p.file_name().is_some_and(|n| removing.iter().any(|r| *r == *n.to_string_lossy())),
                 }));
             }
         }
@@ -613,6 +642,10 @@ mod full {
     /// it is not the GPU pack the preference now wants (a GPU pack also runs on the
     /// CPU, so going to `cpu` never needs one).
     fn needs_process_restart(m: &ServerMachine, config: &Config) -> bool {
+        // The pack it had loaded was removed: OCR may not run on what is left of it.
+        if crate::pack_removal::loaded_pack_removed() {
+            return true;
+        }
         let Some((_, variant, _)) = loaded() else {
             return false;
         };
@@ -732,31 +765,63 @@ mod full {
         Ok(json!({"installing": running, "install": installer.view(), "message": message}))
     }
 
+    /// Why the packs cannot be removed now: an install, or the optional pack's fetch
+    /// on the side, would put one back (or is writing one).
+    pub(super) fn remove_refused(m: &ServerMachine) -> Option<String> {
+        let i = m.installer.as_ref()?;
+        if i.running() {
+            Some("An install is running: wait for it to end".into())
+        } else if i.fetching_extra() {
+            Some("The optional Vulkan pack is being fetched: wait for it to end".into())
+        } else {
+            None
+        }
+    }
+
+    /// Remove this server's packs. The admin panel turned OCR on this machine off and
+    /// waited for it to stop first; nothing installs a pack again while it is off (the
+    /// installer reads the saved setting). A pack never stays half deleted: see
+    /// [`crate::pack_removal`].
     pub(super) fn remove(m: &ServerMachine) -> Result<Value, String> {
-        if m.installer.as_ref().is_some_and(|i| i.running()) {
-            return Err("An install is running: wait for it to end".into());
+        if let Some(why) = remove_refused(m) {
+            return Err(why);
         }
         let config = m.config();
         let t = target(m, &config);
         let root = t.backends_dir();
-        let loaded = loaded();
-        let mut removed = Vec::new();
-        let mut freed = 0u64;
-        for (p, man) in bunko_update::backend::installed(&root) {
-            let size = super::dir_size(&p);
-            std::fs::remove_dir_all(&p).map_err(|e| format!("{}: {e}", p.display()))?;
-            tracing::info!("Removed the OCR backend pack {}", p.display());
-            freed += size;
-            removed.push(man.name);
+        let r = crate::pack_removal::remove_installed(
+            &root,
+            &loaded_dirs(),
+            crate::pack_removal::LOADED_LOCKED,
+            super::dir_size,
+        );
+        if r.removed_loaded {
+            crate::pack_removal::note_loaded_removed();
         }
-        let _ = std::fs::remove_file(InstallRequest::path(&root));
-        let _ = std::fs::remove_file(root.join(install_ocr::HardwareRecord::FILE));
-        let note = if loaded.is_some() {
-            "This server keeps using the loaded pack until it restarts."
-        } else {
-            ""
-        };
-        Ok(json!({"removed": removed, "freed": freed, "message": note}))
+        if r.failed.is_empty() {
+            let _ = std::fs::remove_file(InstallRequest::path(&root));
+            let _ = std::fs::remove_file(root.join(install_ocr::HardwareRecord::FILE));
+        }
+        let mut notes = Vec::new();
+        if !r.deferred.is_empty() {
+            notes.push(format!(
+                "{} {} in use by this server: removed when the server next starts.",
+                r.deferred.join(", "),
+                if r.deferred.len() == 1 { "is" } else { "are" }
+            ));
+        }
+        for (name, why) in &r.failed {
+            notes.push(format!(
+                "{name} could not be removed ({why}); it is left as it was."
+            ));
+        }
+        Ok(json!({
+            "removed": r.removed,
+            "deferred": r.deferred,
+            "failed": r.failed.iter().map(|(n, e)| json!({"name": n, "error": e})).collect::<Vec<_>>(),
+            "freed": r.freed,
+            "message": notes.join(" "),
+        }))
     }
 
     #[cfg(test)]
@@ -782,6 +847,34 @@ mod full {
                 ["auto", "cpu", "rocm", "vulkan"]
             );
             assert_eq!(ids(choices(&none, "vulkan")), ["auto", "cpu", "vulkan"]);
+        }
+
+        /// Remove takes every pack of this server's storage out and says what it did;
+        /// what the setup asked of the next install goes with them.
+        #[test]
+        fn remove_takes_every_pack_and_says_so() {
+            let dir = tempfile::tempdir().unwrap();
+            let storage = dir.path().join("storage");
+            let root = storage.join("backends");
+            crate::pack_removal::tests::pack(&root, "torch-rocm7.1-2.13.0", "rocm7.1");
+            crate::pack_removal::tests::pack(&root, "vulkan-0.8.0", "vulkan");
+            InstallRequest::default().write(&root).unwrap();
+            let m = ServerMachine::new(dir.path().join("config.yaml"), storage.clone(), None, None);
+            assert_eq!(target(&m, &m.config()).backends_dir(), root);
+            assert_eq!(m.remove_refused(), None);
+            let v = m.remove().unwrap();
+            let mut removed: Vec<String> = v["removed"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|n| n.as_str().unwrap().to_string())
+                .collect();
+            removed.sort();
+            assert_eq!(removed, ["torch-rocm7.1-2.13.0", "vulkan-0.8.0"]);
+            assert_eq!(v["deferred"], json!([]));
+            assert_eq!(v["failed"], json!([]));
+            assert!(bunko_update::backend::installed(&root).is_empty());
+            assert!(!InstallRequest::path(&root).exists());
         }
     }
 }

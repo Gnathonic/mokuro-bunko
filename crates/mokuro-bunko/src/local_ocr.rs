@@ -74,6 +74,16 @@ mod full {
         }
 
         fn start(&self, results_dir: &Path) -> Result<LocalChannels, String> {
+            // The pack this process loaded was removed (This server's Remove): OCR
+            // starts again in a new process, on the pack installed now.
+            if crate::pack_removal::loaded_pack_removed() {
+                let restarting = crate::pack_removal::restart_for_removed_pack();
+                return Err(if restarting {
+                    "the OCR backend this server had loaded was removed; the server restarts to load the one installed now".into()
+                } else {
+                    "the OCR backend this server had loaded was removed; restart the server to run OCR".into()
+                });
+            }
             let mut engines = self.engines.clone();
             if let Some((path, cli)) = &self.live {
                 let backend = match cli {

@@ -808,20 +808,29 @@ impl OcrControl {
         let settings = settings_from_config(config, self.has_local());
         self.0.upgrade.configure(&settings.upgrade, &settings.rows);
         let wanted_local = settings.local_processing;
-        let (local_was_running, local_running) = if self.0.pending.lock().is_some() {
+        let (local_was_running, local_running, returned) = if self.0.pending.lock().is_some() {
             // Not started yet: the new settings simply become the starting ones.
             if let Some((s, _)) = self.0.pending.lock().as_mut() {
                 s.apply_settings(settings);
             }
-            (false, wanted_local)
+            (false, wanted_local, 0)
         } else {
-            // Turned off, the scheduler drops this server's OCR in this same step.
+            // Turned off, the scheduler drops this server's OCR in this same step: what
+            // it held (not being installed) goes back to the queue.
             self.ask_blocking(Duration::from_secs(10), move |s| {
                 let was = s.machines.contains_key(types::LOCAL);
+                let held = |s: &Scheduler| {
+                    s.claims
+                        .values()
+                        .filter(|c| c.pid == types::LOCAL && !c.settling)
+                        .count()
+                };
+                let before = held(s);
                 s.apply_settings(settings);
-                (was, s.machines.contains_key(types::LOCAL))
+                let returned = before.saturating_sub(held(s));
+                (was, s.machines.contains_key(types::LOCAL), returned)
             })
-            .unwrap_or((false, false))
+            .unwrap_or((false, false, 0))
         };
         if !wanted_local
             && self.has_local()
@@ -858,7 +867,19 @@ impl OcrControl {
                 }
             }
         }
-        json!({"applied": true, "installing": installing, "restart_required": restart_required, "reason": reason})
+        json!({"applied": true, "installing": installing, "restart_required": restart_required, "reason": reason, "returned": returned})
+    }
+
+    /// From a blocking thread: wait (bounded) until this server's OCR, turned off, has
+    /// wound down (its sessions ended, its engine freed, its scratch swept). A stop
+    /// under way is waited for. Nothing is stopped while local processing is on.
+    pub fn wait_local_stopped(&self, why: &str) {
+        let handle = tokio::runtime::Handle::try_current()
+            .ok()
+            .or_else(|| self.0.runtime.lock().clone());
+        if let Some(h) = handle {
+            h.block_on(self.stop_local(why));
+        }
     }
 
     /// Cut off every processor of an account now (disabled, deleted, re-roled).

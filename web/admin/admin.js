@@ -5048,7 +5048,8 @@ function renderMachine(m) {
     const parts = [];
     // "rocm7.1 for 0.7.0-beta.4": a pack belongs to one release.
     const packSize = (p) => formatBytes(p.size) + ' on disk' + (p.external_size
-        ? ', of which ' + formatBytes(p.external_size) + " came from NVIDIA's CUDA wheels" : '');
+        ? ', of which ' + formatBytes(p.external_size) + " came from NVIDIA's CUDA wheels" : '') +
+        (p.removing ? ', removed when the server next starts' : '');
     const loadedPack = b.loaded && (m.packs || []).find((p) => p.in_use);
     if (b.loaded) {
         parts.push('In use: ' + b.loaded.variant + ' for ' + b.loaded.version +
@@ -5088,7 +5089,9 @@ function renderMachine(m) {
     document.getElementById('machine-install-btn').textContent =
         m.install && m.install.state === 'failed' ? 'Retry' : 'Install';
     document.getElementById('machine-reinstall-btn').hidden = running || !(m.packs || []).some((p) => p.removable);
-    document.getElementById('machine-remove-btn').hidden = running || !(m.packs || []).some((p) => p.removable);
+    // A pack already set to go at the next start offers no second Remove.
+    document.getElementById('machine-remove-btn').hidden = running ||
+        !(m.packs || []).some((p) => p.removable && !p.removing);
     if (running) startMachineInstallPolling();
 
     // Engines and models: what each engine needs on this machine (the models-v1 files
@@ -5237,14 +5240,27 @@ async function machineInstall(reinstall) {
 }
 
 async function machineRemove() {
-    if (!confirm('Remove the installed OCR backend? OCR here stops until it is installed again.')) return;
+    const on = document.getElementById('machine-local').checked;
+    if (!confirm('Remove the installed OCR backend?' + (on
+        ? ' OCR on this machine is turned off first: what it is reading goes back to the queue for' +
+            ' the processors, and it stays off until you turn it on again (which installs the backend again).'
+        : ''))) return;
     try {
         const r = await apiPost('/machine/remove', {});
-        showToast('Removed ' + (r.removed || []).join(', ') + (r.freed ? ' (' + formatBytes(r.freed) + ')' : '') +
-            (r.message ? '. ' + r.message : ''), 'success');
+        const parts = [];
+        if (r.local_turned_off) {
+            parts.push('OCR on this machine is off' + (r.returned
+                ? ' (' + r.returned + ' volume' + (r.returned === 1 ? '' : 's') + ' back in the queue)' : ''));
+        }
+        if ((r.removed || []).length) {
+            parts.push('Removed ' + r.removed.join(', ') + (r.freed ? ' (' + formatBytes(r.freed) + ')' : ''));
+        }
+        if (r.message) parts.push(r.message);
+        showToast(parts.join('. ') || 'Nothing to remove', (r.failed || []).length ? 'error' : 'success');
         loadMachine();
     } catch (e) {
         showToast(e.message || String(e), 'error');
+        loadMachine();
     }
 }
 
