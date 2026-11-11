@@ -77,15 +77,29 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
-/// The trash folder of the library at `root`, created (and hidden on Windows).
+/// The trash folder of the library at `root`, created (and hidden on Windows). A
+/// trash folder that is a link (or not a folder) is refused: what is trashed would
+/// leave the library through it.
 fn trash_dir(root: &Path) -> Result<PathBuf, BErr> {
     let dir = root.join(FOLDER_TRASH_DIR);
     match std::fs::create_dir(&dir) {
         Ok(()) => fsops::set_hidden(&dir),
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            if !real_dir(&dir) {
+                return Err(BErr::Fatal(format!(
+                    "{FOLDER_TRASH_DIR} in the library folder is a link or not a folder: \
+                     Bunko does not trash through it"
+                )));
+            }
+        }
         Err(e) => return Err(io_err(&e, Act::Create, FOLDER_TRASH_DIR)),
     }
     Ok(dir)
+}
+
+/// `dir` is a folder, not a link to one (nor a junction).
+fn real_dir(dir: &Path) -> bool {
+    std::fs::symlink_metadata(dir).is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink())
 }
 
 /// Rename the file `abs` in place to `<name>.bunko-trashed` (unless it already ends
@@ -197,6 +211,10 @@ pub(crate) fn trash(
 /// stamp is left alone. Returns how many went.
 pub(crate) fn purge(root: &Path, now: SystemTime) -> usize {
     let dir = root.join(FOLDER_TRASH_DIR);
+    // A link would have the purge empty a folder elsewhere.
+    if !real_dir(&dir) {
+        return 0;
+    }
     let Ok(rd) = std::fs::read_dir(&dir) else {
         return 0;
     };

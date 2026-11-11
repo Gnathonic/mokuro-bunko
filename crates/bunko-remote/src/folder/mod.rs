@@ -176,6 +176,16 @@ struct Inner {
 /// A folder's names and when they were read.
 type DirNames = (Instant, Arc<HashSet<OsString>>);
 
+/// The way from the library folder down to a pid's parent ([`Inner::way_to`]).
+enum Way {
+    /// Real folders all the way.
+    Clear,
+    /// A folder on the way is missing.
+    Missing,
+    /// A folder on the way is a link, not a folder, or out of Bunko's reach.
+    Blocked,
+}
+
 /// Where the library folder stands.
 enum RootState {
     Dir(Metadata),
@@ -611,6 +621,49 @@ impl Inner {
         Ok(names)
     }
 
+    /// Whether the way from the root down to `pid`'s parent holds only real folders.
+    ///
+    /// `O_NOFOLLOW` and `lstat` look at a path's last segment only: through a folder
+    /// link (a symbolic link, or a junction or another name-surrogate reparse point on
+    /// Windows, which `FileType::is_symlink` covers) further up, a read, a write, a
+    /// rename, a trash or a delete would reach a folder outside the library. Every
+    /// operation reaches its paths through [`Inner::exact`], which asks this first; the
+    /// walk never descends into such a link either (it lists links as nothing).
+    ///
+    /// A check by `lstat` per segment, not a chain of `openat(O_NOFOLLOW)`: it works
+    /// the same on Windows, and the operations stay on the path-based calls the rest
+    /// of the driver uses. What it leaves is the moment between the check and the
+    /// call: a folder swapped for a link in that window by someone who can already
+    /// write in the library folder.
+    fn way_to(&self, pid: &str) -> std::io::Result<Way> {
+        let mut p = self.root.clone();
+        let segs: Vec<&str> = pid.split('/').collect();
+        for seg in &segs[..segs.len().saturating_sub(1)] {
+            if !seg_ok(seg) {
+                return Ok(Way::Blocked);
+            }
+            p.push(seg);
+            match std::fs::symlink_metadata(&p) {
+                Ok(m) if m.is_dir() && !m.file_type().is_symlink() => {}
+                Ok(_) => return Ok(Way::Blocked),
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                    ) =>
+                {
+                    return Ok(Way::Missing);
+                }
+                // A folder Bunko may not enter: what is below it is out of its reach.
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                    return Ok(Way::Blocked);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(Way::Clear)
+    }
+
     /// Nothing is at a pid: `None`, unless the library folder itself is away.
     fn absent(&self) -> Result<Option<Metadata>, BErr> {
         match self.root_state() {
@@ -620,8 +673,8 @@ impl Inner {
     }
 
     /// The node at `pid` in exactly this spelling, as listings show it: `None` when it
-    /// is absent, hidden, a symbolic link, neither file nor folder, or spelled
-    /// otherwise on disk.
+    /// is absent, hidden, a symbolic link or below one ([`Inner::way_to`]), neither file
+    /// nor folder, or spelled otherwise on disk.
     fn exact(&self, pid: &str) -> Result<Option<Metadata>, BErr> {
         if pid.is_empty() {
             return match self.root_state() {
@@ -636,6 +689,12 @@ impl Inner {
         let segs: Vec<&str> = pid.split('/').collect();
         if segs.iter().enumerate().any(|(i, s)| hidden_name(s, i == 0)) {
             return Ok(None);
+        }
+        match self.way_to(pid) {
+            Ok(Way::Clear) => {}
+            Ok(Way::Missing) => return self.absent(),
+            Ok(Way::Blocked) => return Ok(None),
+            Err(e) => return Err(io_err(&e, Act::Read, pid)),
         }
         let m = match std::fs::symlink_metadata(&abs) {
             Ok(m) => m,
@@ -1101,6 +1160,10 @@ impl Inner {
         for seg in pid.split('/') {
             let want = fold(&nfc(seg.as_bytes()));
             let hit = std::fs::read_dir(&cur).ok()?.flatten().find_map(|e| {
+                // Never through a link (one could lead out of the library).
+                if !e.file_type().is_ok_and(|t| !t.is_symlink()) {
+                    return None;
+                }
                 let n = e.file_name().into_string().ok()?;
                 (fold(&nfc(n.as_bytes())) == want).then_some(n)
             })?;
@@ -1202,7 +1265,10 @@ impl Inner {
             else {
                 continue;
             };
-            if std::fs::symlink_metadata(&temp).is_err() {
+            // Through real folders only, as every other operation.
+            if !matches!(self.way_to(&e.temp), Ok(Way::Clear))
+                || std::fs::symlink_metadata(&temp).is_err()
+            {
                 continue;
             }
             let is_dir = std::fs::symlink_metadata(&temp).is_ok_and(|m| m.is_dir());

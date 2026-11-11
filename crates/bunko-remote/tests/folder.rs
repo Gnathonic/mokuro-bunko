@@ -403,6 +403,163 @@ async fn links_are_not_followed_and_unsafe_names_are_reported() {
     ));
 }
 
+/// A folder link inside the library that leads out of it (a symbolic link on Unix, a
+/// junction on Windows) and the files below it: the outside folder is never touched.
+/// Listings skip the link; `stat` and `find_named` see nothing below it; no read,
+/// write, mkdir, move, copy, trash or delete reaches through it, in either direction.
+async fn nothing_goes_through_a_folder_link(lib: &Lib, outside: &Path) {
+    let snapshot = |dir: &Path| -> Vec<(PathBuf, Vec<u8>)> {
+        let mut v: Vec<(PathBuf, Vec<u8>)> = walk(dir)
+            .into_iter()
+            .map(|p| {
+                let bytes = if p.is_file() {
+                    std::fs::read(&p).unwrap()
+                } else {
+                    Vec::new()
+                };
+                (p, bytes)
+            })
+            .collect();
+        v.sort();
+        v
+    };
+    let before = snapshot(outside);
+    let b = lib.open().await;
+    assert_eq!(pids(&b).await, ["S", "S/Vol 1.cbz"]);
+    assert_eq!(b.stat("Link").await.unwrap(), None);
+    assert_eq!(b.stat("Link/Vol 9.cbz").await.unwrap(), None);
+    assert_eq!(b.stat("Link/sub/Deep.cbz").await.unwrap(), None);
+    assert!(matches!(list_dir(&b, "Link").await, Err(BErr::NotFound)));
+    assert!(matches!(
+        b.find_named("Link", "Vol 9.cbz").await,
+        Err(BErr::NotFound)
+    ));
+    assert!(matches!(
+        read_all(&b, "Link/Vol 9.cbz", None).await,
+        Err(BErr::NotFound)
+    ));
+    assert!(matches!(
+        upload_new(lib, &b, "Link", "planted.cbz", b"planted").await,
+        Err(BErr::NotFound)
+    ));
+    assert!(matches!(
+        upload_new(lib, &b, "Link/sub", "planted.cbz", b"planted").await,
+        Err(BErr::NotFound)
+    ));
+    assert!(matches!(
+        replace(lib, &b, "Link/Vol 9.cbz", b"overwritten").await,
+        Err(BErr::NotFound)
+    ));
+    assert!(matches!(
+        b.mkdir("Link", "made", &op()).await,
+        Err(BErr::NotFound)
+    ));
+    // Out of the link, and into it.
+    assert!(
+        b.update("Link/Vol 9.cbz", Some("S"), Some("Taken.cbz"), None)
+            .await
+            .is_err()
+    );
+    assert!(
+        b.update("Link/sub", Some(""), Some("Taken"), None)
+            .await
+            .is_err()
+    );
+    assert!(
+        b.update("S/Vol 1.cbz", Some("Link"), None, None)
+            .await
+            .is_err()
+    );
+    assert!(b.copy("Link/Vol 9.cbz", "S", "Copied.cbz").await.is_err());
+    assert!(b.copy("S/Vol 1.cbz", "Link", "Copied.cbz").await.is_err());
+    assert!(matches!(
+        b.trash("Link/Vol 9.cbz", None).await,
+        Err(BErr::NotFound)
+    ));
+    assert!(matches!(
+        b.trash("Link/sub", None).await,
+        Err(BErr::NotFound)
+    ));
+    assert!(matches!(
+        b.delete_permanent("Link/Vol 9.cbz").await,
+        Err(BErr::NotFound)
+    ));
+    assert!(matches!(
+        b.delete_permanent("Link/sub/Deep.cbz").await,
+        Err(BErr::NotFound)
+    ));
+    assert_eq!(snapshot(outside), before, "the outside folder changed");
+    assert_eq!(std::fs::read(lib.abs("S/Vol 1.cbz")).unwrap(), b"mine");
+    assert!(!lib.abs("S/Taken.cbz").exists() && !lib.abs("Taken").exists());
+    assert!(!lib.abs("S/Copied.cbz").exists());
+    // The link itself is the library's to leave alone too.
+    assert!(matches!(b.trash("Link", None).await, Err(BErr::NotFound)));
+    assert_eq!(pids(&b).await, ["S", "S/Vol 1.cbz"]);
+    assert_eq!(snapshot(outside), before);
+}
+
+/// A library folder with `Link`, a folder link to `outside`, which holds
+/// `Vol 9.cbz` and `sub/Deep.cbz`.
+fn outside_folder(lib: &Lib) -> PathBuf {
+    lib.put("S/Vol 1.cbz", b"mine");
+    let outside = lib.tmp.path().join("outside");
+    std::fs::create_dir_all(outside.join("sub")).unwrap();
+    std::fs::write(outside.join("Vol 9.cbz"), b"not the library's").unwrap();
+    std::fs::write(outside.join("sub/Deep.cbz"), b"deep").unwrap();
+    outside
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_symlinked_folder_never_leads_outside_the_library() {
+    let lib = Lib::new();
+    let outside = outside_folder(&lib);
+    std::os::unix::fs::symlink(&outside, lib.abs("Link")).unwrap();
+    nothing_goes_through_a_folder_link(&lib, &outside).await;
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn a_junction_never_leads_outside_the_library() {
+    let lib = Lib::new();
+    let outside = outside_folder(&lib);
+    let made = std::process::Command::new("cmd")
+        .arg("/C")
+        .arg("mklink")
+        .arg("/J")
+        .arg(lib.abs("Link"))
+        .arg(&outside)
+        .output()
+        .unwrap();
+    assert!(made.status.success(), "{made:?}");
+    nothing_goes_through_a_folder_link(&lib, &outside).await;
+}
+
+/// The trash folder a link to elsewhere: a trash is refused, the file stays, and the
+/// daily purge never empties what the link leads to.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_linked_trash_folder_is_never_followed() {
+    let lib = Lib::new();
+    lib.put("S/Vol 1.cbz", b"mine");
+    let outside = lib.tmp.path().join("outside");
+    let old_batch = outside.join("20000101T000000Z-deadbeef");
+    std::fs::create_dir_all(&old_batch).unwrap();
+    std::fs::write(old_batch.join("keep.txt"), b"keep").unwrap();
+    std::os::unix::fs::symlink(&outside, lib.abs(".mokuro-bunko-trash")).unwrap();
+    let b = lib.open().await;
+    assert!(b.trash("S/Vol 1.cbz", None).await.is_err());
+    assert_eq!(std::fs::read(lib.abs("S/Vol 1.cbz")).unwrap(), b"mine");
+    let c = b.start_cursor().await.unwrap();
+    let _ = b.changes(&c).await;
+    assert_eq!(std::fs::read(old_batch.join("keep.txt")).unwrap(), b"keep");
+    assert_eq!(
+        std::fs::read_dir(&outside).unwrap().count(),
+        1,
+        "nothing was trashed into the link's target"
+    );
+}
+
 // ---- 4. uploads --------------------------------------------------------------------
 
 #[tokio::test]

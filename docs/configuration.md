@@ -243,6 +243,11 @@ folders may be chosen depends on who chooses:
   (`<>:"|?*`, a trailing dot or space, `CON`, `NUL`…): that write shows as failed in
   the Storage tab, and is not retried. A folder made case-insensitive on its own (`chattr +F`) inside a
   case-sensitive disk is not noticed.
+- **Links**: symbolic links (and junctions on Windows) inside the library are not
+  listed and never followed. Nothing Bunko reads, writes, moves, trashes or deletes
+  goes through a linked folder, so a link cannot lead it outside the library; a
+  `.mokuro-bunko-trash` that is a link is refused, and its purge never empties what
+  it leads to.
 - **Network shares** have no change notifications: changes show at
   `poll.idle_s`. Disks whose timestamps are coarse (FAT: 2 s) can miss two
   same-size changes by another program within one tick.
