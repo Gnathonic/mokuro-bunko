@@ -507,8 +507,11 @@ download setting, credentials, 401 challenge) and gets the same CORS
 headers, whether or not `catalog.enabled` is on. A missing `series` or
 `volume` parameter is 400, a series or volume that resolves outside the
 library is 403, and a missing volume is 404. When the OCR queue does not
-answer within a second, the manifest is 503 with `Retry-After: 5` rather
-than an empty `pending`, which would read as "nothing left to run".
+answer within a second, `pending` lists the jobs the volume owed when the
+queue last published its state (within seconds), each with `"eta": null`,
+and `recheck_after` is 300. An empty `pending` would read as "nothing left
+to run". Only while the queue is starting and has published nothing yet is
+the manifest 503 with `Retry-After: 5`.
 
 #### OCR queue file
 
@@ -519,7 +522,7 @@ timer per volume. It lists every running job, the jobs about to start
 session: `queued`, with no `eta`), then the next 100 waiting jobs by when
 they will finish, to the nearest five minutes (jobs in the same five minutes
 keep queue order; jobs the queue cannot time yet come after every timed
-one, in queue order). A volume carries only its listed jobs, running ones
+one, in queue order; while the whole queue is held, queue order alone). A volume carries only its listed jobs, running ones
 first, then soonest first; volumes come in the order of their soonest job,
 those with a job running first. A listed volume also shows its jobs no
 connected machine can run, as `held`. A job that is not listed is still
@@ -1109,13 +1112,15 @@ Existing `<Volume>.mokuro` files are untouched. See
   archive again (a processor fetches it from the library; on a cloud library
   this server's own OCR fetches it from the provider, unless the spool still
   holds it). The first generation reaches every volume soonest.
-- **By volume** (`volume`): volumes come one at a time, in the order their
-  first job would come by generation, and one machine runs every job of a
-  volume back to back from one download of its archive. While that machine
+- **By volume** (`volume`): each volume runs on one machine, its jobs back
+  to back from one download of its archive, and volumes start in the order
+  their first job would come by generation (with several machines or lanes,
+  several volumes run at once, one per lane). While that machine
   is connected and able to run the volume's next job, no other machine is
   offered it. A job that machine cannot run (an engine it does not have, a
   generation stopped or backed off there) goes to another machine, which
-  downloads the archive itself. A volume never starts at a later job while
+  downloads the archive itself and then runs every other job of the volume
+  the first machine cannot. A volume never starts at a later job while
   some machine can run its first. A volume whose machine left goes before
   volumes nobody started.
 - Unset or `auto`: by volume on a **MEGA** library, whose transfer quota

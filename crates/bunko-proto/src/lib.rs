@@ -470,6 +470,14 @@ pub struct VolumeOp {
     /// archive, size and `etag`. Older processors ignore it and download each claim.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub keep_archive: bool,
+    /// The archives (`archive` paths) whose copies this processor should go on keeping
+    /// (the library takes work by volume: the volumes this processor runs). A copy kept
+    /// of any other archive is dropped on receipt. None (an older library, or one
+    /// taking work by generation) says nothing. A kept copy has no time limit: the
+    /// library may wait hours for the volume's next job (a storage hold, a benchmark),
+    /// and only it knows when the copy is no longer wanted. Older processors ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kept_archives: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -730,6 +738,7 @@ mod tests {
             size: Some(3),
             etag: None,
             keep_archive: false,
+            kept_archives: None,
         });
         let text = serde_json::to_string(&op).unwrap();
         assert!(text.starts_with(r#"{"op":"volume","sid":"s1""#), "{text}");

@@ -1533,6 +1533,59 @@ fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     out
 }
 
+/// Finding: a manifest whose OCR queue is too busy to answer within its second must not
+/// say `pending: []` (a reader takes it as finished) nor fail (a deep link then imports
+/// the volume without its layers): it names the jobs the volume owes, as the scheduler
+/// last published them, with no finishing time.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_busy_queue_still_names_the_jobs_a_volume_owes() {
+    use bunko_server::library::OutlookSource;
+    let e = env(|_| {});
+    let lib = e.core.layout.library();
+    let cbz = lib.join("Series A/V1.cbz");
+    ocr_common::write_cbz(&cbz, 3);
+    e.ocr.archive_arrived(&cbz);
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while !e
+        .ocr
+        .owed_pending("Series A/V1.cbz")
+        .is_some_and(|p| !p.is_empty())
+    {
+        assert!(std::time::Instant::now() < deadline, "never published");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let glue = bunko_server::glue::OcrGlue(e.ocr.clone());
+    let answered = glue.volume_outlook(&cbz, "Series A", "V1");
+    assert!(!answered.busy);
+    let ids = |pending: &[Value]| -> Vec<(Value, Value)> {
+        pending
+            .iter()
+            .map(|p| (p["kind"].clone(), p["id"].clone()))
+            .collect()
+    };
+    assert!(!answered.pending.is_empty());
+
+    // The scheduler thread is busy for 3 s: the 1 s ask times out.
+    e.ocr.send(Msg::Query(Box::new(|_| {
+        std::thread::sleep(Duration::from_secs(3))
+    })));
+    let asked = std::time::Instant::now();
+    let busy = glue.volume_outlook(&cbz, "Series A", "V1");
+    assert!(
+        asked.elapsed() >= Duration::from_millis(900),
+        "the ask timed out"
+    );
+    assert!(!busy.busy, "answered from the published board, not 503");
+    assert_eq!(ids(&busy.pending), ids(&answered.pending));
+    assert!(
+        busy.pending.iter().all(|p| p["eta"].is_null()),
+        "{:?}",
+        busy.pending
+    );
+    assert_eq!(busy.recheck_after, Some(json!(300)));
+    e.stop.cancel();
+}
+
 #[tokio::test]
 async fn put_follow_up_names_the_manifest_and_when_to_look_again() {
     use bunko_dav::DavHooks;

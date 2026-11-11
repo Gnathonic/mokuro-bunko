@@ -10,6 +10,14 @@
 //! A volume nobody has started begins at its first job: its later jobs wait while some
 //! machine can run that first one, so a machine without the first generation's engine
 //! never starts a volume halfway and splits it.
+//!
+//! The machine that takes a job its volume's owner cannot run becomes the volume's
+//! next holder (`volume_owners` keeps them in order, the owner first). A job goes to
+//! the first holder whose machine can run it, on the lane that holder runs the volume
+//! on; it is open to every lane only when no holder can run it. So a second machine
+//! runs all of what the first cannot, one job after another from one download, and a
+//! third gets only what neither can. When the owner lets the volume go, the next
+//! holder becomes its owner.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -26,33 +34,35 @@ use crate::ocr::types::{Job, Stamp};
 /// waiting on a hold or a benchmark, gives the volume up after this long.
 pub const OWNER_PATIENCE_SECONDS: f64 = 600.0;
 
-/// The machine (and lane) that started a volume.
+/// A machine (and lane) running a volume: the one that started it (its owner, first in
+/// `Scheduler::volume_owners`), or one that took a job no earlier holder can run.
 #[derive(Debug)]
 pub struct VolumeOwner {
     pub pid: String,
     pub lane: u64,
     /// This server's own OCR on a remote library: the spooled archive, pinned from the
-    /// volume's first job until the owner's last job of it ends or the volume is given
-    /// up, so the provider sends it once.
+    /// holder's first job of the volume until its last one ends or it lets the volume
+    /// go, so the provider sends it once.
     pub spool: Option<SpoolHold>,
     /// The archive version `spool` holds.
     pub stamp: Option<Stamp>,
     /// Monotonic time the owner last held a claim of the volume or was waiting on a
     /// hold or a benchmark.
     pub since: f64,
-    /// The owner can run jobs of the volume beyond the ones in flight (as of the last
-    /// prune): its lane is not free for anyone else's volume.
+    /// The holder has jobs of the volume beyond the ones in flight that no earlier
+    /// holder takes (as of the last prune): its lane is not free for anyone else's
+    /// volume.
     pub more: bool,
 }
 
 /// Whose turn a job of a volume is, for one lane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Turn {
-    /// This lane started the volume.
+    /// This lane holds the volume and is the first holder able to run the job.
     Mine,
     /// Any lane may take it.
     Open,
-    /// Another lane's: its machine runs the volume and can run this job.
+    /// Another lane's: it holds the volume and is the first holder able to run it.
     Elsewhere,
 }
 
@@ -234,19 +244,17 @@ impl Scheduler {
         first_of: &mut HashMap<Arc<str>, Job>,
         later_open: &mut HashMap<Arc<str>, bool>,
     ) -> Turn {
-        if let Some((pid, owner_lane)) = self
-            .volume_owners
-            .get(&*job.rel)
-            .map(|o| (o.pid.clone(), o.lane))
-        {
-            let lane_gone = !self.lanes.iter().any(|l| l.id == owner_lane);
-            if pid == lane.pid && (owner_lane == lane.id || lane_gone) {
-                return Turn::Mine;
-            }
-            return if self.can_run(&pid, job, checks) {
-                Turn::Elsewhere
-            } else {
-                Turn::Open
+        if self.volume_owners.contains_key(&*job.rel) {
+            return match self.holder_for(job, checks) {
+                Some((pid, holder_lane)) => {
+                    let lane_gone = !self.lanes.iter().any(|l| l.id == holder_lane);
+                    if pid == lane.pid && (holder_lane == lane.id || lane_gone) {
+                        Turn::Mine
+                    } else {
+                        Turn::Elsewhere
+                    }
+                }
+                None => Turn::Open,
             };
         }
         let Some(first) = first_of.get(&job.rel).cloned() else {
@@ -264,6 +272,20 @@ impl Scheduler {
         if open { Turn::Open } else { Turn::Elsewhere }
     }
 
+    /// The holder of `job`'s volume whose turn the job is: the first, owner first, whose
+    /// machine can run it now (its pid and lane). None: no holder can.
+    fn holder_for(&mut self, job: &Job, checks: &mut RowChecks) -> Option<(String, u64)> {
+        let holders: Vec<(String, u64)> = self
+            .volume_owners
+            .get(&*job.rel)?
+            .iter()
+            .map(|o| (o.pid.clone(), o.lane))
+            .collect();
+        holders
+            .into_iter()
+            .find(|(pid, _)| self.can_run(pid, job, checks))
+    }
+
     /// Some machine with a lane can run `job` now.
     fn anyone_can_run(&mut self, job: &Job, checks: &mut RowChecks) -> bool {
         let mut pids: Vec<String> = self.lanes.iter().map(|l| l.pid.clone()).collect();
@@ -272,32 +294,59 @@ impl Scheduler {
         pids.iter().any(|pid| self.can_run(pid, job, checks))
     }
 
-    /// A lane took a job of `job`'s volume: the volume is its machine's from now on,
-    /// unless another machine runs it already (this one runs only what that one
-    /// cannot).
+    /// A lane took a job of `job`'s volume: its machine holds the volume from now on.
+    /// The first to take one owns it; a later one (it took a job no earlier holder can
+    /// run) is the next holder.
     pub(super) fn own_volume(&mut self, lane: &Lane, job: &Job) {
+        self.hold_volume(&lane.pid, lane.id, &job.rel);
+    }
+
+    fn hold_volume(&mut self, pid: &str, lane: u64, rel: &Arc<str>) {
         let now = self.mono();
-        match self.volume_owners.get_mut(&*job.rel) {
-            Some(owner) if owner.pid == lane.pid => {
-                owner.lane = lane.id;
-                owner.since = now;
+        let holders = self.volume_owners.entry(rel.clone()).or_default();
+        match holders.iter_mut().find(|o| o.pid == pid) {
+            Some(holder) => {
+                holder.lane = lane;
+                holder.since = now;
             }
-            Some(_) => {}
-            None => {
-                self.volume_owners.insert(
-                    job.rel.clone(),
-                    VolumeOwner {
-                        pid: lane.pid.clone(),
-                        lane: lane.id,
-                        spool: None,
-                        stamp: None,
-                        since: now,
-                        more: true,
-                    },
-                );
+            None => holders.push(VolumeOwner {
+                pid: pid.to_string(),
+                lane,
+                spool: None,
+                stamp: None,
+                since: now,
+                more: true,
+            }),
+        }
+        self.volumes_started.insert(rel.clone());
+    }
+
+    /// Taking work by volume was just switched on: each claim in flight holds its
+    /// volume (with its spooled archive), so the volume's other jobs go to the machine
+    /// already fetching it rather than to one that would fetch it again.
+    pub(super) fn hold_volumes_in_flight(&mut self) {
+        let mut jobs: Vec<Job> = self.claims.keys().cloned().collect();
+        jobs.sort();
+        for job in jobs {
+            let Some((pid, lane, spool, stamp)) = self
+                .claims
+                .get(&job)
+                .map(|c| (c.pid.clone(), c.lane, c.spool.clone(), c.stamp))
+            else {
+                continue;
+            };
+            self.hold_volume(&pid, lane, &job.rel);
+            if let Some(hold) = spool
+                && let Some(holder) = self
+                    .volume_owners
+                    .get_mut(&*job.rel)
+                    .and_then(|h| h.iter_mut().find(|o| o.pid == pid))
+                && holder.spool.is_none()
+            {
+                holder.spool = Some(hold);
+                holder.stamp = stamp;
             }
         }
-        self.volumes_started.insert(job.rel.clone());
     }
 
     /// Whether machine `pid` will be offered another job of `job`'s volume after this
@@ -307,16 +356,16 @@ impl Scheduler {
             return false;
         }
         let mut checks = RowChecks::default();
-        let owner = self.volume_owners.get(&*job.rel).map(|o| o.pid.clone());
+        let held = self.volume_owners.contains_key(&*job.rel);
         for j in self.volume_jobs(&job.rel) {
             if j == *job {
                 continue;
             }
-            let ours = match &owner {
-                Some(o) if o != pid => {
-                    !self.can_run(o, &j, &mut checks) && self.can_run(pid, &j, &mut checks)
-                }
-                _ => self.can_run(pid, &j, &mut checks),
+            let ours = if held {
+                self.holder_for(&j, &mut checks)
+                    .is_some_and(|(holder, _)| holder == pid)
+            } else {
+                self.can_run(pid, &j, &mut checks)
             };
             if ours {
                 return true;
@@ -325,17 +374,35 @@ impl Scheduler {
         false
     }
 
-    /// The archive the owner of `job`'s volume keeps spooled, when it is this claim's
-    /// machine and the version the claim was taken at.
+    /// The archives (as a remote processor's volume op names them) of every volume
+    /// machine `pid` holds, sorted.
+    pub(super) fn volumes_held_by(&self, pid: &str) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .volume_owners
+            .iter()
+            .filter(|(_, holders)| holders.iter().any(|o| o.pid == pid))
+            .map(|(rel, _)| format!("{}{rel}", bunko_proto::ARCHIVES_ROOT))
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// The archive the holder of `job`'s volume on this claim's machine keeps spooled,
+    /// when it is the version the claim was taken at.
     pub(super) fn owner_spool(&self, job: &Job) -> Option<SpoolHold> {
         let claim = self.claims.get(job)?;
-        let owner = self.volume_owners.get(&*job.rel)?;
-        (owner.pid == claim.pid && owner.stamp == claim.stamp && claim.stamp.is_some())
-            .then(|| owner.spool.clone())
+        let holder = self
+            .volume_owners
+            .get(&*job.rel)?
+            .iter()
+            .find(|o| o.pid == claim.pid)?;
+        (holder.stamp == claim.stamp && claim.stamp.is_some())
+            .then(|| holder.spool.clone())
             .flatten()
     }
 
-    /// A claim's archive was spooled: its volume's owner keeps it for the next job.
+    /// A claim's archive was spooled: its machine's hold on the volume keeps it for the
+    /// machine's next job of the volume.
     pub(super) fn keep_owner_spool(&mut self, job: &Job, hold: &SpoolHold) {
         if !self.settings.by_volume {
             return;
@@ -343,18 +410,22 @@ impl Scheduler {
         let Some((pid, stamp)) = self.claims.get(job).map(|c| (c.pid.clone(), c.stamp)) else {
             return;
         };
-        if let Some(owner) = self.volume_owners.get_mut(&*job.rel)
-            && owner.pid == pid
+        if let Some(holder) = self
+            .volume_owners
+            .get_mut(&*job.rel)
+            .and_then(|h| h.iter_mut().find(|o| o.pid == pid))
         {
-            owner.spool = Some(hold.clone());
-            owner.stamp = stamp;
+            holder.spool = Some(hold.clone());
+            holder.stamp = stamp;
         }
     }
 
-    /// Let go of volumes whose owner is gone, has nothing left of them it can run, or
-    /// stopped taking them (patience: [`OWNER_PATIENCE_SECONDS`] without a claim of the
-    /// volume while able, never counted during a hold or a benchmark). Dropping an owner
-    /// drops its spooled archive. Called at the start of every pump.
+    /// Let go of holders that are gone, have nothing left of the volume they would
+    /// get (a job they can run that no holder kept before them can), or stopped taking
+    /// its jobs (patience: [`OWNER_PATIENCE_SECONDS`] without a claim of the volume
+    /// while able, never counted during a hold or a benchmark). Dropping a holder drops
+    /// its spooled archive; the next holder becomes the owner. Called at the start of
+    /// every pump.
     pub(super) fn prune_volume_owners(&mut self) {
         if self.volume_owners.is_empty() {
             return;
@@ -364,51 +435,71 @@ impl Scheduler {
         let mut checks = RowChecks::default();
         let mut dropped = false;
         for rel in rels {
-            let Some((pid, since)) = self
+            let holders: Vec<(String, f64)> = self
                 .volume_owners
                 .get(&rel)
+                .into_iter()
+                .flatten()
                 .map(|o| (o.pid.clone(), o.since))
-            else {
-                continue;
-            };
-            let Some((name, label)) = self
-                .machines
-                .get(&pid)
-                .filter(|m| m.connected())
-                .map(|m| (m.name.clone(), m.label()))
-            else {
-                self.volume_owners.remove(&rel);
-                dropped = true;
-                continue;
-            };
-            let in_flight = self
-                .claims
-                .iter()
-                .any(|(j, c)| j.rel == rel && c.pid == pid);
-            let key = profile_key(&name).to_string();
-            let waiting =
-                self.held(&name) || self.autobench.inflight.iter().any(|(m, _)| *m == key);
+                .collect();
             let jobs = self.volume_jobs(&rel);
-            let more = jobs.iter().any(|j| self.can_run(&pid, j, &mut checks));
-            if !in_flight && !more {
-                self.volume_owners.remove(&rel);
-                dropped = true;
-                continue;
-            }
-            if !in_flight && !waiting && now - since > OWNER_PATIENCE_SECONDS {
-                self.log(format!(
-                    "{label} did not continue {rel} for {} minutes; its other jobs go to any machine",
-                    (OWNER_PATIENCE_SECONDS / 60.0).round()
-                ));
-                self.volume_owners.remove(&rel);
-                dropped = true;
-                continue;
-            }
-            if let Some(owner) = self.volume_owners.get_mut(&rel) {
-                if in_flight || waiting {
-                    owner.since = now;
+            // Holders kept, in order, with (refresh `since`, `more`).
+            let mut kept: Vec<(String, bool, bool)> = Vec::new();
+            for (pid, since) in holders {
+                let Some((name, label)) = self
+                    .machines
+                    .get(&pid)
+                    .filter(|m| m.connected())
+                    .map(|m| (m.name.clone(), m.label()))
+                else {
+                    continue;
+                };
+                let in_flight = self
+                    .claims
+                    .iter()
+                    .any(|(j, c)| j.rel == rel && c.pid == pid);
+                let key = profile_key(&name).to_string();
+                let waiting =
+                    self.held(&name) || self.autobench.inflight.iter().any(|(m, _)| *m == key);
+                let mut more = false;
+                for j in &jobs {
+                    if !self.can_run(&pid, j, &mut checks) {
+                        continue;
+                    }
+                    let earlier = kept.iter().any(|(k, _, _)| self.can_run(k, j, &mut checks));
+                    if !earlier {
+                        more = true;
+                        break;
+                    }
                 }
-                owner.more = more;
+                if !in_flight && !more {
+                    continue;
+                }
+                if !in_flight && !waiting && now - since > OWNER_PATIENCE_SECONDS {
+                    self.log(format!(
+                        "{label} did not continue {rel} for {} minutes; its other jobs go to any machine",
+                        (OWNER_PATIENCE_SECONDS / 60.0).round()
+                    ));
+                    continue;
+                }
+                kept.push((pid, in_flight || waiting, more));
+            }
+            let Some(holders) = self.volume_owners.get_mut(&rel) else {
+                continue;
+            };
+            let before = holders.len();
+            holders.retain(|o| kept.iter().any(|(k, _, _)| *k == o.pid));
+            dropped |= holders.len() != before;
+            for holder in holders.iter_mut() {
+                if let Some((_, busy, more)) = kept.iter().find(|(k, _, _)| *k == holder.pid) {
+                    if *busy {
+                        holder.since = now;
+                    }
+                    holder.more = *more;
+                }
+            }
+            if holders.is_empty() {
+                self.volume_owners.remove(&rel);
             }
         }
         if dropped {
@@ -426,6 +517,7 @@ impl Scheduler {
             && self
                 .volume_owners
                 .values()
+                .flatten()
                 .any(|o| o.lane == lane_id && o.more)
     }
 

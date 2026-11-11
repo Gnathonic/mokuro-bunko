@@ -192,13 +192,15 @@ impl Scheduler {
             .map(|m| (m.len(), crate::ocr::types::mtime_ns(m)));
         // A remote processor is told the archive's ETag (what a GET serves it with) and,
         // by volume, whether more of the volume's jobs follow on it: then it keeps its
-        // copy rather than download the archive again.
-        let (etag, keep_archive) = if local {
-            (None, false)
+        // copy rather than download the archive again. By volume it is also told every
+        // archive it still runs volumes of: a copy it kept of any other one goes.
+        let (etag, keep_archive, kept_archives) = if local {
+            (None, false, None)
         } else {
             (
                 meta.as_ref().map(bunko_dav::strong_file_etag),
                 self.more_of_volume_for(&pid, job),
+                self.settings.by_volume.then(|| self.volumes_held_by(&pid)),
             )
         };
         let series_name =
@@ -227,6 +229,7 @@ impl Scheduler {
             size: stamp.map(|s| s.0),
             etag,
             keep_archive,
+            kept_archives,
         };
         let sent = self
             .machines

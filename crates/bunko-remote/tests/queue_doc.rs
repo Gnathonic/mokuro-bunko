@@ -18,6 +18,11 @@ fn job(state: &str, progress: Value) -> Value {
     json!({"kind": "ocr", "id": "hayai", "state": state, "eta": null, "progress": progress})
 }
 
+/// A waiting job with a finishing time.
+fn priced() -> Value {
+    json!({"kind": "ocr", "id": "hayai", "state": "queued", "eta": "2026-10-12T11:00:00Z", "progress": null})
+}
+
 fn volume(series: &str, vol: &str, jobs: Vec<Value>) -> Value {
     json!({
         "series": series,
@@ -153,11 +158,37 @@ fn truncated_when_fewer_waiting_listed_than_pending() {
     // waiting jobs, and so at most 100 waiting volumes plus those about to start):
     // capped at 100.
     let many: Vec<Value> = (0..150)
-        .map(|i| volume("S", &format!("V{i}"), vec![job("queued", Value::Null)]))
+        .map(|i| volume("S", &format!("V{i}"), vec![priced()]))
         .collect();
     let out = cloud_queue_doc(&server_doc(many, 150, NOW), "i", &[], usize::MAX);
     assert_eq!(out["volumes"].as_array().unwrap().len(), 100);
     assert_eq!(out["truncated"], true);
+}
+
+/// Finding: the server lists the jobs claimed but not started (`queued`, no `eta`)
+/// besides its 100 waiting jobs. Counting their volumes against the cap dropped as
+/// many waiting volumes off the end of the cloud copy.
+#[test]
+fn volumes_about_to_start_do_not_count_toward_the_cap() {
+    let mut vols = vec![
+        volume("S", "Run", vec![job("running", json!(0.5))]),
+        volume("S", "Claimed", vec![job("queued", Value::Null)]),
+    ];
+    vols.extend((0..100).map(|i| volume("S", &format!("V{i}"), vec![priced()])));
+    let out = cloud_queue_doc(&server_doc(vols, 101, NOW), "i", &[], QUEUE_DOC_MAX_BYTES);
+    let names: Vec<&str> = out["volumes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["volume"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names.len(),
+        102,
+        "the running, the claimed and all 100 waiting"
+    );
+    assert_eq!(names[101], "V99");
+    assert_eq!(out["truncated"], false);
 }
 
 /// The server orders volumes by their soonest job and each volume's jobs running first,

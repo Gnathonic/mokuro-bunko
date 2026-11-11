@@ -818,7 +818,6 @@ async fn run_connection(
                 Some(Ok(_)) => last_heard = Instant::now(),
             },
             _ = tick.tick() => {
-                kept.expire_kept();
                 if last_heard.elapsed() > SOCKET_SILENCE {
                     break Ended::Closed(format!("the library sent nothing for {}s", SOCKET_SILENCE.as_secs()));
                 }

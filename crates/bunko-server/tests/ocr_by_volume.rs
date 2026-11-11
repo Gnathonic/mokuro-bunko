@@ -73,7 +73,27 @@ fn rows_of(h: &H, ops: &[Op]) -> Vec<String> {
 }
 
 fn owner(h: &H, rel: &str) -> Option<String> {
-    h.s.volume_owners.get(rel).map(|o| o.pid.clone())
+    h.s.volume_owners
+        .get(rel)
+        .and_then(|o| o.first())
+        .map(|o| o.pid.clone())
+}
+
+/// Every machine holding `rel`'s volume, the owner first.
+fn holders(h: &H, rel: &str) -> Vec<String> {
+    h.s.volume_owners
+        .get(rel)
+        .into_iter()
+        .flatten()
+        .map(|o| o.pid.clone())
+        .collect()
+}
+
+/// A second layer the `paddle` engine runs.
+fn paddle_2() -> Generation {
+    let mut g = layer("g-3", "Paddle 2");
+    g.engine = "paddle-manga".into();
+    g
 }
 
 /// Run the one claim of session `sid` to its end and let the session exit.
@@ -161,6 +181,11 @@ fn a_lane_runs_every_job_of_its_volume_before_the_next() {
     );
     let first = volume_ops(&ops).remove(0);
     assert!(first.keep_archive, "more of A/V1 follows on this machine");
+    assert_eq!(
+        first.kept_archives,
+        Some(vec!["/mokuro-reader/A/V1.cbz".to_string()]),
+        "the archives this machine still runs: a copy of any other goes"
+    );
     let meta = bunko_store::fs::metadata(&a).unwrap();
     assert_eq!(
         first.etag.as_deref(),
@@ -184,6 +209,11 @@ fn a_lane_runs_every_job_of_its_volume_before_the_next() {
     let ops = p.drain();
     assert_eq!(archives(&ops), ["B/V1.cbz"]);
     assert_eq!(rows_of(&h, &ops), ["g-1"]);
+    assert_eq!(
+        volume_ops(&ops)[0].kept_archives,
+        Some(vec!["/mokuro-reader/B/V1.cbz".to_string()]),
+        "A/V1 is done: its copy goes"
+    );
     assert_eq!(owner(&h, "A/V1.cbz"), None, "A/V1 is done");
     assert_eq!(owner(&h, "B/V1.cbz"), Some(p.pid.clone()));
 }
@@ -233,6 +263,103 @@ fn a_job_the_owner_cannot_run_goes_to_another_machine() {
         owner(&h, "A/V1.cbz"),
         Some(a.pid.clone()),
         "a keeps the volume"
+    );
+}
+
+/// Finding: the jobs the owner cannot run had no single taker. The machine that takes
+/// the first of them holds the volume next: the rest of what the owner cannot run goes
+/// to it alone, one after another from its kept copy, not to a third machine that
+/// would download the archive again.
+#[test]
+fn the_jobs_the_owner_cannot_run_go_to_one_machine() {
+    let mut h = by_volume(vec![primary(), paddle(), paddle_2()]);
+    h.add("A/V1.cbz", 3);
+    h.at(0.0);
+    let mut a = h.connect_with("a", 1, json!(["hayai-nova"]));
+    assert_eq!(rows_of(&h, &a.drain()), ["g-1"]);
+    let mut b = h.connect_with("b", 1, json!(["paddle-manga"]));
+    let ops = b.drain();
+    assert_eq!(rows_of(&h, &ops), ["g-2"]);
+    let first = volume_ops(&ops).remove(0);
+    assert!(first.keep_archive, "b runs g-3 next");
+    assert_eq!(holders(&h, "A/V1.cbz"), [a.pid.clone(), b.pid.clone()]);
+    let mut c = h.connect_with("c", 1, json!(["paddle-manga"]));
+    assert!(
+        archives(&c.drain()).is_empty(),
+        "g-3 is b's: it keeps the archive"
+    );
+
+    finish(&mut h, &b, &first);
+    let ops = b.drain();
+    assert_eq!(rows_of(&h, &ops), ["g-3"]);
+    assert!(
+        !volume_ops(&ops)[0].keep_archive,
+        "nothing more of A/V1 for b"
+    );
+    assert!(archives(&c.drain()).is_empty());
+}
+
+/// Finding: a holder with two lanes ran two jobs of the volume at once, so both
+/// downloads overlapped and its kept copy served neither. Its jobs go to the one lane
+/// that holds the volume.
+#[test]
+fn a_holder_runs_the_volume_on_one_lane() {
+    let mut h = by_volume(vec![primary(), paddle(), paddle_2()]);
+    h.add("A/V1.cbz", 3);
+    h.at(0.0);
+    let mut a = h.connect_with("a", 1, json!(["hayai-nova"]));
+    assert_eq!(rows_of(&h, &a.drain()), ["g-1"]);
+    let mut b = h.connect_with("b", 2, json!(["paddle-manga"]));
+    let ops = b.drain();
+    assert_eq!(rows_of(&h, &ops), ["g-2"], "not g-2 and g-3 on two lanes");
+    let first = volume_ops(&ops).remove(0);
+    assert!(first.keep_archive);
+    finish(&mut h, &b, &first);
+    assert_eq!(rows_of(&h, &b.drain()), ["g-3"]);
+}
+
+/// When the owner lets the volume go, the next holder owns it.
+#[test]
+fn the_next_holder_owns_the_volume_once_the_owner_leaves() {
+    let mut h = by_volume(vec![primary(), paddle(), paddle_2()]);
+    h.add("A/V1.cbz", 3);
+    h.at(0.0);
+    let mut a = h.connect_with("a", 1, json!(["hayai-nova"]));
+    assert_eq!(rows_of(&h, &a.drain()), ["g-1"]);
+    let mut b = h.connect_with("b", 1, json!(["paddle-manga"]));
+    assert_eq!(rows_of(&h, &b.drain()), ["g-2"]);
+    h.s.handle(Msg::Drop {
+        pid: a.pid.clone(),
+        reason: "test".into(),
+    });
+    assert_eq!(holders(&h, "A/V1.cbz"), [b.pid.clone()]);
+    let mut c = h.connect_with("c", 1, json!(["paddle-manga"]));
+    assert!(archives(&c.drain()).is_empty(), "g-3 is still b's");
+}
+
+/// Finding: switching to volume mode while claims were in flight split their volumes:
+/// a claim taken by generation had no owner, so the volume's next job went to another
+/// machine, which downloaded the archive again.
+#[test]
+fn switching_to_volume_order_keeps_volumes_in_flight_on_their_machine() {
+    let mut h = harness(vec![primary(), lines()]);
+    h.add("A/V1.cbz", 3);
+    h.at(0.0);
+    let mut a = h.connect("a", 1);
+    let ops = a.drain();
+    assert_eq!(archives(&ops)[0], "A/V1.cbz");
+    assert_eq!(rows_of(&h, &ops)[0], "g-1");
+    let mut s = h.s.settings().clone();
+    s.by_volume = true;
+    h.s.handle(Msg::Apply {
+        settings: Box::new(s),
+        reply: None,
+    });
+    assert_eq!(owner(&h, "A/V1.cbz"), Some(a.pid.clone()));
+    let mut b = h.connect("b", 1);
+    assert!(
+        archives(&b.drain()).is_empty(),
+        "A/V1's layer is a's: a is fetching the archive"
     );
 }
 
@@ -369,21 +496,21 @@ fn an_owner_that_does_not_continue_gives_the_volume_up() {
     let now = h.s.mono();
     h.s.volume_owners.insert(
         "B/V1.cbz".into(),
-        VolumeOwner {
+        vec![VolumeOwner {
             pid: a.pid.clone(),
             lane,
             spool: None,
             stamp: None,
             since: now,
             more: true,
-        },
+        }],
     );
     let mut b = h.connect("b", 1);
     assert!(
         archives(&b.drain()).is_empty(),
         "B/V1 is a's, A/V1's layer too"
     );
-    h.s.volume_owners.get_mut("B/V1.cbz").unwrap().since = now - OWNER_PATIENCE_SECONDS - 1.0;
+    h.s.volume_owners.get_mut("B/V1.cbz").unwrap()[0].since = now - OWNER_PATIENCE_SECONDS - 1.0;
     h.at(1.0);
     assert_eq!(archives(&b.drain()), ["B/V1.cbz"]);
     assert_eq!(owner(&h, "B/V1.cbz"), Some(b.pid.clone()));
@@ -470,6 +597,7 @@ fn by_generation_nothing_is_kept() {
     assert_eq!(archives(&ops), ["A/V1.cbz", "B/V1.cbz"]);
     let first = volume_ops(&ops).remove(0);
     assert!(!first.keep_archive);
+    assert_eq!(first.kept_archives, None);
     let meta = bunko_store::fs::metadata(&a1).unwrap();
     assert_eq!(
         first.etag.as_deref(),

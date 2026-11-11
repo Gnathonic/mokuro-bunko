@@ -1015,9 +1015,9 @@
   function pendingOrderSentence(generations, order) {
     if (order === "volume") {
       return (
-        "Next job first. Volumes run one at a time" +
-        (generations.length > 1 ? ", each through its generations in their configured order" : "") +
-        "; series take turns, each in reading order."
+        "Next job first. Each volume runs on one machine, its jobs back to back" +
+        (generations.length > 1 ? " through its generations in their configured order" : "") +
+        "; volumes start in the order their first job would come, series taking turns, each in reading order."
       );
     }
     return (

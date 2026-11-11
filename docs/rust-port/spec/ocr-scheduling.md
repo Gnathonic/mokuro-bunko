@@ -319,18 +319,25 @@ whatever the outcome (`watcher.py:2830-2833`); in memory only.
 > volume (`Scheduler::volume_order`): owned volumes first, then volumes started
 > earlier (`volumes_started`), then the rest, each class in the order of its
 > volumes' first job, a volume's jobs together in group order. The lane that
-> takes a volume's job records itself as the volume's owner
-> (`Scheduler::volume_owners`, `sched/by_volume.rs`); `claim()` splits the queue
-> into the lane's own volumes' jobs (walked first, never left to another lane)
-> and the jobs open to it: an owned volume's job is open only when the owner
-> cannot run it, an unowned volume's later job only when no connected machine
-> can run its first. The rank-based preemption is off; instead a session
-> drains when the lane's next job is of another row. The `last_served` cursor
-> moves only on a volume's first claim. `pump()` prunes owners first: gone,
-> nothing left they can run, or 600 s without a claim of the volume while able
-> (holds and their own autobench do not count). An owner keeps a local claim's
-> spooled archive (`VolumeOwner.spool`) for the volume's next job; a remote
-> claim says `keep_archive` when more of the volume follows on that processor.
+> takes a volume's job holds the volume (`Scheduler::volume_owners`, an ordered
+> list per volume, `sched/by_volume.rs`): the first holder is its owner; a
+> machine already holding it only moves to the new lane. `claim()` splits the
+> queue into the lane's own jobs (walked first, never left to another lane) and
+> the jobs open to it: a held volume's job is the first holder's whose machine
+> can run it (`holder_for`; `Elsewhere` for every other lane), open only when no
+> holder can, and whoever takes an open job is appended as the next holder. An
+> unheld volume's later job is open only when no connected machine can run its
+> first. The rank-based preemption is off; instead a session drains when the
+> lane's next job is of another row. The `last_served` cursor moves only on a
+> volume's first claim. `pump()` prunes holders first, in order: gone, nothing
+> left they would get (a job they can run that no holder kept before them can),
+> or 600 s without a claim of the volume while able (holds and their own
+> autobench do not count); the next holder then owns the volume. A holder keeps
+> a local claim's spooled archive (`VolumeOwner.spool`) for its next job of the
+> volume; a remote claim says `keep_archive` when more of the volume follows on
+> that processor, and `kept_archives` names every archive it holds.
+> `apply_settings` switching by volume on makes each claim in flight hold its
+> volume (`hold_volumes_in_flight`, with its spooled archive).
 > The plan (`PlanInputs.by_volume`) keeps a volume's jobs on the lane that took
 > its first.
 
@@ -1632,6 +1639,15 @@ pricing (all ETAs null); else `volume_plan(..., pending_within(wait))`
 (exceptions → unpriced). Callers: PUT (wait 0.005 s, max 300 items), volume
 manifest (wait 1.0 s, unbounded) (`catalog/api.py:32`, `237-252`).
 
+> **Rust:** the manifest asks the scheduler thread with a 1 s wait
+> (`OcrGlue::volume_outlook`). When that times out it answers from the owed
+> board the scheduler thread publishes on its tick (`actor::OwedBoard`, rebuilt
+> when the queue generation moved and 5 s passed, or every 60 s): the volume's
+> owed rows with `eta: null`, `recheck_after` 300. Only before the first publish
+> is the manifest 503 with `Retry-After: 5`. (0.5.2 answered `pending: []` on a
+> timeout, which a reader takes as "finished"; a 503 instead would make a
+> deep link import the volume without its layers.)
+
 ---
 
 ## 21. Pipeline congestion readout — KEEP the verdict algorithm
@@ -1903,7 +1919,11 @@ exception` → "engine error"; else "failed — will retry".
   by series, volume and row, first in plan order wins) sorted by
   `(unpriced, floor(eta_at / 300 s), plan position)`. The 300 s buckets keep the
   window and the ETag still while the plan re-prices by seconds; unpriced jobs (a
-  blocked tail, or a row hold) come after every priced one, in plan order. A
+  blocked tail, or a row hold) come after every priced one, in plan order. While
+  `queue_hold()` is set the bucket is ignored (`queue_window(.., timed: false)`):
+  the plan still prices waiting jobs on the held machines' idle lanes at
+  "now + run time", so every `eta_at` moves with the clock and jobs on two lanes
+  would cross bucket boundaries in turn; the window then follows plan position. A
   waiting job a row hold keeps (`held` on the item) that falls outside the 100 is
   attached when its volume is listed anyway; it adds no volume. Volumes come in
   the order of their first job by `(running, claimed, waiting)` then that key; a

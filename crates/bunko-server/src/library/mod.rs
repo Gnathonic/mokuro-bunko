@@ -108,8 +108,9 @@ pub struct VolumeOutlook {
     pub pending: Vec<Value>,
     /// Seconds until the reader should re-fetch the manifest; `None` = `null`.
     pub recheck_after: Option<Value>,
-    /// The OCR queue did not answer in time: what is pending is unknown, not empty.
-    /// The manifest is then 503 with `Retry-After`, so a reader keeps watching.
+    /// The OCR queue did not answer in time and has published nothing to answer from
+    /// yet (it is starting): what is pending is unknown, not empty. The manifest is then
+    /// 503 with `Retry-After`, so a reader keeps watching.
     pub busy: bool,
 }
 

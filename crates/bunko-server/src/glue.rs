@@ -26,10 +26,11 @@ impl OutlookSource for OcrGlue {
             return VolumeOutlook::default();
         };
         let ocr = self.0.clone();
+        let asked = rel.clone();
         // 0.5.2 waited at most 1 s for the pending list when serving a manifest.
         let answer = blocking(move || {
             ocr.ask_within(Duration::from_secs(1), move |s| {
-                (s.volume_pending(&rel, None), s.now())
+                (s.volume_pending(&asked, None), s.now())
             })
         });
         match answer {
@@ -41,11 +42,27 @@ impl OutlookSource for OcrGlue {
                     busy: false,
                 }
             }
-            // Unknown is not "nothing pending": a reader told `[]` takes the volume as
-            // finished and stops watching it.
-            Asked::TimedOut => VolumeOutlook {
-                busy: true,
-                ..VolumeOutlook::default()
+            // Too busy to price the volume in time: the rows it owes as the scheduler
+            // last published them, without finishing times. Not `[]` for "unknown": a
+            // reader told `[]` takes the volume as finished and stops watching it. Not a
+            // 503 either while there is an answer: a deep link would import the volume
+            // without its layers. Only before anything was published is it busy.
+            Asked::TimedOut => match self.0.owed_pending(&rel) {
+                Some(pending) => {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0.0, |d| d.as_secs_f64());
+                    let recheck = bunko_sched::outlook::recheck_after(&pending, now);
+                    VolumeOutlook {
+                        pending,
+                        recheck_after: recheck.map(Value::from),
+                        busy: false,
+                    }
+                }
+                None => VolumeOutlook {
+                    busy: true,
+                    ..VolumeOutlook::default()
+                },
             },
             Asked::Gone => VolumeOutlook::default(),
         }

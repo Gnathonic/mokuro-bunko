@@ -584,6 +584,38 @@ impl Scheduler {
         rows
     }
 
+    /// [`crate::ocr::actor::OwedBoard`]: what [`Self::owed_rows`] gives for every
+    /// owed volume, in one pass.
+    pub fn owed_board(&self) -> crate::ocr::actor::OwedBoard {
+        let mut rows: Vec<OwedRow> = self
+            .enabled_rows()
+            .into_iter()
+            .map(|r| OwedRow {
+                id: r.id,
+                name: r.name,
+                primary: r.primary,
+            })
+            .collect();
+        rows.sort_by_key(|r| !r.primary);
+        let volumes = self
+            .owed
+            .volumes
+            .iter()
+            .filter_map(|(rel, v)| {
+                let owed: Vec<u16> = rows
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, r)| {
+                        v.rows.iter().any(|g| **g == *r.id) || (v.upgrade && r.primary)
+                    })
+                    .filter_map(|(i, _)| u16::try_from(i).ok())
+                    .collect();
+                (!owed.is_empty()).then(|| (rel.clone(), owed))
+            })
+            .collect();
+        crate::ocr::actor::OwedBoard { rows, volumes }
+    }
+
     /// `OcrControl.volume_pending`: `[{kind, id, eta}]`, None when this process schedules
     /// nothing, `[]` when nothing is owed.
     pub fn volume_pending(&mut self, rel: &str, max_items: Option<usize>) -> Vec<Value> {
@@ -654,7 +686,9 @@ impl Scheduler {
                 Some(e)
             })
             .collect();
-        let window = queue_window(&plan, &claimed, QUEUE_REPORT_LIMIT);
+        // Held, the plan still prices jobs on idle lanes at "now + run time": order by
+        // plan position, or the window would reorder itself as the clock moves.
+        let window = queue_window(&plan, &claimed, QUEUE_REPORT_LIMIT, held.is_none());
         let mut volumes = Vec::new();
         for listed in &window.volumes {
             let mut out = Vec::new();

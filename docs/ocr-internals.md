@@ -173,15 +173,19 @@ above, and volumes come in the order of their first job. The lane that takes
 a volume's first job **owns** the volume: its other jobs are offered to that
 lane alone while its machine is connected, unpaused and able to run them (the
 row not refused, stopped or backed off there, the job not given back by it).
-A job the owner cannot run is open to every machine. A volume nobody owns
+A job the owner cannot run is open to every machine; the machine that takes
+it becomes the volume's next holder, and the rest of what the owner cannot
+run goes to that machine's lane alone (a third machine gets only what
+neither can run). When the owner lets the volume go, the next holder owns
+it. A volume nobody owns
 starts at its first remaining job; its later jobs wait while some connected
 machine can run that first one, so a machine lacking the first row's engine
 cannot start the volume halfway. Owned volumes come first in the queue, then
 volumes whose owner left (a disconnect, a pause, a restart), then the rest.
 
-An owner lets its volume go when it has nothing of it left to run, when its
-machine leaves, or after 10 minutes without a claim of the volume while able
-to run one; time spent held (a storage hold, an update, a benchmark) or
+An owner (or holder) lets its volume go when it has nothing of it left to
+run that no earlier holder takes, when its machine leaves, or after 10
+minutes without a claim of the volume while able to run one; time spent held (a storage hold, an update, a benchmark) or
 waiting for its own autobench does not count. The earliest-finish walk and
 the warm-session rule apply only to volumes nobody owns, and a lane that owns
 a volume with jobs left is not counted on for other work. The ETA plan keeps
@@ -191,7 +195,8 @@ The point is the archive: one download per volume per machine. This server's
 own OCR on a cloud library keeps the volume's spooled archive pinned on the
 owner from its first job to its last; a processor is told `keep_archive` with
 each claim that more of the volume follows on it, and keeps its copy (see
-Remote processors). The cost is throughput: a session runs one row, so a
+Remote processors). Switching to by volume while claims are in flight makes
+each claim's machine the holder of its volume, so the volume is not split. The cost is throughput: a session runs one row, so a
 machine loads models for every job of a volume, and it takes no volume ahead
 of the one it runs.
 
@@ -381,13 +386,19 @@ into an empty answer; processors detect that and give those volumes back.
 **Kept archives.** When the library takes work by volume, a claim whose
 volume has more jobs for the same processor says `keep_archive`, and names
 the archive's strong ETag (the one a GET serves). After the claim the
-processor keeps its copy, by archive path, size and ETag, for at most 10
-minutes and at most one copy per session slot; the volume's next claim uses
-it when its size and ETag still match, and its `fetch ready` says `reused`
-(the library does not count it as a download). A kept copy gives way to any
-new download that needs its room: a RAM copy before the new one would fall
-back to disk, any copy before the claim would go back as `no_room`. Kept
-copies go when the connection ends. A processor that does not know the field
+processor keeps its copy, by archive path, size and ETag, at most one copy
+per session slot (the oldest goes first); the volume's next claim uses it
+when its size and ETag still match, and its `fetch ready` says `reused` (the
+library does not count it as a download). A kept copy has no time limit,
+since the library may wait hours for the volume's next job (a storage hold,
+a benchmark): every volume op names the archives the library still runs on
+that processor (`kept_archives`), and a copy of any other archive is dropped
+then. A kept copy also gives way to a new download that needs its room: a
+RAM copy when the machine is short of memory (not when only the RAM budget
+is full: the new archive then goes to disk, a local write being cheaper than
+the volume's next download), any copy before the claim would go back as
+`no_room`. An archive larger than the whole RAM budget goes to disk and
+drops nothing. Kept copies go when the connection ends. A processor that does not know the field
 downloads every claim, as before.
 
 When a processor gives a volume back undelivered, the library judges it from

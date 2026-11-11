@@ -224,11 +224,13 @@
 
 ### Added
 - **OCR can take work volume by volume.** With `ocr.queue_order: volume` (Admin → OCR →
-  Queue order) volumes come one at a time, in the order their first job would come by
-  generation, and one machine runs every job of a volume back to back from one download
-  of its archive. While that machine is connected and able to run the volume's next job,
-  no other machine is offered it; a job it cannot run (an engine it does not have) goes
-  to another machine, which downloads the archive itself. This server's own OCR on a
+  Queue order) each volume runs on one machine, its jobs back to back from one download
+  of its archive, and volumes start in the order their first job would come by
+  generation (with several machines or lanes, several volumes run at once, one per
+  lane). While that machine is connected and able to run the volume's next job, no other
+  machine is offered it; a job it cannot run (an engine it does not have) goes to
+  another machine, which downloads the archive itself and runs every other job of the
+  volume the first one cannot. This server's own OCR on a
   cloud library keeps the spooled archive pinned for the whole volume, and a processor of
   this release keeps its copy between the volume's jobs when the library asks it to
   (older processors download it for each job). On a MEGA library this is the default,
@@ -691,8 +693,9 @@
   so small re-pricings do not reorder the file), grouped by volume, and each volume
   carries only those jobs. A listed volume still shows the jobs no connected machine
   can run, as held. A job left out is still owed, and the volume's manifest lists every
-  one. A manifest whose OCR queue does not answer within a second is now 503 with
-  `Retry-After` instead of saying nothing is pending, which a reader took as "done".
+  one. A manifest whose OCR queue does not answer within a second now lists the jobs
+  the volume owed when the queue last published its state, with no finishing time,
+  instead of saying nothing is pending, which a reader took as "done".
 - **Windows: no console window flashes while the app runs.** The app
   (`mokuro-bunko.exe`) and the server and processor it starts have no console, so
   every console program they ran was given a window of its own: `nvidia-smi`, which

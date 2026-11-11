@@ -1201,6 +1201,7 @@ fn local_volume_jobs(by_volume: bool) -> usize {
         sched
             .volume_owners
             .get("Series/Vol 2.cbz")
+            .and_then(|h| h.first())
             .is_some_and(|o| o.spool.is_some()),
         by_volume,
         "by volume the owner keeps the archive spooled between the jobs"

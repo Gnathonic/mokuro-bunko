@@ -797,7 +797,10 @@ impl Scheduler {
             .retain(|(sid, _), _| self.sessions.contains_key(sid));
         self.breakers.remove(pid);
         // Its volumes (and their spooled archives) go to whoever takes them next.
-        self.volume_owners.retain(|_, o| o.pid != pid);
+        for holders in self.volume_owners.values_mut() {
+            holders.retain(|o| o.pid != pid);
+        }
+        self.volume_owners.retain(|_, holders| !holders.is_empty());
         self.lanes.retain(|l| l.pid != pid);
         self.bench_machine_left(&machine.name);
         self.rebuild_lanes();

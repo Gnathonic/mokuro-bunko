@@ -379,6 +379,7 @@ mod tests {
             size: None,
             etag: None,
             keep_archive: false,
+            kept_archives: None,
         })
     }
 

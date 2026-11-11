@@ -413,8 +413,10 @@ pub struct Scheduler {
     pub last_poll_tick: f64,
     /// When the per-scan state (attempted, strikes, stopped rows...) was last reset.
     pub scan_reset_at: f64,
-    /// By volume: the lane that started each volume ([`by_volume`]).
-    pub volume_owners: HashMap<Arc<str>, VolumeOwner>,
+    /// By volume: the machines (lanes) running each volume ([`by_volume`]), in order:
+    /// the one that started it (its owner), then each that took a job no earlier one
+    /// can run.
+    pub volume_owners: HashMap<Arc<str>, Vec<VolumeOwner>>,
     /// By volume: volumes a job of which was claimed and that are still owed; they go
     /// before volumes nobody started once their owner lets them go.
     pub volumes_started: HashSet<Arc<str>>,
@@ -1096,11 +1098,15 @@ impl Scheduler {
     /// Restart-free reconfiguration (`OCRWorker.apply_settings`).
     pub fn apply_settings(&mut self, settings: Settings) {
         let local_changed = self.settings.local_processing != settings.local_processing;
+        let by_volume_now = settings.by_volume && !self.settings.by_volume;
         if !settings.by_volume {
             // Claims in flight finish; nothing stays tied to a machine.
             self.forget_volume_owners();
         }
         self.settings = settings;
+        if by_volume_now {
+            self.hold_volumes_in_flight();
+        }
         self.autobench.asked.clear();
         self.autobench.failed.clear();
         self.bump();

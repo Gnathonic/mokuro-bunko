@@ -1524,7 +1524,8 @@ impl Drop for LeaseHandle {
 pub const QUEUE_DOC_MAX_BYTES: usize = 64 * 1024;
 /// Waiting volumes listed at most: a backstop; the server lists at most 100 waiting
 /// jobs (`QUEUE_REPORT_LIMIT`), so at most 100 waiting volumes besides those about to
-/// start.
+/// start. A volume whose every job is `queued` with no `eta` does not count
+/// ([`counts_toward_the_cap`]).
 pub const QUEUE_WAITING_LIMIT: usize = 100;
 /// `done[]` holds at most this many completions …
 pub const DONE_LIMIT: usize = 100;
@@ -1567,6 +1568,20 @@ fn is_running(volume: &Value) -> bool {
     volume["jobs"]
         .as_array()
         .is_some_and(|jobs| jobs.iter().any(|j| j["state"] == "running"))
+}
+
+/// Whether a waiting volume counts toward [`QUEUE_WAITING_LIMIT`]: it has a job with a
+/// finishing time, or a held one. A volume whose every job is `queued` with no `eta`
+/// is most often one whose job a machine has claimed and not yet started, which the
+/// server lists outside its 100 waiting jobs; cutting it from the count keeps the cap
+/// from dropping that many volumes off the end of an honest list. (A job behind one
+/// the queue cannot time looks the same; the server still lists at most 100 of
+/// those, and the byte cap binds whatever this lets through.)
+fn counts_toward_the_cap(volume: &Value) -> bool {
+    volume["jobs"].as_array().is_none_or(|jobs| {
+        jobs.iter()
+            .any(|j| !(j["state"] == "queued" && j["eta"].is_null()))
+    })
 }
 
 fn quantise_progress(volume: &mut Value) {
@@ -1636,7 +1651,8 @@ fn assemble(
 ///
 /// - `volumes`: in the server's order (every running job, the jobs about to start,
 ///   then the next 100 waiting jobs, by volume), at most [`QUEUE_WAITING_LIMIT`]
-///   waiting volumes. `truncated` is true when fewer waiting volumes are listed than
+///   waiting volumes besides those whose every job is queued with no `eta` (about to
+///   start). `truncated` is true when fewer waiting volumes are listed than
 ///   `pending_volumes`; a volume listed with only some of its jobs does not count.
 /// - `done`: entries from the [`DONE_WINDOW`] before the document's `generated_at`
 ///   (every entry when it has none), newest first, at most [`DONE_LIMIT`].
@@ -1672,7 +1688,14 @@ pub fn cloud_queue_doc(
         .get("pending_volumes")
         .and_then(Value::as_u64)
         .map_or(waiting.len(), |n| usize::try_from(n).unwrap_or(usize::MAX));
-    waiting.truncate(QUEUE_WAITING_LIMIT);
+    let mut counted = 0;
+    waiting.retain(|v| {
+        if !counts_toward_the_cap(v) {
+            return true;
+        }
+        counted += 1;
+        counted <= QUEUE_WAITING_LIMIT
+    });
     let window_ms = i64::try_from(DONE_WINDOW.as_millis()).unwrap_or(i64::MAX);
     let mut recent: Vec<&DoneEntry> = done
         .iter()

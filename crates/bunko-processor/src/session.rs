@@ -222,8 +222,12 @@ impl Link {
                     op.keep_archive
                         .then(|| (remote.fetcher.spool(), op.archive.clone()))
                 };
-                // The library takes work by volume: the copy kept from the volume's
-                // earlier job serves this one while it is still the library's file.
+                // The library takes work by volume: it names the archives it still
+                // runs here, and the copy kept from the volume's earlier job serves
+                // this one while it is still the library's file.
+                if let Some(wanted) = &op.kept_archives {
+                    remote.fetcher.spool().retain_kept(wanted);
+                }
                 if let Some(mut kept) =
                     remote
                         .fetcher
@@ -1928,6 +1932,7 @@ mod tests {
             size: None,
             etag: None,
             keep_archive: false,
+            kept_archives: None,
         }
     }
 

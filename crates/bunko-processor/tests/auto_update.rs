@@ -172,6 +172,7 @@ async fn drive(mut ws: WebSocket, lib: Shared) {
                     size: None,
                     etag: Some("\"a1\"".into()),
                     keep_archive: false,
+                    kept_archives: None,
                 })))
                 .await
                 .unwrap(),

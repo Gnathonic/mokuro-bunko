@@ -133,6 +133,8 @@ struct Inner {
     running_jobs: actor::RunningJobs,
     /// What the scheduler thread last published of its failing volumes.
     failing: actor::FailingVolumes,
+    /// What the scheduler thread last published of the rows each volume is owed.
+    owed: actor::OwedVolumes,
     queue_file: queue_file::QueueFile,
     status: queue_api::StatusCache,
     storage: PathBuf,
@@ -248,6 +250,7 @@ impl OcrControl {
             upgrade: up,
             running_jobs: actor::RunningJobs::default(),
             failing: actor::FailingVolumes::default(),
+            owed: actor::OwedVolumes::default(),
             queue_file: queue_file::QueueFile::default(),
             status: queue_api::StatusCache::default(),
             storage: layout.base.clone(),
@@ -299,6 +302,14 @@ impl OcrControl {
             .cloned()
     }
 
+    /// The manifest's `pending` for `rel` (library-relative archive path) as the
+    /// scheduler last published it (within seconds), without finishing times; None
+    /// before it first published. Never waits on the scheduler.
+    pub fn owed_pending(&self, rel: &str) -> Option<Vec<serde_json::Value>> {
+        let board = self.0.owed.read().clone()?;
+        Some(board.pending(rel))
+    }
+
     /// Start the scheduler thread, the in-process processor (full build, local
     /// processing on) and the stop watcher. Must be called inside a tokio runtime.
     pub fn start(&self, stop: CancellationToken) {
@@ -311,6 +322,7 @@ impl OcrControl {
             rx,
             self.0.running_jobs.clone(),
             self.0.failing.clone(),
+            self.0.owed.clone(),
         ) {
             Ok(handle) => *self.0.thread.lock() = Some(handle),
             Err(e) => {

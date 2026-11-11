@@ -3,16 +3,24 @@
 //! predicted finishing time, grouped by volume.
 //!
 //! A volume carries only its listed jobs: running first, then soonest first. Volumes
-//! come in the order of their soonest job, those with a running job first. A volume's
-//! jobs that no connected machine can run (a row hold: `held` on the plan entry) are
-//! attached when the volume is listed anyway, so its card still says why they wait;
-//! they never bring a volume in on their own.
+//! come in the order of their soonest job, those with a running job first. A job no
+//! connected machine can run (a row hold: `held` on the plan entry) has no finishing
+//! time, so it sorts after every timed job; within the `limit` it is listed like any
+//! other waiting job, and may bring its volume in. Past the `limit` it is attached
+//! only to a volume listed anyway, so that volume's card still says why the job
+//! waits; there it adds no volume.
 //!
 //! Finishing times are compared in [`ETA_BUCKET_SECONDS`] buckets, with plan order as
 //! the tie-break. The plan re-prices every job whenever a rate or a running card's
 //! progress moves, and two jobs a few seconds apart would swap places on every such
 //! move; the buckets keep the file (and its ETag) still until a job's finishing time
 //! moves by minutes.
+//!
+//! While the whole queue is held the window ignores finishing times (`timed: false`)
+//! and follows plan order alone. The plan still prices waiting jobs on the held
+//! machines' idle lanes, at "now + their run time", so every finishing time moves with
+//! the clock. Jobs on two lanes would then cross bucket boundaries in turn, and the
+//! window would reorder itself every few minutes while nothing in the queue changed.
 
 use std::collections::{HashMap, HashSet};
 
@@ -47,7 +55,8 @@ struct Soonest {
     position: usize,
 }
 
-fn soonest(e: &Object, state: Listed, position: usize) -> Soonest {
+/// `timed`: compare finishing times (in buckets); otherwise plan position alone.
+fn soonest(e: &Object, state: Listed, position: usize, timed: bool) -> Soonest {
     let eta = e
         .get("eta_at")
         .and_then(Value::as_str)
@@ -55,7 +64,10 @@ fn soonest(e: &Object, state: Listed, position: usize) -> Soonest {
     Soonest {
         state,
         unpriced: eta.is_none(),
-        bucket: eta.map_or(0, |t| (t / ETA_BUCKET_SECONDS as f64).floor() as i64),
+        bucket: match eta {
+            Some(t) if timed => (t / ETA_BUCKET_SECONDS as f64).floor() as i64,
+            _ => 0,
+        },
         position,
     }
 }
@@ -94,10 +106,12 @@ pub struct QueueWindow<'a> {
 /// The queue file's window over `plan` (`plan.running` priced, `plan.pending` in the
 /// scheduler's order) and `claimed` (jobs claimed whose card has not begun: objects with
 /// `series`, `volume` and `generation_id`), listing at most `limit` waiting jobs.
+/// `timed`: order by finishing time; false while the queue is held (plan order alone).
 pub fn queue_window<'a>(
     plan: &'a QueuePlan,
     claimed: &'a [Object],
     limit: usize,
+    timed: bool,
 ) -> QueueWindow<'a> {
     let mut seen: HashSet<(&str, &str, &str)> = HashSet::new();
     let mut running_volumes: HashSet<(&str, &str)> = HashSet::new();
@@ -115,7 +129,7 @@ pub fn queue_window<'a>(
             entry: e,
             state: Listed::Running,
         };
-        picked.push((soonest(e, Listed::Running, i), (s, v), job));
+        picked.push((soonest(e, Listed::Running, i, timed), (s, v), job));
     }
     for (i, e) in claimed.iter().enumerate() {
         let Some((s, v, g)) = identity(e) else {
@@ -129,7 +143,7 @@ pub fn queue_window<'a>(
             entry: e,
             state: Listed::Claimed,
         };
-        picked.push((soonest(e, Listed::Claimed, i), (s, v), job));
+        picked.push((soonest(e, Listed::Claimed, i, timed), (s, v), job));
     }
     let mut waiting: Vec<(Soonest, (&str, &str), &'a Object)> = Vec::new();
     for (i, e) in plan.pending.iter().enumerate() {
@@ -141,7 +155,7 @@ pub fn queue_window<'a>(
             continue;
         }
         waiting_volumes.insert((s, v));
-        waiting.push((soonest(e, Listed::Waiting, i), (s, v), e));
+        waiting.push((soonest(e, Listed::Waiting, i, timed), (s, v), e));
     }
     let pending_volumes = waiting_volumes
         .iter()
@@ -262,7 +276,7 @@ mod tests {
                 e("S", "C", "g-1", Some(far + 240.0)),
             ],
         );
-        let w = queue_window(&p, &[], 3);
+        let w = queue_window(&p, &[], 3, true);
         assert_eq!(
             shape(&w),
             sv(&[("A", &["l-1"]), ("B", &["l-1"]), ("C", &["l-1"])])
@@ -281,7 +295,7 @@ mod tests {
                 e("S", "D", "g-1", Some(1200.0)),
             ],
         );
-        let w = queue_window(&p, &[], 3);
+        let w = queue_window(&p, &[], 3, true);
         assert_eq!(order(&w), ["B", "D", "C"]);
         assert_eq!(w.pending_volumes, 4);
     }
@@ -295,7 +309,7 @@ mod tests {
                 e("S", "A", "l-2", Some(900.0)),
             ],
         );
-        let w = queue_window(&p, &[], 10);
+        let w = queue_window(&p, &[], 10, true);
         assert_eq!(shape(&w), sv(&[("A", &["g-1", "l-2", "l-1"])]));
         let states: Vec<Listed> = w.volumes[0].jobs.iter().map(|j| j.state).collect();
         assert_eq!(states, [Listed::Running, Listed::Waiting, Listed::Waiting]);
@@ -311,7 +325,7 @@ mod tests {
                 e("S", "X", "l-1", Some(0.0)),
             ],
         );
-        let w = queue_window(&p, &[], 10);
+        let w = queue_window(&p, &[], 10, true);
         assert_eq!(
             shape(&w),
             sv(&[("R", &["g-1"]), ("X", &["l-1", "g-1"]), ("Y", &["g-1"])])
@@ -330,7 +344,7 @@ mod tests {
                 e("S", "P2", "g-1", Some(0.0)),
             ],
         );
-        let w = queue_window(&p, &[], 3);
+        let w = queue_window(&p, &[], 3, true);
         assert_eq!(order(&w), ["P2", "P1", "U1"]);
         assert_eq!(w.pending_volumes, 4);
     }
@@ -348,7 +362,7 @@ mod tests {
                 e("S", "X", "g-1", None),
             ],
         );
-        let w = queue_window(&p, &[], 4);
+        let w = queue_window(&p, &[], 4, true);
         assert_eq!(order(&w), ["A", "B", "Z", "Y"]);
     }
 
@@ -361,7 +375,7 @@ mod tests {
                 e("S", "A", "g-1", Some(60.0)),
             ],
         );
-        assert_eq!(order(&queue_window(&p, &[], 2)), ["B", "A"]);
+        assert_eq!(order(&queue_window(&p, &[], 2, true)), ["B", "A"]);
     }
 
     #[test]
@@ -373,7 +387,7 @@ mod tests {
                 e("S", "B", "g-1", Some(60.0)),
             ],
         );
-        assert_eq!(order(&queue_window(&p, &[], 2)), ["A", "B"]);
+        assert_eq!(order(&queue_window(&p, &[], 2, true)), ["A", "B"]);
     }
 
     #[test]
@@ -398,10 +412,41 @@ mod tests {
                 e("S", "D", "g-1", Some(680.0)),
             ],
         );
-        let a = queue_window(&before, &[], 3);
-        let b = queue_window(&after, &[], 3);
+        let a = queue_window(&before, &[], 3, true);
+        let b = queue_window(&after, &[], 3, true);
         assert_eq!(shape(&a), shape(&b));
         assert_eq!(order(&a), ["R", "A", "B", "C"]);
+    }
+
+    /// Finding: a held queue still prices its waiting jobs on the held machines' idle
+    /// lanes, at "now + run time", so every finishing time moves with the clock. Two
+    /// idle lanes, plan order A (200 s) on one, then B (100 s) and C (50 s) on the
+    /// other: by finishing time the window cycles [A,B] → [B,C] → [B,A] → [A,B] every
+    /// 300 s with nothing in the queue changing. Untimed (held) it stays in plan order.
+    #[test]
+    fn a_held_queue_keeps_plan_order_as_the_clock_moves() {
+        let at = |now: f64| {
+            plan(
+                vec![],
+                vec![
+                    e("S", "A", "g-1", Some(now + 200.0)),
+                    e("S", "B", "g-1", Some(now + 100.0)),
+                    e("S", "C", "g-1", Some(now + 150.0)),
+                ],
+            )
+        };
+        let timed: Vec<Vec<String>> = [0.0, 100.0, 150.0, 200.0]
+            .iter()
+            .map(|now| order(&queue_window(&at(*now), &[], 2, true)))
+            .collect();
+        assert_eq!(
+            timed,
+            [["A", "B"], ["B", "C"], ["B", "A"], ["A", "B"]],
+            "timed, the window follows the clock"
+        );
+        for now in [0.0, 100.0, 150.0, 200.0, 250.0, 299.0] {
+            assert_eq!(order(&queue_window(&at(now), &[], 2, false)), ["A", "B"]);
+        }
     }
 
     #[test]
@@ -414,7 +459,7 @@ mod tests {
             ],
         );
         let claimed = [e("S", "X", "g-1", None)];
-        let w = queue_window(&p, &claimed, 1);
+        let w = queue_window(&p, &claimed, 1, true);
         assert_eq!(order(&w), ["R", "X", "Y"]);
         let states: Vec<Listed> = w.volumes.iter().map(|v| v.jobs[0].state).collect();
         assert_eq!(states, [Listed::Running, Listed::Claimed, Listed::Waiting]);
@@ -433,7 +478,7 @@ mod tests {
                 held(e("S", "H", "l-1", None)),
             ],
         );
-        let w = queue_window(&p, &[], 2);
+        let w = queue_window(&p, &[], 2, true);
         assert_eq!(shape(&w), sv(&[("A", &["g-1", "l-1"]), ("B", &["g-1"])]));
         assert_eq!(w.pending_volumes, 3);
     }
@@ -448,7 +493,7 @@ mod tests {
                 e("S", "B", "g-1", Some(900.0)),
             ],
         );
-        let w = queue_window(&p, &[], 1);
+        let w = queue_window(&p, &[], 1, true);
         assert_eq!(shape(&w), sv(&[("R", &["g-1", "l-1"])]));
         assert_eq!(w.pending_volumes, 2);
     }
@@ -460,7 +505,7 @@ mod tests {
             vec![e("S", "A", "g-1", Some(300.0))],
         );
         let claimed = [e("S", "A", "g-1", None)];
-        let w = queue_window(&p, &claimed, 10);
+        let w = queue_window(&p, &claimed, 10, true);
         assert_eq!(shape(&w), sv(&[("A", &["g-1"])]));
         assert_eq!(w.volumes[0].jobs[0].state, Listed::Running);
         assert_eq!(w.pending_volumes, 0);
