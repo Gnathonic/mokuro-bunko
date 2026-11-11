@@ -792,6 +792,101 @@ fn remote_arrivals_are_judged_off_the_actor() {
     assert_eq!(v.rows.len(), 1);
 }
 
+/// Finding: until a cloud arrival's judgement came back, the scheduler did not know
+/// the volume, and its manifest said `pending: []`, which a reader takes as finished
+/// (it stops watching the volume). It is busy (503) until the judgement is in.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cloud_arrival_is_busy_until_it_is_judged() {
+    use bunko_server::library::OutlookSource;
+    /// Judging `Vol 3` takes 3 s (a slow provider read).
+    struct SlowVol3;
+    impl LibraryFacts for SlowVol3 {
+        fn missing_pages(&self, cbz: &std::path::Path) -> i64 {
+            LibraryFacts::missing_pages(&FileFacts, cbz)
+        }
+        fn page_count(&self, cbz: &std::path::Path) -> Option<i64> {
+            if cbz.ends_with("Vol 3.cbz") {
+                std::thread::sleep(Duration::from_secs(3));
+            }
+            None
+        }
+    }
+    let c = tokio::task::spawn_blocking(cloud_sched).await.unwrap();
+    let db_dir = tempfile::tempdir().unwrap();
+    let db = Arc::new(
+        bunko_db::Database::open_with(
+            db_dir.path().join("db.sqlite"),
+            &bunko_db::DbOptions {
+                bcrypt_cost: 4,
+                ..bunko_db::DbOptions::default()
+            },
+        )
+        .unwrap(),
+    );
+    let mut config = cloud_config(c.layout.base.clone(), true);
+    config.ocr.autobench = false;
+    let backend = Arc::new(bunko_server::backend::DbAuthBackend::new(
+        db.clone(),
+        c.layout.clone(),
+    ));
+    let core = bunko_server::core::Core::with_layout(
+        Arc::new(parking_lot::RwLock::new(config)),
+        None,
+        backend,
+        c.layout.clone(),
+    );
+    let ocr = bunko_server::ocr::OcrControl::new(bunko_server::ocr::OcrDeps {
+        core,
+        db: Some(db),
+        facts: Arc::new(SlowVol3),
+        locks: Arc::new(bunko_library::service::NoPathLocks),
+        local: None,
+        clock: None,
+    });
+    let stop = tokio_util::sync::CancellationToken::new();
+    ocr.start(stop.clone());
+    // The first walk is in (Vol 2 owes its OCR).
+    eventually("the first walk", Duration::from_secs(20), || {
+        ocr.owed_pending("Series/Vol 2.cbz")
+            .is_some_and(|p| !p.is_empty())
+    })
+    .await;
+
+    let vol3 = c.layout.library().join("Series/Vol 3.cbz");
+    let c = tokio::task::spawn_blocking(move || {
+        let fake = c.remote.backend();
+        fake.reader_put(&format!("{ROOT}/Series/Vol 3.cbz"), &cbz(2, 100));
+        c.remote.feed().poll_now();
+        let vol3 = c.layout.library().join("Series/Vol 3.cbz");
+        eventually_sync("the new archive in the index", || {
+            bunko_store::fs::is_file(&vol3)
+        });
+        c
+    })
+    .await
+    .unwrap();
+    ocr.archive_arrived(&vol3);
+    let glue = bunko_server::glue::OcrGlue(ocr.clone());
+    let answer = glue.volume_outlook(&vol3, "Series", "Vol 3");
+    assert!(
+        answer.busy,
+        "a cloud arrival not judged yet is unknown, not finished: {:?}",
+        answer.pending
+    );
+    let until = Instant::now() + Duration::from_secs(20);
+    loop {
+        let answer = glue.volume_outlook(&vol3, "Series", "Vol 3");
+        if !answer.busy {
+            assert!(!answer.pending.is_empty(), "judged: it owes its OCR");
+            break;
+        }
+        assert!(Instant::now() < until, "never judged");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    stop.cancel();
+    tokio::task::spawn_blocking(move || drop(c)).await.unwrap();
+}
+
 /// Spec §3.5 / §9.1: while the store needs a new sign-in the queue holds with
 /// `storage-auth` (no new claims); it takes work again once the store is back.
 #[test]

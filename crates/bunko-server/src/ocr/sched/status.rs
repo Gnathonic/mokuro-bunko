@@ -348,15 +348,59 @@ impl Scheduler {
     ) -> QueuePlan {
         let pricing = self.pricing();
         let lane_machines = self.lane_machines();
+        // A machine held on its own (its benchmark, a pause) or whose downloads are
+        // held takes no new work: its idle lanes would price waiting jobs at "now + run
+        // time", which moves with the clock while the others' finishing times stay put.
+        // Its lanes take no waiting job in the plan (its running cards stay priced).
+        // When every machine is held the whole queue is (`queue_hold`): all keep
+        // planning, and the queue file follows plan order.
+        let stalled: HashSet<&str> = {
+            let stalled: HashSet<&str> = lane_machines
+                .iter()
+                .map(String::as_str)
+                .filter(|name| {
+                    self.machine_by_name(name).is_some_and(|m| {
+                        self.held(&m.name)
+                            || m.pause.is_some()
+                            || (!m.local && self.breaker_open(&m.pid))
+                    })
+                })
+                .collect();
+            if lane_machines.iter().all(|m| stalled.contains(m.as_str())) {
+                HashSet::new()
+            } else {
+                stalled
+            }
+        };
         let refusal = |g: &str, machine: &str| -> Option<String> {
+            if stalled.contains(machine) {
+                return Some(format!("{machine} takes no new work now"));
+            }
             let row = self.settings.rows.iter().find(|r| r.id == g)?;
             let m = self.machine_by_name(machine)?;
             self.refusal(&m.pid, row)
         };
         let hold = |g: &str| -> Option<String> {
             let row = self.settings.rows.iter().find(|r| r.id == g)?;
-            (row.precision_applies() && bunko_core::engines::is_forced_precision(&row.precision))
-                .then(|| hold_reason(&row.precision))
+            if row.precision_applies() && bunko_core::engines::is_forced_precision(&row.precision) {
+                return Some(hold_reason(&row.precision));
+            }
+            // Only machines that take no new work now could run it.
+            let mut waiting_for: Vec<&str> = stalled
+                .iter()
+                .copied()
+                .filter(|name| {
+                    self.machine_by_name(name)
+                        .is_some_and(|m| self.refusal(&m.pid, row).is_none())
+                })
+                .collect();
+            waiting_for.sort_unstable();
+            (!waiting_for.is_empty()).then(|| {
+                format!(
+                    "Waiting for {}, which takes no new work now",
+                    waiting_for.join(", ")
+                )
+            })
         };
         let inputs = PlanInputs {
             lane_count: lane_machines.len().max(1),

@@ -201,10 +201,12 @@ impl FetchedArchive {
         out
     }
 
-    /// The claim is over: kept in the spool for the volume's next job when the library
-    /// asked for that and the copy has a strong ETag to be matched by, else released.
-    pub fn finish(mut self) {
-        if let Some((spool, url)) = self.keep.take()
+    /// The claim is over: kept in the spool for the volume's next job when its run
+    /// `completed` (not failed, cancelled or released), the library asked for that and
+    /// the copy has a strong ETag to be matched by; else released.
+    pub fn finish(mut self, completed: bool) {
+        if completed
+            && let Some((spool, url)) = self.keep.take()
             && let Some(etag) = self.etag.clone()
         {
             spool.keep(&url, etag, self);

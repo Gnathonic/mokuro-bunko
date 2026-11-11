@@ -563,6 +563,9 @@ async fn run_connection(
     let lost = CancellationToken::new();
     let (tx, mut events) = mpsc::unbounded_channel::<Event>();
     let kept = spool.clone();
+    // A new registration: the library offers nothing it kept for (also a copy a late
+    // worker of the last connection put back after that connection let its copies go).
+    kept.clear_kept();
     let fetcher = match http_client(&client.tls(), options.timing.connect_timeout, false) {
         Ok(http) => ArchiveFetcher::new(
             http,
@@ -818,6 +821,7 @@ async fn run_connection(
                 Some(Ok(_)) => last_heard = Instant::now(),
             },
             _ = tick.tick() => {
+                kept.expire_idle_kept();
                 if last_heard.elapsed() > SOCKET_SILENCE {
                     break Ended::Closed(format!("the library sent nothing for {}s", SOCKET_SILENCE.as_secs()));
                 }

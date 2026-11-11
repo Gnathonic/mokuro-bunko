@@ -212,3 +212,48 @@ fn queue_file_leaves_out_a_backed_off_job_the_manifest_keeps() {
         .expect("the manifest still owes the main file");
     assert_eq!(main["eta"], Value::Null);
 }
+
+/// Finding: while one machine of several is held on its own (its benchmark), the plan
+/// still priced waiting jobs on its idle lane at "now + run time". Those finishing
+/// times move with the clock while the others stay put, so they crossed the queue
+/// file's 300 s buckets in turn and the file reordered itself with nothing changing.
+/// A held machine's lanes take no waiting job in the plan.
+#[test]
+fn a_machine_held_on_its_own_takes_no_waiting_job_in_the_plan() {
+    let mut h = harness(vec![primary()]);
+    for v in ["A/V1.cbz", "B/V1.cbz", "C/V1.cbz", "D/V1.cbz"] {
+        h.add(v, 4);
+    }
+    h.at(0.0);
+    for m in ["a", "b"] {
+        for _ in 0..3 {
+            h.s.rates()
+                .record_volume(&bunko_sched::rate::rate_key("g-1", m), 4.0, 40.0, false);
+        }
+    }
+    h.run(|s| s.hold_queue("b"));
+    let mut a = h.connect("a", 1);
+    let mut b = h.connect("b", 1);
+    let _ = (a.drain(), b.drain());
+    assert!(h.s.claims.values().all(|c| c.machine == "a"), "b is held");
+    let eta = |e: &serde_json::Map<String, Value>| e["eta_at"].as_str().map(str::to_string);
+    for t in [0.0, 600.0] {
+        h.at(t);
+        let running = h.s.running_jobs();
+        let pending = h.s.pending_jobs();
+        let items = bunko_server::ocr::sched::Scheduler::plan_items(&pending, &running);
+        let plan = h.s.queue_plan(&running, &items, None);
+        let busy_until = plan.running.iter().filter_map(eta).max().expect("a runs");
+        assert!(!plan.pending.is_empty());
+        for e in &plan.pending {
+            let at = eta(e).expect("timed on a's lane");
+            assert!(
+                at > busy_until,
+                "{} is planned on b's idle lane ({at} before a frees at {busy_until})",
+                e["series"]
+            );
+        }
+    }
+    let (held, _, _) = h.s.queue_document();
+    assert_eq!(held, None, "one machine held is no queue hold");
+}

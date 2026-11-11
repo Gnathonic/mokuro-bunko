@@ -335,7 +335,13 @@ whatever the outcome (`watcher.py:2830-2833`); in memory only.
 > autobench do not count); the next holder then owns the volume. A holder keeps
 > a local claim's spooled archive (`VolumeOwner.spool`) for its next job of the
 > volume; a remote claim says `keep_archive` when more of the volume follows on
-> that processor, and `kept_archives` names every archive it holds.
+> that processor, and `kept_archives` names every archive it holds (every remote
+> op carries it, empty by generation). A holder waits for its machine through
+> that machine's benchmark or hold: the volume's jobs it can run are offered to
+> no other machine meanwhile (owner decision). The submit-time stamp of a remote
+> claim (`SessionJob.sent_stamp`) is the version a reused copy holds: a `fetch
+> ready` with `reused` for an archive whose stamp has changed since cancels the
+> claim and sends the job back.
 > `apply_settings` switching by volume on makes each claim in flight hold its
 > volume (`hold_volumes_in_flight`, with its spooled archive).
 > The plan (`PlanInputs.by_volume`) keeps a volume's jobs on the lane that took
@@ -1549,6 +1555,13 @@ card's own `eta_seconds` is used only as a hint by EFT lanes.
   CLI) — **DROP** in Rust (always False) (`watcher.py:2057-2074`);
 - `refusal_for(gen, machine)` = `_machine_precision_refusal` memoised;
   `hold_for(gen)` = `hold_reason(row.precision)` (`watcher.py:1860-1882`).
+  **Rust:** while some machine takes work, a machine that takes no new work (held
+  on its own by its benchmark, paused, or a remote one whose download breaker is
+  open) refuses every row, so its lanes take no waiting job: priced on its idle
+  lanes at "now + run time", those jobs' ETAs would move with the clock while the
+  others' stay put, and the queue file's 300 s buckets would reorder. Its running
+  cards stay priced. A row only such machines can run is held, `hold_for` naming
+  them. When every machine is held nothing is refused (the queue hold below).
 
 ### 20.2 Running jobs → lanes (`lanes_from_running`, `eta.py:902-993`)
 
@@ -1643,8 +1656,14 @@ manifest (wait 1.0 s, unbounded) (`catalog/api.py:32`, `237-252`).
 > (`OcrGlue::volume_outlook`). When that times out it answers from the owed
 > board the scheduler thread publishes on its tick (`actor::OwedBoard`, rebuilt
 > when the queue generation moved and 5 s passed, or every 60 s): the volume's
-> owed rows with `eta: null`, `recheck_after` 300. Only before the first publish
-> is the manifest 503 with `Retry-After: 5`. (0.5.2 answered `pending: []` on a
+> owed rows with `eta: null`, `recheck_after` 300. The manifest is 503 with
+> `Retry-After: 5` before the first publish, and for a volume that arrived after
+> the board was built and that the board lists nothing for
+> (`actor::FreshArrivals`: `OcrControl::archive_arrived` notes it before the
+> scheduler hears of it; the actor settles it once a board built after the
+> scheduler took it in is published). On a remote library the live answer is 503
+> too while the arrival is being judged on a helper (`Scheduler::judging`, until
+> `ArrivalJudged`, at most 300 s) and nothing is owed yet. (0.5.2 answered `pending: []` on a
 > timeout, which a reader takes as "finished"; a 503 instead would make a
 > deep link import the volume without its layers.)
 

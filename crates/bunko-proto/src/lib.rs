@@ -471,11 +471,12 @@ pub struct VolumeOp {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub keep_archive: bool,
     /// The archives (`archive` paths) whose copies this processor should go on keeping
-    /// (the library takes work by volume: the volumes this processor runs). A copy kept
-    /// of any other archive is dropped on receipt. None (an older library, or one
-    /// taking work by generation) says nothing. A kept copy has no time limit: the
-    /// library may wait hours for the volume's next job (a storage hold, a benchmark),
-    /// and only it knows when the copy is no longer wanted. Older processors ignore it.
+    /// (the volumes the library runs on it by volume; empty by generation). A copy kept
+    /// of any other archive is dropped on receipt. This library sends it on every remote
+    /// volume op; None (an older library) says nothing. The library may wait hours for
+    /// a volume's next job (a storage hold, a benchmark), and only it knows when the
+    /// copy is no longer wanted: a processor drops a kept copy on its own only once it
+    /// has waited 6 hours with no job of it. Older processors ignore it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kept_archives: Option<Vec<String>>,
 }

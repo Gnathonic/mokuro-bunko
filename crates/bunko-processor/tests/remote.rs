@@ -601,6 +601,16 @@ async fn two_claims(
     second_etag: &'static str,
     let_go: bool,
 ) -> (u32, serde_json::Value) {
+    two_claims_with(keep, second_etag, let_go, FakeConfig::default()).await
+}
+
+/// [`two_claims`] over a fake pipeline configured as `fake`.
+async fn two_claims_with(
+    keep: bool,
+    second_etag: &'static str,
+    let_go: bool,
+    fake: FakeConfig,
+) -> (u32, serde_json::Value) {
     let dir = tempfile::tempdir().unwrap();
     let mode = Mode::TwoClaims {
         keep,
@@ -608,10 +618,8 @@ async fn two_claims(
         let_go,
     };
     let (url, lib) = library(mode, true, 200).await;
-    let mut options = ServeOptions::new(
-        config(&url, dir.path()),
-        Arc::new(FakePipeline::new(FakeConfig::default())),
-    );
+    let mut options =
+        ServeOptions::new(config(&url, dir.path()), Arc::new(FakePipeline::new(fake)));
     options.backoff_start = Duration::from_millis(100);
     let shutdown = options.shutdown.clone();
     let task = tokio::spawn(serve(options));
@@ -684,5 +692,20 @@ async fn a_kept_archive_of_another_version_is_downloaded_again() {
 async fn a_kept_archive_the_library_lets_go_is_dropped() {
     let (gets, ready) = two_claims(true, "\"a1\"", true).await;
     assert_eq!(gets, 2);
+    assert!(ready.get("reused").is_none(), "{ready}");
+}
+
+/// Finding: a claim's copy was kept whenever the library asked, even when its run
+/// failed or was cancelled (a late worker could then add a copy after the connection
+/// cleared its copies). Only a run that completed keeps its copy: after a failed one
+/// the next claim downloads the archive again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_run_keeps_no_copy() {
+    let fake = FakeConfig {
+        fail_volumes: ["v1".to_string()].into_iter().collect(),
+        ..FakeConfig::default()
+    };
+    let (gets, ready) = two_claims_with(true, "\"a1\"", false, fake).await;
+    assert_eq!(gets, 2, "the failed claim's copy was not kept");
     assert!(ready.get("reused").is_none(), "{ready}");
 }

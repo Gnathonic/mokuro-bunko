@@ -69,6 +69,11 @@ pub const PRECISION_REFUSAL: &str = "precision not available here";
 pub const DISCARDED: &str =
     "the archive was replaced or deleted while it was being read, so the result was discarded";
 
+/// How long a remote arrival's judgement may take ([`Scheduler::arrival_judging`])
+/// before its volume is answered from what the scheduler knows again (a helper that
+/// never answered).
+pub const JUDGE_PATIENCE_SECONDS: f64 = 300.0;
+
 /// Live settings (`apply_settings`).
 #[derive(Clone, Debug)]
 pub struct Settings {
@@ -420,6 +425,12 @@ pub struct Scheduler {
     /// By volume: volumes a job of which was claimed and that are still owed; they go
     /// before volumes nobody started once their owner lets them go.
     pub volumes_started: HashSet<Arc<str>>,
+    /// Remote arrivals being judged on a helper thread: rel → (how many, when the
+    /// last was sent). Until the judgement is in, the volume's manifest is busy.
+    pub judging: HashMap<String, (u32, f64)>,
+    /// Arrivals taken into the owed index (or judged) since the actor last took this
+    /// list: the actor's owed board, built after it took them, knows them.
+    pub settled_arrivals: Vec<String>,
 }
 
 impl Scheduler {
@@ -500,6 +511,8 @@ impl Scheduler {
             scan_reset_at: f64::NEG_INFINITY,
             volume_owners: HashMap::new(),
             volumes_started: HashSet::new(),
+            judging: HashMap::new(),
+            settled_arrivals: Vec::new(),
             deps,
         }
     }

@@ -233,11 +233,16 @@
   volume the first one cannot. This server's own OCR on a
   cloud library keeps the spooled archive pinned for the whole volume, and a processor of
   this release keeps its copy between the volume's jobs when the library asks it to
-  (older processors download it for each job). On a MEGA library this is the default,
-  because its transfer quota counts every download; elsewhere the queue still runs
-  generation by generation unless set. The cost is throughput: a machine loads each
-  generation's models again for every volume and takes no volume ahead. The queue page,
-  the reader's queue file and the ETAs follow the order.
+  (older processors download it for each job). Only a job that finished keeps its copy,
+  and the copy goes once the library no longer runs the volume there (every job it
+  sends says which it does, none by generation), when the connection ends, or after 6
+  hours with no job of the volume; a copy of an archive replaced outside WebDAV since
+  the job was sent is not used, and the job goes back to the queue. A volume waits for
+  its machine through that machine's benchmark or hold. On a MEGA library this is the
+  default, because its transfer quota counts every download; elsewhere the queue still
+  runs generation by generation unless set. The cost is throughput: a machine loads
+  each generation's models again for every volume and takes no volume ahead. The queue
+  page, the reader's queue file and the ETAs follow the order.
 - **Sidecars and the queue file name the OCR's parts with versions.** A sidecar Bunko
   writes now carries `ocr_engine.parts`, e.g. `[{"role": "recognizer", "name":
   "Hayai Nova", "version": "2.5"}, {"role": "detector", "name": "PP-OCR Manga",
@@ -695,7 +700,12 @@
   can run, as held. A job left out is still owed, and the volume's manifest lists every
   one. A manifest whose OCR queue does not answer within a second now lists the jobs
   the volume owed when the queue last published its state, with no finishing time,
-  instead of saying nothing is pending, which a reader took as "done".
+  instead of saying nothing is pending, which a reader took as "done". A volume the
+  queue has not taken in yet (it arrived since, or on a cloud library its archive is
+  still being read) is 503 with `Retry-After` until it has. While one machine of
+  several takes no new work (its benchmark, a pause, its downloads held), the plan
+  gives it no waiting job, so the file no longer reorders itself every few minutes;
+  a job only that machine can run is shown held.
 - **Windows: no console window flashes while the app runs.** The app
   (`mokuro-bunko.exe`) and the server and processor it starts have no console, so
   every console program they ran was given a window of its own: `nvidia-smi`, which

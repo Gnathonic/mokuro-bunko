@@ -55,6 +55,9 @@ pub struct SessionJob {
     /// The runner has it (local: from submit; remote: `fetch ready` / `volume_started`).
     pub delivered: bool,
     pub archive_size: Option<u64>,
+    /// The archive's `(size, mtime_ns)` when the op was sent: a copy a processor kept
+    /// from the volume's earlier job is that version (its ETag matched the op's).
+    pub sent_stamp: Option<crate::ocr::types::Stamp>,
     pub sidecar_name: String,
     pub first_page_at: Option<f64>,
     pub done: i64,
@@ -192,15 +195,16 @@ impl Scheduler {
             .map(|m| (m.len(), crate::ocr::types::mtime_ns(m)));
         // A remote processor is told the archive's ETag (what a GET serves it with) and,
         // by volume, whether more of the volume's jobs follow on it: then it keeps its
-        // copy rather than download the archive again. By volume it is also told every
-        // archive it still runs volumes of: a copy it kept of any other one goes.
+        // copy rather than download the archive again. It is also told every archive it
+        // still runs volumes of (none by generation): a copy it kept of any other one
+        // goes, so a switch to generation order frees what it kept by volume.
         let (etag, keep_archive, kept_archives) = if local {
             (None, false, None)
         } else {
             (
                 meta.as_ref().map(bunko_dav::strong_file_etag),
                 self.more_of_volume_for(&pid, job),
-                self.settings.by_volume.then(|| self.volumes_held_by(&pid)),
+                Some(self.volumes_held_by(&pid)),
             )
         };
         let series_name =
@@ -263,6 +267,7 @@ impl Scheduler {
                     claim,
                     delivered: local,
                     archive_size: stamp.map(|s| s.0),
+                    sent_stamp: stamp,
                     sidecar_name,
                     first_page_at: None,
                     done: 0,
@@ -738,13 +743,13 @@ impl Scheduler {
                 id, state, detail, ..
             } => {
                 if state == "ready" {
-                    let Some(job) = self
+                    let Some((job, sent)) = self
                         .sessions
                         .get_mut(&sid)
                         .and_then(|s| s.jobs.get_mut(&id))
                         .map(|j| {
                             j.delivered = true;
-                            j.job.clone()
+                            (j.job.clone(), j.sent_stamp)
                         })
                     else {
                         return;
@@ -752,7 +757,7 @@ impl Scheduler {
                     let mut u = Map::new();
                     u.insert("delivered".into(), json!(true));
                     self.update_card(&job, u);
-                    self.download_delivered(pid, &job, &detail);
+                    self.download_delivered(pid, &sid, &id, &job, &detail, sent);
                 }
             }
             Event::VolumeReturned {

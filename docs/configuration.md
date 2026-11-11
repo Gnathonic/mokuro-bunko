@@ -510,8 +510,11 @@ library is 403, and a missing volume is 404. When the OCR queue does not
 answer within a second, `pending` lists the jobs the volume owed when the
 queue last published its state (within seconds), each with `"eta": null`,
 and `recheck_after` is 300. An empty `pending` would read as "nothing left
-to run". Only while the queue is starting and has published nothing yet is
-the manifest 503 with `Retry-After: 5`.
+to run". The manifest is 503 with `Retry-After: 5` in two cases only: while
+the queue is starting and has published nothing yet, and for a volume the
+queue has not taken in yet (one that arrived after the queue last published
+its state, or, on a cloud library, one whose archive the queue is still
+reading).
 
 #### OCR queue file
 
@@ -1131,8 +1134,11 @@ Existing `<Volume>.mokuro` files are untouched. See
 By volume costs throughput: a machine loads each generation's models again
 for every volume (a session runs one generation), it takes no volume ahead
 of the one it runs, and it runs the rest of a volume even when another
-machine would be faster. A machine that keeps a volume but takes none of its
-jobs for 10 minutes, while not held or benchmarking, gives the volume up.
+machine would be faster. A volume waits for its machine through that
+machine's benchmark or hold (a storage hold, an update): the jobs it can run
+are offered to no other machine meanwhile, however long the hold lasts. A
+machine that keeps a volume but takes none of its jobs for 10 minutes, while
+not held or benchmarking, gives the volume up.
 
 The archive is downloaded once per volume per machine:
 
@@ -1142,8 +1148,11 @@ The archive is downloaded once per volume per machine:
   spool's room (`storage.library.spool_gb`).
 - A processor of this release keeps its copy between the volume's jobs when
   the library asks it to (`processor.archive_memory_mb` holds it, or the
-  processor's storage), for at most 10 minutes; a kept copy makes way for
-  any new download. Older processors download the archive for each job.
+  processor's storage), until the library no longer runs the volume there
+  (it says so with each job it sends), the connection ends, or 6 hours pass
+  with no job of the volume. A copy makes way for a new download that has
+  no room without it. Only a job that finished keeps its copy. Older
+  processors download the archive for each job.
 
 The queue page, the reader's queue file and the ETAs follow the order: by
 volume a volume's jobs are planned back to back on the machine running it.

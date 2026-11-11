@@ -135,6 +135,8 @@ struct Inner {
     failing: actor::FailingVolumes,
     /// What the scheduler thread last published of the rows each volume is owed.
     owed: actor::OwedVolumes,
+    /// Archives that arrived after the published owed board was built.
+    fresh: actor::FreshArrivals,
     queue_file: queue_file::QueueFile,
     status: queue_api::StatusCache,
     storage: PathBuf,
@@ -251,6 +253,7 @@ impl OcrControl {
             running_jobs: actor::RunningJobs::default(),
             failing: actor::FailingVolumes::default(),
             owed: actor::OwedVolumes::default(),
+            fresh: actor::FreshArrivals::default(),
             queue_file: queue_file::QueueFile::default(),
             status: queue_api::StatusCache::default(),
             storage: layout.base.clone(),
@@ -310,6 +313,14 @@ impl OcrControl {
         Some(board.pending(rel))
     }
 
+    /// `rel` (library-relative archive path) arrived after the published owed board
+    /// was built: the board's `[]` for it says nothing. Read it before
+    /// [`Self::owed_pending`] (an arrival is settled after the board that knows it is
+    /// published). Never waits on the scheduler.
+    pub fn arrival_unsettled(&self, rel: &str) -> bool {
+        actor::arrival_unsettled(&self.0.fresh, rel)
+    }
+
     /// Start the scheduler thread, the in-process processor (full build, local
     /// processing on) and the stop watcher. Must be called inside a tokio runtime.
     pub fn start(&self, stop: CancellationToken) {
@@ -323,6 +334,7 @@ impl OcrControl {
             self.0.running_jobs.clone(),
             self.0.failing.clone(),
             self.0.owed.clone(),
+            self.0.fresh.clone(),
         ) {
             Ok(handle) => *self.0.thread.lock() = Some(handle),
             Err(e) => {
@@ -634,6 +646,11 @@ impl OcrControl {
 
     /// A library `.cbz` is in place (PUT, MOVE/COPY into place): queue its OCR now.
     pub fn archive_arrived(&self, cbz: &Path) {
+        // Noted before the scheduler hears of it: a manifest asked meanwhile must not
+        // read the published board's `[]` as "nothing owed".
+        if let Some(rel) = types::arrival_rel(&self.0.core.layout.library(), cbz) {
+            actor::note_arrival(&self.0.fresh, rel);
+        }
         self.send(Msg::ArchiveArrived(cbz.to_path_buf()));
     }
 

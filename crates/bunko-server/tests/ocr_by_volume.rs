@@ -584,8 +584,8 @@ fn a_reused_archive_is_not_counted_as_a_download() {
     assert_eq!(fetched(&h), 1);
 }
 
-/// By generation nothing changes: no lane keeps a volume, no archive is kept, and the
-/// ETag a remote processor is told is the one a GET serves.
+/// By generation nothing changes: no lane keeps a volume, no archive is kept (the op
+/// names none to keep), and the ETag a remote processor is told is the one a GET serves.
 #[test]
 fn by_generation_nothing_is_kept() {
     let mut h = harness(vec![primary(), lines()]);
@@ -597,7 +597,7 @@ fn by_generation_nothing_is_kept() {
     assert_eq!(archives(&ops), ["A/V1.cbz", "B/V1.cbz"]);
     let first = volume_ops(&ops).remove(0);
     assert!(!first.keep_archive);
-    assert_eq!(first.kept_archives, None);
+    assert_eq!(first.kept_archives, Some(Vec::new()));
     let meta = bunko_store::fs::metadata(&a1).unwrap();
     assert_eq!(
         first.etag.as_deref(),
@@ -605,4 +605,106 @@ fn by_generation_nothing_is_kept() {
     );
     assert!(h.s.volume_owners.is_empty());
     assert!(h.s.volumes_started.is_empty());
+}
+
+/// Finding: after a switch to generation order a processor kept the copies it had kept
+/// by volume for the rest of its connection: an op by generation named no archives
+/// (`kept_archives` absent), which tells a processor nothing. Every remote op of this
+/// library names them; by generation that is none, so the copies go.
+#[test]
+fn switching_to_generation_order_lets_kept_copies_go() {
+    let mut h = by_volume(vec![primary(), lines()]);
+    h.add("A/V1.cbz", 3);
+    h.add("B/V1.cbz", 3);
+    h.at(0.0);
+    let mut a = h.connect("a", 1);
+    let first = volume_ops(&a.drain()).remove(0);
+    assert!(first.keep_archive);
+    assert_eq!(
+        first.kept_archives,
+        Some(vec!["/mokuro-reader/A/V1.cbz".to_string()])
+    );
+    let mut s = h.s.settings().clone();
+    s.by_volume = false;
+    h.s.handle(Msg::Apply {
+        settings: Box::new(s),
+        reply: None,
+    });
+    finish(&mut h, &a, &first);
+    h.at(1.0);
+    let next = volume_ops(&a.drain());
+    assert!(!next.is_empty(), "a takes more work");
+    for op in &next {
+        assert!(!op.keep_archive);
+        assert_eq!(op.kept_archives, Some(Vec::new()), "{}", op.archive);
+    }
+}
+
+/// Finding: a copy a processor kept is the archive as it was when the op was sent (its
+/// ETag matched the op's), but the claim took the archive's version when the processor
+/// said it had it. An archive replaced outside WebDAV in between (no arrival cancels
+/// the claim) then had the old version's result accepted for the new one. A reused copy
+/// of an archive that changed since the op was sent sends the job back.
+#[test]
+fn a_reused_copy_of_an_archive_changed_since_the_op_is_sent_back() {
+    let mut h = by_volume(vec![primary(), lines()]);
+    let path = h.add("A/V1.cbz", 3);
+    h.at(0.0);
+    let mut a = h.connect("a", 1);
+    let first = volume_ops(&a.drain()).remove(0);
+    let reused = || -> BTreeMap<String, Value> {
+        let mut d = BTreeMap::new();
+        d.insert("bytes".into(), json!(1000));
+        d.insert("requests".into(), json!(0));
+        d.insert("reused".into(), json!(true));
+        d
+    };
+    // Replaced outside WebDAV: another size, so another stamp.
+    ocr_common::write_cbz(&path, 4);
+    h.event(
+        &a,
+        Event::Fetch {
+            sid: first.sid.clone(),
+            id: first.claim.clone(),
+            state: "ready".into(),
+            detail: reused(),
+        },
+    );
+    assert!(
+        !h.s.claims
+            .values()
+            .any(|c| c.claim.as_deref() == Some(first.claim.as_str())),
+        "the claim on the old copy is released"
+    );
+    let ops = a.drain();
+    assert!(
+        ops.iter().any(|o| matches!(
+            o,
+            Op::Cancel { claim: Some(c), .. } if *c == first.claim
+        )),
+        "{ops:?}"
+    );
+
+    // The same version: the reused copy is taken, under the stamp the op was sent at.
+    let mut h = by_volume(vec![primary(), lines()]);
+    let path = h.add("A/V1.cbz", 3);
+    let sent = bunko_server::ocr::types::stamp_of(&path);
+    h.at(0.0);
+    let mut a = h.connect("a", 1);
+    let first = volume_ops(&a.drain()).remove(0);
+    h.event(
+        &a,
+        Event::Fetch {
+            sid: first.sid.clone(),
+            id: first.claim.clone(),
+            state: "ready".into(),
+            detail: reused(),
+        },
+    );
+    let claim =
+        h.s.claims
+            .values()
+            .find(|c| c.claim.as_deref() == Some(first.claim.as_str()))
+            .expect("still claimed");
+    assert_eq!(claim.stamp, sent);
 }

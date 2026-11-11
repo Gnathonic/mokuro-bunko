@@ -58,6 +58,50 @@ impl OwedBoard {
 /// The [`OwedBoard`] as last published; None until the scheduler first publishes it.
 pub type OwedVolumes = Arc<RwLock<Option<Arc<OwedBoard>>>>;
 
+/// Archives that arrived after the owed board was built: library-relative path → (how
+/// many arrivals of it the scheduler has not taken in yet, when the last came). The
+/// DAV hook adds to it before it tells the scheduler; the actor takes an arrival off
+/// once it has published a board built after the scheduler took it in (judged it, on a
+/// remote library). Until then the board's `[]` for that volume means "not seen yet",
+/// not "nothing owed".
+pub type FreshArrivals = Arc<parking_lot::Mutex<std::collections::HashMap<String, (u32, Instant)>>>;
+
+/// An arrival the scheduler never took in (it stopped, or a helper never answered)
+/// stops counting after this long.
+pub const ARRIVAL_PATIENCE: Duration = Duration::from_secs(600);
+
+/// An arrival of `rel` is on its way to the scheduler.
+pub fn note_arrival(fresh: &FreshArrivals, rel: String) {
+    let mut map = fresh.lock();
+    map.retain(|_, (n, at)| *n > 0 && at.elapsed() < ARRIVAL_PATIENCE);
+    let entry = map.entry(rel).or_insert((0, Instant::now()));
+    *entry = (entry.0 + 1, Instant::now());
+}
+
+/// `rel` arrived and the published owed board may not know it yet.
+pub fn arrival_unsettled(fresh: &FreshArrivals, rel: &str) -> bool {
+    fresh
+        .lock()
+        .get(rel)
+        .is_some_and(|(n, at)| *n > 0 && at.elapsed() < ARRIVAL_PATIENCE)
+}
+
+/// The board just published knows these arrivals.
+fn settle_arrivals(fresh: &FreshArrivals, settled: &[String]) {
+    if settled.is_empty() {
+        return;
+    }
+    let mut map = fresh.lock();
+    for rel in settled {
+        if let Some((n, _)) = map.get_mut(rel) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                map.remove(rel);
+            }
+        }
+    }
+}
+
 /// The owed board is rebuilt at most this often while the queue keeps changing …
 const OWED_EVERY: Duration = Duration::from_secs(5);
 /// … and at least this often (a renamed row changes no queue generation).
@@ -70,6 +114,7 @@ pub fn run(
     board: RunningJobs,
     failing: FailingVolumes,
     owed: OwedVolumes,
+    fresh: FreshArrivals,
 ) {
     let mut next_tick = Instant::now() + TICK;
     let mut published: Option<Instant> = None;
@@ -106,7 +151,11 @@ pub fn run(
                 (g != generation && at.elapsed() >= OWED_EVERY) || at.elapsed() >= OWED_AT_LEAST
             });
             if due {
+                // Taken before the board is built, settled after it is published: a
+                // manifest that finds an arrival settled finds it on the board.
+                let settled = std::mem::take(&mut sched.settled_arrivals);
                 *owed.write() = Some(Arc::new(sched.owed_board()));
+                settle_arrivals(&fresh, &settled);
                 owed_at = Some((generation, Instant::now()));
             }
         }
@@ -118,6 +167,7 @@ pub fn run(
     *board.write() = Arc::new(Vec::new());
     *failing.write() = Arc::default();
     *owed.write() = None;
+    fresh.lock().clear();
 }
 
 /// Start the thread.
@@ -127,10 +177,11 @@ pub fn spawn(
     board: RunningJobs,
     failing: FailingVolumes,
     owed: OwedVolumes,
+    fresh: FreshArrivals,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     std::thread::Builder::new()
         .name("ocr-scheduler".into())
-        .spawn(move || run(sched, rx, board, failing, owed))
+        .spawn(move || run(sched, rx, board, failing, owed, fresh))
 }
 
 /// A channel pair for the scheduler.

@@ -125,10 +125,10 @@ impl ArchiveHandle {
     }
 
     /// The claim is over: a fetched copy the library asked to keep waits in the spool
-    /// for the volume's next job; anything else is released.
-    fn finish(self) {
+    /// for the volume's next job when the run `completed`; anything else is released.
+    fn finish(self, completed: bool) {
         match self {
-            ArchiveHandle::Fetched(f) => (*f).finish(),
+            ArchiveHandle::Fetched(f) => (*f).finish(completed),
             ArchiveHandle::Local(_) => {}
         }
     }
@@ -1642,7 +1642,7 @@ fn work(shared: &Shared) {
             other_cpu: None,
         };
         if released {
-            job.archive.finish();
+            job.archive.finish(false);
             let _ = shared.reports.send(Msg::Terminal(Box::new(terminal)));
             continue;
         }
@@ -1700,8 +1700,10 @@ fn work(shared: &Shared) {
         // The archive goes back BEFORE the terminal event: the library's top-up that
         // event triggers must never find three archives held here. A copy the library
         // asked to keep waits in the spool, and gives way to any new download that
-        // needs its room.
-        job.archive.finish();
+        // needs its room; only a run that completed keeps it (a cancelled one may be
+        // a session the leaving connection abandoned, whose copies it already let go).
+        let completed = result.is_ok() && !shared.run_cancel.is_cancelled();
+        job.archive.finish(completed);
         let result = match result {
             Err(RunError::Fatal(error)) => {
                 tracing::error!(
