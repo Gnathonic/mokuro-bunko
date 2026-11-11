@@ -26,6 +26,7 @@
 
 use bunko_control::{Problem, UpdateView};
 use bunko_update::auto::{Blocked, InstallFailure, Marker, ReleaseInstaller};
+use bunko_update::tools::Windowless;
 use futures_util::future::BoxFuture;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -169,7 +170,8 @@ impl Installer {
         if let Who::Processor { config } = &i.who {
             cmd.arg("--processor-config").arg(config);
         }
-        cmd.env("NO_COLOR", "1")
+        cmd.windowless()
+            .env("NO_COLOR", "1")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
