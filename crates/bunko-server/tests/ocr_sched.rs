@@ -2411,3 +2411,28 @@ fn a_late_cloud_fetch_leaves_another_machines_claim_alone() {
         "the processor's claim was given back"
     );
 }
+
+/// A benchmark on this server cut short by turning its OCR off says so: it failed with
+/// "local disconnected", the internal machine id, as if a processor had dropped off.
+#[test]
+fn a_benchmark_cut_short_by_turning_this_servers_ocr_off_says_so() {
+    let mut h = harness(vec![primary()]);
+    h.s.settings.autobench = true;
+    h.s.settings.local_processing = true;
+    h.add("A/V1.cbz", 6);
+    h.at(0.0);
+    let mut ops = local_up(&mut h, &["fp32"]);
+    h.at(0.0);
+    let op = bench_op(&drain_rx(&mut ops)).expect("an autobench of this server");
+
+    set_local_processing(&mut h, false);
+
+    let got = h.s.bench_get("g-1", "local");
+    assert_eq!(got["state"], "failed", "{got}");
+    assert_eq!(got["error"], "OCR on this machine was turned off", "{got}");
+    let sample = h
+        .storage()
+        .join(".processing")
+        .join(format!("{}.cbz", op.bid));
+    assert!(!sample.exists(), "its sample is removed");
+}

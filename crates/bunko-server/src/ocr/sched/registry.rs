@@ -826,7 +826,18 @@ impl Scheduler {
         // A processor that drops off usually comes back: its autobench runs wait for it.
         let identity = (!machine.local && !self.stopping)
             .then(|| (machine.host_value.clone(), machine.catalog_value.clone()));
-        self.bench_machine_left(&machine.name, identity);
+        // What a benchmark it ran says it ended of: this server's OCR has no link to
+        // lose, so "local disconnected" said nothing.
+        let why = if !machine.local {
+            format!("{} disconnected", machine.name)
+        } else if !self.settings.local_processing {
+            "OCR on this machine was turned off".to_string()
+        } else if self.stopping {
+            "the server stopped".to_string()
+        } else {
+            format!("this server's OCR stopped ({reason})")
+        };
+        self.bench_machine_left(&machine.name, identity, &why);
         self.rebuild_lanes();
         self.bump();
         self.bump_page();

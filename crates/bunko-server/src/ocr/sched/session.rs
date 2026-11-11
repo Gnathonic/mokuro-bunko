@@ -119,7 +119,12 @@ impl Scheduler {
             })
         });
         if !sent {
-            self.fail_session_start(&claimed.pid, &row, &job, &format!("{name} disconnected"));
+            let why = if local {
+                "this server's OCR stopped".to_string()
+            } else {
+                format!("{name} disconnected")
+            };
+            self.fail_session_start(&claimed.pid, &row, &job, &why);
             return;
         }
         self.sessions.insert(sid.clone(), session);

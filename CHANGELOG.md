@@ -727,7 +727,9 @@
   again, it starts without a restart. A restart for another OCR backend sweeps the old
   sessions' leftovers the same way. A cloud archive fetched for this server's OCR after
   its claim went back no longer returns another processor's claim of that volume to the
-  queue (that processor's result was then thrown away as late).
+  queue (that processor's result was then thrown away as late). A benchmark of this
+  server cut short by turning it off now says "OCR on this machine was turned off"
+  instead of "local disconnected".
 - **A processor that drops off leaves no uploaded result behind.** A processor that
   disconnected (or whose account was disabled or deleted) after uploading a result but
   before saying the volume was done left that result in `.processing` for good: the
