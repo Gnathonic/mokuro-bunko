@@ -1858,6 +1858,14 @@ impl<B: Backend> LibraryStore for RemoteStore<B> {
         }
     }
 
+    /// The fence is shut because this Bunko is still claiming the library (§9.2): its
+    /// first sync, the settle wait (with what is left), or confirming its claim.
+    fn claiming(&self) -> Option<bunko_store::Claiming> {
+        self.core
+            .claiming()
+            .map(|left| bunko_store::Claiming { left })
+    }
+
     fn case_winner(&self, parent: &Path, fold: &str) -> Option<String> {
         let rel = self.rel(parent).ok()?;
         let idx = self.core.index.lock();

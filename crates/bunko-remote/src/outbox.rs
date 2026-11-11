@@ -685,6 +685,27 @@ impl<B: Backend> Core<B> {
             && (!self.lease_on || self.fence.get().is_some_and(|f| f.ok()))
     }
 
+    /// The fence is shut because this Bunko is still claiming the lease (the cases
+    /// [`Self::fence_refusal`] names `storage-lease-claiming`): `Some(left)`, with what
+    /// is left of the settle wait while it runs. `None`: the fence is open, or another
+    /// Bunko holds the lease, or the store stopped.
+    pub(crate) fn claiming(&self) -> Option<Option<Duration>> {
+        use crate::status::LeaseRecordState;
+        if self.fence_open() || self.crashed.load(Ordering::Acquire) {
+            return None;
+        }
+        let Some(fence) = self.fence.get() else {
+            return Some(None);
+        };
+        if let Some(left) = fence.claiming_left() {
+            return Some(Some(left));
+        }
+        match fence.state() {
+            LeaseRecordState::None | LeaseRecordState::Holder => Some(None),
+            LeaseRecordState::Standby | LeaseRecordState::Lost | LeaseRecordState::Released => None,
+        }
+    }
+
     /// Why a Sync write may not reach the provider now (the fence is shut): this
     /// Bunko is still claiming the lease (its first sync, or the settle wait of §9.2
     /// step 1.2, with what is left as the retry delay), or another Bunko holds it.

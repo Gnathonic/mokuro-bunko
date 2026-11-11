@@ -44,6 +44,9 @@ impl From<&PageSuffixes> for Suffixes {
 /// The most page-suffix reads asked of a helper at a time (remote store).
 pub const SUFFIX_BATCH: usize = 8;
 
+/// The start of [`Scheduler::upgrade_hold`]'s reason.
+pub const UPGRADES_WAIT: &str = "Upgrades wait until this Bunko holds the library";
+
 /// Appended to a row id to name that row's upgrade jobs in the queue order: they are a
 /// group of their own, ranked right after the row's missing files. Row ids are
 /// `[A-Za-z0-9_-]`, so the name never collides with a real row.
@@ -781,6 +784,40 @@ impl Scheduler {
         }
     }
 
+    /// Does `job`'s result replace a file the library has, in place: an upgrade's swap,
+    /// or a generation layer written again over its own outdated file (critique C10)?
+    /// That is a Sync write; a new file is a Deferred one.
+    pub fn replaces_in_place(&self, job: &Job) -> bool {
+        job.upgrade
+            || self
+                .owed
+                .volumes
+                .get(&*job.rel)
+                .is_some_and(|v| v.outdated.iter().any(|g| **g == *job.gid))
+    }
+
+    /// Why the jobs that replace a file in place ([`Self::replaces_in_place`]: upgrades,
+    /// and outdated layers written again) wait while the rest of the queue runs, or
+    /// None: on a cloud library this Bunko is still claiming (its first sync, the
+    /// settle wait, or confirming its claim, spec §9.2). Such a replace is a Sync write
+    /// checked against the cloud's current version, which only the Bunko holding the
+    /// library may make; a new OCR file is a Deferred write that waits in the outbox,
+    /// so other jobs run.
+    pub fn upgrade_hold(&self) -> Option<String> {
+        let store = bunko_store::store_for(&self.library())?;
+        if !store.caps().remote {
+            return None;
+        }
+        let claiming = store.claiming()?;
+        Some(match claiming.left {
+            Some(left) => format!(
+                "{UPGRADES_WAIT}; it is still claiming it (about {} left)",
+                bunko_remote::status::about(left)
+            ),
+            None => format!("{UPGRADES_WAIT}; it is still claiming it"),
+        })
+    }
+
     /// Hold (or release) every machine for an automatic update: no new claims; the
     /// claims in flight finish and upload.
     pub fn set_update_drain(&mut self, on: bool) {
@@ -971,8 +1008,13 @@ impl Scheduler {
             .cloned()
             .chain(self.attempted.iter().cloned())
             .collect();
-        // Phase B.
-        let proposed = self.candidates(&unavailable, true);
+        // Phase B. Upgrade jobs (and outdated layers written again) wait while this
+        // Bunko is still claiming a cloud library: their replace needs the lease. The
+        // rest of the queue runs.
+        let mut proposed = self.candidates(&unavailable, true);
+        if self.upgrade_hold().is_some() {
+            proposed.retain(|j| !self.replaces_in_place(j));
+        }
         // By volume: the jobs of volumes this lane started come first and are never left
         // to another lane; of the rest, only the jobs open to it.
         let by_volume = self.settings.by_volume;

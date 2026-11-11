@@ -272,6 +272,13 @@ impl Scheduler {
         if job.upgrade {
             e.insert("kind".into(), json!("upgrade"));
         }
+        // Held: the plan leaves it out of the lanes and shows why.
+        if let Some(reason) = &self.upgrade_held
+            && self.replaces_in_place(job)
+        {
+            e.insert("held".into(), json!(true));
+            e.insert("reason".into(), json!(reason));
+        }
         let key = self.failure_key_of(job, row);
         let mtime = self.owed.volumes.get(&*job.rel).map(|v| v.mtime);
         if let Some(attempts) = bunko_sched::failures::pending_attempts(
