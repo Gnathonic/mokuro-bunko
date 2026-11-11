@@ -728,6 +728,12 @@
   sessions' leftovers the same way. A cloud archive fetched for this server's OCR after
   its claim went back no longer returns another processor's claim of that volume to the
   queue (that processor's result was then thrown away as late).
+- **A processor that drops off leaves no uploaded result behind.** A processor that
+  disconnected (or whose account was disabled or deleted) after uploading a result but
+  before saying the volume was done left that result in `.processing` for good: the
+  volume went back to the queue, and nothing ever removed the file. Its uploads now go
+  with it, as they do when its session ends (a result already being installed stays
+  until the install is done).
 - **A library folder never takes a volume Mokuro Reader is still writing.** The
   reader's Local Folder writes the way Chromium does: an empty file first, then the
   bytes into `<name>.crswap` beside it, renamed over the empty file at the end. Bunko

@@ -1285,6 +1285,63 @@ fn a_mismatched_result_name_removes_only_its_claim_directory() {
     assert!(claim_dir.is_dir());
 }
 
+/// Regression (review finding): a processor that dropped off between uploading a result
+/// and its `volume_done` left that result in `.processing/<sid>/<claim>` for good: the
+/// drop forgot the upload, and nothing ever swept the directory. A session's end
+/// removes its uploads; the drop now does too, and its claim goes back as before.
+#[test]
+fn a_processor_that_drops_off_leaves_no_uploaded_result_behind() {
+    let mut h = harness(vec![primary()]);
+    h.add("A/V1.cbz", 3);
+    h.at(0.0);
+    let mut p = h.connect("box", 1);
+    let ops = p.drain();
+    let sid = opened(&ops)[0].clone();
+    let (claim, sidecar) = ops
+        .iter()
+        .find_map(|o| match o {
+            Op::Volume(v) => Some((v.claim.clone(), v.sidecar_name.clone())),
+            _ => None,
+        })
+        .expect("a volume was sent");
+    // Its result arrived, as the upload stores it; its `volume_done` never does.
+    let session_dir = h.storage().join(".processing").join(&sid);
+    let claim_dir = session_dir.join(&claim);
+    std::fs::create_dir_all(&claim_dir).unwrap();
+    std::fs::write(claim_dir.join(bunko_proto::RESULT_FILE), b"{}").unwrap();
+    // A half-written upload of the same session.
+    std::fs::create_dir_all(session_dir.join("v99")).unwrap();
+    std::fs::write(
+        session_dir
+            .join("v99")
+            .join(format!("{}.part", bunko_proto::RESULT_FILE)),
+        b"{",
+    )
+    .unwrap();
+    h.s.handle(Msg::ResultStored {
+        pid: p.pid.clone(),
+        sid: sid.clone(),
+        claim: claim.clone(),
+        name: sidecar,
+        sha256: "0".repeat(64),
+    });
+    assert!(claim_dir.join(bunko_proto::RESULT_FILE).is_file());
+
+    h.s.handle(Msg::Drop {
+        pid: p.pid.clone(),
+        reason: "the socket closed".into(),
+    });
+
+    assert!(h.s.claims.is_empty(), "{:?}", h.s.claims);
+    assert!(h.s.results.is_empty());
+    assert!(!session_dir.exists(), "its uploads were left behind");
+    assert!(h.s.failures.is_empty(), "a drop records nothing");
+    assert!(!h.library().join("A/V1.mokuro").exists());
+    // The volume goes to the next processor, whose upload has a directory of its own.
+    let mut q = h.connect("other", 1);
+    assert_eq!(names(&volumes(&q.drain())), ["A/V1.cbz"]);
+}
+
 /// This server's own hardware: a local machine on a channel, as `LocalUp` makes it.
 fn local_up(h: &mut H, formats: &[&str]) -> tokio::sync::mpsc::UnboundedReceiver<Op> {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();

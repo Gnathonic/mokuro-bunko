@@ -799,16 +799,23 @@ impl Scheduler {
             .filter(|(_, s)| s.pid == pid)
             .map(|(k, _)| k.clone())
             .collect();
-        for sid in sids {
-            self.sessions.remove(&sid);
+        for sid in &sids {
+            self.sessions.remove(sid);
             if machine.local {
                 // Its runner may still write there while it winds down.
                 self.local_scratch.insert(sid.clone());
             }
-            self.ended_sessions.insert(sid, now);
+            self.ended_sessions.insert(sid.clone(), now);
         }
         self.results
             .retain(|(sid, _), _| self.sessions.contains_key(sid));
+        if !machine.local {
+            // Results it uploaded whose `volume_done` never came: nobody collects them
+            // now (its claims went back above; one being installed keeps its file).
+            for sid in &sids {
+                self.sweep_session_scratch(sid);
+            }
+        }
         self.breakers.remove(pid);
         // Its volumes (and their spooled archives) go to whoever takes them next.
         for holders in self.volume_owners.values_mut() {
@@ -854,31 +861,39 @@ impl Scheduler {
     /// its processor has wound down and nothing writes there any more: a volume's
     /// workspace, a result it finished as it was stopped. A claim of such a session
     /// still being installed keeps its directory (the install removes it).
+    pub fn sweep_local_scratch(&mut self) {
+        for sid in std::mem::take(&mut self.local_scratch) {
+            self.sweep_session_scratch(&sid);
+        }
+    }
+
+    /// Remove what an ended session left in `.processing/<sid>`, except the directory of
+    /// a claim of it still being installed (the install reads it, then removes it).
     // unmounted: the `.processing` spool, beside the library.
     #[allow(clippy::disallowed_methods)]
-    pub fn sweep_local_scratch(&mut self) {
-        let processing = self.storage().join(".processing");
-        for sid in std::mem::take(&mut self.local_scratch) {
-            let installing: HashSet<&str> = self
-                .claims
-                .values()
-                .filter(|c| c.sid.as_deref() == Some(sid.as_str()))
-                .filter_map(|c| c.claim.as_deref())
-                .collect();
-            let dir = processing.join(&sid);
-            for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
-                if installing.contains(entry.file_name().to_string_lossy().as_ref()) {
-                    continue;
-                }
-                let _ = if entry.file_type().is_ok_and(|t| t.is_dir()) {
-                    std::fs::remove_dir_all(entry.path())
-                } else {
-                    std::fs::remove_file(entry.path())
-                };
-            }
-            // Only once empty: a result being installed is still there.
-            let _ = std::fs::remove_dir(&dir);
+    fn sweep_session_scratch(&self, sid: &str) {
+        if !bunko_proto::valid_id(sid) {
+            return;
         }
+        let installing: HashSet<&str> = self
+            .claims
+            .values()
+            .filter(|c| c.sid.as_deref() == Some(sid))
+            .filter_map(|c| c.claim.as_deref())
+            .collect();
+        let dir = self.storage().join(".processing").join(sid);
+        for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            if installing.contains(entry.file_name().to_string_lossy().as_ref()) {
+                continue;
+            }
+            let _ = if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                std::fs::remove_dir_all(entry.path())
+            } else {
+                std::fs::remove_file(entry.path())
+            };
+        }
+        // Only once empty: a result being installed is still there.
+        let _ = std::fs::remove_dir(&dir);
     }
 
     /// Every registration (local first, then by lowercase name), as the admin reads them.
