@@ -49,7 +49,7 @@ front (`--config`).
 | `serve --port` | CLI-only because where the server listens is fixed before it serves (`server.port`, `MOKURO_PORT`); the chooser picks a free port from 8080 |
 | `serve --ocr` | [This server](/_admin#server) → OCR → Run it on (`ocr.backend`: auto, CPU, or the GPU found) |
 | `serve --generations` | [Settings](/_admin#settings) → OCR → Generations |
-| `setup` | The server's own [setup](/setup): where the library lives (this computer, Google Drive, OneDrive, MEGA, a WebDAV server), Connect and Check, whether readers connect, admin account, who may join and remote access (tunnel, Dynamic DNS, HTTPS) when they do, OCR on this machine (lite build: connect a processor). From another computer it asks for the one-time code in the server log |
+| `setup` | The server's own [setup](/setup): where the library lives (this computer, a local folder, Google Drive, OneDrive, MEGA, a WebDAV server), Connect and Check, whether readers connect, admin account, who may join and remote access (tunnel, Dynamic DNS, HTTPS) when they do, OCR on this machine (lite build: connect a processor). From another computer it asks for the one-time code in the server log |
 | `setup --skip-if-exists` | CLI-only because it exists for container entrypoints and scripts; [setup](/setup) only runs while no admin exists |
 | `doctor` | [This server](/_admin#server) → Diagnostics → Run checks |
 | `doctor --processor` | [Diagnostics](/app/settings/doctor) on the processor's own page |
@@ -138,7 +138,8 @@ front (`--config`).
 | `library status` | [Storage](/_admin#storage) → Library (health, sync, store, quota), Uploads, caches and conflicts, Lease; the tray's library line ("Google Drive · synced 1 min ago", "Syncing 412/1000", "Needs sign-in") |
 | `library status --json` | CLI-only because it is the same report for scripts ([Storage](/_admin#storage) reads it as `/_admin/api/storage`) |
 | `library connect` | [setup](/setup) → Where does your library live? → Connect → Check; later [Storage](/_admin#storage) → Connect a library… / Sign in again… (`Tray → "Sign in again…"` opens it). One Connect button: a browser on the server signs in through the loopback page; elsewhere Google Drive gets a code to enter on any device, and OneDrive the sign-in page plus a field for the address the browser ends on |
-| `library connect <PROVIDER>` | [setup](/setup) → Where does your library live? (This computer, Google Drive, OneDrive, MEGA, A WebDAV server); [Storage](/_admin#storage) → Connect → Where does your library live? |
+| `library connect <PROVIDER>` | [setup](/setup) → Where does your library live? (This computer, Local folder, Google Drive, OneDrive, MEGA, A WebDAV server); [Storage](/_admin#storage) → Connect → Where does your library live? |
+| `library connect --path` | [setup](/setup) → Local folder → Choose the library folder (the path, or Browse… in a browser on the server's machine); [Storage](/_admin#storage) → Connect → Local folder |
 | `library connect --reader` | [setup](/setup) → Connect → "Which Mokuro Reader do you use?" (reader.mokuro.app or the beta); [Storage](/_admin#storage) → Change pairing… (a Disconnect, then a Connect with the other reader) |
 | `library connect --folder` | CLI-only because the pages connect the reader's own `mokuro-reader/` folder; another name is for a folder made by hand (`storage.library.folder`) |
 | `library connect --url` | [setup](/setup) → Connect → Server address; [Storage](/_admin#storage) → A WebDAV server → Server address |
@@ -146,7 +147,7 @@ front (`--config`).
 | `library connect --password-file` | [setup](/setup) → Connect → App password; [Storage](/_admin#storage) → A WebDAV server → App password (the pages take it in the form; the file is for scripts and Docker secrets) |
 | `library connect --allow-http` | [setup](/setup) → Connect → Allow http://; [Storage](/_admin#storage) → A WebDAV server → Allow http:// |
 | `library connect --email` | [setup](/setup) → Connect → Email (MEGA; the password and two-factor code beside it); [Storage](/_admin#storage) → MEGA |
-| `library connect --create` | [setup](/setup) → Check → Create mokuro-reader/; [Storage](/_admin#storage) → Connect → Create mokuro-reader/ |
+| `library connect --create` | [setup](/setup) → Check → Create mokuro-reader/ (Local folder: Create it); [Storage](/_admin#storage) → Connect → Create mokuro-reader/ (Create it) |
 | `library connect --use-this-account` | [setup](/setup) → Connect → "Use this account's library instead"; [Storage](/_admin#storage) → Connect → the same choice |
 | `library connect --browser` | [setup](/setup) → Connect (opened on the server itself: the sign-in page opens in a new tab); [Storage](/_admin#storage) → Connect from `localhost` |
 | `library connect --device` | [setup](/setup) → Connect → "Use a code instead" / "Use a sign-in code instead (work or school accounts)"; [Storage](/_admin#storage) → Connect → "Use a code instead" / "Use a sign-in code (work or school)" |

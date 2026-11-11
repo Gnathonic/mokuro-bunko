@@ -344,6 +344,16 @@ impl Limits {
         }
     }
 
+    /// A local folder: 8 concurrent calls, 2 transfers (spinning disks and network
+    /// shares thrash at more).
+    pub fn folder() -> Limits {
+        Limits {
+            concurrency: 8,
+            transfers: 2,
+            ..Limits::unlimited()
+        }
+    }
+
     /// WebDAV: 3 concurrent requests.
     pub fn webdav() -> Limits {
         Limits {

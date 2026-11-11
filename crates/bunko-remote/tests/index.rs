@@ -888,6 +888,8 @@ async fn fake_feed_drives_the_index_on_every_profile() {
         FakeBackend::webdav_plain(),
         FakeBackend::onedrive_like(),
         FakeBackend::mega_like(),
+        FakeBackend::folder_like(),
+        FakeBackend::folder_like_ci(),
     ] {
         let label = b.account().await.unwrap().label;
         b.reader_put("mokuro-reader/Series/Vol 1.cbz", b"zip");

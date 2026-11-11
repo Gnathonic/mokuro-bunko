@@ -1024,6 +1024,49 @@ lite image (or `latest` with `MOKURO_OCR_LOCAL_PROCESSING=false`) and a
 asks for the setup code even from a browser on the Docker host (see
 [First start](#first-start)): `docker logs mokuro-bunko` shows it.
 
+### A library folder on the host
+
+To keep the library in a folder of the host (the one Mokuro Reader's Local Folder
+uses on that machine, a second disk, a mounted share), mount it into the container
+and point `MOKURO_LIBRARY_PATH` at the mount (see [A library folder you
+choose](configuration.md#a-library-folder-you-choose)):
+
+```yaml
+services:
+  mokuro-bunko:
+    image: ghcr.io/gnathonic/mokuro-bunko:latest
+    volumes:
+      - mokuro-data:/data
+      - /srv/manga:/library
+    environment:
+      - PUID=1000   # the owner of /srv/manga
+      - PGID=1000
+      - MOKURO_LIBRARY_BACKEND=folder
+      - MOKURO_LIBRARY_PATH=/library
+      # Lets the setup wizard and the Storage tab choose a folder in the mount.
+      - MOKURO_LIBRARY_FOLDER_ROOTS=/library
+volumes:
+  mokuro-data:
+```
+
+- `bunko-init` chowns only the storage and config directories, never the library
+  folder (`TAKE_OWNERSHIP` included): set `PUID`/`PGID` to the folder's owner, or
+  make it writable for them. Connecting to a folder Bunko cannot write warns that
+  OCR results, covers and series info cannot be saved there.
+- In the setup wizard, type `/library`: **Browse…** is offered only in a browser
+  on the server's own machine, and inside a container it would list the
+  container's folders anyway.
+- A browser on the Docker host reaches the container through Docker's network, so
+  Bunko counts it as another computer: the wizard and the Storage tab connect a
+  library folder only at or under `MOKURO_LIBRARY_FOLDER_ROOTS`
+  (`storage.library.folder_roots`), which no page can change. Without it they
+  refuse and say so; `docker exec -it mokuro-bunko mokuro-bunko library connect
+  folder --path /library` works either way. See [Which
+  folders](configuration.md#which-folders).
+- On Docker Desktop (Mac, Windows) the container hears nothing of changes made on
+  the host: they show at `storage.library.poll.idle_s` (300 s by default). On Linux
+  a bind mount passes changes on at once.
+
 ### Docker Compose
 
 - [`deploy/docker-compose.yml`](../deploy/docker-compose.yml): the `latest`

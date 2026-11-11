@@ -8,7 +8,7 @@ A self-hosted manga library server with WebDAV, built-in OCR processing, and mul
 ## What it does
 
 - Serves a shared manga library over WebDAV so Mokuro Reader can connect directly
-- Keeps the library on its own disk, or in your own cloud storage (Google Drive, OneDrive, MEGA or any WebDAV server): it finds the volumes there, runs OCR and writes the results back next to them, with no server to host (see [Cloud library](#cloud-library))
+- Keeps the library on its own disk, in a folder you choose (the one Mokuro Reader's Local Folder uses), or in your own cloud storage (Google Drive, OneDrive, MEGA or any WebDAV server): it finds the volumes there, runs OCR and writes the results back next to them, with no server to host (see [Cloud library](#cloud-library) and [Local folder](#local-folder))
 - Tracks per-user reading progress (each user gets their own progress files transparently)
 - Compiles the reader's metadata files (`series.json`, `catalog.json`) server-side from the library itself, merging in client-submitted series facts (titles, links, tags), and recompiles within seconds of an upload
 - Runs OCR automatically on uploaded manga with [hayai-nova](https://huggingface.co/JustANormalTinkerer/hayai-ocr-v2.5-nova) by default, plus optional extra OCR layers from PaddleOCR-VL (`paddle-manga`) and PP-OCRv6 (`ppocr-manga`, which also reads scanned novels)
@@ -164,7 +164,9 @@ Copy [`config.example.yaml`](config.example.yaml) for a documented starting poin
 | `server.threads` | `0` | Async worker threads (`0` = `min(cores, 4)`) |
 | `server.cache_mb` | `32` | Memory budget of the in-memory caches |
 | `storage.base_path` | `~/.local/share/mokuro-bunko` | Library and database location |
-| `storage.library.backend` | `local` | Where the library is: `local`, `gdrive`, `onedrive`, `mega` or `webdav` (see [Cloud library](#cloud-library)) |
+| `storage.library.backend` | `local` | Where the library is: `local`, `folder`, `gdrive`, `onedrive`, `mega` or `webdav` (see [Cloud library](#cloud-library), [Local folder](#local-folder)) |
+| `storage.library.path` | | `backend: folder`: the library folder, a full path (`/srv/manga`, `D:\Manga`) |
+| `storage.library.folder_roots` | `[]` | The folders a browser on another computer may connect a library folder in (config file or `MOKURO_LIBRARY_FOLDER_ROOTS` only) |
 | `registration.mode` | `self` | `disabled`, `self`, `invite`, or `approval` |
 | `ocr.backend` | `auto` | `auto`, `cuda`, `rocm`, `cpu`, or `skip` (no OCR on this machine) |
 | `ocr.generations` | one `hayai-nova` row | The OCR recipes every volume gets a layer from, in run order |
@@ -192,6 +194,42 @@ mokuro-bunko library disconnect     # deletes nothing in the cloud
 - No password or token is written to `config.yaml`.
 
 Every setting is in [docs/configuration.md](docs/configuration.md#library-location).
+
+## Local folder
+
+New in 0.8. The library can also be a folder you choose, on this computer, a second disk or a mounted share: pick the same folder as Mokuro Reader's **Local Folder** (Chrome or Edge on a desktop). Bunko treats it exactly like a cloud folder: it reads and writes it in place, writes the reader's queue file and its marker there, and puts its OCR files, covers and the reader's metadata next to the volumes. The reader keeps reading the folder directly. This is not **This computer**, which keeps the library in Bunko's own `library` folder.
+
+```yaml
+storage:
+  library:
+    backend: folder
+    path: /srv/manga          # Windows: D:\Manga, or a share: \\files.example.com\manga
+```
+
+```
+mokuro-bunko library connect folder --path /srv/manga [--create]
+mokuro-bunko library disconnect     # leaves every file in the folder where it is
+```
+
+- The setup wizard and the admin panel's Storage tab take the path. **Browse…** lists folders only in a browser on the server's own machine; anywhere else, type the path as the server sees it.
+- From a browser on another computer, only a folder at or under `storage.library.folder_roots` (set in `config.yaml` or `MOKURO_LIBRARY_FOLDER_ROOTS`, none by default) can be chosen. System folders, Bunko's own folders and a folder holding them are refused for everyone ([Which folders](docs/configuration.md#which-folders)).
+- Switching to another folder (or back to This computer) is a different library: the old folder stays as it is.
+- Bunko's removals go to a hidden `.mokuro-bunko-trash` folder inside the library, kept 30 days, which the reader does not list.
+- In Docker, mount the folder and point Bunko at the mount (Bunko never changes the folder's owner, so set `PUID`/`PGID` to its owner):
+
+  ```yaml
+  volumes:
+    - mokuro-data:/data
+    - /srv/manga:/library
+  environment:
+    - PUID=1000   # the owner of /srv/manga
+    - PGID=1000
+    - MOKURO_LIBRARY_BACKEND=folder
+    - MOKURO_LIBRARY_PATH=/library
+    - MOKURO_LIBRARY_FOLDER_ROOTS=/library   # lets the wizard and Storage tab choose it
+  ```
+
+  On Docker Desktop (Mac, Windows), changes made outside the container can take up to `storage.library.poll.idle_s` (5 minutes) to show.
 
 ## OCR
 
@@ -274,7 +312,7 @@ mokuro-bunko admin          # users and invites: add-user, delete-user, list-use
                             #   set-password, disable-user, approve-user, restore-user,
                             #   generate-invite, list-invites, delete-invite
 mokuro-bunko config         # show, set, path, init, cors-add, cors-remove
-mokuro-bunko library        # status, connect <gdrive|onedrive|mega|webdav>, disconnect (a cloud library)
+mokuro-bunko library        # status, connect <gdrive|onedrive|mega|webdav|folder>, disconnect (a cloud or folder library)
 mokuro-bunko ssl            # enable, disable, status, generate
 mokuro-bunko tunnel         # status, cloudflare (a Cloudflare quick tunnel)
 mokuro-bunko dyndns         # setup, status, update, enable, disable

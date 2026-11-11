@@ -22,8 +22,8 @@ pub const USER_STATUSES: [&str; 4] = ["active", "pending", "disabled", "deleted"
 #[derive(Parser, Debug)]
 #[command(
     name = "mokuro-bunko",
-    about = "Mokuro Bunko - look after a manga library on this computer or in your Google Drive, OneDrive, MEGA or WebDAV storage: OCR, covers and series info.",
-    long_about = "Mokuro Bunko - look after a manga library on this computer or in your Google Drive, OneDrive, MEGA or WebDAV storage. Bunko OCRs new volumes, here or on other machines, and adds covers and series info. Readers can connect to Bunko, or keep reading straight from your cloud storage.",
+    about = "Mokuro Bunko - look after a manga library on this computer, in a folder you choose, or in your Google Drive, OneDrive, MEGA or WebDAV storage: OCR, covers and series info.",
+    long_about = "Mokuro Bunko - look after a manga library on this computer, in a folder you choose, or in your Google Drive, OneDrive, MEGA or WebDAV storage. Bunko OCRs new volumes, here or on other machines, and adds covers and series info. Readers can connect to Bunko, or keep reading straight from your cloud storage.",
     disable_version_flag = true
 )]
 pub struct Cli {
@@ -406,8 +406,10 @@ pub enum LibraryCmd {
         json: bool,
     },
     /// Keep the library in a cloud folder: Google Drive or OneDrive, MEGA with --email
-    /// and its password (asked on the terminal, never stored), or a WebDAV server with
-    /// its URL, user and app password. A running server restarts onto it.
+    /// and its password (asked on the terminal, never stored), a WebDAV server with
+    /// its URL, user and app password, or a folder you choose with --path (the folder
+    /// Mokuro Reader's Local Folder uses; Bunko keeps it like a cloud folder). A
+    /// running server restarts onto it.
     ///
     /// Google Drive and OneDrive sign in through the browser on a desktop (it opens by
     /// itself; the address is printed too). Without one (SSH, Docker, a NAS), Google
@@ -430,6 +432,8 @@ pub enum CloudProvider {
     Onedrive,
     Mega,
     Webdav,
+    /// A folder on this computer (--path)
+    Folder,
 }
 
 impl CloudProvider {
@@ -439,6 +443,7 @@ impl CloudProvider {
             CloudProvider::Onedrive => "onedrive",
             CloudProvider::Mega => "mega",
             CloudProvider::Webdav => "webdav",
+            CloudProvider::Folder => "folder",
         }
     }
 }
@@ -464,6 +469,10 @@ pub struct LibraryConnectArgs {
     /// The library folder in the cloud account  [default: mokuro-reader]
     #[arg(long, value_name = "NAME")]
     pub folder: Option<String>,
+    /// Local folder: the folder Mokuro Reader's Local Folder uses (Bunko reads and
+    /// writes it in place)
+    #[arg(long, value_name = "DIR")]
+    pub path: Option<PathBuf>,
     /// WebDAV: the server's URL (https, or http for a server on this machine)
     /// [default: storage.library.webdav.url]
     #[arg(long)]

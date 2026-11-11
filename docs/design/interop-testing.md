@@ -292,10 +292,10 @@ shaped profiles (§8.2).
 |---|---|---|
 | `dav` | reader ↔ Bunko (local library) | connect, list, open and read a volume, progress write and read-back, sidecar PUT, Basic (UTF-8 password) and Bearer auth, token renewal and logout revocation, CORS preflight from the reader's origin |
 | `api` | reader ↔ Bunko | the reader's queue poller and pending view on a real queue (304s, `done[]`), login and account flows, nav config with readers off, error banners for 401/429/503 |
-| `bridge` | reader ↔ Bunko ↔ cloudsim (each provider) and rclone | reader reads through Bunko from a cloud library; bridge PUT; 503 during the lease claim; restart resumes |
+| `bridge` | reader ↔ Bunko ↔ cloudsim (each provider), rclone and a library folder | reader reads through Bunko from a cloud library; bridge PUT; 503 during the lease claim; restart resumes |
 | `direct` | reader ↔ cloudsim (each provider) and rclone | reader alone: list, read, upload, 401 refresh, revoked token banner, 403 quota, 429 backoff, 412 conflict |
 | `shared` | reader and Bunko on one cloudsim folder (each provider) and rclone | the M7 exit checks: Bunko progress for a volume the reader uploaded; sidecar pulled on `done[]`; reader stops writing `series.json`/`catalog.json` while the marker is fresh and resumes 2 × ttl after Bunko stops or at once on `released`; edits go up as `<Vol>.edit.mokuro` and never as the main sidecar; a Bunko case merge shows as a rename with progress kept; duplicate roots (two top-level `mokuro-reader` folders plus a nested one) converge into the canonical root whether Bunko, the reader or both merge them, with the nested root untouched and no `Suspect` |
-| `cloud` | Bunko ↔ cloudsim and rclone (no reader) | the Rust-side Bunko ↔ cloud scenarios at process level: cold start, adoption, outbox under faults, lease handover, quota pauses |
+| `cloud` | Bunko ↔ cloudsim, rclone and a library folder (no reader) | the Rust-side Bunko ↔ cloud scenarios at process level: cold start, adoption, outbox under faults, lease handover, quota pauses; on a folder, a reader's writes and renames on the disk and the folder unplugged |
 | `perf` | all of the above, shaped | §8 |
 
 The 0.8 crossplay scenarios run inside those suites, one spec each (their checks are in
@@ -313,6 +313,17 @@ needed on either side):
 | S7 Allow on first connect | `dav/allow-first-connect` | `dav` | none |
 | S8 a spine offset cleared (no PUT on the next two syncs) | `dav/`, `shared/spine-offset-clear` | `dav`; `shared` on every cloud | none |
 | S9 reader-only dedup, then a Bunko restart with no hold | `direct/dup-roots`; its restart in `shared/dup-roots-lease` | `direct` and `shared`; google, mega | `dedup` |
+| A folder library: the reader's writes, renames, an unplugged folder | `cloud` scenarios `reader-writes`, `reader-rename`, `unplug` (Rust, `rig/cloud.rs`) | `cloud`; folder | none |
+
+**The `folder` provider** is a library folder on the rig's disk that Bunko keeps as its
+storage backend (`storage.library.backend: folder`, `storage.library.path`), as it keeps
+a cloud: the folder is the library root, the part a cloud's `mokuro-reader` folder plays.
+It runs `cloud` and `bridge`. `direct` and `shared` are not drivable on it: the reader's
+Local Folder opens a folder only through the File System Access picker
+(`showDirectoryPicker`), which Playwright cannot answer, and the OPFS storage Chromium
+offers instead is no folder on disk that Bunko could read. The reader's side of a folder
+library (reading Bunko's marker and queue from the folder) is covered by the reader's
+own vitest suite and a manual run in Chrome.
 
 A spec that needs a capability (`test.use({ needs: [...] })`) FAILS when the reader's
 driver lacks it, unless `interop/pending-reader-caps.txt` lists that capability: then it
@@ -324,7 +335,8 @@ done only while it lists nothing.
 **As built (I3, runner core):** `cargo xtask interop rig <suites> [--provider P,…]
 [--bin B] [--cloudsim-bin C] [--reader-dir D | --reader-ref SHA] [--grep G] [--headed]
 [--keep]`. Suites and providers expand to the pairs that apply (`dav` and `api` on
-`local`, the others on `google`, `microsoft`, `mega` and `rclone`; `all` for either).
+`local`; `direct` and `shared` on `google`, `microsoft`, `mega` and `rclone`; `bridge`
+and `cloud` on those and `folder`; `all` for either).
 `--bin` must be a testing build (checked through `processor-fake --help`). `--grep`
 keeps the scenarios and specs whose name contains G, as plain case-sensitive text in
 every suite (Playwright gets it escaped, inside `/…/`, with `--pass-with-no-tests`). Each pair
@@ -861,8 +873,25 @@ server stands by and answers writes 503 `storage-lease`; once the first stops, i
 takes the library over and its PUT lands) and **quota-pause** (a full provider: a
 PUT answers 507, the next one 507 without reaching the provider, health blocked by
 `StorageFull`). The hold lifts at the first storage probe, five minutes on; the suite
-does not wait for it. On rclone, outbox-faults and quota-pause are skipped (no fault
-knobs). Measured locally (wall time, setup included): google 25–38 s, microsoft 22–34 s,
+does not wait for it. On rclone and on a folder, outbox-faults and quota-pause are
+skipped (no fault knobs).
+
+On a folder (`rig/folder.rs`: `<work>/folder/Library`, a root not named
+`mokuro-reader`, seeded with the same files, the library folder's prefix dropped, plus a
+series of its own for the rename) the suite also runs three scenarios that skip
+themselves elsewhere: **reader-writes** (a new volume written as Chromium's File System
+Access writes, an empty file and its bytes in `<name>.crswap` until the write closes:
+neither the catalog nor the bridge has it for the 6 s the write stays open; the bridge
+serves the reader's bytes within 10 s of the swap, and the catalog lists it within 30 s,
+since it compiles a series only after 10 s of quiet; then a sidecar replaced the same
+way is served with its old bytes until the swap and with the new ones within 10 s),
+**reader-rename** (a series renamed as the reader's Local Folder renames: per syncable
+file, archive, sidecar, cover and `series.json`, a copy then a delete, and the old
+folder pruned only if empty by then: the catalog moves the volume, two
+walks later nothing of either name is queued, its sidecar moved with it and no numbered
+sidecar exists) and, last, **unplug** (the folder's parent renamed away: the store goes
+offline and the catalog stays as it was; renamed back: the store is online and holds the
+lease, and the catalog and the folder's volumes are unchanged after a walk). Measured locally (wall time, setup included): google 25–38 s, microsoft 22–34 s,
 mega 87–100 s (one MEGA command a second, and a 30 s lease ttl so a heartbeat keeps
 writes open). On rclone the suite first checks the CORS preflight a browser would send
 from an allowed origin (`OPTIONS` asking for PROPFIND with `Authorization`): it must
@@ -1053,7 +1082,13 @@ to `main` and `0.8/remote-storage`, and on demand; `catalog-perf` is unchanged.
   |---|---|---|
   | local | `dav,api` | `local` |
   | google, microsoft, mega, rclone | `bridge,direct,shared` | that one |
-  | cloud | `cloud` | `all` |
+  | cloud | `cloud` | `google,microsoft,mega,rclone` |
+  | folder | `cloud,bridge` | `folder` |
+
+  The folder leg runs `cloud` and `bridge`; `direct` and `shared` are not drivable on a
+  folder (the File System Access picker, §7.1), the reader's side of a folder library
+  being covered by its vitest suite and a manual Chrome run. The cloud leg names its four
+  providers rather than `all`, so the folder's `cloud` suite runs in one leg only.
 
   The rclone and cloud legs use the rig's pinned rclone download. The reader's build
   cache is per machine (rig/reader.rs), so a leg runs `vite build` once more over the

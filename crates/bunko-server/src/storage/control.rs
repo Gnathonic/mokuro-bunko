@@ -278,9 +278,9 @@ impl StorageControl {
     /// The library on this disk again (`backend: local`). Refused while a cloud store
     /// that ran here still has its credentials: that needs its Disconnect.
     pub fn use_local(&self) -> Result<(), String> {
-        if let Some(name) = self.connected_store_on_file() {
+        if let Some(which) = self.connected_store_on_file() {
             return Err(format!(
-                "this Bunko manages a {name} library: disconnect it first (it is a different library)"
+                "this Bunko manages {which}: disconnect it first (it is a different library)"
             ));
         }
         let was_cloud = self.handle.is_some();
@@ -291,18 +291,27 @@ impl StorageControl {
         Ok(())
     }
 
-    /// The provider name of a store with credentials that ran here.
-    fn connected_store_on_file(&self) -> Option<&'static str> {
+    /// Which library a store with credentials that ran here is: "a Google Drive
+    /// library", "the library in /srv/manga".
+    fn connected_store_on_file(&self) -> Option<String> {
         let creds = CredentialStore::open(&self.cloud_dir).ok()?;
         for id in creds.store_ids().ok()? {
             if store_ran(&self.cloud_dir, &id)
                 && let Ok(Some(c)) = creds.get(&id)
             {
-                return Some(
-                    LibraryBackend::parse(&c.provider)
-                        .map(provider_name)
-                        .unwrap_or("cloud"),
-                );
+                if c.provider == super::folder::PROVIDER {
+                    return Some(format!(
+                        "the library in {}",
+                        c.account_label
+                            .as_deref()
+                            .or(c.account_id.as_deref())
+                            .unwrap_or("a folder")
+                    ));
+                }
+                let name = LibraryBackend::parse(&c.provider)
+                    .map(provider_name)
+                    .unwrap_or("cloud");
+                return Some(format!("a {name} library"));
             }
         }
         None
@@ -408,6 +417,12 @@ impl StorageControl {
         if let Some(p) = cred.client_id.as_deref().and_then(pairing_of_client) {
             config.storage.library.google_project = p;
         }
+        // A folder store's account is its folder: an older folder can still be drained.
+        if cred.provider == super::folder::PROVIDER
+            && let Some(path) = cred.account_id.as_deref()
+        {
+            config.storage.library.path = Some(PathBuf::from(path));
+        }
         let layout = config.storage.layout();
         let opened = open_library_store(&config, &layout)
             .map_err(|e| DisconnectError::Failed(e.to_string()))?;
@@ -451,8 +466,10 @@ fn configured_json(lib: &LibraryConfig) -> Value {
             "username": lib.webdav.username,
             "allow_http": lib.webdav.allow_http,
         },
+        "path": lib.path,
         "pinned": {
             "backend": std::env::var("MOKURO_LIBRARY_BACKEND").ok().filter(|v| !v.trim().is_empty()),
+            "path": std::env::var("MOKURO_LIBRARY_PATH").ok().filter(|v| !v.trim().is_empty()),
             "google_project": std::env::var("MOKURO_GOOGLE_PROJECT").ok().filter(|v| !v.trim().is_empty()),
             "serve_readers": std::env::var("MOKURO_SERVE_READERS").ok().filter(|v| !v.trim().is_empty()),
         },
@@ -469,6 +486,12 @@ fn hhmm(t: std::time::SystemTime) -> String {
 /// `storage-lease`. Each `{kind, severity, text, hint}`.
 pub fn storage_problems(h: &StoreHandle, health: &Health, conflicts: usize) -> Vec<Value> {
     let name = provider_name(h.backend);
+    let folder = h.backend == LibraryBackend::Folder;
+    let path = h
+        .path
+        .as_ref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
     let mut out = Vec::new();
     let mut push = |kind: &str, severity: &str, text: String, hint: Option<String>| {
         out.push(json!({"kind": kind, "severity": severity, "text": text, "hint": hint}));
@@ -488,7 +511,11 @@ pub fn storage_problems(h: &StoreHandle, health: &Health, conflicts: usize) -> V
         push(
             "storage-auth",
             "fail",
-            format!("The {name} library is not connected"),
+            if folder {
+                "The library folder is not connected".into()
+            } else {
+                format!("The {name} library is not connected")
+            },
             h.problem().map(str::to_string),
         );
     }
@@ -504,6 +531,14 @@ pub fn storage_problems(h: &StoreHandle, health: &Health, conflicts: usize) -> V
                 hint,
             );
         }
+        Health::Offline if folder => push(
+            "storage-offline",
+            "warn",
+            "The library folder cannot be reached: Bunko keeps retrying".into(),
+            Some(format!(
+                "Is the drive or network share connected? Bunko looks at {path}."
+            )),
+        ),
         Health::Offline => push(
             "storage-offline",
             "warn",
@@ -518,6 +553,12 @@ pub fn storage_problems(h: &StoreHandle, health: &Health, conflicts: usize) -> V
                 hhmm(*retry_at)
             ),
             None,
+        ),
+        Health::Blocked(Blocked::StorageFull) if folder => push(
+            "storage-full",
+            "fail",
+            "The disk that holds the library folder is full: results wait in the outbox".into(),
+            Some("Free some space on that disk.".into()),
         ),
         Health::Blocked(Blocked::StorageFull) => push(
             "storage-full",
@@ -543,8 +584,12 @@ pub fn storage_problems(h: &StoreHandle, health: &Health, conflicts: usize) -> V
         Health::Suspect => push(
             "storage-conflict",
             "warn",
-            "Many files disappeared from the cloud folder at once: Bunko holds those removals"
-                .into(),
+            if folder {
+                "Many files disappeared from the library folder at once: Bunko holds those removals"
+            } else {
+                "Many files disappeared from the cloud folder at once: Bunko holds those removals"
+            }
+            .into(),
             Some("Check the folder, then apply the removals in Storage.".into()),
         ),
         _ if h
@@ -578,8 +623,9 @@ pub fn storage_problems(h: &StoreHandle, health: &Health, conflicts: usize) -> V
             "storage-conflict",
             "warn",
             format!(
-                "{conflicts} conflict{} in the cloud folder",
-                if conflicts == 1 { "" } else { "s" }
+                "{conflicts} conflict{} in the {} folder",
+                if conflicts == 1 { "" } else { "s" },
+                if folder { "library" } else { "cloud" }
             ),
             Some("See Storage → Conflicts.".into()),
         );

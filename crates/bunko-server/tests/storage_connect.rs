@@ -866,3 +866,426 @@ fn disconnect_modes_parse_from_the_pages() {
     }
     assert!(DisconnectMode::from_json(&json!({"mode": "nuke"})).is_err());
 }
+
+// ---------------------------------------------------------------- a local folder
+
+/// A library in a folder (`backend: folder`), through the live driver: the Check over a
+/// real directory, "Create it?", the refusals of Bunko's own folder, Disconnect (the
+/// folder is left as it was but for the marker) and a switch to another folder (an
+/// account change, as on the clouds).
+mod folder_library {
+    use super::*;
+    use bunko_core::config::LibraryConfig;
+    use bunko_server::storage::connect::{ConnectRequest, ConnectStatus, RequestOrigin};
+    use parking_lot::Mutex;
+    use std::collections::BTreeMap;
+
+    /// Two series, three volumes, one OCR file.
+    fn seed(folder: &Path) {
+        std::fs::create_dir_all(folder.join("Series A")).unwrap();
+        std::fs::create_dir_all(folder.join("Series B")).unwrap();
+        std::fs::write(folder.join("Series A/Vol 1.cbz"), b"zip-1").unwrap();
+        std::fs::write(folder.join("Series A/Vol 1.mokuro"), b"{}").unwrap();
+        std::fs::write(folder.join("Series A/Vol 2.cbz"), b"zip-2").unwrap();
+        std::fs::write(folder.join("Series B/Vol 1.cbz"), b"zip-3").unwrap();
+    }
+
+    /// Every file and folder under `dir` (folders end in `/`) with its bytes.
+    fn tree(dir: &Path) -> BTreeMap<String, Vec<u8>> {
+        let mut out = BTreeMap::new();
+        let mut todo = vec![(dir.to_path_buf(), String::new())];
+        while let Some((d, rel)) = todo.pop() {
+            for e in std::fs::read_dir(&d).unwrap().flatten() {
+                let name = format!("{rel}{}", e.file_name().to_string_lossy());
+                if e.file_type().unwrap().is_dir() {
+                    out.insert(format!("{name}/"), Vec::new());
+                    todo.push((e.path(), format!("{name}/")));
+                } else {
+                    out.insert(name, std::fs::read(e.path()).unwrap());
+                }
+            }
+        }
+        out
+    }
+
+    fn folder_req(path: &Path) -> ConnectRequest {
+        ConnectRequest {
+            provider: "folder".into(),
+            path: Some(path.to_string_lossy().into_owned()),
+            ..ConnectRequest::default()
+        }
+    }
+
+    /// A Connector on the live drivers over the storage base `base`.
+    fn live_connector(base: &Path) -> (Connector, Arc<Mutex<LibraryConfig>>) {
+        let lib = Arc::new(Mutex::new(LibraryConfig::default()));
+        let (r, w) = (lib.clone(), lib.clone());
+        let c = Connector::new(
+            base.join("cloud"),
+            Arc::new(move || r.lock().clone()),
+            Arc::new(move |choice| {
+                choice.apply_to(&mut w.lock());
+                Ok(())
+            }),
+        );
+        (c, lib)
+    }
+
+    async fn settle(c: &Connector) -> ConnectStatus {
+        c.wait_for(|s| !s.in_progress(), Duration::from_secs(30))
+            .await
+    }
+
+    fn shown(p: &Path) -> String {
+        p.to_string_lossy().into_owned()
+    }
+
+    /// Refused before any folder is opened: Bunko's own folder, anything in it but its
+    /// `library/`, a folder that holds it, a relative path, a file, a path whose parent
+    /// is missing too. Nothing is written.
+    #[tokio::test]
+    async fn folders_bunko_cannot_use_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("storage");
+        std::fs::create_dir_all(base.join("cloud")).unwrap();
+        std::fs::write(dir.path().join("a-file"), b"x").unwrap();
+        let (c, lib) = live_connector(&base);
+        for (path, says) in [
+            (base.clone(), "part of Bunko's own folder"),
+            (base.join("cloud"), "part of Bunko's own folder"),
+            (base.join("users/me"), "part of Bunko's own folder"),
+            (dir.path().to_path_buf(), "holds Bunko's own folder"),
+            (PathBuf::from("manga"), "starts with / or a drive letter"),
+            (dir.path().join("a-file"), "is a file, not a folder"),
+            (dir.path().join("gone/manga"), "is missing too"),
+        ] {
+            c.start(folder_req(&path), RequestOrigin::cli()).unwrap();
+            let s = settle(&c).await;
+            assert_eq!(s.state, "failed", "{path:?}: {s:?}");
+            let e = s.error.unwrap();
+            assert!(e.contains(says), "{path:?}: {e}");
+        }
+        assert!(!dir.path().join("gone").exists());
+        let empty = ConnectRequest {
+            provider: "folder".into(),
+            ..ConnectRequest::default()
+        };
+        assert_eq!(
+            c.start(empty, RequestOrigin::cli()).unwrap_err(),
+            "Enter the folder's full path."
+        );
+        assert_eq!(lib.lock().backend, LibraryBackend::Local);
+        assert!(!base.join("cloud/credentials.json").exists());
+    }
+
+    /// Refused for everyone, the CLI included, before the folder is opened: the top of
+    /// the system disk, system folders, and Bunko's own settings folder (and a folder
+    /// holding it).
+    #[tokio::test]
+    async fn system_folders_and_bunkos_settings_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("storage");
+        std::fs::create_dir_all(base.join("cloud")).unwrap();
+        let (c, lib) = live_connector(&base);
+        let mut refused: Vec<(PathBuf, &str)> = Vec::new();
+        #[cfg(unix)]
+        for p in ["/", "/etc", "/usr/lib", "/proc/self", "/boot/../etc/x"] {
+            refused.push((PathBuf::from(p), "is a system folder"));
+        }
+        #[cfg(windows)]
+        {
+            let windir = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
+            let drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into());
+            refused.push((PathBuf::from(format!(r"{drive}\")), "is a system folder"));
+            refused.push((PathBuf::from(&windir), "is a system folder"));
+            refused.push((
+                PathBuf::from(&windir).join("System32"),
+                "is a system folder",
+            ));
+            refused.push((
+                PathBuf::from(format!(r"{drive}\Program Files")),
+                "is a system folder",
+            ));
+            refused.push((
+                PathBuf::from(format!(r"{drive}\ProgramData\x")),
+                "is a system folder",
+            ));
+        }
+        let settings = bunko_core::storage::default_config_path()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        refused.push((settings.clone(), "Bunko's settings"));
+        refused.push((settings.join("x"), "Bunko's settings"));
+        // Its parent may hold Bunko's own folder too (on Windows both are in
+        // %LOCALAPPDATA%): either refusal.
+        refused.push((settings.parent().unwrap().to_path_buf(), "holds Bunko's"));
+        for (path, says) in refused {
+            c.start(folder_req(&path), RequestOrigin::cli()).unwrap();
+            let s = settle(&c).await;
+            assert_eq!(s.state, "failed", "{path:?}: {s:?}");
+            assert!(s.check.is_none(), "{path:?}: never opened: {s:?}");
+            let e = s.error.unwrap();
+            assert!(e.contains(says), "{path:?}: {e}");
+        }
+        assert_eq!(lib.lock().backend, LibraryBackend::Local);
+        assert!(!base.join("cloud/credentials.json").exists());
+    }
+
+    /// A caller elsewhere with `storage.library.folder_roots` set: a folder at or under
+    /// a root connects, and "Create it?" works there; one outside is refused; and the
+    /// Check's refusals read the same for a file, a missing parent and anything else, so
+    /// it tells them nothing of the disk. The CLI gets the detailed words.
+    #[tokio::test]
+    async fn a_caller_elsewhere_connects_inside_a_root_and_learns_nothing_more() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("storage");
+        let root = dir.path().join("library");
+        seed(&root.join("Manga"));
+        std::fs::write(root.join("a-file"), b"x").unwrap();
+        std::fs::create_dir_all(dir.path().join("outside")).unwrap();
+        let (c, lib) = live_connector(&base);
+        lib.lock().folder_roots = vec![root.clone()];
+        let far = RequestOrigin::of(false, Some("Mozilla/5.0"));
+
+        c.start(folder_req(&root.join("Manga")), far).unwrap();
+        let s = settle(&c).await;
+        assert_eq!(s.state, "connected", "{s:?}");
+        assert_eq!(s.check.unwrap().volumes, 3);
+
+        let fresh = root.join("New");
+        c.start(folder_req(&fresh), far).unwrap();
+        let s = settle(&c).await;
+        assert_eq!(s.state, "connected", "{s:?}");
+        assert!(c.create_folder().await.unwrap().found);
+        assert!(fresh.is_dir());
+
+        let e = {
+            c.start(folder_req(&dir.path().join("outside")), far)
+                .unwrap();
+            let s = settle(&c).await;
+            assert_eq!(s.state, "failed", "{s:?}");
+            s.error.unwrap()
+        };
+        assert!(e.contains("is not inside the folders"), "{e}");
+
+        let mut said = Vec::new();
+        for p in [root.join("a-file"), root.join("gone").join("manga")] {
+            c.start(folder_req(&p), far).unwrap();
+            let s = settle(&c).await;
+            assert_eq!(s.state, "failed", "{p:?}: {s:?}");
+            said.push(s.error.unwrap().replace(&shown(&p), "<path>"));
+        }
+        assert_eq!(said[0], said[1]);
+        assert_eq!(
+            said[0],
+            "There is no folder Bunko can use at <path>: check the path."
+        );
+        // The CLI is told which it is.
+        c.start(folder_req(&root.join("a-file")), RequestOrigin::cli())
+            .unwrap();
+        let s = settle(&c).await;
+        assert!(s.error.unwrap().contains("is a file, not a folder"));
+    }
+
+    /// The Check counts the folder's volumes and series; a missing folder is offered
+    /// ("Create it?") and made, one level only; `<base>/library` may be chosen.
+    #[tokio::test]
+    async fn the_check_counts_the_folder_and_creates_one_level() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("storage");
+        let manga = dir.path().join("Manga");
+        seed(&manga);
+        let (c, lib) = live_connector(&base);
+        c.start(folder_req(&manga), RequestOrigin::cli()).unwrap();
+        let s = settle(&c).await;
+        assert_eq!(s.state, "connected", "{s:?}");
+        assert_eq!(s.account.as_deref(), Some(shown(&manga).as_str()));
+        let check = s.check.unwrap();
+        assert!(check.found);
+        assert_eq!((check.volumes, check.series), (3, 2));
+        assert_eq!(
+            check.summary,
+            format!("Found {}: 3 volumes in 2 series.", shown(&manga))
+        );
+        assert_eq!(check.warning, None, "a writable folder needs no warning");
+        {
+            let l = lib.lock();
+            assert_eq!(l.backend, LibraryBackend::Folder);
+            assert_eq!(l.path.as_deref(), Some(manga.as_path()));
+            assert_eq!(l.folder, ROOT);
+        }
+        let id = bunko_server::storage::store_id("folder", "", &shown(&manga), ROOT);
+        let cred = bunko_remote::auth::CredentialStore::open(&base.join("cloud"))
+            .unwrap()
+            .get(&id)
+            .unwrap()
+            .expect("the stub");
+        assert_eq!(cred.provider, "folder");
+        assert_eq!(cred.account_id.as_deref(), Some(shown(&manga).as_str()));
+
+        // A folder that is not there yet: offered, then made, one level only.
+        let fresh = dir.path().join("New Manga");
+        c.start(folder_req(&fresh), RequestOrigin::cli()).unwrap();
+        let s = settle(&c).await;
+        assert_eq!(s.state, "connected", "{s:?}");
+        let check = s.check.unwrap();
+        assert!(!check.found);
+        assert_eq!(
+            check.summary,
+            format!("There is no folder at {} yet. Create it?", shown(&fresh))
+        );
+        assert!(!fresh.exists(), "the Check alone makes nothing");
+        let made = c.create_folder().await.unwrap();
+        assert!(made.created && made.found, "{made:?}");
+        assert_eq!((made.volumes, made.series), (0, 0));
+        assert!(fresh.is_dir());
+        assert!(
+            std::fs::read_dir(&fresh).unwrap().next().is_none(),
+            "nothing but the folder itself: {:?}",
+            tree(&fresh)
+        );
+        // The parent missing too: refused, nothing made.
+        let deep = dir.path().join("a/b");
+        c.start(folder_req(&deep), RequestOrigin::cli()).unwrap();
+        let s = settle(&c).await;
+        assert_eq!(s.state, "failed");
+        assert!(s.error.unwrap().contains("is missing too"));
+        assert!(!dir.path().join("a").exists());
+
+        // <base>/library: allowed (a library on this computer kept in place).
+        std::fs::create_dir_all(base.join("library/Series")).unwrap();
+        std::fs::write(base.join("library/Series/Vol 1.cbz"), b"zip").unwrap();
+        c.start(folder_req(&base.join("library")), RequestOrigin::cli())
+            .unwrap();
+        let s = settle(&c).await;
+        assert_eq!(s.state, "connected", "{s:?}");
+        assert_eq!(s.check.unwrap().volumes, 1);
+    }
+
+    /// The lease on, with a short settle wait.
+    fn leased(c: &mut bunko_remote::RemoteStoreConfig) {
+        c.lease = true;
+        c.lease_settle = Some(Duration::from_millis(300));
+        c.retry_base = Duration::from_millis(20);
+    }
+
+    /// A folder library that ran here: `use_local` is refused until its Disconnect;
+    /// choosing another folder is an account change ("Use this folder instead"), which
+    /// disconnects the first; the first folder is then as it was, but for the marker,
+    /// which says `released`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn disconnect_and_switch_leave_the_folder_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("storage");
+        let first = dir.path().join("Manga");
+        let second = dir.path().join("Other Manga");
+        seed(&first);
+        seed(&second);
+        let before = tree(&first);
+
+        let mut config = Config::default();
+        config.storage.base_path = base.clone();
+        config.storage.library.backend = LibraryBackend::Folder;
+        config.storage.library.path = Some(first.clone());
+        let layout = config.storage.layout();
+        bunko_server::storage::test_cloud::register_tune(&base, leased);
+        let (_store, _guard, handle) = bunko_server::storage::open_library_store(&config, &layout)
+            .unwrap()
+            .unwrap();
+        assert!(handle.connected(), "{:?}", handle.problem());
+        let h = handle.clone();
+        let held = tokio::task::spawn_blocking(move || {
+            let until = Instant::now() + Duration::from_secs(60);
+            while h.status_json()["lease"]["state"] != "held" || !h.adopted() {
+                if Instant::now() > until {
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            true
+        })
+        .await
+        .unwrap();
+        assert!(held, "{}", handle.status_json());
+        let st = handle.status_json();
+        assert_eq!(st["path"], shown(&first).as_str());
+        assert_eq!(st["provider"], "the library folder");
+
+        let shared = Arc::new(Mutex::new(config.clone()));
+        let (r, w) = (shared.clone(), shared.clone());
+        let control = StorageControl::new(
+            layout.cloud_dir(),
+            Some(handle.clone()),
+            Arc::new(move || r.lock().clone()),
+            Arc::new(move |f: &mut dyn FnMut(&mut Config)| {
+                f(&mut w.lock());
+                Ok(())
+            }),
+            None,
+        );
+        let e = control.use_local().unwrap_err();
+        assert_eq!(
+            e,
+            format!(
+                "this Bunko manages the library in {}: disconnect it first (it is a different library)",
+                shown(&first)
+            )
+        );
+        assert_eq!(
+            control.status_json()["configured"]["path"],
+            shown(&first).as_str()
+        );
+
+        // Another folder: the account decision.
+        let s = control
+            .connect(folder_req(&second), RequestOrigin::cli(), false)
+            .unwrap();
+        let s = control
+            .connector()
+            .wait_for(
+                |x| x.session != s.session || !x.in_progress(),
+                Duration::from_secs(30),
+            )
+            .await;
+        assert_eq!(s.state, "account-mismatch", "{s:?}");
+        assert_eq!(
+            s.message.as_deref(),
+            Some(
+                format!(
+                    "This Bunko's library is in {}, not {}. Choose that folder, or choose \"Use this folder instead\".",
+                    shown(&first),
+                    shown(&second)
+                )
+                .as_str()
+            )
+        );
+        // "Use this folder instead": the first library is disconnected (drained).
+        let s = control.decide_account(true, false).await.unwrap();
+        assert_eq!(s.state, "connected", "{s:?}");
+        let ids = bunko_remote::auth::CredentialStore::open(&layout.cloud_dir())
+            .unwrap()
+            .store_ids()
+            .unwrap();
+        let second_id = bunko_server::storage::store_id("folder", "", &shown(&second), ROOT);
+        assert_eq!(ids, vec![second_id]);
+        {
+            let c = shared.lock();
+            assert_eq!(c.storage.library.backend, LibraryBackend::Folder);
+            assert_eq!(c.storage.library.path.as_deref(), Some(second.as_path()));
+        }
+
+        // The first folder: as it was, but for the marker, which says released.
+        let mut after = tree(&first);
+        let marker = after
+            .remove(".mokuro-bunko.json")
+            .expect("the marker stays, released");
+        let marker: Value = serde_json::from_slice(&marker).unwrap();
+        assert_eq!(marker["state"], "released", "{marker}");
+        assert_eq!(after, before, "Disconnect leaves the folder alone");
+        // Nothing in the second folder was touched by the Check.
+        assert!(!second.join(".mokuro-bunko.json").exists());
+        // And the library on this computer may be chosen again.
+        control.use_local().unwrap();
+    }
+}

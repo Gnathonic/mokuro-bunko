@@ -251,13 +251,16 @@ impl Cloudsim {
                     json!({"account_label": label, "mega_session": session}),
                 )
             }
-            Provider::Local | Provider::Rclone => bail!("{} is not a cloudsim provider", p.name()),
+            Provider::Local | Provider::Rclone | Provider::Folder => {
+                bail!("{} is not a cloudsim provider", p.name())
+            }
         };
         Ok(CloudLogin {
             backend,
             account_id: format!("sim-{account}"),
             credential,
             webdav: None,
+            path: None,
         })
     }
 }

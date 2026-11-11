@@ -223,6 +223,30 @@
   fails to load, with an error naming that row, until it is renamed.
 
 ### Added
+- **Keep the library in a folder you choose** (`storage.library.backend: folder`,
+  `storage.library.path`, `MOKURO_LIBRARY_PATH`): the same folder Mokuro Reader's
+  Local Folder uses, on this computer, a second disk or a mounted share. Bunko treats
+  it like a cloud folder (queue file, marker, OCR results written in place) and
+  watches it, so changes the reader makes show within seconds. It is distinct from
+  This computer (Bunko's own `library` folder); switching between them, or to another
+  folder, leaves the old library where it is. Bunko's removals go to a hidden
+  `.mokuro-bunko-trash` folder inside the library, kept 30 days. The setup wizard and
+  the admin panel's Storage tab offer **Local folder**, with **Browse…** for a browser
+  on the server's own machine (`/setup/api/fs`, `/_admin/api/fs`, which refuse any
+  other caller, a request a proxy forwarded or a page naming another host included);
+  elsewhere the path is typed. A browser on another computer may connect a folder
+  only at or under `storage.library.folder_roots` (`MOKURO_LIBRARY_FOLDER_ROOTS`),
+  which only the config file or the environment sets and is empty by default; the
+  refusal says how to allow it. Nobody may choose the top of the system disk, a
+  system folder, Bunko's own folder or settings folder, or a folder holding one;
+  the setup and admin pages never take a Windows network share or device path
+  (`\\server\share`, `\\?\…`), which only the config, the environment and the CLI
+  may name. A browser elsewhere is told the same for any folder it cannot use, so
+  the Check tells it nothing about the server's disk. Inside the library, symbolic
+  links and junctions are neither listed, watched nor followed: no read, write, move,
+  trash or delete goes through a linked folder, wherever it sits on the path.
+- **`mokuro-bunko library connect folder --path DIR [--create]`** connects a library
+  folder from a terminal.
 - **OCR can take work volume by volume.** With `ocr.queue_order: volume` (Admin → OCR →
   Queue order) each volume runs on one machine, its jobs back to back from one download
   of its archive, and volumes start in the order their first job would come by

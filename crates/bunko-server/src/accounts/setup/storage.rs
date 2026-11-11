@@ -23,6 +23,7 @@ pub(super) fn routes() -> Router<AccountsDeps> {
         .route("/setup/api/storage/connect/account", post(account))
         .route("/setup/api/storage/connect/create", post(create))
         .route("/setup/api/storage/local", post(local))
+        .route("/setup/api/fs", get(fs))
 }
 
 /// The gate: setup still needed, and this caller may run it.
@@ -81,7 +82,9 @@ fn origin(client: &Client, parts: &Parts) -> RequestOrigin {
         .headers
         .get(header::USER_AGENT)
         .and_then(|v| v.to_str().ok());
-    RequestOrigin::of(is_local(client), ua)
+    RequestOrigin::of(is_local(client), ua).on_this_machine(
+        crate::accounts::local::browser_on_this_machine(client, &parts.headers),
+    )
 }
 
 /// `GET /setup/api/storage`: the configured library, the mounted store and the
@@ -216,6 +219,38 @@ async fn create(
     match c.connector().create_folder().await {
         Ok(check) => json_response(200, json!({"check": check})),
         Err(e) => json_error(400, &e),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct FsQuery {
+    path: Option<String>,
+}
+
+/// `GET /setup/api/fs?path=…`: Browse… for the library folder, the subfolders of a
+/// folder on this machine. A browser on this machine only (403 for any other, a setup
+/// code holder, a forwarded request and a page that names another host included: it
+/// would show them what is on this disk).
+async fn fs(
+    State(d): State<AccountsDeps>,
+    client: Client,
+    parts: Parts,
+    axum::extract::Query(q): axum::extract::Query<FsQuery>,
+) -> Response {
+    if let Err(r) = allowed(&d, &client, &parts).await {
+        return r;
+    }
+    if !crate::accounts::local::browser_on_this_machine(&client, &parts.headers) {
+        return json_error(403, crate::fs_browse::REMOTE_REFUSAL);
+    }
+    let dir = match crate::fs_browse::requested_over_http(q.path.as_deref()) {
+        Ok(p) => p,
+        Err(e) => return json_error(400, &e),
+    };
+    match blocking(move || crate::fs_browse::list_dir(&dir, &[])).await {
+        Ok(Ok(v)) => json_response(200, v),
+        Ok(Err(e)) => json_error(400, &e),
+        Err(r) => r,
     }
 }
 

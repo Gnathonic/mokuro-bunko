@@ -1,7 +1,9 @@
 //! `/app/api/...`: the pages' backend. Every route sits behind `super::guard`.
 
 use super::jobs;
-use super::setup::{self, ProcessorForm};
+#[cfg(feature = "ocr")]
+use super::setup;
+use super::setup::ProcessorForm;
 use super::spawn;
 use super::{AppState, Role, paths, tray};
 use axum::Json;
@@ -543,7 +545,7 @@ async fn fs_list(Query(q): Query<FsQuery>) -> Response {
         .map(|s| s.trim().trim_start_matches('.').to_string())
         .filter(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric()))
         .collect();
-    match blocking(move || setup::list_dir(&dir, &exts)).await {
+    match blocking(move || bunko_server::fs_browse::list_dir(&dir, &exts)).await {
         Some(Ok(v)) => ok(v),
         Some(Err(e)) => bad(e),
         None => fail(StatusCode::INTERNAL_SERVER_ERROR, "listing failed"),

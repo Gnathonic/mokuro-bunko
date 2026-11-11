@@ -39,13 +39,22 @@ function walk(dir, rel = '') {
     return out;
 }
 
+/** Bunko's trash in a folder library (`.mokuro-bunko-trash`): no reader lists it. */
+const FOLDER_TRASH = '.mokuro-bunko-trash';
+
 /**
  * The cloud's files under the library folder, as it stores them: `[{path, id, size,
  * sha256, modified}]`, `path` relative to the folder (`Rig Series/Vol 1.cbz`). cloudsim's
- * tree (never in its request log), or rclone's served directory (no `modified`: one
- * file per path on a disk).
+ * tree (never in its request log), rclone's served directory, or the folder provider's
+ * library folder, its trash left out (on a disk: no `modified`, one file per path).
  */
 export async function cloudFiles(rig) {
+    if (rig.provider === 'folder') {
+        if (!rig.folder?.path) throw new Error('RIG_CONTEXT names no library folder');
+        return walk(rig.folder.path)
+            .filter(([p]) => p.split('/')[0] !== FOLDER_TRASH)
+            .map(([p, bytes]) => ({ path: p, id: p, size: bytes.length, sha256: sha256(bytes) }));
+    }
     if (rig.provider === 'rclone') {
         const root = path.join(rig.workdir, 'rclone-root', LIBRARY_FOLDER);
         return walk(root).map(([p, bytes]) => ({ path: p, id: p, size: bytes.length, sha256: sha256(bytes) }));
