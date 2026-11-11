@@ -920,6 +920,12 @@
   library before it has read the library's series.json files and claimed the library;
   until then its uploads showed only as HELD. The panel now says what they wait for,
   with how many series.json files are left to read or how long the claim has left.
+- **Markers of Bunkos that stopped for good are cleared away.** Every Bunko that
+  managed a cloud library leaves its `.mokuro-bunko.json` in the `mokuro-reader` folder,
+  and one that never came back left it there for good. Readers ignore a stale marker,
+  but the folder kept collecting them. The Bunko that holds the library now moves
+  another one's marker to the provider's trash once it has not been rewritten for
+  seven days.
 
 ### Known limits
 - **Merging duplicate folders on Google Drive can trash files Bunko cannot see.**

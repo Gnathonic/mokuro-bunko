@@ -55,6 +55,11 @@ pub const MARKER_VERSION: u32 = 1;
 pub const DEFAULT_TTL: Duration = Duration::from_secs(900);
 /// The TTL on MEGA (`ttl_s` 3600); the caller picks it for that provider.
 pub const MEGA_TTL: Duration = Duration::from_secs(3600);
+
+/// Another Bunko's marker not rewritten for this long belongs to an install that
+/// stopped for good: the holder moves it to the provider's trash (readers already
+/// ignore any stale marker; this only tidies the folder).
+pub const ABANDONED_AFTER: Duration = Duration::from_secs(7 * 24 * 3600);
 /// The shortest CLAIM_LEASE settle wait (`max(60 s, 2 × feed interval)`).
 pub const CLAIM_SETTLE_MIN: Duration = Duration::from_secs(60);
 /// A same-named node larger than this is not read: it is not a marker.
@@ -1020,6 +1025,7 @@ impl<B: Backend> Lease<B> {
             next.heartbeat_at = self.now_iso();
             if let Some(node) = self.write_marker(&next, &set, WriteMode::Heartbeat).await? {
                 self.become_holder(next, &node, ok_at)?;
+                self.trash_abandoned(&set).await;
                 return Ok(Heartbeat::Held);
             }
         }
@@ -1118,6 +1124,41 @@ impl<B: Backend> Lease<B> {
             .collect();
         for pid in own {
             self.delete_node(&pid).await;
+        }
+    }
+
+    /// Move another install's markers to the trash once they have not been rewritten
+    /// for [`ABANDONED_AFTER`] (the holder only, after a heartbeat). The trash, not a
+    /// permanent delete: the file is not ours. A node rewritten since the listing is
+    /// left alone (`if_cver`).
+    async fn trash_abandoned(&mut self, set: &MarkerSet) {
+        let after = i64::try_from(ABANDONED_AFTER.as_millis()).unwrap_or(i64::MAX);
+        let abandoned: Vec<(Pid, String, String)> = set
+            .nodes
+            .iter()
+            .filter(|n| !self.is_ours(&n.marker))
+            .filter(|n| set.server_now.0.saturating_sub(n.node.base_mtime_ms) >= after)
+            .map(|n| {
+                (
+                    n.node.pid.clone(),
+                    n.node.cver.clone(),
+                    n.marker.instance_name.clone(),
+                )
+            })
+            .collect();
+        for (pid, cver, name) in abandoned {
+            match self.backend.trash(&pid, Some(&cver)).await {
+                Ok(()) | Err(BErr::NotFound) => {
+                    tracing::info!(
+                        pid,
+                        instance = %name,
+                        "lease: moved a marker untouched for a week to the trash (a Bunko \
+                         that stopped for good)"
+                    );
+                    self.cache.remove(&pid);
+                }
+                Err(e) => tracing::debug!(pid, error = %e, "lease: an abandoned marker stays"),
+            }
         }
     }
 

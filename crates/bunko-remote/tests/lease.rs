@@ -763,3 +763,56 @@ async fn the_marker_carries_dedup() {
     let v = serde_json::json!({"kind": "mokuro-bunko", "instance_id": "x", "epoch": 1});
     assert!(!Marker::parse(v.to_string().as_bytes()).unwrap().dedup);
 }
+
+/// A Bunko that stopped for good leaves its marker behind; the holder's heartbeat moves
+/// another instance's marker to the provider's trash once it has not been rewritten
+/// for [`ABANDONED_AFTER`], and leaves younger ones alone (readers already ignore any
+/// stale marker; this only tidies the folder).
+#[tokio::test(start_paused = true)]
+async fn the_holder_trashes_markers_abandoned_for_a_week() {
+    use bunko_remote::status::ABANDONED_AFTER;
+    let env = Env::new(FakeBackend::drive_like()).await;
+    let old = env.inject(&foreign("oldd", 1, env.fake.now_ms())).await;
+    tokio::time::advance(Duration::from_secs(24 * 3600)).await;
+    env.inject(&foreign("ynge", 2, env.fake.now_ms())).await;
+    // Six days after the first one was last written: both stale, neither abandoned.
+    tokio::time::advance(
+        ABANDONED_AFTER - Duration::from_secs(24 * 3600) - Duration::from_secs(60),
+    )
+    .await;
+    let mut a = env.lease_mem(cfg("aaaa", "a-boot"), 0);
+    assert_eq!(a.claim().await.unwrap(), LeaseState::Holder);
+    assert_eq!(a.heartbeat().await.unwrap(), Heartbeat::Held);
+    assert!(
+        env.fake.trashed_log().is_empty(),
+        "nothing is a week old yet"
+    );
+    // A week after the first was last written.
+    tokio::time::advance(Duration::from_secs(120)).await;
+    assert_eq!(a.heartbeat().await.unwrap(), Heartbeat::Held);
+    assert_eq!(env.fake.trashed_log(), std::slice::from_ref(&old.pid));
+    let left: Vec<String> = env
+        .markers()
+        .await
+        .into_iter()
+        .map(|(_, m)| m.instance_id)
+        .collect();
+    assert!(
+        left.contains(&"ynge".to_string()) && left.contains(&"aaaa".to_string()),
+        "{left:?}"
+    );
+}
+
+/// Only the holder tidies: a Bunko in standby touches no marker.
+#[tokio::test(start_paused = true)]
+async fn a_standby_bunko_trashes_nothing() {
+    use bunko_remote::status::ABANDONED_AFTER;
+    let env = Env::new(FakeBackend::drive_like()).await;
+    env.inject(&foreign("oldd", 1, env.fake.now_ms())).await;
+    tokio::time::advance(ABANDONED_AFTER + Duration::from_secs(60)).await;
+    env.inject(&foreign("hold", 5, env.fake.now_ms())).await;
+    let mut b = env.lease_mem(cfg("bbbb", "b-boot"), 0);
+    let s = b.claim().await.unwrap();
+    assert_eq!(holder_of(&s).unwrap().instance_id, "hold");
+    assert!(env.fake.trashed_log().is_empty());
+}
