@@ -1145,24 +1145,26 @@ impl Connector {
                 });
             }
             Ok(Some(previous)) if !use_this_account => {
+                let label = held.account.label.clone();
+                let message = if held.backend == LibraryBackend::Folder {
+                    format!(
+                        "This Bunko's library is in {previous}, not {label}. Choose that folder, or choose \"Use this folder instead\"."
+                    )
+                } else {
+                    format!(
+                        "This Bunko's {} library belongs to {previous}, not {label}. Sign in with that account, or choose \"Use this account's library instead\".",
+                        provider_name(held.backend)
+                    )
+                };
+                // Held first, then the state: a caller that sees "account-mismatch"
+                // may answer it at once (decide_account takes what is held).
+                *self.0.held.lock() = Some(held);
                 self.set(session, |s| {
                     s.state = "account-mismatch";
-                    s.account = Some(held.account.label.clone());
-                    s.previous_account = Some(previous.clone());
-                    s.message = Some(if held.backend == LibraryBackend::Folder {
-                        format!(
-                            "This Bunko's library is in {previous}, not {}. Choose that folder, or choose \"Use this folder instead\".",
-                            held.account.label
-                        )
-                    } else {
-                        format!(
-                            "This Bunko's {} library belongs to {previous}, not {}. Sign in with that account, or choose \"Use this account's library instead\".",
-                            provider_name(held.backend),
-                            held.account.label
-                        )
-                    });
+                    s.account = Some(label);
+                    s.previous_account = Some(previous);
+                    s.message = Some(message);
                 });
-                *self.0.held.lock() = Some(held);
             }
             Ok(_) => {
                 let r = self.persist(held).await;
