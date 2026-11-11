@@ -791,22 +791,28 @@ impl Inner {
     }
 
     /// An empty file held back settles in `left`: the feed looks again by then.
+    /// The earliest such time is kept, even once past: a file that settled before the
+    /// feed got to its wait is due a look at once ([`Inner::snapshot`] starts afresh).
     fn settles_in(&self, left: Duration) {
         let at = Instant::now() + left + SETTLE_SLACK;
         let mut g = self.settles.lock();
-        if g.is_none_or(|t| t <= Instant::now() || at < t) {
+        if g.is_none_or(|t| at < t) {
             *g = Some(at);
         }
     }
 
-    /// `max`, or less when an empty file held back settles sooner.
+    /// `max`, or less when an empty file held back settles sooner: nothing when one
+    /// has settled since the last walk began.
     fn until_settled(&self, max: Duration) -> Duration {
         let mut g = self.settles.lock();
         match *g {
-            Some(t) if t > Instant::now() => max.min(t.saturating_duration_since(Instant::now())),
-            _ => {
-                *g = None;
-                max
+            None => max,
+            Some(t) => {
+                let left = t.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    *g = None;
+                }
+                max.min(left)
             }
         }
     }
@@ -945,6 +951,8 @@ impl Inner {
     /// The whole library (the root included) as a generation's entries, and its nodes.
     /// A missing folder is an empty one; one that is away fails.
     fn snapshot(&self, carry: Option<&Generation>) -> Result<(Vec<RNode>, Entries), BErr> {
+        // This walk sees every file held back: it notes again those still unsettled.
+        *self.settles.lock() = None;
         let m = match self.root_state() {
             RootState::Dir(m) => m,
             RootState::Missing => return Ok((Vec::new(), Entries::new())),
@@ -1464,6 +1472,10 @@ impl Inner {
         fsops::fsync_dir(&parent_abs);
         self.memo.keep_only(&dest, &cver);
         let node = self.read_back(parent, &parent_abs, name)?;
+        if node.pid != dest {
+            // A filesystem that rewrote the name: the memo follows its spelling.
+            self.memo.rebase(&dest, &node.pid);
+        }
         Ok(self.with_hash(node))
     }
 

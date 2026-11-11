@@ -513,6 +513,42 @@ async fn the_feed_looks_again_when_an_empty_file_settles() {
     }
 }
 
+/// The feed may get to its wait only after the file it held back has settled (a big
+/// page took a while to apply): it looks again at once, not at the next poll.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_file_that_settled_before_the_wait_is_looked_for_at_once() {
+    for watching in [false, true] {
+        let lib = Lib::new();
+        lib.put("S/Vol 1.cbz", b"zip");
+        lib.put("S/Vol 2.cbz", b"");
+        lib.age("S/Vol 2.cbz", EMPTY_SETTLE - Duration::from_millis(500));
+        let b = if watching {
+            lib.open_watching().await
+        } else {
+            lib.open().await
+        };
+        let c = b.start_cursor().await.unwrap();
+        // Settled (and its slack gone) before the wait begins.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        let t0 = Instant::now();
+        b.wait_change(&c, Duration::from_secs(120)).await.unwrap();
+        let took = t0.elapsed();
+        assert!(
+            took < Duration::from_secs(10),
+            "watching {watching}: {took:?}"
+        );
+        let (items, c) = page(&b, &c).await;
+        assert_eq!(upserts(&items), ["S/Vol 2.cbz"], "watching {watching}");
+        // The walk that listed it leaves nothing due: back at max.
+        let t0 = Instant::now();
+        b.wait_change(&c, Duration::from_millis(800)).await.unwrap();
+        assert!(
+            t0.elapsed() >= Duration::from_millis(700),
+            "watching {watching}"
+        );
+    }
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn links_are_not_followed_and_unsafe_names_are_reported() {
