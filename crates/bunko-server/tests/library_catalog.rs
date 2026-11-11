@@ -351,8 +351,40 @@ impl OutlookSource for Outlook {
         VolumeOutlook {
             pending: vec![json!({"id": "hayai", "eta": "2026-10-01T00:00:00Z"})],
             recheck_after: Some(json!(42)),
+            busy: false,
         }
     }
+}
+
+/// An OCR queue that did not answer within its second.
+struct Busy;
+
+impl OutlookSource for Busy {
+    fn volume_outlook(&self, _cbz: &Path, _series: &str, _volume: &str) -> VolumeOutlook {
+        VolumeOutlook {
+            busy: true,
+            ..VolumeOutlook::default()
+        }
+    }
+}
+
+/// A manifest whose OCR queue did not answer says so (503, ask again) instead of
+/// `"pending": []`, which a reader takes as "every job is done" and stops watching.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_manifest_whose_queue_does_not_answer_is_503_not_empty() {
+    let mut env = catalog_env(|c| c.registration.allow_anonymous_download = true).await;
+    env.deps.outlook = Some(Arc::new(Busy));
+    let r = env
+        .send(get(
+            "/catalog/api/manifest?series=Dr%20Stone&volume=Volume%2002",
+        ))
+        .await;
+    assert_eq!(r.status, 503, "{}", r.text());
+    assert_eq!(r.header("retry-after"), Some("5"));
+    assert_eq!(r.header("cache-control"), Some("no-store"));
+    let body = r.json();
+    assert!(body.get("pending").is_none(), "{body}");
+    assert!(body["error"].is_string());
 }
 
 /// D27: personal corrections are one account's own, so the manifest (anonymous when

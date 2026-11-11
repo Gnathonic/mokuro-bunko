@@ -55,6 +55,9 @@ pub struct SessionJob {
     /// The runner has it (local: from submit; remote: `fetch ready` / `volume_started`).
     pub delivered: bool,
     pub archive_size: Option<u64>,
+    /// The archive's `(size, mtime_ns)` when the op was sent: a copy a processor kept
+    /// from the volume's earlier job is that version (its ETag matched the op's).
+    pub sent_stamp: Option<crate::ocr::types::Stamp>,
     pub sidecar_name: String,
     pub first_page_at: Option<f64>,
     pub done: i64,
@@ -164,10 +167,21 @@ impl Scheduler {
         let library = self.library();
         let cbz = job.path(&library);
         // A local runner opens the archive as a file: on a remote store it reads a
-        // spooled copy, fetched first on a helper thread (spec §8).
+        // spooled copy, fetched first on a helper thread (spec §8). By volume the copy
+        // spooled for the volume's earlier job serves this one.
         let spool = if local && self.remote_library() {
-            match self.claims.get(job).and_then(|c| c.spool.clone()) {
-                Some(hold) => Some(hold),
+            let held = self
+                .claims
+                .get(job)
+                .and_then(|c| c.spool.clone())
+                .or_else(|| self.owner_spool(job));
+            match held {
+                Some(hold) => {
+                    if let Some(c) = self.claims.get_mut(job) {
+                        c.spool = Some(hold.clone());
+                    }
+                    Some(hold)
+                }
                 None => return self.start_spooling(sid, job, &cbz),
             }
         } else {
@@ -175,7 +189,24 @@ impl Scheduler {
         };
         self.claim_seq += 1;
         let claim = format!("v{}", self.claim_seq);
-        let stamp = crate::ocr::types::stamp_of(&cbz);
+        let meta = bunko_store::fs::metadata(&cbz).ok().filter(|m| m.is_file());
+        let stamp = meta
+            .as_ref()
+            .map(|m| (m.len(), crate::ocr::types::mtime_ns(m)));
+        // A remote processor is told the archive's ETag (what a GET serves it with) and,
+        // by volume, whether more of the volume's jobs follow on it: then it keeps its
+        // copy rather than download the archive again. It is also told every archive it
+        // still runs volumes of (none by generation): a copy it kept of any other one
+        // goes, so a switch to generation order frees what it kept by volume.
+        let (etag, keep_archive, kept_archives) = if local {
+            (None, false, None)
+        } else {
+            (
+                meta.as_ref().map(bunko_dav::strong_file_etag),
+                self.more_of_volume_for(&pid, job),
+                Some(self.volumes_held_by(&pid)),
+            )
+        };
         let series_name =
             bunko_layout::sidecar::derive_series_name(&cbz, &library, &self.deps.layout.inbox());
         let volume_uuid = self
@@ -200,7 +231,9 @@ impl Scheduler {
             title_uuid: Some(bunko_layout::sidecar::title_uuid(&series_name)),
             volume_uuid,
             size: stamp.map(|s| s.0),
-            etag: None,
+            etag,
+            keep_archive,
+            kept_archives,
         };
         let sent = self
             .machines
@@ -234,6 +267,7 @@ impl Scheduler {
                     claim,
                     delivered: local,
                     archive_size: stamp.map(|s| s.0),
+                    sent_stamp: stamp,
                     sidecar_name,
                     first_page_at: None,
                     done: 0,
@@ -290,11 +324,10 @@ impl Scheduler {
                     false,
                 ),
                 Ok(hold) => {
-                    let alive = was_spooling
-                        && self
-                            .sessions
-                            .get(sid)
-                            .is_some_and(|s| !s.closing && s.draining.is_none());
+                    // A draining session still runs what it accepted, this claim
+                    // included (by volume every session drains after its first claim:
+                    // the lane's next job is another row's).
+                    let alive = was_spooling && self.sessions.get(sid).is_some_and(|s| !s.closing);
                     let claimed = self.claims.get(job).and_then(|c| c.stamp);
                     let now = crate::ocr::types::stamp_of(&job.path(&self.library()));
                     if !alive {
@@ -306,6 +339,7 @@ impl Scheduler {
                             true,
                         );
                     } else {
+                        self.keep_owner_spool(job, &hold);
                         if let Some(c) = self.claims.get_mut(job) {
                             c.spool = Some(hold);
                         }
@@ -445,11 +479,16 @@ impl Scheduler {
                 break;
             }
             let (job, preempt) = self.claim(lane, Some(&row_id));
+            let drain_reason = if self.settings.by_volume {
+                "the lane's next job is another generation's"
+            } else {
+                "an earlier generation has work"
+            };
             let Some(job) = job else {
                 let poll = self.settings.poll_interval.max(1.0);
                 let s = self.sessions.get_mut(&sid).expect("session exists");
                 if preempt {
-                    s.draining = Some("an earlier generation has work".into());
+                    s.draining = Some(drain_reason.into());
                 } else {
                     s.next_claim_at = now + poll;
                 }
@@ -466,7 +505,7 @@ impl Scheduler {
             }
             if preempt {
                 if let Some(s) = self.sessions.get_mut(&sid) {
-                    s.draining = Some("an earlier generation has work".into());
+                    s.draining = Some(drain_reason.into());
                 }
                 break;
             }
@@ -704,13 +743,13 @@ impl Scheduler {
                 id, state, detail, ..
             } => {
                 if state == "ready" {
-                    let Some(job) = self
+                    let Some((job, sent)) = self
                         .sessions
                         .get_mut(&sid)
                         .and_then(|s| s.jobs.get_mut(&id))
                         .map(|j| {
                             j.delivered = true;
-                            j.job.clone()
+                            (j.job.clone(), j.sent_stamp)
                         })
                     else {
                         return;
@@ -718,7 +757,7 @@ impl Scheduler {
                     let mut u = Map::new();
                     u.insert("delivered".into(), json!(true));
                     self.update_card(&job, u);
-                    self.download_delivered(pid, &job, &detail);
+                    self.download_delivered(pid, &job, &detail, sent);
                 }
             }
             Event::VolumeReturned {

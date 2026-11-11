@@ -390,6 +390,19 @@
                             </div>
 
                             <div class="field">
+                                <label class="field__label" for="settings-ocr-queue-order">Queue order</label>
+                                <div class="field__control">
+                                    <select id="settings-ocr-queue-order" class="form-select">
+                                        <option value="auto">Automatic</option>
+                                        <option value="generation">By generation</option>
+                                        <option value="volume">By volume</option>
+                                    </select>
+                                    <p class="form-hint">By generation runs each generation across the whole library in the order above, and downloads a volume's archive once for each of its jobs. By volume runs every generation of one volume back to back on one machine, so the archive is downloaded once; a job that machine cannot run goes to another machine, which downloads it too. Automatic is by volume on a MEGA library, whose transfer quota counts every download, and by generation otherwise.</p>
+                                    <p class="form-hint" id="settings-ocr-queue-order-now"></p>
+                                </div>
+                            </div>
+
+                            <div class="field">
                                 <label class="field__label" for="settings-ocr-interval">Library scan</label>
                                 <div class="field__control field__control--short">
                                     <div class="input-suffix"><input type="number" id="settings-ocr-interval" class="form-input" min="1" value="30"><span>seconds between scans</span></div>
@@ -397,7 +410,7 @@
                             </div>
 
                             <footer class="settings-section__footer">
-                                <button class="btn btn--primary" onclick="saveOcrSettings()">Save scan interval</button>
+                                <button class="btn btn--primary" onclick="saveOcrSettings()">Save queue settings</button>
                                 <span class="form-hint">Generations have their own Save button above.</span>
                             </footer>
 

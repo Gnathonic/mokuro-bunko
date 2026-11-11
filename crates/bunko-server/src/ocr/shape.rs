@@ -747,6 +747,10 @@ pub fn shape_status(
         "generations".into(),
         Value::Array(objects(raw.get("generations")).iter().map(|r| json!({"id": r.get("id").cloned().unwrap_or(Value::Null), "name": r.get("name").cloned().unwrap_or(Value::Null)})).collect()),
     );
+    // How the queue takes work: `generation` or `volume` (the page's order line).
+    if let Some(order) = raw.get("queue_order").filter(|v| v.is_string()) {
+        payload.insert("queue_order".into(), order.clone());
+    }
     if detailed {
         let mut speed = Vec::new();
         for entry in objects(raw.get("speed")) {

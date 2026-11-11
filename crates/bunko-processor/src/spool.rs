@@ -11,13 +11,27 @@
 //! RAM placements are Linux `memfd`s, read back by the in-process pipeline through
 //! `/proc/self/fd/<n>` (the kernel frees them with the last handle, crash included).
 //! Other platforms always use the disk (0.5.2: Windows has no `/dev/shm`).
+//!
+//! When the library takes work by volume it asks a processor to keep an archive after
+//! its claim (`keep_archive`): the copy waits here, by archive path, size and strong
+//! ETag, for the volume's next job ([`ArchiveSpool::keep`], [`ArchiveSpool::take_kept`]),
+//! at most `keep_max` copies. The library may wait hours for that job (a storage hold,
+//! a benchmark), and it says which copies it still wants on each volume op
+//! ([`ArchiveSpool::retain_kept`]). A copy goes when the library stops naming it, when
+//! a newer one pushes it past `keep_max`, when the connection ends, when a new download
+//! has no room without it, or, as a backstop for a processor that gets no further op,
+//! once it has waited [`KEPT_IDLE_LIMIT`].
 
+use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{self, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
+
+use crate::fetch::FetchedArchive;
 
 pub const MIB: u64 = 1 << 20;
 pub const GIB: u64 = 1 << 30;
@@ -25,6 +39,10 @@ pub const GIB: u64 = 1 << 30;
 pub const MEMORY_MARGIN: u64 = GIB;
 /// What must stay free on storage beside an archive placed on disk.
 pub const DISK_MARGIN: u64 = 256 * MIB;
+/// A kept copy no op has asked about for this long goes ([`ArchiveSpool::expire_idle_kept`]):
+/// the library names the copies it wants on every op, so only a processor that got no
+/// further op (the queue drained, the volume finished elsewhere) still holds it then.
+pub const KEPT_IDLE_LIMIT: Duration = Duration::from_secs(6 * 3600);
 
 /// The disk fallback, under the processor's storage. Swept at start, which only the
 /// storage lock's holder may do.
@@ -60,11 +78,32 @@ pub enum SpoolError {
     Io(#[from] io::Error),
 }
 
+/// Why an archive could not be placed on disk.
+enum DiskRefusal {
+    /// Not enough free room: a kept disk copy may make it.
+    Short(String),
+    /// The storage cannot be used at all: no kept copy helps.
+    Unusable(String),
+    Io(io::Error),
+}
+
 type Headroom = dyn Fn() -> Option<u64> + Send + Sync;
 type FreeBytes = dyn Fn(&Path) -> io::Result<u64> + Send + Sync;
 
 struct Shared {
     in_memory: Mutex<u64>,
+}
+
+/// A finished claim's archive, kept for the volume's next job.
+struct Kept {
+    /// The op's `archive` (the URL path it was fetched from).
+    url: String,
+    size: u64,
+    /// The strong ETag it was served with.
+    etag: String,
+    archive: FetchedArchive,
+    /// When it was kept (each job of the volume keeps it again).
+    since: Instant,
 }
 
 /// One processor's archive spool.
@@ -75,6 +114,10 @@ pub struct ArchiveSpool {
     headroom: Box<Headroom>,
     free: Box<FreeBytes>,
     memory_enabled: bool,
+    /// Oldest first. Never dropped while `shared.in_memory` is held (a placement's
+    /// release takes it).
+    kept: Mutex<VecDeque<Kept>>,
+    keep_max: usize,
 }
 
 impl std::fmt::Debug for ArchiveSpool {
@@ -97,7 +140,148 @@ impl ArchiveSpool {
             headroom: Box::new(memory_headroom),
             free: Box::new(|p| fs4::available_space(p)),
             memory_enabled: memfd_supported(),
+            kept: Mutex::new(VecDeque::new()),
+            keep_max: 1,
         }
+    }
+
+    /// Keep at most `n` archives for later claims (one per session slot).
+    pub fn keeping(mut self, n: usize) -> ArchiveSpool {
+        self.keep_max = n;
+        self
+    }
+
+    /// Keep a finished claim's archive for a later claim of the same `url`, size and
+    /// `etag`: it replaces an older copy of that archive, and the oldest copy goes when
+    /// more than `keep_max` are kept.
+    pub fn keep(&self, url: &str, etag: String, archive: FetchedArchive) {
+        let mut gone: Vec<Kept> = Vec::new();
+        {
+            let mut kept = self.kept.lock();
+            if let Some(i) = kept.iter().position(|k| k.url == url) {
+                gone.extend(kept.remove(i));
+            }
+            if self.keep_max > 0 {
+                tracing::info!("keeping {url} for the volume's next job");
+                kept.push_back(Kept {
+                    url: url.to_string(),
+                    size: archive.size,
+                    etag,
+                    archive,
+                    since: Instant::now(),
+                });
+            }
+            while kept.len() > self.keep_max {
+                gone.extend(kept.pop_front());
+            }
+        }
+        drop(gone);
+    }
+
+    /// The copy kept of `url`, when it is still the library's file: the same strong
+    /// `etag` and (when given) `size`. A copy of another version is dropped.
+    pub fn take_kept(
+        &self,
+        url: &str,
+        size: Option<u64>,
+        etag: Option<&str>,
+    ) -> Option<FetchedArchive> {
+        let mut gone: Vec<Kept> = Vec::new();
+        let found = {
+            let mut kept = self.kept.lock();
+            match kept.iter().position(|k| k.url == url) {
+                None => None,
+                Some(i) => {
+                    let k = kept.remove(i)?;
+                    let same =
+                        etag.is_some_and(|e| e == k.etag) && size.is_none_or(|s| s == k.size);
+                    if same {
+                        Some(k.archive)
+                    } else {
+                        tracing::debug!(
+                            "the kept copy of {url} is not the library's file now ({:?}, {} bytes; asked {etag:?}, {size:?}): downloading again",
+                            k.etag,
+                            k.size
+                        );
+                        gone.push(k);
+                        None
+                    }
+                }
+            }
+        };
+        drop(gone);
+        found
+    }
+
+    /// Keep only the copies of `urls`: the library no longer wants the others (it
+    /// names every archive it still runs volumes of here on each volume op).
+    pub fn retain_kept(&self, urls: &[String]) {
+        let gone: Vec<Kept> = {
+            let mut kept = self.kept.lock();
+            let (keep, gone): (VecDeque<Kept>, VecDeque<Kept>) =
+                kept.drain(..).partition(|k| urls.contains(&k.url));
+            *kept = keep;
+            gone.into()
+        };
+        for k in &gone {
+            tracing::debug!(
+                "dropping the copy kept of {}: the library no longer runs it here",
+                k.url
+            );
+        }
+        drop(gone);
+    }
+
+    /// Drop the copies kept longer than [`KEPT_IDLE_LIMIT`] (the processor's 1 s tick).
+    pub fn expire_idle_kept(&self) {
+        if let Some(cutoff) = Instant::now().checked_sub(KEPT_IDLE_LIMIT) {
+            self.expire_kept_before(cutoff);
+        }
+    }
+
+    /// Drop the copies kept before `cutoff`.
+    pub fn expire_kept_before(&self, cutoff: Instant) {
+        let gone: Vec<Kept> = {
+            let mut kept = self.kept.lock();
+            let (keep, gone): (VecDeque<Kept>, VecDeque<Kept>) =
+                kept.drain(..).partition(|k| k.since >= cutoff);
+            *kept = keep;
+            gone.into()
+        };
+        for k in &gone {
+            tracing::info!(
+                "dropping the copy kept of {}: no job of it came for {} hours",
+                k.url,
+                KEPT_IDLE_LIMIT.as_secs() / 3600
+            );
+        }
+        drop(gone);
+    }
+
+    /// Drop every kept copy (the connection ended).
+    pub fn clear_kept(&self) {
+        let gone: Vec<Kept> = self.kept.lock().drain(..).collect();
+        drop(gone);
+    }
+
+    /// How many copies are kept now.
+    pub fn kept_count(&self) -> usize {
+        self.kept.lock().len()
+    }
+
+    /// Drop the oldest kept copy (of that kind only, when `only`): its room goes to a
+    /// new placement. False when there was none.
+    fn give_way(&self, only: Option<PlacementKind>) -> bool {
+        let found = {
+            let mut kept = self.kept.lock();
+            let i = kept
+                .iter()
+                .position(|k| only.is_none_or(|kind| k.archive.placement.kind() == kind));
+            i.and_then(|i| kept.remove(i))
+        };
+        let gave = found.is_some();
+        drop(found);
+        gave
     }
 
     /// Replace the probes (tests).
@@ -121,38 +305,69 @@ impl ArchiveSpool {
     }
 
     /// A new, empty placement for an archive of `size` bytes: RAM if it fits (and
-    /// `memory`), else disk, else [`SpoolError::NoRoom`].
+    /// `memory`), else disk, else [`SpoolError::NoRoom`]. A kept copy gives its room up
+    /// only when the machine needs it: a RAM one when the machine is short of memory
+    /// (not when the RAM budget is full: the new archive goes to disk then, which costs
+    /// a local write where dropping the copy would cost the volume's download), and
+    /// before the new archive would be refused for want of disk room, a disk one, or a
+    /// RAM one when the new archive may go to RAM. Nothing gives way to a storage that
+    /// cannot be used at all.
     pub fn place(&self, size: u64, memory: bool) -> Result<Placement, SpoolError> {
-        if memory && self.memory_enabled && self.budget > 0 {
-            let mut in_memory = self.shared.in_memory.lock();
-            let fits_budget = *in_memory + size <= self.budget;
-            let fits_machine =
-                fits_budget && (self.headroom)().is_none_or(|h| h >= size + MEMORY_MARGIN);
-            if fits_machine && let Some((file, path)) = open_memfd() {
-                *in_memory += size;
-                return Ok(Placement {
-                    shared: self.shared.clone(),
-                    kind: PlacementKind::Memory,
-                    size,
-                    file: Some(file),
-                    read_path: path,
-                    named: None,
-                    written: 0,
-                    released: false,
-                });
+        // An archive larger than the whole budget never goes to RAM, and no kept RAM
+        // copy is dropped for it.
+        let ram_open = memory && self.memory_enabled && self.budget > 0 && size <= self.budget;
+        loop {
+            if ram_open {
+                let mut in_memory = self.shared.in_memory.lock();
+                let fits_budget = *in_memory + size <= self.budget;
+                let memory_free = (self.headroom)().is_none_or(|h| h >= size + MEMORY_MARGIN);
+                if fits_budget
+                    && memory_free
+                    && let Some((file, path)) = open_memfd()
+                {
+                    *in_memory += size;
+                    return Ok(Placement {
+                        shared: self.shared.clone(),
+                        kind: PlacementKind::Memory,
+                        size,
+                        file: Some(file),
+                        read_path: path,
+                        named: None,
+                        written: 0,
+                        released: false,
+                    });
+                }
+                drop(in_memory);
+                if fits_budget && !memory_free && self.give_way(Some(PlacementKind::Memory)) {
+                    continue;
+                }
+            }
+            match self.place_on_disk(size) {
+                Ok(placed) => return Ok(placed),
+                Err(DiskRefusal::Short(why)) => {
+                    // A kept disk copy frees disk room; a kept RAM copy only frees the
+                    // RAM the next pass may place this archive in.
+                    let only = (!ram_open).then_some(PlacementKind::Disk);
+                    if self.give_way(only) {
+                        continue;
+                    }
+                    return Err(SpoolError::NoRoom(why));
+                }
+                Err(DiskRefusal::Unusable(why)) => return Err(SpoolError::NoRoom(why)),
+                Err(DiskRefusal::Io(e)) => return Err(SpoolError::Io(e)),
             }
         }
-        self.place_on_disk(size)
     }
 
-    fn place_on_disk(&self, size: u64) -> Result<Placement, SpoolError> {
+    fn place_on_disk(&self, size: u64) -> Result<Placement, DiskRefusal> {
         let dir = self.disk_dir();
-        std::fs::create_dir_all(&dir)
-            .map_err(|e| SpoolError::NoRoom(format!("the processor's storage is unusable: {e}")))?;
-        let free = (self.free)(&dir)
-            .map_err(|e| SpoolError::NoRoom(format!("the processor's storage is unusable: {e}")))?;
+        let unusable = |e: io::Error| {
+            DiskRefusal::Unusable(format!("the processor's storage is unusable: {e}"))
+        };
+        std::fs::create_dir_all(&dir).map_err(unusable)?;
+        let free = (self.free)(&dir).map_err(unusable)?;
         if free < size + DISK_MARGIN {
-            return Err(SpoolError::NoRoom(format!(
+            return Err(DiskRefusal::Short(format!(
                 "no room for a {:.1} MB archive: not in memory, and {} has {:.0} MB free",
                 size as f64 / MIB as f64,
                 dir.display(),
@@ -164,7 +379,8 @@ impl ArchiveSpool {
             .read(true)
             .write(true)
             .create_new(true)
-            .open(&path)?;
+            .open(&path)
+            .map_err(DiskRefusal::Io)?;
         Ok(Placement {
             shared: self.shared.clone(),
             kind: PlacementKind::Disk,
@@ -424,6 +640,221 @@ mod tests {
 
     fn spool(dir: &Path, mb: u64, headroom: Option<u64>, free: u64) -> ArchiveSpool {
         ArchiveSpool::new(dir, mb).with_probes(move || headroom, move |_| Ok(free))
+    }
+
+    /// A finished archive of `size` bytes as the fetcher hands it over.
+    fn archive(s: &ArchiveSpool, size: u64) -> FetchedArchive {
+        let mut placement = s.place(size, true).unwrap();
+        placement.write(&vec![7u8; size as usize]).unwrap();
+        FetchedArchive::for_tests(placement, size)
+    }
+
+    #[test]
+    fn take_kept_matches_url_size_and_etag() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = spool(dir.path(), 0, None, 10 * GIB).keeping(2);
+        let a = archive(&s, 10);
+        let kept_path = a.path().to_path_buf();
+        s.keep("/lib/A.cbz", "\"1-10\"".into(), a);
+        assert_eq!(s.kept_count(), 1);
+        assert!(
+            s.take_kept("/lib/B.cbz", Some(10), Some("\"1-10\""))
+                .is_none()
+        );
+        assert!(
+            s.take_kept("/lib/A.cbz", Some(10), None).is_none(),
+            "no ETag asked: nothing proves the copy is the library's file"
+        );
+        assert_eq!(s.kept_count(), 0, "an unproven copy is dropped");
+        assert!(!kept_path.exists());
+
+        s.keep("/lib/A.cbz", "\"1-10\"".into(), archive(&s, 10));
+        let back = s
+            .take_kept("/lib/A.cbz", Some(10), Some("\"1-10\""))
+            .unwrap();
+        assert_eq!(std::fs::read(back.path()).unwrap(), vec![7u8; 10]);
+        assert_eq!(s.kept_count(), 0, "taken, not copied");
+
+        s.keep("/lib/A.cbz", "\"1-10\"".into(), back);
+        assert!(
+            s.take_kept("/lib/A.cbz", Some(11), Some("\"1-10\""))
+                .is_none()
+        );
+        s.keep("/lib/A.cbz", "\"1-10\"".into(), archive(&s, 10));
+        assert!(
+            s.take_kept("/lib/A.cbz", Some(10), Some("\"2-10\""))
+                .is_none()
+        );
+        assert_eq!(s.kept_count(), 0, "a copy of another version is dropped");
+
+        // At most `keep_max`, oldest out first; one copy per archive.
+        s.keep("/lib/A.cbz", "\"a\"".into(), archive(&s, 10));
+        s.keep("/lib/A.cbz", "\"a2\"".into(), archive(&s, 10));
+        assert_eq!(s.kept_count(), 1);
+        s.keep("/lib/B.cbz", "\"b\"".into(), archive(&s, 10));
+        s.keep("/lib/C.cbz", "\"c\"".into(), archive(&s, 10));
+        assert_eq!(s.kept_count(), 2);
+        assert!(s.take_kept("/lib/A.cbz", None, Some("\"a2\"")).is_none());
+        assert!(s.take_kept("/lib/C.cbz", None, Some("\"c\"")).is_some());
+        s.clear_kept();
+        assert_eq!(s.kept_count(), 0);
+        assert_eq!(std::fs::read_dir(s.disk_dir()).unwrap().count(), 0);
+    }
+
+    /// Finding: a kept copy expired after 10 minutes while the library could keep its
+    /// volume for hours (a storage hold). It now goes only when the library stops
+    /// naming it.
+    #[test]
+    fn kept_archives_wait_until_the_library_lets_them_go() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = spool(dir.path(), 0, None, 10 * GIB).keeping(4);
+        s.keep("/lib/A.cbz", "\"a\"".into(), archive(&s, 10));
+        s.keep("/lib/B.cbz", "\"b\"".into(), archive(&s, 10));
+        s.retain_kept(&["/lib/A.cbz".into(), "/lib/B.cbz".into()]);
+        assert_eq!(s.kept_count(), 2);
+        s.retain_kept(&["/lib/B.cbz".into(), "/lib/C.cbz".into()]);
+        assert_eq!(s.kept_count(), 1);
+        assert!(s.take_kept("/lib/A.cbz", None, Some("\"a\"")).is_none());
+        assert!(s.take_kept("/lib/B.cbz", None, Some("\"b\"")).is_some());
+        assert_eq!(std::fs::read_dir(s.disk_dir()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn kept_archives_give_way_to_new_placements() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // A disk with room for one archive: the kept copy gives its room up.
+        let free = Arc::new(Mutex::new(10 * GIB));
+        let probe = free.clone();
+        let s = ArchiveSpool::new(dir.path(), 0)
+            .with_probes(|| None, move |_| Ok(*probe.lock()))
+            .keeping(4);
+        s.keep("/lib/A.cbz", "\"a\"".into(), archive(&s, 10));
+        *free.lock() = DISK_MARGIN;
+        // The probe cannot see the kept copy go, so the placement is still refused,
+        // but only after the kept copy gave way.
+        assert!(matches!(s.place(10, true), Err(SpoolError::NoRoom(_))));
+        assert_eq!(s.kept_count(), 0);
+        *free.lock() = 10 * GIB;
+
+        if memfd_supported() {
+            // Finding: a full RAM budget dropped a kept RAM copy so a new archive could
+            // go to RAM instead of disk, trading a local write for the kept volume's
+            // download. The new archive goes to disk; the copy stays.
+            let s = spool(dir.path(), 1, Some(100 * GIB), 10 * GIB).keeping(4);
+            let mut p = s.place(MIB, true).unwrap();
+            assert_eq!(p.kind(), PlacementKind::Memory);
+            p.write(b"x").unwrap();
+            s.keep(
+                "/lib/A.cbz",
+                "\"a\"".into(),
+                FetchedArchive::for_tests(p, 1),
+            );
+            assert_eq!(s.in_memory_bytes(), MIB);
+            let next = s.place(MIB, true).unwrap();
+            assert_eq!(next.kind(), PlacementKind::Disk);
+            assert_eq!(s.kept_count(), 1);
+            drop(next);
+
+            // Finding: an archive larger than the whole budget dropped every kept RAM
+            // copy, one per pass, before it went to disk anyway.
+            let big = s.place(2 * MIB, true).unwrap();
+            assert_eq!(big.kind(), PlacementKind::Disk);
+            assert_eq!(s.kept_count(), 1);
+            drop(big);
+
+            // The machine short of memory (not the budget): the kept RAM copy goes.
+            let headroom = Arc::new(Mutex::new(100 * GIB));
+            let probe = headroom.clone();
+            let s = ArchiveSpool::new(dir.path(), 4)
+                .with_probes(move || Some(*probe.lock()), |_| Ok(10 * GIB))
+                .keeping(4);
+            let mut p = s.place(MIB, true).unwrap();
+            assert_eq!(p.kind(), PlacementKind::Memory);
+            p.write(b"x").unwrap();
+            s.keep(
+                "/lib/A.cbz",
+                "\"a\"".into(),
+                FetchedArchive::for_tests(p, 1),
+            );
+            *headroom.lock() = MEMORY_MARGIN;
+            let next = s.place(MIB, true).unwrap();
+            assert_eq!(next.kind(), PlacementKind::Disk);
+            assert_eq!(s.kept_count(), 0, "the RAM copy gave its memory up");
+        }
+    }
+
+    /// Finding: a new archive that could not go to RAM dropped a kept RAM copy to make
+    /// room on disk, which frees none (that volume was then downloaded again), and a
+    /// storage that could not be used at all dropped every kept copy for nothing.
+    #[test]
+    fn only_what_frees_the_room_gives_way() {
+        if !memfd_supported() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        // None: the storage cannot be used (its free space cannot be read).
+        let free: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(Some(10 * GIB)));
+        let probe = free.clone();
+        let s = ArchiveSpool::new(dir.path(), 1)
+            .with_probes(
+                || Some(100 * GIB),
+                move |_| (*probe.lock()).ok_or_else(|| io::Error::other("gone")),
+            )
+            .keeping(4);
+        let mut ram = s.place(MIB, true).unwrap();
+        assert_eq!(ram.kind(), PlacementKind::Memory);
+        ram.write(b"a").unwrap();
+        s.keep(
+            "/lib/A.cbz",
+            "\"a\"".into(),
+            FetchedArchive::for_tests(ram, 1),
+        );
+        let mut disk = s.place(MIB, false).unwrap();
+        assert_eq!(disk.kind(), PlacementKind::Disk);
+        disk.write(b"b").unwrap();
+        s.keep(
+            "/lib/B.cbz",
+            "\"b\"".into(),
+            FetchedArchive::for_tests(disk, 1),
+        );
+
+        // The storage is unusable: nothing a kept copy holds would help.
+        *free.lock() = None;
+        assert!(matches!(s.place(MIB, false), Err(SpoolError::NoRoom(_))));
+        assert_eq!(s.kept_count(), 2, "no copy dropped for an unusable storage");
+
+        // The disk is full and the new archive cannot go to RAM: only the disk copy
+        // gives way (the probe cannot see it go, so the placement is still refused).
+        *free.lock() = Some(DISK_MARGIN);
+        assert!(matches!(s.place(MIB, false), Err(SpoolError::NoRoom(_))));
+        assert_eq!(s.kept_count(), 1);
+        assert!(s.take_kept("/lib/B.cbz", None, Some("\"b\"")).is_none());
+        let a = s.take_kept("/lib/A.cbz", None, Some("\"a\"")).unwrap();
+        s.keep("/lib/A.cbz", "\"a\"".into(), a);
+
+        // It could go to RAM but the budget is full and the disk too: the RAM copy
+        // gives its room up, and the archive goes to RAM.
+        let placed = s.place(MIB, true).unwrap();
+        assert_eq!(placed.kind(), PlacementKind::Memory);
+        assert_eq!(s.kept_count(), 0);
+    }
+
+    /// The backstop: a copy the library never asked about again (a processor that got
+    /// no further op) goes after [`KEPT_IDLE_LIMIT`].
+    #[test]
+    fn a_copy_nobody_asks_about_goes_after_the_idle_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = spool(dir.path(), 0, None, 10 * GIB).keeping(4);
+        s.keep("/lib/A.cbz", "\"a\"".into(), archive(&s, 10));
+        s.expire_kept_before(Instant::now() - KEPT_IDLE_LIMIT);
+        assert_eq!(s.kept_count(), 1);
+        s.expire_kept_before(Instant::now() + Duration::from_secs(1));
+        assert_eq!(s.kept_count(), 0);
+        assert_eq!(std::fs::read_dir(s.disk_dir()).unwrap().count(), 0);
+        s.keep("/lib/A.cbz", "\"a\"".into(), archive(&s, 10));
+        s.expire_idle_kept();
+        assert_eq!(s.kept_count(), 1, "a fresh copy stays");
     }
 
     #[test]
