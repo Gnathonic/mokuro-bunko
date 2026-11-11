@@ -408,7 +408,8 @@ pub struct PlanInputs<'a> {
 /// `plan_queue`: price the running cards, then walk the queue across the
 /// lanes, each item to the lane that finishes it first (else the lane that
 /// frees first). An item that cannot be priced blocks everything behind it;
-/// a held item (no lane may take its row) blocks nothing.
+/// a held item (no lane may take its row, or the caller marked it `held` with
+/// its `reason`) blocks nothing.
 pub fn plan_queue(running: &[Object], pending: &[Object], inputs: &PlanInputs<'_>) -> QueuePlan {
     let pricing = inputs.pricing;
     let now = inputs.now;
@@ -451,6 +452,16 @@ pub fn plan_queue(running: &[Object], pending: &[Object], inputs: &PlanInputs<'_
         entry.insert("pages".into(), pages.map_or(Value::Null, Value::from));
         entry.insert("rough".into(), Value::Bool(rough));
 
+        if truthy(entry.get("held")) {
+            let reason = entry
+                .get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or("held")
+                .to_owned();
+            no_prediction(&mut entry, &reason);
+            planned.push(entry);
+            continue;
+        }
         if let Some(blocked) = &blocked_by {
             no_prediction(
                 &mut entry,
@@ -775,5 +786,33 @@ mod tests {
         assert_eq!(plan.pending[1]["eta_seconds"], 15);
         assert_eq!(plan.pending[1]["eta_at"], "1970-01-01T00:00:15Z");
         assert_eq!(plan.done_in, Some(15.0));
+    }
+
+    /// An item the caller marked held (an upgrade waiting for the library's lease) says
+    /// its own reason and blocks nothing; the rest of the queue is planned.
+    #[test]
+    fn items_marked_held_say_why_and_block_nothing() {
+        let inputs = PlanInputs {
+            lane_count: 1,
+            lane_machines: None,
+            pricing: &Fixed,
+            now: 0.0,
+            through: None,
+            refusal_for: None,
+            hold_for: None,
+        };
+        let mut held = item("g-1", 10);
+        held.insert("held".into(), Value::Bool(true));
+        held.insert("reason".into(), Value::from("Upgrades wait"));
+        let plan = plan_queue(&[], &[held, item("g-1", 100)], &inputs);
+        assert_eq!(plan.pending[0]["reason"], "Upgrades wait");
+        assert_eq!(plan.pending[0]["held"], true);
+        assert!(plan.pending[0]["eta_at"].is_null());
+        assert!(
+            plan.pending[1]["eta_seconds"].is_number(),
+            "{:?}",
+            plan.pending[1]
+        );
+        assert!(plan.pending[1].get("held").is_none());
     }
 }

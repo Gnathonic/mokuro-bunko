@@ -28,7 +28,7 @@ use bunko_proto::{Event, Op};
 use bunko_remote::fake::FakeBackend;
 use bunko_server::app::{ServeOptions, Services, assemble};
 use bunko_server::ocr::sched::{Exec, Msg, SchedDeps, Scheduler};
-use bunko_server::ocr::types::{FileFacts, LibraryFacts};
+use bunko_server::ocr::types::{FileFacts, Job, LibraryFacts};
 use http::{Request, StatusCode};
 use ocr_common::{exit, primary, ready, settings, started};
 use tower::ServiceExt;
@@ -1426,4 +1426,226 @@ fn an_older_processor_is_offered_work_after_one_batch_of_page_format_reads() {
     let got = volume_ops(&drain(&mut old));
     assert!(!got.is_empty(), "offered nothing after the first batch");
     assert!(sched.failures.is_empty());
+}
+
+/// The lease runs, with a first-claim settle wait of a few seconds.
+fn claim_in_seconds(c: &mut bunko_remote::RemoteStoreConfig) {
+    c.lease = true;
+    c.lease_settle = Some(Duration::from_secs(4));
+    c.retry_base = Duration::from_millis(50);
+}
+
+/// An old main sidecar (no `ocr_engine`): the generation upgrade replaces it.
+const LEGACY: &str = r#"{"version": "0.2.1", "title": "Series", "volume": "Vol 1", "pages": [{"img_path": "001.jpg", "blocks": []}, {"img_path": "002.jpg", "blocks": []}, {"img_path": "003.jpg", "blocks": []}]}"#;
+
+/// While this Bunko is still claiming a cloud library (its settle wait, spec §9.2), an
+/// upgrade job is not handed out: its swap replaces the cloud's current version with a
+/// Sync write, which the store refuses until this Bunko holds the library, so the OCR
+/// run would be thrown away and the volume recorded as failed. The other jobs run (a
+/// new OCR file waits in the outbox), the queue page says why the upgrade waits and
+/// the queue file shows it held, and once the lease is held the upgrade is handed out.
+#[test]
+fn upgrade_jobs_wait_while_this_bunko_claims_the_cloud_library() {
+    use bunko_remote::status::LeaseEvent;
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("storage");
+    let fake = Arc::new(FakeBackend::drive_like());
+    fake.reader_put(&format!("{ROOT}/Series/Vol 1.cbz"), &cbz(3, 100));
+    fake.reader_put(&format!("{ROOT}/Series/Vol 1.mokuro"), LEGACY.as_bytes());
+    fake.reader_put(&format!("{ROOT}/Series/Vol 2.cbz"), &cbz(3, 100));
+    bunko_server::storage::testing::register_tuned(&base, fake, Some(claim_in_seconds));
+    let config = cloud_config(base.clone(), true);
+    let layout = config.storage.layout();
+    layout.ensure_directories().unwrap();
+    let (store, _mount, handle) = bunko_server::storage::open_library_store(&config, &layout)
+        .unwrap()
+        .unwrap();
+    assert!(handle.wait_steady(Duration::from_secs(20)));
+    let layout = layout.with_library_root(store.root());
+    let remote = handle.fake_store().unwrap().clone();
+    let claiming = || remote.lease().and_then(|l| l.claiming_left()).is_some();
+    eventually_sync("the claim's settle wait", claiming);
+
+    let upgrade = Arc::new(bunko_server::ocr::upgrade::Upgrade::new(
+        layout.library(),
+        None,
+        Arc::new(FileFacts),
+        Arc::new(bunko_library::service::NoPathLocks),
+        "mokuro-bunko test".into(),
+    ));
+    upgrade.configure(
+        &bunko_core::config::UpgradeConfig {
+            enabled: true,
+            replace: vec!["mokuro-legacy".into(), "mokuro".into()],
+        },
+        &[primary()],
+    );
+    let t0 = ocr_common::t0();
+    let clock = Arc::new(bunko_sched::rate::ManualClock::new(t0));
+    let mut s = settings(vec![primary()]);
+    s.local_processing = true;
+    let mut sched = Scheduler::new(
+        SchedDeps {
+            layout: layout.clone(),
+            db: None,
+            facts: Arc::new(FileFacts),
+            locks: Arc::new(bunko_library::service::NoPathLocks),
+            clock: clock.clone(),
+            exec: Exec::Inline,
+            upgrade: Some(upgrade),
+            generator: "mokuro-bunko test".into(),
+            version: "0.8.0-test".into(),
+        },
+        s,
+    );
+    sched.handle(Msg::Tick);
+    let upgrade_job = Job::upgrade("Series/Vol 1.cbz", "g-1");
+    let plain_job = Job::new("Series/Vol 2.cbz", "g-1");
+    assert!(
+        sched.owed.volumes["Series/Vol 1.cbz"].upgrade,
+        "an upgrade is owed"
+    );
+    assert!(sched.owed.volumes.contains_key("Series/Vol 2.cbz"));
+    let (tx, mut ops) = tokio::sync::mpsc::unbounded_channel();
+    let catalog: bunko_proto::Catalog = serde_json::from_value(serde_json::json!({
+        "engines": ocr_common::ENGINES,
+        "detectors": ["ppocr-manga"],
+        "devices": [{"id": "cpu", "label": "CPU"}],
+        "engine_revisions": ocr_common::current_revisions(ocr_common::ENGINES),
+    }))
+    .unwrap();
+    sched.handle(Msg::LocalUp {
+        ops: tx,
+        catalog,
+        host: bunko_proto::HostInfo {
+            cpu: "Test CPU".into(),
+            backend: "cpu".into(),
+            ..Default::default()
+        },
+    });
+    clock.set(t0 + 1.0);
+    sched.handle(Msg::Tick);
+    let sent = drain(&mut ops);
+    let sid = sent
+        .iter()
+        .find_map(|o| match o {
+            Op::OpenSession { sid, .. } => Some(sid.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("a local session opens: {sent:?}"));
+    let vol = sent
+        .iter()
+        .find_map(|o| match o {
+            Op::Volume(v) => Some(v.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("the plain job is handed out: {sent:?}"));
+    assert!(
+        sched.claims.contains_key(&plain_job),
+        "{:?}",
+        sched.claims.keys()
+    );
+    assert!(
+        !sched.claims.contains_key(&upgrade_job),
+        "no upgrade job while claiming"
+    );
+    // The library is not held as a whole: the claim holds only the upgrades.
+    assert_eq!(sched.storage_hold(), None);
+    assert_eq!(sched.queue_hold(), None);
+
+    // The plain job finishes and is installed (a Deferred write, held in the outbox
+    // until the lease); the free lane still gets no upgrade job.
+    let local = sched
+        .machines
+        .values()
+        .find(|m| m.local)
+        .unwrap()
+        .pid
+        .clone();
+    let event = |sched: &mut Scheduler, event: Event| {
+        sched.handle(Msg::Event {
+            pid: local.clone(),
+            event,
+        })
+    };
+    event(&mut sched, ready(&sid));
+    event(&mut sched, started(&sid, &vol.claim, 3));
+    let result_dir = base.join(".processing").join(&sid).join(&vol.claim);
+    std::fs::create_dir_all(&result_dir).unwrap();
+    let result = result_dir.join(bunko_proto::RESULT_FILE);
+    std::fs::write(&result, mokuro("vol-2-uuid", 3)).unwrap();
+    let sha = bunko_server::ocr::collect::sha256_file(&result).unwrap();
+    event(
+        &mut sched,
+        Event::VolumeDone {
+            sid: sid.clone(),
+            id: vol.claim.clone(),
+            pages: 3,
+            failed_pages: 0,
+            seconds: 2.0,
+            stats: serde_json::Value::Null,
+            cpu_pressure: None,
+            other_cpu: None,
+            sidecar_sha256: Some(sha),
+        },
+    );
+    clock.set(t0 + 2.0);
+    sched.handle(Msg::Tick);
+    assert!(
+        !sched.owed.volumes.contains_key("Series/Vol 2.cbz"),
+        "installed"
+    );
+    let sent = drain(&mut ops);
+    assert!(
+        !sched.claims.contains_key(&upgrade_job) && volume_ops(&sent).is_empty(),
+        "no upgrade job while claiming: {sent:?}"
+    );
+    assert!(sched.failures.is_empty(), "no failure recorded");
+    // With nothing it may run, the session closes.
+    if sent
+        .iter()
+        .any(|o| matches!(o, Op::CloseSession { sid: s } if *s == sid))
+    {
+        event(&mut sched, exit(&sid, Some(0)));
+    }
+
+    // The queue page says why it waits; the queue file shows it held.
+    let pending = sched.pending_jobs();
+    let entry = pending
+        .iter()
+        .find(|e| e.get("kind").and_then(|k| k.as_str()) == Some("upgrade"))
+        .unwrap_or_else(|| panic!("the upgrade is listed: {pending:?}"));
+    assert_eq!(entry["held"], true, "{entry:?}");
+    let reason = entry["reason"].as_str().unwrap();
+    assert!(
+        reason.starts_with("Upgrades wait until this Bunko holds the library")
+            && reason.contains("left)"),
+        "{reason}"
+    );
+    let (held, volumes, _) = sched.queue_document();
+    assert_eq!(held, None, "the queue as a whole is not held");
+    let vol1 = volumes
+        .iter()
+        .find(|v| v["volume"] == "Vol 1")
+        .unwrap_or_else(|| panic!("{volumes:?}"));
+    assert_eq!(vol1["jobs"][0]["state"], "held", "{vol1}");
+    assert!(claiming(), "all of the above ran while claiming");
+
+    // Once this Bunko holds the library, the upgrade is handed out.
+    eventually_sync("the lease", || {
+        remote.lease().map(|l| l.event()) == Some(LeaseEvent::Acquired)
+    });
+    clock.set(t0 + 3.0);
+    sched.handle(Msg::Tick);
+    let sent = drain(&mut ops);
+    assert!(
+        sched.claims.contains_key(&upgrade_job),
+        "the upgrade runs once the lease is held: {:?} {sent:?}",
+        sched.claims.keys()
+    );
+    let pending = sched.pending_jobs();
+    assert!(
+        pending.iter().all(|e| e.get("held").is_none()),
+        "{pending:?}"
+    );
 }

@@ -399,6 +399,9 @@ pub struct Scheduler {
     pub hold_logged: bool,
     /// The last [`Scheduler::storage_hold`] the tick saw (logged on change).
     pub storage_held: Option<&'static str>,
+    /// The last [`Scheduler::upgrade_hold`] the tick saw: why upgrade jobs wait while
+    /// the rest of the queue runs (logged when it begins and ends).
+    pub upgrade_held: Option<String>,
     /// This server's own OCR has come up at least once (`LocalUp`).
     pub local_was_up: bool,
     /// An automatic update is waiting for a quiet moment: no machine gets a new claim
@@ -481,6 +484,7 @@ impl Scheduler {
             ended_sessions: HashMap::new(),
             hold_logged: false,
             storage_held: None,
+            upgrade_held: None,
             local_was_up: false,
             update_drain: false,
             last_poll_tick: f64::NEG_INFINITY,
@@ -680,6 +684,7 @@ impl Scheduler {
         }
         self.check_sessions();
         self.check_storage_hold();
+        self.check_upgrade_hold();
         let now = self.mono();
         if now - self.last_poll_tick >= self.settings.poll_interval {
             self.last_poll_tick = now;
@@ -716,6 +721,31 @@ impl Scheduler {
                 }
                 self.maybe_start_scan();
             }
+        }
+        self.bump();
+        self.bump_page();
+    }
+
+    /// The upgrade hold began, changed (the time left) or ended: the queue page says
+    /// why upgrade jobs wait; the log has a line when it begins and ends; on release
+    /// every lane looks for work again (the upgrades run now).
+    fn check_upgrade_hold(&mut self) {
+        let now = self.upgrade_hold();
+        if now == self.upgrade_held {
+            return;
+        }
+        let was = std::mem::replace(&mut self.upgrade_held, now.clone());
+        match (&was, &now) {
+            (None, Some(reason)) => self.log(format!("OCR holds upgrade jobs: {reason}")),
+            (Some(_), None) => {
+                self.log("OCR runs upgrade jobs again (this Bunko holds the library now)");
+                for lane in &mut self.lanes {
+                    lane.idle_at = None;
+                }
+                self.maybe_start_scan();
+                self.maybe_start_direct();
+            }
+            _ => {}
         }
         self.bump();
         self.bump_page();
@@ -900,6 +930,10 @@ impl Scheduler {
         let Some(up) = self.upgrade_probe() else {
             return;
         };
+        // A swap is a Sync write: it waits until this Bunko holds the library.
+        if self.upgrade_hold().is_some() {
+            return;
+        }
         let volumes = up.ready_volumes();
         if volumes.is_empty() {
             return;

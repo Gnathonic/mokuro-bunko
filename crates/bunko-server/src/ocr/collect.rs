@@ -273,24 +273,50 @@ pub fn volume_uuid_for(
 }
 
 /// Move `from` to `to`: a publish (a rename on a local library), or a copy into a temp
-/// file beside `to` then a publish when they are on different filesystems (the
-/// rename's `CrossesDevices`). `intent` is what the store is told about the write.
+/// file beside `to` then a publish when the store cannot take `from` as it is (a local
+/// library on another filesystem: the rename's `CrossesDevices`). `intent` is what the
+/// store is told about the write.
+///
+/// A store that refused the write itself ([`refused_now`], or a conflict) is answered
+/// with that refusal: a copy would be refused the same way, and its error would hide
+/// the real one. Neither is a copy tried when `from` is gone after the publish.
 pub fn move_into_place(from: &Path, to: &Path, intent: &WriteIntent) -> std::io::Result<()> {
-    match fs::publish(from, to, intent) {
-        Ok(_) => Ok(()),
-        Err(_) => {
-            let tmp = to.with_file_name(format!(
-                ".{}.part",
-                to.file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default()
-            ));
-            fs::copy(from, &tmp)?;
-            fs::publish(&tmp, to, intent)?;
-            let _ = fs::remove_file(from);
-            Ok(())
-        }
+    let first = match fs::publish(from, to, intent) {
+        Ok(_) => return Ok(()),
+        Err(e) => e,
+    };
+    if refused_now(&first) || bunko_store::is_conflict(&first) || !fs::is_file(from) {
+        return Err(first);
     }
+    let tmp = to.with_file_name(format!(
+        ".{}.part",
+        to.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    ));
+    fs::copy(from, &tmp)?;
+    if let Err(e) = fs::publish(&tmp, to, intent) {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
+    }
+    let _ = fs::remove_file(from);
+    Ok(())
+}
+
+/// The store refused a write for now, not for its content: this Bunko is still
+/// claiming the library or another one holds it, the provider is out, throttled or
+/// full, or its sign-in expired. The result is good; the job runs again later.
+pub fn refused_now(e: &std::io::Error) -> bool {
+    use bunko_store::ErrorClass as C;
+    matches!(
+        bunko_store::classify(e),
+        C::LeaseClaiming { .. }
+            | C::LeaseHeld
+            | C::Unavailable { .. }
+            | C::NeedsAuth
+            | C::StorageFull
+            | C::TransferQuota { .. }
+    )
 }
 
 /// Try the DAV write lock for a while: a write in flight is short.

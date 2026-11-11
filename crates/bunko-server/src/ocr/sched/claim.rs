@@ -44,6 +44,9 @@ impl From<&PageSuffixes> for Suffixes {
 /// The most page-suffix reads asked of a helper at a time (remote store).
 pub const SUFFIX_BATCH: usize = 8;
 
+/// The start of [`Scheduler::upgrade_hold`]'s reason.
+pub const UPGRADES_WAIT: &str = "Upgrades wait until this Bunko holds the library";
+
 /// The pseudo row id upgrade jobs are ordered under: after every real row.
 pub const UPGRADE_ORDER_KEY: &str = "\u{10FFFF}upgrade";
 
@@ -751,6 +754,26 @@ impl Scheduler {
         }
     }
 
+    /// Why upgrade jobs wait while the rest of the queue runs, or None: on a cloud
+    /// library this Bunko is still claiming (its first sync, the settle wait, or
+    /// confirming its claim, spec §9.2). An upgrade's swap replaces the cloud's current
+    /// version with a Sync write, which only the Bunko holding the library may make;
+    /// a new OCR file is a Deferred write that waits in the outbox, so other jobs run.
+    pub fn upgrade_hold(&self) -> Option<String> {
+        let store = bunko_store::store_for(&self.library())?;
+        if !store.caps().remote {
+            return None;
+        }
+        let claiming = store.claiming()?;
+        Some(match claiming.left {
+            Some(left) => format!(
+                "{UPGRADES_WAIT}; it is still claiming it (about {} left)",
+                bunko_remote::status::about(left)
+            ),
+            None => format!("{UPGRADES_WAIT}; it is still claiming it"),
+        })
+    }
+
     /// Hold (or release) every machine for an automatic update: no new claims; the
     /// claims in flight finish and upload.
     pub fn set_update_drain(&mut self, on: bool) {
@@ -941,8 +964,12 @@ impl Scheduler {
             .cloned()
             .chain(self.attempted.iter().cloned())
             .collect();
-        // Phase B.
-        let proposed = self.candidates(&unavailable, true);
+        // Phase B. Upgrade jobs wait while this Bunko is still claiming a cloud library
+        // (their swap needs the lease); the rest of the queue runs.
+        let mut proposed = self.candidates(&unavailable, true);
+        if self.upgrade_hold().is_some() {
+            proposed.retain(|j| !j.upgrade);
+        }
         let mut offered: HashMap<String, bool> = HashMap::new();
         let mut walked_rows: Vec<String> = Vec::new();
         for job in &proposed {

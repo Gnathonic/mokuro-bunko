@@ -270,6 +270,11 @@ impl Scheduler {
         e.insert("pages".into(), json!(self.known_pages(&job.rel)));
         if job.upgrade {
             e.insert("kind".into(), json!("upgrade"));
+            // Held: the plan leaves it out of the lanes and shows why.
+            if let Some(reason) = &self.upgrade_held {
+                e.insert("held".into(), json!(true));
+                e.insert("reason".into(), json!(reason));
+            }
         }
         let key = self.failure_key_of(job, row);
         let mtime = self.owed.volumes.get(&*job.rel).map(|v| v.mtime);

@@ -88,12 +88,27 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> 
     tokio::task::spawn_blocking(f).await.unwrap()
 }
 
+/// The lease runs, and its first claim waits an hour before it may hold the lease.
+fn slow_claim(c: &mut bunko_remote::RemoteStoreConfig) {
+    c.lease = true;
+    c.lease_settle = Some(Duration::from_secs(3600));
+    c.retry_base = Duration::from_millis(50);
+}
+
 impl Cloud {
     /// A server over `fake`, with the reader's files already in it, after its first sync.
     async fn start(fake: Arc<FakeBackend>) -> Cloud {
+        Cloud::start_tuned(fake, no_lease).await
+    }
+
+    /// [`Cloud::start`] with the store's settings tuned by `tune`.
+    async fn start_tuned(
+        fake: Arc<FakeBackend>,
+        tune: fn(&mut bunko_remote::RemoteStoreConfig),
+    ) -> Cloud {
         let dir = tempfile::tempdir().unwrap();
         let base = dir.path().join("storage");
-        bunko_server::storage::testing::register_tuned(&base, fake.clone(), Some(no_lease));
+        bunko_server::storage::testing::register_tuned(&base, fake.clone(), Some(tune));
         let mut c = Config::default();
         c.storage.base_path = base;
         c.storage.library.backend = LibraryBackend::GDrive;
@@ -548,6 +563,19 @@ async fn collect(
     row: bunko_core::generations::Generation,
     result: String,
 ) -> bunko_server::ocr::collect::Outcome {
+    let job = bunko_server::ocr::types::Job::new(cbz, &row.id);
+    collect_job(cloud, job, row, result, None).await
+}
+
+/// [`collect`] of `job` (an upgrade job when `upgrade` is given).
+async fn collect_job(
+    cloud: &Cloud,
+    job: bunko_server::ocr::types::Job,
+    row: bunko_core::generations::Generation,
+    result: String,
+    upgrade: Option<Arc<Upgrade>>,
+) -> bunko_server::ocr::collect::Outcome {
+    let cbz = job.rel.to_string();
     let dir = cloud
         .dir
         .path()
@@ -557,7 +585,7 @@ async fn collect(
     std::fs::write(&out, result).unwrap();
     let layout = cloud.services.core.layout.clone();
     let req = bunko_server::ocr::collect::CollectRequest {
-        job: bunko_server::ocr::types::Job::new(cbz, &row.id),
+        job,
         rows: vec![
             bunko_core::generations::default_generation("g-1"),
             row.clone(),
@@ -580,9 +608,54 @@ async fn collect(
         sid: "s-1".into(),
         claim: "c-1".into(),
         congestion: None,
-        upgrade: None,
+        upgrade,
     };
     blocking(move || bunko_server::ocr::collect::run(req).outcome).await
+}
+
+/// An upgrade job's result that arrives while this Bunko is still claiming the cloud
+/// library (its settle wait, §9.2): the swap is a Sync write, which the store refuses
+/// until it holds the library. That is no failure of the volume: the job goes back to
+/// the queue (`Held`), and the cloud's main sidecar is as it was, with nothing left in
+/// the outbox. (It failed with the store's refusal hidden behind "No such file or
+/// directory": the store had moved the result into its outbox and dropped it, and the
+/// copy fallback then found no file.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_upgrade_result_while_the_library_is_being_claimed_is_held() {
+    use bunko_server::ocr::collect::Outcome;
+    let fake = Arc::new(FakeBackend::drive_like());
+    library(&fake, LEGACY);
+    let cloud = Cloud::start_tuned(fake.clone(), slow_claim).await;
+    let store = cloud.store().clone();
+    let until = Instant::now() + Duration::from_secs(20);
+    while store.lease().and_then(|l| l.claiming_left()).is_none() {
+        assert!(Instant::now() < until, "the settle wait");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(cloud.judge("Series/Vol 1.cbz").await, Verdict::NeedsOcr);
+    let primary = bunko_core::generations::default_generation("g-1");
+    let job = bunko_server::ocr::types::Job::upgrade("Series/Vol 1.cbz", &primary.id);
+    let outcome = collect_job(&cloud, job, primary, hayai().to_string(), Some(cloud.up())).await;
+    let Outcome::Held(reason) = &outcome else {
+        panic!("held, not failed: {outcome:?}");
+    };
+    assert!(reason.contains("still claiming the library"), "{reason}");
+    assert!(!reason.contains("No such file"), "{reason}");
+    assert_eq!(
+        cloud.cloud_bytes("Series/Vol 1.mokuro").as_deref(),
+        Some(LEGACY),
+        "the cloud's main sidecar is untouched"
+    );
+    assert!(
+        store.outbox().iter().all(|o| !o.dest.ends_with(".mokuro")),
+        "{:?}",
+        store.outbox()
+    );
+    assert!(cloud.upgrade_audits().is_empty());
+    assert!(
+        store.lease().and_then(|l| l.claiming_left()).is_some(),
+        "still claiming throughout"
+    );
 }
 
 /// The rename race on a cloud library (critique S6): what a reader moved to the

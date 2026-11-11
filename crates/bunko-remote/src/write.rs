@@ -454,6 +454,12 @@ impl<B: Backend> RemoteStore<B> {
                 ));
             }
         }
+        // A Sync write the fence refuses now is refused before the bytes are taken:
+        // `stage_put` moves the caller's file into the outbox, and the refusal would
+        // then drop it with the op. The caller keeps its bytes, as above.
+        if w.durability == Durability::Sync && !self.core.fence_open() {
+            return Err(self.core.fence_refusal());
+        }
         let op = self.core.stage_put(&src, rel, w)?;
         forget_staging(self);
         match w.durability {
