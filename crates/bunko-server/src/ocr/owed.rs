@@ -26,6 +26,11 @@ pub struct OwedVolume {
     pub mtime: f64,
     /// Row ids owed, in list (= run) order.
     pub rows: Vec<Arc<str>>,
+    /// The rows of `rows` owed because their layer is Bunko's own output at an older
+    /// engine revision ([`UpgradeProbe::layer_outdated`]), not because it is missing.
+    /// They are upgrades: the queue runs them after that row's missing files. Their
+    /// result replaces that file in place, a Sync write, as an upgrade's swap is.
+    pub outdated: Vec<Arc<str>>,
     /// Non-primary rows withheld because the supplied `.mokuro` names pages the archive
     /// lacks (never a failure, no record).
     pub skipped: Vec<Arc<str>>,
@@ -227,10 +232,21 @@ fn compute_in(
         return None;
     }
     let enabled: Vec<&Generation> = bunko_core::generations::enabled_generations(rows).collect();
+    let mut outdated: Vec<Arc<str>> = Vec::new();
     let mut owed: Vec<&Generation> = enabled
         .iter()
         .copied()
-        .filter(|r| !row_done(cbz, r, folder) || upgrade.is_some_and(|p| p.layer_outdated(cbz, r)))
+        .filter(|r| {
+            if !row_done(cbz, r, folder) {
+                return true;
+            }
+            // Done, but Bunko's own output at an older revision: an upgrade of the row.
+            let stale = upgrade.is_some_and(|p| p.layer_outdated(cbz, r));
+            if stale {
+                outdated.push(Arc::from(r.id.as_str()));
+            }
+            stale
+        })
         .filter(|r| writable(&r.sidecar_suffix()))
         .collect();
     let primary_done = enabled
@@ -249,6 +265,7 @@ fn compute_in(
             owed.retain(|r| r.primary);
         }
     }
+    outdated.retain(|id| owed.iter().any(|r| *r.id == **id));
     let mut wants_upgrade = false;
     if let Some(probe) = upgrade
         && primary_done
@@ -271,6 +288,7 @@ fn compute_in(
         mtime_ns: mtime_ns(&meta),
         mtime,
         rows: owed.iter().map(|r| Arc::from(r.id.as_str())).collect(),
+        outdated,
         skipped,
         missing_pages,
         upgrade: wants_upgrade,

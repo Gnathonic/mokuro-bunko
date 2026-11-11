@@ -1533,6 +1533,123 @@ fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     out
 }
 
+/// Finding: a manifest whose OCR queue is too busy to answer within its second must not
+/// say `pending: []` (a reader takes it as finished) nor fail (a deep link then imports
+/// the volume without its layers): it names the jobs the volume owes, as the scheduler
+/// last published them, with no finishing time.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_busy_queue_still_names_the_jobs_a_volume_owes() {
+    use bunko_server::library::OutlookSource;
+    let e = env(|_| {});
+    let lib = e.core.layout.library();
+    let cbz = lib.join("Series A/V1.cbz");
+    ocr_common::write_cbz(&cbz, 3);
+    e.ocr.archive_arrived(&cbz);
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while !e
+        .ocr
+        .owed_pending("Series A/V1.cbz")
+        .is_some_and(|p| !p.is_empty())
+    {
+        assert!(std::time::Instant::now() < deadline, "never published");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let glue = bunko_server::glue::OcrGlue(e.ocr.clone());
+    let answered = glue.volume_outlook(&cbz, "Series A", "V1");
+    assert!(!answered.busy);
+    let ids = |pending: &[Value]| -> Vec<(Value, Value)> {
+        pending
+            .iter()
+            .map(|p| (p["kind"].clone(), p["id"].clone()))
+            .collect()
+    };
+    assert!(!answered.pending.is_empty());
+
+    // The scheduler thread is busy for 3 s: the 1 s ask times out.
+    e.ocr.send(Msg::Query(Box::new(|_| {
+        std::thread::sleep(Duration::from_secs(3))
+    })));
+    let asked = std::time::Instant::now();
+    let busy = glue.volume_outlook(&cbz, "Series A", "V1");
+    assert!(
+        asked.elapsed() >= Duration::from_millis(900),
+        "the ask timed out"
+    );
+    assert!(!busy.busy, "answered from the published board, not 503");
+    assert_eq!(ids(&busy.pending), ids(&answered.pending));
+    assert!(
+        busy.pending.iter().all(|p| p["eta"].is_null()),
+        "{:?}",
+        busy.pending
+    );
+    assert_eq!(busy.recheck_after, Some(json!(300)));
+    e.stop.cancel();
+}
+
+/// Finding: the owed board is rebuilt at most every 5 s, so a volume that arrived after
+/// it was built is not on it. Asked about while the scheduler is too busy to answer,
+/// that volume was answered `pending: []` (a reader takes it as finished and stops
+/// watching it). It is busy (503) until the board has it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_volume_newer_than_the_owed_board_is_busy_not_finished() {
+    use bunko_server::library::OutlookSource;
+    let e = env(|_| {});
+    let lib = e.core.layout.library();
+    let v1 = lib.join("Series A/V1.cbz");
+    ocr_common::write_cbz(&v1, 3);
+    e.ocr.archive_arrived(&v1);
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while !e
+        .ocr
+        .owed_pending("Series A/V1.cbz")
+        .is_some_and(|p| !p.is_empty())
+    {
+        assert!(std::time::Instant::now() < deadline, "never published");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // The board was just built: the next one is at least 5 s away.
+    let v2 = lib.join("Series A/V2.cbz");
+    ocr_common::write_cbz(&v2, 3);
+    e.ocr.archive_arrived(&v2);
+    let block = |ocr: &OcrControl| {
+        ocr.send(Msg::Query(Box::new(|_| {
+            std::thread::sleep(Duration::from_secs(2))
+        })))
+    };
+    block(&e.ocr);
+    let glue = bunko_server::glue::OcrGlue(e.ocr.clone());
+    let asked = std::time::Instant::now();
+    let answer = glue.volume_outlook(&v2, "Series A", "V2");
+    assert!(asked.elapsed() >= Duration::from_millis(900), "timed out");
+    assert!(
+        answer.busy,
+        "a volume the board has not seen is unknown, not finished: {:?}",
+        answer.pending
+    );
+    // A volume the board knows is still answered from it.
+    block(&e.ocr);
+    let known = glue.volume_outlook(&v1, "Series A", "V1");
+    assert!(!known.busy);
+    assert!(!known.pending.is_empty());
+
+    // Once the board has it, it names its jobs.
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while !e
+        .ocr
+        .owed_pending("Series A/V2.cbz")
+        .is_some_and(|p| !p.is_empty())
+    {
+        assert!(std::time::Instant::now() < deadline, "never published");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    block(&e.ocr);
+    let later = glue.volume_outlook(&v2, "Series A", "V2");
+    assert!(!later.busy);
+    assert!(!later.pending.is_empty());
+    assert!(later.pending.iter().all(|p| p["eta"].is_null()));
+    e.stop.cancel();
+}
+
 #[tokio::test]
 async fn put_follow_up_names_the_manifest_and_when_to_look_again() {
     use bunko_dav::DavHooks;
@@ -2105,4 +2222,64 @@ async fn a_testing_build_counts_the_walks_for_its_admin() {
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
     e.stop.cancel();
+}
+
+/// A processor waits 90 s for its socket to open, because a library busy with a large
+/// queue answers late. The socket's opening asks the scheduler, and that ask gave up
+/// after 30 s and refused the socket with 503: the processor registered again, which
+/// only added to the scheduler's queue. A scheduler 35 s behind now still opens it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_socket_opens_when_the_scheduler_answers_after_30_seconds() {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let e = env(|_| {});
+    e.db.create_user(
+        "tower-acct",
+        "processor-pass-1",
+        Role::Processor,
+        UserStatus::Active,
+        "",
+    )
+    .unwrap();
+    let app = bunko_server::ocr::processor_router(e.ocr.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let auth = basic("tower-acct", "processor-pass-1");
+    let reg: Value = reqwest::Client::new()
+        .post(format!("http://{addr}/_processor/register"))
+        .header("authorization", &auth)
+        .json(&json!({"protocol": 3, "name": "tower", "catalog": {"engines": ["hayai-nova"], "detectors": ["ppocr-manga"], "engine_revisions": ocr_common::current_revisions(["hayai-nova"])}}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let pid = reg["processor_id"].as_str().unwrap().to_string();
+    // The scheduler is busy for 35 s.
+    assert!(
+        e.ocr
+            .send(bunko_server::ocr::sched::Msg::Query(Box::new(|_| {
+                std::thread::sleep(Duration::from_secs(35));
+            })))
+    );
+    let mut req = format!("ws://{addr}/_processor/{pid}/socket")
+        .into_client_request()
+        .unwrap();
+    req.headers_mut()
+        .insert("authorization", auth.parse().unwrap());
+    let started = std::time::Instant::now();
+    let opened = tokio::time::timeout(
+        Duration::from_secs(90),
+        tokio_tungstenite::connect_async(req),
+    )
+    .await
+    .expect("the socket's opening took longer than the processor waits");
+    assert!(
+        opened.is_ok(),
+        "refused after {:?}: {:?}",
+        started.elapsed(),
+        opened.err()
+    );
+    assert!(started.elapsed() >= Duration::from_secs(30));
 }

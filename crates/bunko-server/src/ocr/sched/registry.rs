@@ -618,6 +618,7 @@ impl Scheduler {
         self.rebuild_lanes();
         self.bump();
         self.bump_page();
+        self.bench_machine_back(pid);
         let slots = self.lanes.iter().filter(|l| l.pid == pid).count();
         if self.scan_active {
             self.log(format!(
@@ -796,8 +797,16 @@ impl Scheduler {
         self.results
             .retain(|(sid, _), _| self.sessions.contains_key(sid));
         self.breakers.remove(pid);
+        // Its volumes (and their spooled archives) go to whoever takes them next.
+        for holders in self.volume_owners.values_mut() {
+            holders.retain(|o| o.pid != pid);
+        }
+        self.volume_owners.retain(|_, holders| !holders.is_empty());
         self.lanes.retain(|l| l.pid != pid);
-        self.bench_machine_left(&machine.name);
+        // A processor that drops off usually comes back: its autobench runs wait for it.
+        let identity = (!machine.local && !self.stopping)
+            .then(|| (machine.host_value.clone(), machine.catalog_value.clone()));
+        self.bench_machine_left(&machine.name, identity);
         self.rebuild_lanes();
         self.bump();
         self.bump_page();

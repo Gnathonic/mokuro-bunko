@@ -351,6 +351,25 @@ enum Install<'a> {
     Direct(Vec<u8>),
 }
 
+/// Why a swap did not happen: its text, and whether the library's cloud store refused
+/// the write for now ([`super::collect::refused_now`]: this Bunko is still claiming the
+/// library, another one holds it, the provider is out). A refusal is not the volume's
+/// failure: its job waits and runs again.
+#[derive(Debug)]
+struct SwapError {
+    text: String,
+    refused: bool,
+}
+
+impl From<String> for SwapError {
+    fn from(text: String) -> Self {
+        SwapError {
+            text,
+            refused: false,
+        }
+    }
+}
+
 impl Install<'_> {
     fn mode(&self) -> &'static str {
         match self {
@@ -1007,9 +1026,12 @@ impl Upgrade {
     pub fn swap(&self, cbz: &Path, new: &Path, mode: &str) -> Result<PathBuf, String> {
         if mode == "direct" {
             let bytes = self.layer_source(new)?;
-            return self.swap_install(cbz, Install::Direct(bytes));
+            return self
+                .swap_install(cbz, Install::Direct(bytes))
+                .map_err(|e| e.text);
         }
         self.swap_install(cbz, Install::Generated(new))
+            .map_err(|e| e.text)
     }
 
     /// The bytes of `layer` a direct replace may install, or why it may not.
@@ -1028,16 +1050,16 @@ impl Upgrade {
         })
     }
 
-    fn swap_install(&self, cbz: &Path, install: Install<'_>) -> Result<PathBuf, String> {
+    fn swap_install(&self, cbz: &Path, install: Install<'_>) -> Result<PathBuf, SwapError> {
         if let Some(frozen) = bunko_library::fsutil::frozen_path(&self.library, cbz) {
-            return Err(frozen.describe());
+            return Err(frozen.describe().into());
         }
         let bare = bunko_library::sidecar::sibling(cbz, ".mokuro").ok_or_else(|| {
             "the volume is in a case-variant group, or its OCR's name is another volume's"
                 .to_string()
         })?;
         let Some(_guard) = self.locks.try_lock(&bare) else {
-            return Err(format!("{} is locked by a WebDAV write", bare.display()));
+            return Err(format!("{} is locked by a WebDAV write", bare.display()).into());
         };
         // Under the lock, from a fresh listing: a file that reached the name since, in
         // another spelling, is the volume's primary now (judged by the next census).
@@ -1045,7 +1067,8 @@ impl Upgrade {
             return Err(format!(
                 "{} changed during its upgrade; the next census judges it again",
                 bare.display()
-            ));
+            )
+            .into());
         }
         let rel = rel_of(&self.library, cbz).unwrap_or_default();
         let result = self.swap_locked(cbz, &bare, &rel, &install);
@@ -1061,7 +1084,7 @@ impl Upgrade {
         bare: &Path,
         rel: &str,
         install: &Install<'_>,
-    ) -> Result<PathBuf, String> {
+    ) -> Result<PathBuf, SwapError> {
         let mode = install.mode();
         let bare_rel = Self::bare_rel(rel);
         let row = self
@@ -1087,7 +1110,8 @@ impl Upgrade {
                     return Err(format!(
                         "{} changed during its upgrade; the next census judges it again",
                         bare.display()
-                    ));
+                    )
+                    .into());
                 }
                 Mode::Replace {
                     base: entry.version.clone(),
@@ -1102,7 +1126,11 @@ impl Upgrade {
             }
             Install::Generated(new) => super::collect::move_into_place(new, bare, &intent),
         };
-        installed.map_err(|e| format!("could not install {}: {e}", bare.display()))?;
+        installed.map_err(|e| SwapError {
+            refused: super::collect::refused_now(&e)
+                && bunko_store::store_for(bare).is_some_and(|s| s.caps().remote),
+            text: format!("could not install {}: {e}", bare.display()),
+        })?;
         // Bookkeeping: the old file's provenance row goes with it (the caller records the
         // new file's), or the next census would read the old recipe off it.
         if let (Some(db), Some(_)) = (&self.db, &row) {
@@ -1138,7 +1166,9 @@ impl Upgrade {
     pub fn direct_replace(&self, cbz: &Path, layer: &Path) -> Result<PathBuf, String> {
         let bytes = self.layer_source(layer)?;
         let rel = rel_of(&self.library, cbz).unwrap_or_default();
-        let bare = self.swap_install(cbz, Install::Direct(bytes))?;
+        let bare = self
+            .swap_install(cbz, Install::Direct(bytes))
+            .map_err(|e| e.text)?;
         let layer_rel = rel_of(&self.library, layer).unwrap_or_default();
         let lrow = self
             .db
@@ -1412,13 +1442,18 @@ pub fn swap_in_generated(req: &CollectRequest, cbz: &Path) -> Result<(PathBuf, S
             .map(|p| (p, Swapped::EditedMainLayer));
     }
     upgrade
-        .swap(cbz, &req.result, "generated")
+        .swap_install(cbz, Install::Generated(&req.result))
         .map(|p| (p, Swapped::Main))
         .map_err(|e| {
-            if e.contains("locked") {
-                Outcome::Busy(e)
+            if e.refused {
+                // The cloud store cannot take it now (this Bunko is still claiming the
+                // library, say): not a failure of the volume; the job goes back to the
+                // queue, as a plain install's does.
+                Outcome::Held(e.text)
+            } else if e.text.contains("locked") {
+                Outcome::Busy(e.text)
             } else {
-                Outcome::Failed(e)
+                Outcome::Failed(e.text)
             }
         })
 }

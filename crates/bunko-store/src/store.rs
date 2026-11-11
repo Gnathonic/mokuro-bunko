@@ -39,6 +39,16 @@ pub enum Health {
     LeaseHeld { by: String },
 }
 
+/// A remote store's own Bunko is still claiming the library (its lease, spec §9.2):
+/// its first sync, the settle wait after it wrote its marker, or confirming the claim.
+/// Deferred writes queue for the lease meanwhile; a Sync write is refused until this
+/// Bunko holds it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Claiming {
+    /// What is left of the settle wait, while it runs (`None`: not known yet).
+    pub left: Option<Duration>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Capacity {
     pub total: u64,
@@ -215,6 +225,12 @@ pub trait LibraryStore: Send + Sync + 'static {
     /// §9.2: 503), so a client hears it before it sends a body. Default: yes.
     fn writable(&self, _p: &Path) -> io::Result<()> {
         Ok(())
+    }
+    /// Is this Bunko still claiming the library ([`Claiming`])? Work that needs a Sync
+    /// write (a replace checked against the provider's current version) waits until
+    /// this is `None`; Deferred writes need not. Default: never.
+    fn claiming(&self) -> Option<Claiming> {
+        None
     }
 }
 

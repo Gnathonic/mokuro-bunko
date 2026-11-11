@@ -187,6 +187,30 @@ place, the same run fetches missing models:
 - `MOKURO_OCR_AUTO_INSTALL=false`: never by itself; the missing backend is a
   problem with an Install button instead.
 
+The Vulkan pack (with `ocr.backend: auto`, any GPU on Linux x64; AMD and Intel
+GPUs on Windows) is optional: its runtimes are only more candidates for the
+machine's benchmark, and the libtorch pack serves without it. A machine whose
+libtorch pack is in place therefore never waits for it. It is fetched in the
+background after the libtorch pack's install, or at the start when only it is
+missing, and while it downloads a processor stays available and the server's
+own OCR keeps running. A fetch that fails is a warning (the optional pack is
+not installed, OCR runs without it) with a Retry button, and is recorded in
+`<backends>/.optional-pack.json`. The next automatic fetch waits 5, 15 and 60
+minutes, then a day; a release that has published nothing for it waits a day
+at once. Reconnects and restarts do not fetch it again sooner, and neither does
+another release (it starts afresh), and neither does turning local processing
+on or saving the backend preference: only Retry fetches at once. A fetch that
+succeeds makes a processor register again once, so its new runtimes join the
+benchmark, and so does a Vulkan pack installed by hand after a failed fetch (its
+warning goes at the next check).
+
+Where the Vulkan pack is the machine's only GPU route (`ocr.backend: vulkan`, AMD
+and Intel GPUs on Windows, an AMD GPU with no ROCm build, an NVIDIA driver too old
+for CUDA), the libtorch pack it has is the CPU one. Its first fetch is then waited
+for as an install is, so the machine is not benchmarked on the CPU meanwhile. A
+failed fetch ends that wait: the machine runs on the CPU, and the later tries above
+run on the side.
+
 While the install runs, and after a failed one with no pack in place, the
 machine does no OCR at all, ppocr-manga included; other processors keep
 working. Only with `MOKURO_OCR_AUTO_INSTALL=false` does it run without the
@@ -448,10 +472,12 @@ Expose your local server to the internet without port forwarding:
    ```
 
 `mokuro-bunko tunnel cloudflare` starts a temporary quick tunnel instead, for
-testing. A tunnel or CDN in front of the library also carries the processors'
-sidecar uploads, which can be tens of MB, and a long-lived WebSocket; if it
-limits request bodies below that, point processors at an address that reaches
-the server directly (see below).
+testing. On a terminal it asks whether to add the tunnel's URL to the CORS allowed
+origins. Started without one (detached, or as a service), it asks nothing and adds
+nothing; `--cors yes` adds the URL and `--cors no` never asks. A tunnel or CDN in
+front of the library also carries the processors' sidecar uploads, which can be tens
+of MB, and a long-lived WebSocket; if it limits request bodies below that, point
+processors at an address that reaches the server directly (see below).
 
 ## Remote OCR processors
 

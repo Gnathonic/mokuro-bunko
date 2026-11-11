@@ -522,7 +522,12 @@ pub fn shape_status(
     };
     let connected = objects(raw.get("connected_machines"));
     let grouped = group_by_machine(&jobs, &connected);
-    let pending = objects(raw.get("pending_ocr"));
+    // Borrowed: a large queue lists thousands of entries, and only the first are shown.
+    let pending: Vec<&Map<String, Value>> = raw
+        .get("pending_ocr")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_object).collect())
+        .unwrap_or_default();
     let mut common = Map::new();
     common.insert("level".into(), json!(level));
     common.insert(
@@ -747,6 +752,10 @@ pub fn shape_status(
         "generations".into(),
         Value::Array(objects(raw.get("generations")).iter().map(|r| json!({"id": r.get("id").cloned().unwrap_or(Value::Null), "name": r.get("name").cloned().unwrap_or(Value::Null)})).collect()),
     );
+    // How the queue takes work: `generation` or `volume` (the page's order line).
+    if let Some(order) = raw.get("queue_order").filter(|v| v.is_string()) {
+        payload.insert("queue_order".into(), order.clone());
+    }
     if detailed {
         let mut speed = Vec::new();
         for entry in objects(raw.get("speed")) {

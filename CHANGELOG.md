@@ -236,6 +236,27 @@
   other caller); elsewhere the path is typed.
 - **`mokuro-bunko library connect folder --path DIR [--create]`** connects a library
   folder from a terminal.
+- **OCR can take work volume by volume.** With `ocr.queue_order: volume` (Admin → OCR →
+  Queue order) each volume runs on one machine, its jobs back to back from one download
+  of its archive, and volumes start in the order their first job would come by
+  generation (with several machines or lanes, several volumes run at once, one per
+  lane). While that machine is connected and able to run the volume's next job, no other
+  machine is offered it; a job it cannot run (an engine it does not have) goes to
+  another machine, which downloads the archive itself and runs every other job of the
+  volume the first one cannot. This server's own OCR on a
+  cloud library keeps the spooled archive pinned for the whole volume, and a processor of
+  this release keeps its copy between the volume's jobs when the library asks it to
+  (older processors download it for each job). Only a job that finished keeps its copy,
+  and the copy goes once the library no longer runs the volume there (every job it
+  sends says which it does, none by generation), when the connection ends, or after 6
+  hours with no job of the volume; the result of a copy of an archive replaced outside
+  WebDAV since the job was sent is discarded, and the job goes back to the queue. A
+  volume waits for its machine through that machine's benchmark or hold. On a MEGA
+  library this is the default, because its transfer quota counts every download;
+  elsewhere the queue still runs generation by generation unless set. The cost is
+  throughput: a machine loads each generation's models again for every volume and takes
+  no volume ahead. The queue page, the reader's queue file and the ETAs follow the
+  order.
 - **Sidecars and the queue file name the OCR's parts with versions.** A sidecar Bunko
   writes now carries `ocr_engine.parts`, e.g. `[{"role": "recognizer", "name":
   "Hayai Nova", "version": "2.5"}, {"role": "detector", "name": "PP-OCR Manga",
@@ -492,6 +513,15 @@
   are test builds, never offered as an update.
 
 ### Changed
+- **A generation's upgrades run at that generation's place in the queue.** An upgrade
+  replaces OCR a volume already has: an older main `.mokuro`, or a layer Bunko wrote
+  at an older engine revision. Upgrades now run right after their generation's missing
+  files and before the next generation's, so the primary's upgrades no longer wait
+  behind every job of every layer, and an outdated layer no longer takes turns with
+  the layer's missing files. A volume with no OCR still comes before one with old OCR.
+  With many old main files and upgrades on, every layer now waits for the primary's
+  upgrade pass, and a session on a layer drains when upgrade jobs appear, as it does
+  for the primary's missing files.
 - **PP-OCR manga v0.3.** The line detector and the CTC recognizer every engine reads
   with are now [PP-OCRv6 manga v0.3](https://huggingface.co/Kellenok/PP-OCRv6_manga):
   cleaner line boundaries, fewer boxes on artwork, and a dictionary that covers all of
@@ -671,6 +701,86 @@
 - **Dependency updates**: zip 9, rcgen 0.14, windows 0.62, windows-sys 0.61.
 
 ### Fixed
+- **A processor whose OCR backend works takes work while the optional Vulkan pack is
+  missing.** With `ocr.backend: auto` and a GPU, a missing Vulkan pack counted as a
+  missing OCR backend, although its runtimes are only more benchmark candidates beside
+  the libtorch pack. A processor started the install again at every registration and
+  said it was installing, so the library gave it no work. When the Vulkan pack could not
+  be downloaded (its release was not published), the install ended without it, the
+  processor registered again, and the cycle repeated without end. The Vulkan pack is now
+  fetched on its own after the libtorch pack, and the machine stays available while it
+  downloads. A failed fetch is a warning with a Retry button, and the machine waits
+  5, 15 and 60 minutes and then a day before it tries again; a release with nothing
+  published waits a day at once. The wait is kept in the backends directory, so a
+  reconnect or a restart does not fetch it again sooner, and neither does turning local
+  processing on or saving the backend preference (only Retry does). The server's own
+  OCR no longer waits for the Vulkan pack either. Where the Vulkan pack is the machine's
+  only GPU route (`ocr.backend: vulkan`, AMD or Intel GPUs on Windows, an AMD GPU with
+  no ROCm build, an NVIDIA driver too old for CUDA), its first fetch is waited for as an
+  install is, so the machine is not benchmarked on the CPU meanwhile; if it fails, the
+  machine runs on the CPU and later tries run on the side. A Vulkan pack installed by
+  hand after a failed fetch clears the warning at the next check. A Vulkan pack
+  installed on its own also no longer replaces a backend variant picked by hand.
+- **A library with a large OCR queue answers a processor's registration at once.** A
+  processor that has not benchmarked a row takes none of that row's volumes, yet each of
+  its claims looked every one of them up in the library, with several folder listings
+  each (index reads on a cloud library). With 10,000 jobs queued, such a claim took
+  1.5 s on a local disk and 6 s on a cloud library, about once each time the processor
+  opened its socket. The queue page, the reader's queue file and a reader's question
+  about a volume also read each processor's profile from disk once per queued job and
+  machine, about 0.6 s per build at 10,000 jobs. The OCR scheduler answers registrations and all
+  of these one at a time, and the queue page and the queue file are built every few
+  seconds, so it likely fell behind on them: a registration waited past the
+  processor's 30 s timeout, the processor registered again, and the queue page took
+  from seconds to over 30 s. A claim now passes over the volumes of a row whose
+  benchmark it has asked for, and a queue estimate reads each machine's profile once
+  per row. At 10,000 jobs a processor's arrival now costs the scheduler 20 to 60 ms
+  instead of 1.5 to 6 s, and a queue page build 40 to 170 ms instead of 0.2 to 0.9 s
+  (`crates/bunko-server/tests/ocr_scale.rs` measures it).
+- **A processor that reconnects carries on with its benchmarks.** When a processor's
+  link dropped, its queued benchmarks failed, and on its return every one was asked for
+  again: each packed a new sample from the library (provider reads on a cloud library,
+  each on a helper thread of its own) and logged "Benchmarking ... before it runs there"
+  for every row. A processor back within 10 minutes with the same host and catalog now
+  picks its line up where it was, and the benchmark it was running is sent again with
+  the sample already packed. One back with another catalog, or later, is measured
+  afresh, and one back while it still installs its backend waits until it is available.
+  A benchmark waiting for its processor's return shows as queued and can be cancelled,
+  and a server that stops removes the samples packed for such benchmarks.
+- **A processor waits 90 s for the library to answer its registration and open its
+  socket** (30 s before). The library's OCR scheduler answers both, so a busy library
+  can take longer, and a processor that gave up registered again, which only added to
+  the scheduler's queue. The library also waits up to 85 s for its scheduler before it
+  opens the socket; it refused the socket after 30 s with "OCR is not running", and now
+  says the scheduler is busy when it does give up. 90 s stays under the 100 s a
+  Cloudflare tunnel holds a request open.
+- **`mokuro-bunko tunnel cloudflare` keeps running without a terminal.** Started
+  detached or as a service (stdin not a terminal), it printed the tunnel URL, read end of
+  input at "Add tunnel URL to CORS allowed origins?", aborted, and took cloudflared down
+  with it. The question is now asked only on a terminal. Without one, the command says
+  that it adds nothing and that `--cors yes` adds the URL, and the tunnel stays up. The
+  new `--cors yes|no|ask` option (default `ask`) answers the question ahead. A "no", a
+  Ctrl-D at the question, or a config file that cannot be saved also leaves the tunnel
+  running.
+- **A cloud archive fetched for this server's own OCR is used even when its session
+  starts to drain meanwhile.** The claim went back to the queue unrun, and the archive
+  was fetched again later. A draining session finishes what it accepted, and a claim
+  whose archive is being fetched is one of them.
+- **The OCR queue file lists the next 100 jobs, soonest first.** It listed the next
+  100 waiting volumes with every job each still owed, so a volume near the front
+  brought along jobs planned days later. It now lists every running job, the jobs about
+  to start and the 100 waiting jobs that finish soonest (to the nearest five minutes,
+  so small re-pricings do not reorder the file), grouped by volume, and each volume
+  carries only those jobs. A listed volume still shows the jobs no connected machine
+  can run, as held. A job left out is still owed, and the volume's manifest lists every
+  one. A manifest whose OCR queue does not answer within a second now lists the jobs
+  the volume owed when the queue last published its state, with no finishing time,
+  instead of saying nothing is pending, which a reader took as "done". A volume the
+  queue has not taken in yet (it arrived since, or on a cloud library its archive is
+  still being read) is 503 with `Retry-After` until it has. While one machine of
+  several takes no new work (its benchmark, a pause, its downloads held), the plan
+  gives it no waiting job, so the file no longer reorders itself every few minutes;
+  a job only that machine can run is shown held.
 - **Windows: no console window flashes while the app runs.** The app
   (`mokuro-bunko.exe`) and the server and processor it starts have no console, so
   every console program they ran was given a window of its own: `nvidia-smi`, which
@@ -679,6 +789,16 @@
   processor is paired, for the `cloudflared` a server starts (its window stayed for as
   long as the tunnel was up) and for an update being fetched. These programs now run
   without a window (#79).
+- **A remote processor no longer waits seconds for each cloud archive.** A processor
+  fetches a cloud library's archive with a plain GET, and Bunko read it from the
+  provider one 256 KiB block at a time until sixteen reads had proven the reader
+  sequential; only then did one download of the whole file start. On Google Drive each
+  of those reads is a round trip of about 0.4 s, so every archive cost 6 to 7 seconds
+  before its bytes flowed, whatever its size, and a fast GPU sat idle between volumes.
+  Now a GET body, a copy or a whole-file read tells the store up front what it is
+  about to read: a whole file, or a span of at least 4 MiB, is one download (or large
+  read-ahead) from its first read. A short Range (one page) still fetches only its
+  blocks, and a zip reader moving around an archive still reads block by block.
 - **A WebDAV library no longer loses files to a listing the server cut short.** rclone's
   `serve webdav`, like most servers built on Go's WebDAV package, gives up on a folder
   listing when a file vanishes while it walks the folder, and still answers 207 with the
@@ -892,6 +1012,19 @@
   and the message says this Bunko is still claiming the library and roughly how long is
   left, instead of "another Bunko manages this library". The admin Storage tab and
   status show the same.
+- **OCR upgrades no longer fail while Bunko is still claiming a cloud library.** OCR
+  runs during the claim, and a new OCR file waits in the upload queue until it ends,
+  but an upgrade replaces the cloud's current OCR file, which Bunko may only do once
+  it holds the library. So in the first minutes after connecting a library with old
+  OCR files, every upgrade ran its OCR and then failed with "could not install
+  …: No such file or directory": the refused upload had taken the new file with it,
+  and the error hid the refusal. Each volume was then recorded as failed and retried
+  later. Upgrade jobs, and OCR layers written again over Bunko's own older output, now
+  wait until this Bunko holds the library, and the queue page says so, with the time
+  left; the other OCR jobs keep running, and the waiting ones start as soon as the
+  claim ends. A refused upload no longer takes the file it was given, and should an
+  upgrade still meet such a refusal, the real reason is reported and the job goes back
+  to the queue instead of failing.
 - **Failed WebDAV requests are logged.** A request that ends in a server error (5xx),
   uploads included, is logged with its method, path, user and cause (503s as warnings,
   other failures as errors); before, a failed upload left no trace in the log.

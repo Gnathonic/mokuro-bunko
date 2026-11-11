@@ -330,6 +330,50 @@ impl Default for UpgradeConfig {
     }
 }
 
+/// `ocr.queue_order`: how the OCR queue takes work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueueOrder {
+    /// Each generation runs across the library in the order of `ocr.generations`, with
+    /// one archive download per job.
+    Generation,
+    /// One machine runs every job of a volume back to back from one download of its
+    /// archive; volumes come in the order their first job would by generation.
+    Volume,
+}
+
+impl QueueOrder {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            QueueOrder::Generation => "generation",
+            QueueOrder::Volume => "volume",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<QueueOrder> {
+        match s.trim() {
+            "generation" => Some(QueueOrder::Generation),
+            "volume" => Some(QueueOrder::Volume),
+            _ => None,
+        }
+    }
+}
+
+/// `ocr.queue_order` as written: unset, empty or `auto` is None (the library backend
+/// decides, [`Config::queue_order`]).
+pub fn parse_queue_order(value: Option<&str>) -> Result<Option<QueueOrder>, ConfigError> {
+    let Some(v) = value
+        .map(str::trim)
+        .filter(|v| !v.is_empty() && *v != "auto")
+    else {
+        return Ok(None);
+    };
+    QueueOrder::parse(v).map(Some).ok_or_else(|| {
+        invalid(format!(
+            "Invalid ocr.queue_order: {v} (expected generation, volume or auto)"
+        ))
+    })
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct OcrConfig {
     pub backend: String,
@@ -342,6 +386,9 @@ pub struct OcrConfig {
     pub upgrade: UpgradeConfig,
     /// The Vulkan pack's runtimes in order of preference (docs/rust-port/VULKAN.md).
     pub vulkan_backends: Vec<String>,
+    /// `ocr.queue_order` as configured; None: by volume on a MEGA library, else by
+    /// generation ([`Config::queue_order`]).
+    pub queue_order: Option<QueueOrder>,
 }
 
 impl Default for OcrConfig {
@@ -356,6 +403,7 @@ impl Default for OcrConfig {
             generations: generations::default_generations(),
             upgrade: UpgradeConfig::default(),
             vulkan_backends: VULKAN_RUNTIMES.iter().map(|s| s.to_string()).collect(),
+            queue_order: None,
         }
     }
 }
@@ -1383,6 +1431,7 @@ impl Config {
             "vulkan_backends",
             &OcrConfig::default().vulkan_backends,
         )?;
+        c.ocr.queue_order = parse_queue_order(get_opt_str(&s, "queue_order").as_deref())?;
         c.ocr.validate()?;
         let ocr_extra = leftovers(
             s,
@@ -1396,6 +1445,7 @@ impl Config {
                 "generations",
                 "upgrade",
                 "vulkan_backends",
+                "queue_order",
             ],
         );
 
@@ -1610,6 +1660,9 @@ impl Config {
         if self.ocr.vulkan_backends != OcrConfig::default().vulkan_backends {
             ocr["vulkan_backends"] = json!(self.ocr.vulkan_backends);
         }
+        if let Some(order) = self.ocr.queue_order {
+            ocr["queue_order"] = json!(order.as_str());
+        }
         if self.ocr.upgrade != UpgradeConfig::default() {
             ocr["upgrade"] =
                 json!({"enabled": self.ocr.upgrade.enabled, "replace": self.ocr.upgrade.replace});
@@ -1788,6 +1841,7 @@ impl Config {
                 validate_vulkan_backends(&list)?;
                 self.ocr.vulkan_backends = list;
             }
+            "ocr.queue_order" => self.ocr.queue_order = parse_queue_order(Some(value))?,
             "ocr.generations" => {
                 let parsed = generations::parse_generation_list(&Value::String(value.to_string()))?;
                 self.apply_parsed_generations(parsed);
@@ -1873,6 +1927,7 @@ impl Config {
         "ocr.local_processing",
         "ocr.autobench",
         "ocr.vulkan_backends",
+        "ocr.queue_order",
         "ocr.generations",
         "dyndns.enabled",
         "dyndns.provider",
@@ -1984,6 +2039,18 @@ impl Config {
     /// `processes_locally` in 0.5.2 plus the lite build's lack of an OCR runtime.
     pub fn processes_locally(&self, ocr_available: bool) -> bool {
         ocr_available && self.ocr.backend != "skip" && self.ocr.local_processing
+    }
+
+    /// How the OCR queue takes work: `ocr.queue_order` when set, else by volume on a
+    /// MEGA library (its transfer quota counts every download, and by volume each
+    /// archive is downloaded once), else by generation.
+    pub fn queue_order(&self) -> QueueOrder {
+        self.ocr
+            .queue_order
+            .unwrap_or(match self.library_backend() {
+                LibraryBackend::Mega => QueueOrder::Volume,
+                _ => QueueOrder::Generation,
+            })
     }
 }
 
@@ -2259,6 +2326,73 @@ mod tests {
             .unwrap();
         assert_eq!(paddle.detector.as_deref(), Some("ppocr-manga"));
         assert!(c.to_yaml().contains("engine: mokuro"));
+    }
+
+    #[test]
+    fn queue_order_follows_the_library_backend_unless_set() {
+        let mut c = Config::default();
+        assert_eq!(c.queue_order(), QueueOrder::Generation);
+        c.storage.library.backend = LibraryBackend::Mega;
+        assert_eq!(c.queue_order(), QueueOrder::Volume);
+        c.ocr.queue_order = Some(QueueOrder::Generation);
+        assert_eq!(
+            c.queue_order(),
+            QueueOrder::Generation,
+            "set beats the default"
+        );
+        c.storage.library.backend = LibraryBackend::Local;
+        c.ocr.queue_order = Some(QueueOrder::Volume);
+        assert_eq!(c.queue_order(), QueueOrder::Volume);
+        for other in [
+            LibraryBackend::GDrive,
+            LibraryBackend::OneDrive,
+            LibraryBackend::WebDav,
+        ] {
+            let mut c = Config::default();
+            c.storage.library.backend = other;
+            assert_eq!(c.queue_order(), QueueOrder::Generation, "{other:?}");
+        }
+    }
+
+    #[test]
+    fn queue_order_is_saved_only_when_set() {
+        let c = Config::from_value(&yaml("ocr: {queue_order: volume}")).unwrap();
+        assert_eq!(c.ocr.queue_order, Some(QueueOrder::Volume));
+        assert_eq!(c.to_value()["ocr"]["queue_order"], "volume");
+        let again = Config::from_value(&c.to_value()).unwrap();
+        assert_eq!(again.ocr.queue_order, Some(QueueOrder::Volume));
+        for unset in [
+            "ocr: {queue_order: auto}",
+            "ocr: {queue_order: ''}",
+            "ocr: {}",
+        ] {
+            let c = Config::from_value(&yaml(unset)).unwrap();
+            assert_eq!(c.ocr.queue_order, None, "{unset}");
+            assert!(c.to_value()["ocr"].get("queue_order").is_none(), "{unset}");
+        }
+    }
+
+    #[test]
+    fn queue_order_rejects_an_unknown_value() {
+        let e = Config::from_value(&yaml("ocr: {queue_order: series}")).unwrap_err();
+        assert!(e.to_string().contains("ocr.queue_order"), "{e}");
+        assert!(
+            Config::default()
+                .set_by_dotted_key("ocr.queue_order", "fastest")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn queue_order_dotted_key_and_env() {
+        let mut c = Config::default();
+        c.set_by_dotted_key("ocr.queue_order", "volume").unwrap();
+        assert_eq!(c.ocr.queue_order, Some(QueueOrder::Volume));
+        c.set_by_dotted_key("ocr.queue_order", "auto").unwrap();
+        assert_eq!(c.ocr.queue_order, None);
+        c.apply_env_overrides(|k| (k == "MOKURO_OCR_QUEUE_ORDER").then(|| "generation".into()))
+            .unwrap();
+        assert_eq!(c.ocr.queue_order, Some(QueueOrder::Generation));
     }
 
     #[test]

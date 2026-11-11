@@ -84,6 +84,7 @@ pub fn settings(rows: Vec<Generation>) -> Settings {
         concurrency: 1,
         autobench: false,
         upgrade: UpgradeConfig::default(),
+        by_volume: false,
     }
 }
 
