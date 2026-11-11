@@ -1048,6 +1048,55 @@ async fn a_folder_library_connects_through_setup() {
     assert!(!folder.join(".mokuro-bunko.json").exists());
 }
 
+/// A folder library through setup from anywhere but a browser on this machine (a
+/// setup-code holder on another computer, a request a local proxy forwarded, a page
+/// naming another host): with no `storage.library.folder_roots`, refused before the
+/// folder is opened, saying how to allow it; nothing is configured.
+#[tokio::test]
+async fn setup_from_elsewhere_needs_a_folder_root() {
+    let env = Env::new();
+    let folder = env.dir.path().join("Manga");
+    std::fs::create_dir_all(folder.join("Series A")).unwrap();
+    std::fs::write(folder.join("Series A/Vol 1.cbz"), b"zip-1").unwrap();
+    let shown = folder.to_string_lossy().into_owned();
+    let code = normalize_code(&env.deps.setup.issue_code());
+    let far = "203.0.113.10";
+    // Each with the setup code: the setup gate lets them in, the folder rule does not.
+    let elsewhere = [
+        from_peer("POST", "/setup/api/storage/connect", far),
+        req("POST", "/setup/api/storage/connect").header("x-forwarded-for", far),
+        req("POST", "/setup/api/storage/connect").header("host", "rebind.example.com:18100"),
+    ];
+    for b in elsewhere {
+        let b = b.header("x-setup-code", code.as_str());
+        let r = env
+            .send(json_body(b, json!({"provider": "folder", "path": shown})))
+            .await;
+        assert_eq!(r.status, 200, "{}", r.text());
+        let v = settled_connect(&env).await;
+        assert_eq!(v["state"], "failed", "{v}");
+        let e = v["error"].as_str().unwrap();
+        assert!(e.contains("storage.library.folder_roots"), "{e}");
+        assert!(e.contains("MOKURO_LIBRARY_FOLDER_ROOTS"), "{e}");
+        assert!(e.contains("library connect folder"), "{e}");
+        assert!(v["check"].is_null(), "the folder was never opened: {v}");
+    }
+    assert_eq!(
+        env.deps.core.config.read().storage.library.backend,
+        bunko_core::LibraryBackend::Local
+    );
+    // A browser on this machine names it.
+    let r = env
+        .send(json_body(
+            req("POST", "/setup/api/storage/connect").header("host", "localhost:18100"),
+            json!({"provider": "folder", "path": shown}),
+        ))
+        .await;
+    assert_eq!(r.status, 200, "{}", r.text());
+    let v = settled_connect(&env).await;
+    assert_eq!(v["state"], "connected", "{v}");
+}
+
 /// "Create it?" through setup: a folder whose parent exists is made, one level only.
 #[tokio::test]
 async fn setup_creates_a_missing_library_folder() {

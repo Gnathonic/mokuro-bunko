@@ -140,3 +140,166 @@ async fn only_admins_browse() {
     assert_ne!(r.status, StatusCode::OK);
     assert!(!r.text().contains("Manga"));
 }
+
+/// Browse… wants a browser on this machine: a loopback connection a local proxy
+/// forwarded, or one from a page naming another host (DNS rebinding), sees nothing.
+#[tokio::test]
+async fn a_forwarded_or_rebound_request_does_not_browse() {
+    let h = Harness::new();
+    let admin = h.admin();
+    let root = disk(&h);
+    for (name, value) in [
+        ("x-forwarded-for", "203.0.113.10"),
+        ("forwarded", "for=203.0.113.10"),
+        ("host", "rebind.example.com:18100"),
+    ] {
+        let mut r = get(&query(&root), Some(&admin), "127.0.0.1");
+        r.headers_mut().insert(name, value.parse().unwrap());
+        let r = h.send(r).await;
+        assert_eq!(r.status, StatusCode::FORBIDDEN, "{name}: {}", r.text());
+        assert!(!r.text().contains("Manga"), "{name}");
+    }
+    let mut r = get(&query(&root), Some(&admin), "127.0.0.1");
+    r.headers_mut()
+        .insert(header::HOST, "localhost:18100".parse().unwrap());
+    assert_eq!(h.send(r).await.status, StatusCode::OK);
+}
+
+fn post_json(uri: &str, token: &str, peer: &str, body: serde_json::Value) -> Request<Body> {
+    let addr: SocketAddr = format!("{peer}:50000")
+        .parse()
+        .unwrap_or_else(|_| format!("[{peer}]:50000").parse().expect("peer"));
+    Request::builder()
+        .method(Method::POST)
+        .uri(uri)
+        .extension(ConnectInfo(addr))
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap()
+}
+
+/// The Storage panel's Connect, settled (no longer starting or checking).
+async fn settled(h: &Harness, admin: &str) -> serde_json::Value {
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let r = h
+            .send(get("/_admin/api/storage/connect", Some(admin), "127.0.0.1"))
+            .await;
+        assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+        let v = r.json();
+        if !matches!(v["state"].as_str(), Some("starting" | "checking")) {
+            return v;
+        }
+        assert!(std::time::Instant::now() < until, "{v}");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+fn with_storage() -> Harness {
+    Harness::with(admin_support::Options {
+        storage: Some(Box::new(|core: &bunko_server::core::Core| {
+            bunko_server::storage::StorageControl::for_core(core, None)
+        })),
+        ..admin_support::Options::default()
+    })
+}
+
+/// An admin elsewhere (another computer, or a request a local proxy forwarded) may
+/// connect a folder library only inside `storage.library.folder_roots`, which no HTTP
+/// call sets: with none set, the Connect is refused before the folder is opened and
+/// says how to allow it. An admin in a browser on this machine connects it.
+#[tokio::test]
+async fn an_admin_elsewhere_needs_a_folder_root() {
+    let h = with_storage();
+    let admin = h.admin();
+    let manga = disk(&h).join("Manga");
+    let body = json!({"provider": "folder", "path": manga.to_string_lossy()});
+    let elsewhere = [
+        post_json(
+            "/_admin/api/storage/connect",
+            &admin,
+            "203.0.113.10",
+            body.clone(),
+        ),
+        {
+            let mut r = post_json(
+                "/_admin/api/storage/connect",
+                &admin,
+                "127.0.0.1",
+                body.clone(),
+            );
+            r.headers_mut()
+                .insert("x-forwarded-for", "203.0.113.10".parse().unwrap());
+            r
+        },
+    ];
+    for r in elsewhere {
+        let r = h.send(r).await;
+        assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+        let v = settled(&h, &admin).await;
+        assert_eq!(v["state"], "failed", "{v}");
+        let e = v["error"].as_str().unwrap();
+        assert!(e.contains("storage.library.folder_roots"), "{e}");
+        assert!(e.contains("MOKURO_LIBRARY_FOLDER_ROOTS"), "{e}");
+        assert!(v["check"].is_null(), "the folder was never opened: {v}");
+    }
+    assert_eq!(
+        h.core.config.read().storage.library.backend,
+        bunko_core::LibraryBackend::Local
+    );
+    let r = h
+        .send(post_json(
+            "/_admin/api/storage/connect",
+            &admin,
+            "127.0.0.1",
+            body,
+        ))
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+    let v = settled(&h, &admin).await;
+    assert_eq!(v["state"], "connected", "{v}");
+}
+
+/// `storage.library.folder_roots` is the operator's alone: no admin call, from this
+/// machine or elsewhere, changes it, whatever a body names.
+#[tokio::test]
+async fn no_admin_call_sets_the_folder_roots() {
+    let h = with_storage();
+    let admin = h.admin();
+    let roots = json!(["/", "C:\\"]);
+    let body = json!({
+        "folder_roots": roots,
+        "storage": {"library": {"folder_roots": roots, "path": "/"}},
+        "library": {"folder_roots": roots},
+        "provider": "folder",
+        "path": "/",
+    });
+    for (method, path) in [
+        ("PUT", "/_admin/api/settings/registration"),
+        ("PUT", "/_admin/api/settings/cors"),
+        ("PUT", "/_admin/api/settings/catalog"),
+        ("PUT", "/_admin/api/settings/queue"),
+        ("PUT", "/_admin/api/settings/ocr"),
+        ("PUT", "/_admin/api/settings/dyndns"),
+        ("PUT", "/_admin/api/settings/analytics"),
+        ("PUT", "/_admin/api/storage/readers"),
+        ("PUT", "/_admin/api/machine/ocr"),
+        ("POST", "/_admin/api/storage/connect"),
+    ] {
+        for peer in ["127.0.0.1", "203.0.113.10"] {
+            let mut r = post_json(path, &admin, peer, body.clone());
+            *r.method_mut() = Method::from_bytes(method.as_bytes()).unwrap();
+            h.send(r).await;
+            assert!(
+                h.core.config.read().storage.library.folder_roots.is_empty(),
+                "{method} {path} from {peer}"
+            );
+        }
+    }
+    settled(&h, &admin).await;
+    assert!(h.core.config.read().storage.library.folder_roots.is_empty());
+    if h.config_path.exists() {
+        assert!(h.saved_config().storage.library.folder_roots.is_empty());
+    }
+}

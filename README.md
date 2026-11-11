@@ -166,6 +166,7 @@ Copy [`config.example.yaml`](config.example.yaml) for a documented starting poin
 | `storage.base_path` | `~/.local/share/mokuro-bunko` | Library and database location |
 | `storage.library.backend` | `local` | Where the library is: `local`, `folder`, `gdrive`, `onedrive`, `mega` or `webdav` (see [Cloud library](#cloud-library), [Local folder](#local-folder)) |
 | `storage.library.path` | | `backend: folder`: the library folder, a full path (`/srv/manga`, `D:\Manga`) |
+| `storage.library.folder_roots` | `[]` | The folders a browser on another computer may connect a library folder in (config file or `MOKURO_LIBRARY_FOLDER_ROOTS` only) |
 | `registration.mode` | `self` | `disabled`, `self`, `invite`, or `approval` |
 | `ocr.backend` | `auto` | `auto`, `cuda`, `rocm`, `cpu`, or `skip` (no OCR on this machine) |
 | `ocr.generations` | one `hayai-nova` row | The OCR recipes every volume gets a layer from, in run order |
@@ -211,6 +212,7 @@ mokuro-bunko library disconnect     # leaves every file in the folder where it i
 ```
 
 - The setup wizard and the admin panel's Storage tab take the path. **Browse…** lists folders only in a browser on the server's own machine; anywhere else, type the path as the server sees it.
+- From a browser on another computer, only a folder at or under `storage.library.folder_roots` (set in `config.yaml` or `MOKURO_LIBRARY_FOLDER_ROOTS`, none by default) can be chosen. System folders, Bunko's own folders and a folder holding them are refused for everyone ([Which folders](docs/configuration.md#which-folders)).
 - Switching to another folder (or back to This computer) is a different library: the old folder stays as it is.
 - Bunko's removals go to a hidden `.mokuro-bunko-trash` folder inside the library, kept 30 days, which the reader does not list.
 - In Docker, mount the folder and point Bunko at the mount (Bunko never changes the folder's owner, so set `PUID`/`PGID` to its owner):
@@ -224,6 +226,7 @@ mokuro-bunko library disconnect     # leaves every file in the folder where it i
     - PGID=1000
     - MOKURO_LIBRARY_BACKEND=folder
     - MOKURO_LIBRARY_PATH=/library
+    - MOKURO_LIBRARY_FOLDER_ROOTS=/library   # lets the wizard and Storage tab choose it
   ```
 
   On Docker Desktop (Mac, Windows), changes made outside the container can take up to `storage.library.poll.idle_s` (5 minutes) to show.

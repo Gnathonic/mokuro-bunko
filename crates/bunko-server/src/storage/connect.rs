@@ -192,6 +192,11 @@ pub struct RequestOrigin {
     /// control API). It names its flow; `loopback` is honoured since the terminal
     /// and the listener share the machine.
     pub cli: bool,
+    /// A browser on this machine: loopback, naming this machine as its host, and
+    /// forwarded by no proxy ([`crate::accounts::local::browser_on_this_machine`]).
+    /// It may name any library folder; any other HTTP caller only one inside
+    /// `storage.library.folder_roots` ([`super::folder::Asker`]).
+    pub this_machine: bool,
 }
 
 impl RequestOrigin {
@@ -209,6 +214,25 @@ impl RequestOrigin {
             loopback,
             webview: user_agent.is_some_and(is_webview),
             cli: false,
+            this_machine: false,
+        }
+    }
+
+    /// The same origin, a browser on this machine (or not).
+    pub fn on_this_machine(mut self, yes: bool) -> RequestOrigin {
+        self.this_machine = yes;
+        self
+    }
+
+    /// Who names a library folder from here.
+    pub fn asker(self) -> super::folder::Asker {
+        use super::folder::Asker;
+        if self.cli {
+            Asker::Operator
+        } else if self.this_machine {
+            Asker::BrowserHere
+        } else {
+            Asker::Elsewhere
         }
     }
 
@@ -455,9 +479,10 @@ pub enum Auth {
         password: String,
         allow_http: bool,
     },
-    /// No secret: the folder's path.
+    /// No secret: the folder's path, and who named it (what the Check may tell them).
     Folder {
         path: PathBuf,
+        asker: super::folder::Asker,
     },
 }
 
@@ -561,7 +586,7 @@ impl ProviderOps for LiveOps {
                     .await?;
                     check_backend(&b, folder, create, ours).await
                 }
-                (LibraryBackend::Folder, Auth::Folder { path }) => {
+                (LibraryBackend::Folder, Auth::Folder { path, .. }) => {
                     let b = bunko_remote::folder::FolderBackend::connect(
                         bunko_remote::folder::FolderConfig {
                             path: path.clone(),
@@ -1107,7 +1132,7 @@ impl Connector {
             }
             LibraryBackend::Mega => self.mega(session, &folder, req).await,
             LibraryBackend::WebDav => self.webdav(session, &folder, req).await,
-            LibraryBackend::Folder => self.folder(session, &folder, req).await,
+            LibraryBackend::Folder => self.folder(session, &folder, &lib, req, origin).await,
             LibraryBackend::Local => Err("the library on this computer needs no Connect".into()),
         };
         let held = match outcome {
@@ -1326,10 +1351,14 @@ impl Connector {
                 self.status().pairing,
             )
         };
-        if let Auth::Folder { path } = &auth
-            && let Some(why) = super::folder::precheck(path)
-        {
-            return Err(why);
+        if let Auth::Folder { path, asker } = &auth {
+            let (p, a) = (path.clone(), *asker);
+            let pre = tokio::task::spawn_blocking(move || super::folder::precheck(&p, a))
+                .await
+                .map_err(|e| e.to_string())?;
+            if let Some(why) = pre {
+                return Err(why);
+            }
         }
         let ours = our_instances(&self.0.cloud_dir);
         let scratch = self.scratch_dir();
@@ -1339,8 +1368,8 @@ impl Connector {
             .inspect(backend, &auth, &folder, true, &scratch, &ours)
             .await
             .map_err(|e| match (e, &auth) {
-                (BErr::Transient(_) | BErr::NotFound, Auth::Folder { path }) => {
-                    super::folder::missing_parent(path)
+                (BErr::Transient(_) | BErr::NotFound, Auth::Folder { path, asker }) => {
+                    super::folder::missing_parent(path, *asker)
                 }
                 (e, _) => e.to_string(),
             })?;
@@ -1382,8 +1411,8 @@ impl Connector {
             .inspect(backend, auth, folder, false, &scratch, &ours)
             .await
             .map_err(|e| match (e, auth) {
-                (BErr::Transient(_) | BErr::NotFound, Auth::Folder { path }) => {
-                    super::folder::missing_parent(path)
+                (BErr::Transient(_) | BErr::NotFound, Auth::Folder { path, asker }) => {
+                    super::folder::missing_parent(path, *asker)
                 }
                 (BErr::AuthExpired | BErr::AuthRevoked, _) => format!(
                     "{} refused the sign-in: check the account and try again",
@@ -1883,13 +1912,16 @@ impl Connector {
         }))
     }
 
-    /// A library in a folder: the path checked against Bunko's own folder, then the
-    /// Check. The account is the path; the credentials entry holds no secret.
+    /// A library in a folder: the path checked against Bunko's own folder, the system's
+    /// and, for a caller elsewhere, the operator's roots ([`super::folder::check_path`]),
+    /// then the Check. The account is the path; the credentials entry holds no secret.
     async fn folder(
         &self,
         session: u64,
         folder: &str,
+        lib: &LibraryConfig,
         req: ConnectRequest,
+        origin: RequestOrigin,
     ) -> Result<Option<Held>, String> {
         let typed = req.path.unwrap_or_default();
         let base = self
@@ -1898,11 +1930,22 @@ impl Connector {
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_default();
-        let path = super::folder::check_path(Path::new(typed.trim()), &base)?;
-        if let Some(why) = super::folder::precheck(&path) {
-            return Err(why);
-        }
-        let auth = Auth::Folder { path: path.clone() };
+        let asker = origin.asker();
+        let roots = lib.folder_roots.clone();
+        // Off the async workers: resolving a path waits on its disk (a share gone away).
+        let path = tokio::task::spawn_blocking(move || -> Result<PathBuf, String> {
+            let path = super::folder::check_path(Path::new(typed.trim()), &base, &roots, asker)?;
+            match super::folder::precheck(&path, asker) {
+                Some(why) => Err(why),
+                None => Ok(path),
+            }
+        })
+        .await
+        .map_err(|e| e.to_string())??;
+        let auth = Auth::Folder {
+            path: path.clone(),
+            asker,
+        };
         let (_, check) = self
             .inspect(session, LibraryBackend::Folder, &auth, folder)
             .await?;

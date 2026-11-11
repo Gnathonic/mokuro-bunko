@@ -56,6 +56,10 @@ storage:
   # library:
   #   backend: folder
   #   path: /srv/manga        # Windows: D:\Manga
+  #   # Where a browser on another computer (setup wizard, admin Storage tab)
+  #   # may choose a library folder; none unless listed. Only this file and
+  #   # MOKURO_LIBRARY_FOLDER_ROOTS set it.
+  #   folder_roots: [/srv/manga]
 
 registration:
   # Registration mode:

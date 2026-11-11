@@ -978,6 +978,116 @@ mod folder_library {
         assert!(!base.join("cloud/credentials.json").exists());
     }
 
+    /// Refused for everyone, the CLI included, before the folder is opened: the top of
+    /// the system disk, system folders, and Bunko's own settings folder (and a folder
+    /// holding it).
+    #[tokio::test]
+    async fn system_folders_and_bunkos_settings_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("storage");
+        std::fs::create_dir_all(base.join("cloud")).unwrap();
+        let (c, lib) = live_connector(&base);
+        let mut refused: Vec<(PathBuf, &str)> = Vec::new();
+        #[cfg(unix)]
+        for p in ["/", "/etc", "/usr/lib", "/proc/self", "/boot/../etc/x"] {
+            refused.push((PathBuf::from(p), "is a system folder"));
+        }
+        #[cfg(windows)]
+        {
+            let windir = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
+            let drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into());
+            refused.push((PathBuf::from(format!(r"{drive}\")), "is a system folder"));
+            refused.push((PathBuf::from(&windir), "is a system folder"));
+            refused.push((
+                PathBuf::from(&windir).join("System32"),
+                "is a system folder",
+            ));
+            refused.push((
+                PathBuf::from(format!(r"{drive}\Program Files")),
+                "is a system folder",
+            ));
+            refused.push((
+                PathBuf::from(format!(r"{drive}\ProgramData\x")),
+                "is a system folder",
+            ));
+        }
+        let settings = bunko_core::storage::default_config_path()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        refused.push((settings.clone(), "Bunko's settings"));
+        refused.push((settings.join("x"), "Bunko's settings"));
+        // Its parent may hold Bunko's own folder too (on Windows both are in
+        // %LOCALAPPDATA%): either refusal.
+        refused.push((settings.parent().unwrap().to_path_buf(), "holds Bunko's"));
+        for (path, says) in refused {
+            c.start(folder_req(&path), RequestOrigin::cli()).unwrap();
+            let s = settle(&c).await;
+            assert_eq!(s.state, "failed", "{path:?}: {s:?}");
+            assert!(s.check.is_none(), "{path:?}: never opened: {s:?}");
+            let e = s.error.unwrap();
+            assert!(e.contains(says), "{path:?}: {e}");
+        }
+        assert_eq!(lib.lock().backend, LibraryBackend::Local);
+        assert!(!base.join("cloud/credentials.json").exists());
+    }
+
+    /// A caller elsewhere with `storage.library.folder_roots` set: a folder at or under
+    /// a root connects, and "Create it?" works there; one outside is refused; and the
+    /// Check's refusals read the same for a file, a missing parent and anything else, so
+    /// it tells them nothing of the disk. The CLI gets the detailed words.
+    #[tokio::test]
+    async fn a_caller_elsewhere_connects_inside_a_root_and_learns_nothing_more() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("storage");
+        let root = dir.path().join("library");
+        seed(&root.join("Manga"));
+        std::fs::write(root.join("a-file"), b"x").unwrap();
+        std::fs::create_dir_all(dir.path().join("outside")).unwrap();
+        let (c, lib) = live_connector(&base);
+        lib.lock().folder_roots = vec![root.clone()];
+        let far = RequestOrigin::of(false, Some("Mozilla/5.0"));
+
+        c.start(folder_req(&root.join("Manga")), far).unwrap();
+        let s = settle(&c).await;
+        assert_eq!(s.state, "connected", "{s:?}");
+        assert_eq!(s.check.unwrap().volumes, 3);
+
+        let fresh = root.join("New");
+        c.start(folder_req(&fresh), far).unwrap();
+        let s = settle(&c).await;
+        assert_eq!(s.state, "connected", "{s:?}");
+        assert!(c.create_folder().await.unwrap().found);
+        assert!(fresh.is_dir());
+
+        let e = {
+            c.start(folder_req(&dir.path().join("outside")), far)
+                .unwrap();
+            let s = settle(&c).await;
+            assert_eq!(s.state, "failed", "{s:?}");
+            s.error.unwrap()
+        };
+        assert!(e.contains("is not inside the folders"), "{e}");
+
+        let mut said = Vec::new();
+        for p in [root.join("a-file"), root.join("gone/manga")] {
+            c.start(folder_req(&p), far).unwrap();
+            let s = settle(&c).await;
+            assert_eq!(s.state, "failed", "{p:?}: {s:?}");
+            said.push(s.error.unwrap().replace(&shown(&p), "<path>"));
+        }
+        assert_eq!(said[0], said[1]);
+        assert_eq!(
+            said[0],
+            "There is no folder Bunko can use at <path>: check the path."
+        );
+        // The CLI is told which it is.
+        c.start(folder_req(&root.join("a-file")), RequestOrigin::cli())
+            .unwrap();
+        let s = settle(&c).await;
+        assert!(s.error.unwrap().contains("is a file, not a folder"));
+    }
+
     /// The Check counts the folder's volumes and series; a missing folder is offered
     /// ("Create it?") and made, one level only; `<base>/library` may be chosen.
     #[tokio::test]

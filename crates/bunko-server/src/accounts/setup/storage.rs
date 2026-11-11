@@ -82,7 +82,9 @@ fn origin(client: &Client, parts: &Parts) -> RequestOrigin {
         .headers
         .get(header::USER_AGENT)
         .and_then(|v| v.to_str().ok());
-    RequestOrigin::of(is_local(client), ua)
+    RequestOrigin::of(is_local(client), ua).on_this_machine(
+        crate::accounts::local::browser_on_this_machine(client, &parts.headers),
+    )
 }
 
 /// `GET /setup/api/storage`: the configured library, the mounted store and the
@@ -241,7 +243,7 @@ async fn fs(
     if !crate::accounts::local::browser_on_this_machine(&client, &parts.headers) {
         return json_error(403, crate::fs_browse::REMOTE_REFUSAL);
     }
-    let dir = match crate::fs_browse::requested(q.path.as_deref()) {
+    let dir = match crate::fs_browse::requested_over_http(q.path.as_deref()) {
         Ok(p) => p,
         Err(e) => return json_error(400, &e),
     };

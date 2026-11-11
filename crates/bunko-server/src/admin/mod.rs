@@ -204,6 +204,9 @@ pub(crate) struct ApiRequest {
     /// The `User-Agent` (the Storage panel's Connect: an embedded WebView gets the
     /// device flow).
     pub user_agent: Option<String>,
+    /// A browser on this machine ([`crate::accounts::local::browser_on_this_machine`]):
+    /// Browse…, and a library folder outside `storage.library.folder_roots`.
+    pub this_machine: bool,
 }
 
 impl ApiRequest {
@@ -311,6 +314,14 @@ async fn entry(State(state): State<AdminState>, req: Request) -> Response {
         .get(header::USER_AGENT)
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
+    let this_machine = crate::accounts::local::request_on_this_machine(
+        parts
+            .extensions
+            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+            .map(|c| c.0.ip()),
+        &ctx.client_ip,
+        &parts.headers,
+    );
     let body = if method == Method::POST || method == Method::PUT {
         read_body(&parts.headers, body).await
     } else {
@@ -322,6 +333,7 @@ async fn entry(State(state): State<AdminState>, req: Request) -> Response {
         query: parts.uri.query().unwrap_or("").to_string(),
         body,
         user_agent,
+        this_machine,
     };
     dispatch(&state, &sub["/api/".len()..], req).await
 }

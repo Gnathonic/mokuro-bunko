@@ -29,18 +29,19 @@ fn loopback(req: &ApiRequest) -> bool {
 }
 
 fn origin(req: &ApiRequest) -> RequestOrigin {
-    RequestOrigin::of(loopback(req), req.user_agent.as_deref())
+    RequestOrigin::of(loopback(req), req.user_agent.as_deref()).on_this_machine(req.this_machine)
 }
 
 /// `GET /api/fs?path=…`: Browse… for the library folder, the subfolders of a folder on
-/// this machine. An admin on this machine only: 403 for one elsewhere, as the folder
-/// path is then typed (it would show them what is on the server's disk).
+/// this machine. An admin in a browser on this machine only: 403 for one elsewhere (or
+/// forwarded by a proxy, or on a page naming another host), as the folder path is then
+/// typed (it would show them what is on the server's disk).
 pub(super) async fn fs(req: &ApiRequest) -> Response {
-    if !loopback(req) {
+    if !req.this_machine {
         return error(403, crate::fs_browse::REMOTE_REFUSAL);
     }
     let q = super::parse_qs(&req.query);
-    let dir = match crate::fs_browse::requested(super::query_one(&q, "path").as_deref()) {
+    let dir = match crate::fs_browse::requested_over_http(super::query_one(&q, "path").as_deref()) {
         Ok(p) => p,
         Err(e) => return error(400, e),
     };

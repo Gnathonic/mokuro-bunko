@@ -610,6 +610,12 @@ pub struct LibraryConfig {
     /// `backend: folder`: the library folder, as written (`~` is expanded where it is
     /// used). Kept, and ignored, while another backend is set.
     pub path: Option<PathBuf>,
+    /// The folders a browser on another computer (the setup wizard, the admin panel)
+    /// may connect a folder library in: at or under one of these only. Empty (the
+    /// default): none. Set in `config.yaml` or `MOKURO_LIBRARY_FOLDER_ROOTS` only;
+    /// no HTTP call changes it. The CLI, the desktop app and a browser on the server
+    /// itself are not held to it.
+    pub folder_roots: Vec<PathBuf>,
     pub cache_mb: u32,
     pub spool_gb: u32,
     pub outbox_hold_mb: u32,
@@ -633,6 +639,7 @@ impl Default for LibraryConfig {
             folder: "mokuro-reader".into(),
             webdav: WebDavLibraryConfig::default(),
             path: None,
+            folder_roots: Vec::new(),
             cache_mb: 1024,
             spool_gb: 4,
             outbox_hold_mb: 2048,
@@ -654,6 +661,10 @@ const LIBRARY_ENV: &[(&str, &str)] = &[
     ("MOKURO_LIBRARY_BACKEND", "storage.library.backend"),
     ("MOKURO_LIBRARY_FOLDER", "storage.library.folder"),
     ("MOKURO_LIBRARY_PATH", "storage.library.path"),
+    (
+        "MOKURO_LIBRARY_FOLDER_ROOTS",
+        "storage.library.folder_roots",
+    ),
     ("MOKURO_WEBDAV_URL", "storage.library.webdav.url"),
     ("MOKURO_WEBDAV_USERNAME", "storage.library.webdav.username"),
     (
@@ -692,6 +703,15 @@ impl LibraryConfig {
         l.webdav.username = get_opt_str(&webdav, "username");
         l.webdav.allow_http = get_bool(&webdav, "storage.library.webdav", "allow_http", false)?;
         l.path = get_opt_str(&m, "path").map(PathBuf::from);
+        l.folder_roots = match m.get("folder_roots") {
+            // One path as a string is one root (a path may hold a comma).
+            Some(Value::String(s)) => split_roots(s),
+            _ => get_list(&m, SEC, "folder_roots", &[])?
+                .into_iter()
+                .filter(|r| !r.trim().is_empty())
+                .map(PathBuf::from)
+                .collect(),
+        };
         l.cache_mb = get_positive(&m, SEC, "cache_mb", d.cache_mb)?;
         l.spool_gb = get_positive(&m, SEC, "spool_gb", d.spool_gb)?;
         l.outbox_hold_mb = get_positive(&m, SEC, "outbox_hold_mb", d.outbox_hold_mb)?;
@@ -732,6 +752,7 @@ impl LibraryConfig {
                 "folder",
                 "webdav",
                 "path",
+                "folder_roots",
                 "cache_mb",
                 "spool_gb",
                 "outbox_hold_mb",
@@ -812,6 +833,14 @@ impl LibraryConfig {
                 )));
             }
         }
+        for root in &self.folder_roots {
+            if !storage::expand_user(root).is_absolute() {
+                return Err(invalid(format!(
+                    "storage.library.folder_roots: {} is not a full path",
+                    root.display()
+                )));
+            }
+        }
         if self.backend == LibraryBackend::Folder && self.path.is_none() {
             return Err(invalid(
                 "storage.library.backend: folder needs storage.library.path (MOKURO_LIBRARY_PATH)",
@@ -874,6 +903,11 @@ impl LibraryConfig {
                 "allow_http": self.webdav.allow_http,
             },
             "path": self.path.as_ref().map(|p| p.to_string_lossy()),
+            "folder_roots": self
+                .folder_roots
+                .iter()
+                .map(|p| p.to_string_lossy())
+                .collect::<Vec<_>>(),
             "cache_mb": self.cache_mb,
             "spool_gb": self.spool_gb,
             "outbox_hold_mb": self.outbox_hold_mb,
@@ -927,6 +961,7 @@ impl LibraryConfig {
             "webdav.allow_http" => self.webdav.allow_http = b()?,
             "webdav.password" => return Err(invalid(WEBDAV_PASSWORD_REFUSED)),
             "path" => self.path = opt().map(PathBuf::from),
+            "folder_roots" => self.folder_roots = split_roots(value),
             "cache_mb" => self.cache_mb = pos()?,
             "spool_gb" => self.spool_gb = pos()?,
             "outbox_hold_mb" => self.outbox_hold_mb = pos()?,
@@ -961,6 +996,7 @@ impl LibraryConfig {
         "webdav.username",
         "webdav.allow_http",
         "path",
+        "folder_roots",
         "cache_mb",
         "spool_gb",
         "outbox_hold_mb",
@@ -1165,6 +1201,19 @@ fn get_list(
             "{sec}.{key}: expected a list, got {other}"
         ))),
     }
+}
+
+/// `storage.library.folder_roots` from one string (`MOKURO_LIBRARY_FOLDER_ROOTS`,
+/// `config set`): the paths split as `PATH` is, on `:` (`;` on Windows), since a path
+/// may hold a comma; `null` or empty is none.
+fn split_roots(s: &str) -> Vec<PathBuf> {
+    let s = s.trim();
+    if s.is_empty() || s == "null" {
+        return Vec::new();
+    }
+    std::env::split_paths(s)
+        .filter(|p| !p.as_os_str().is_empty())
+        .collect()
 }
 
 fn split_list(s: &str) -> Vec<String> {
@@ -2841,5 +2890,65 @@ mod tests {
             e.contains("MOKURO_LIBRARY_PATH") && e.contains("full path"),
             "{e}"
         );
+    }
+
+    /// `storage.library.folder_roots`: none by default; a list (or one path) in the
+    /// file, split as `PATH` from `MOKURO_LIBRARY_FOLDER_ROOTS` and `config set`; every
+    /// root a full path; written back as a list.
+    #[test]
+    fn library_folder_roots() {
+        let (a, b, sep) = if cfg!(windows) {
+            (r"D:\Manga", r"E:\Comics, Manga", ";")
+        } else {
+            ("/library", "/srv/comics, manga", ":")
+        };
+        assert!(Config::default().storage.library.folder_roots.is_empty());
+        let c = Config::from_value(&yaml(&format!(
+            "storage:\n  library:\n    folder_roots: ['{a}', '{b}']\n"
+        )))
+        .unwrap();
+        assert_eq!(
+            c.storage.library.folder_roots,
+            vec![PathBuf::from(a), PathBuf::from(b)]
+        );
+        let v = c.to_value();
+        assert_eq!(v["storage"]["library"]["folder_roots"], json!([a, b]));
+        assert_eq!(Config::from_value(&v).unwrap().storage, c.storage);
+        // One path as a string: one root, its comma kept.
+        let c = Config::from_value(&yaml(&format!(
+            "storage: {{library: {{folder_roots: '{b}'}}}}"
+        )))
+        .unwrap();
+        assert_eq!(c.storage.library.folder_roots, vec![PathBuf::from(b)]);
+        let e = Config::from_value(&yaml("storage: {library: {folder_roots: [manga]}}"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("storage.library.folder_roots: manga is not a full path"),
+            "{e}"
+        );
+        // The environment and `config set`: split as PATH is.
+        let joined = format!("{a}{sep}{b}");
+        let mut c = Config::default();
+        c.apply_env_overrides(|k: &str| {
+            (k == "MOKURO_LIBRARY_FOLDER_ROOTS").then(|| joined.clone())
+        })
+        .unwrap();
+        assert_eq!(
+            c.storage.library.folder_roots,
+            vec![PathBuf::from(a), PathBuf::from(b)]
+        );
+        let mut c = Config::default();
+        c.set_by_dotted_key("storage.library.folder_roots", a)
+            .unwrap();
+        assert_eq!(c.storage.library.folder_roots, vec![PathBuf::from(a)]);
+        assert!(
+            c.set_by_dotted_key("storage.library.folder_roots", "relative")
+                .is_err()
+        );
+        c.set_by_dotted_key("storage.library.folder_roots", "")
+            .unwrap();
+        assert!(c.storage.library.folder_roots.is_empty());
+        assert!(LibraryConfig::KEYS.contains(&"folder_roots"));
     }
 }

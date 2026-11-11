@@ -122,7 +122,8 @@ storage:
 |--------|------|---------|-------------|
 | `backend` | string | `local` | `local`, `folder` (a folder you choose), `gdrive` (Google Drive), `onedrive`, `mega` or `webdav`. `MOKURO_LIBRARY_BACKEND`. |
 | `folder` | string | `mokuro-reader` | The library folder in the cloud account (the one Mokuro Reader uses). `MOKURO_LIBRARY_FOLDER`. With `backend: folder` it is only the name the library's top folder is known by, whatever it is called on disk: leave it as it is. |
-| `path` | string | — | Required for `folder`: the library folder, a full path as the server sees it (`/srv/manga`, `D:\Manga`, `\\files.example.com\manga`; `~` is expanded). It may not be Bunko's `base_path`, hold it, or lie inside it, except in `base_path/library/` (so a library on this computer can become a folder library in place). Ignored by the other backends. `MOKURO_LIBRARY_PATH`. |
+| `path` | string | — | Required for `folder`: the library folder, a full path as the server sees it (`/srv/manga`, `D:\Manga`, `\\files.example.com\manga`; `~` is expanded). It may not be Bunko's `base_path`, hold it, or lie inside it, except in `base_path/library/` (so a library on this computer can become a folder library in place); nor Bunko's settings folder or one holding it; nor a system folder (see [Which folders](#which-folders)). Ignored by the other backends. `MOKURO_LIBRARY_PATH`. |
+| `folder_roots` | list | `[]` | The folders a browser on another computer (the setup wizard, the admin panel's Storage tab) may connect a library folder in: at or under one of these only, and none when empty. Only `config.yaml` and `MOKURO_LIBRARY_FOLDER_ROOTS` (paths separated as in `PATH`: `:`, `;` on Windows) set it; no page or API call changes it. The CLI, the desktop app and a browser on the server itself are not held to it. Each a full path. In Docker, the library mount (`/library`). |
 | `webdav.url` | string | — | The WebDAV server's folder URL; required for `webdav`. `http://` is refused unless `webdav.allow_http` is `true`, except for a server on this machine (`localhost`, `127.0.0.0/8`, `[::1]`). `MOKURO_WEBDAV_URL`. |
 | `webdav.username` | string | — | `MOKURO_WEBDAV_USERNAME`. |
 | `webdav.allow_http` | boolean | `false` | Allow a plain `http://` URL (the password then travels unencrypted). Not needed for a loopback host (`localhost`, `127.0.0.0/8`, `[::1]`). `MOKURO_WEBDAV_ALLOW_HTTP`. |
@@ -195,6 +196,37 @@ path is made). In the setup wizard and the Storage tab, **Browse…** lists the
 server's folders only in a browser on the server's own machine; from anywhere else,
 type the path.
 
+##### Which folders
+
+A folder library lets Bunko read, write, rename and remove files there, so which
+folders may be chosen depends on who chooses:
+
+- **The server's operator** (`config.yaml`, `MOKURO_LIBRARY_PATH`, `mokuro-bunko
+  library connect folder`, the desktop app) and **a browser on the server itself**
+  (connected over `localhost`, naming this machine as its host, and not forwarded by
+  a proxy) may choose any folder but those below.
+- **A browser on another computer** (an admin, or someone with the setup code; also
+  a request a proxy on the same machine forwards) may choose only a folder at or
+  under one of `storage.library.folder_roots`, which is empty unless set. A refusal
+  says how to allow it: set the root in `config.yaml` (or
+  `MOKURO_LIBRARY_FOLDER_ROOTS`) on the server and restart, or connect the folder
+  from the server itself. Its Check also tells it nothing about folders it cannot
+  use: a file, a missing folder and a missing parent read the same.
+- **Nobody** may choose the top of the system disk (`/`; on Windows the system drive,
+  `C:\`; another drive's top, `D:\`, is fine), a system folder (`/bin`, `/boot`,
+  `/dev`, `/etc`, `/lib*`, `/proc`, `/root`, `/run` except `/run/media`, `/sbin`,
+  `/sys`, `/usr`, `/var` itself and `/var/lib`, `/var/log`, `/var/cache`, `/var/spool`
+  and the like, and on macOS `/System`, `/Library` and `/private/etc`; on Windows
+  `C:\Windows`, `C:\Program Files*`, `C:\ProgramData` and any drive's
+  `$Recycle.Bin` and `System Volume Information`), Bunko's own folder (`base_path`,
+  except `base_path/library/`), Bunko's settings folder (where `config.yaml` is by
+  default), or a folder holding either. Paths are checked as written and with
+  symbolic links resolved, without case.
+- **Network shares and device paths** on Windows (`\\server\share`, `\\?\…`,
+  `\\.\…`) are taken only from the operator (`config.yaml`, the environment, the
+  CLI): the setup and admin pages refuse them before anything opens them, as opening
+  one makes Windows connect to that computer with the server's credentials.
+
 - **Switching** to another folder, to a cloud account or to This computer is a
   different library: Disconnect first. The old folder is left as it is.
 - **Disconnect** leaves every file in the folder where it is; only the marker says
@@ -216,7 +248,10 @@ type the path.
   same-size changes by another program within one tick.
 - **Docker**: mount the folder and point `MOKURO_LIBRARY_PATH` at the mount (see
   [deployment](deployment.md)). Bunko never changes the folder's owner: run it as
-  that owner (`PUID`/`PGID`).
+  that owner (`PUID`/`PGID`). A browser on the Docker host is not on the server's
+  machine (it reaches the container through Docker's network), so to choose the
+  folder in the setup wizard or the Storage tab, set `MOKURO_LIBRARY_FOLDER_ROOTS`
+  to the mount (`/library`).
 - **Windows service**: a service does not see mapped drive letters; use the share's
   UNC path (`\\files.example.com\manga`).
 
@@ -1786,6 +1821,7 @@ Other variables:
 | `MOKURO_SERVE_READERS` | — | Short alias for `server.serve_readers`. |
 | `MOKURO_LIBRARY_BACKEND`, `MOKURO_LIBRARY_FOLDER` | — | `storage.library.backend` and `folder` (see [Library location](#library-location)). |
 | `MOKURO_LIBRARY_PATH` | — | `storage.library.path`: the library folder of `backend: folder` (see [A library folder you choose](#a-library-folder-you-choose)). |
+| `MOKURO_LIBRARY_FOLDER_ROOTS` | — | `storage.library.folder_roots`: the folders a browser on another computer may connect a library folder in, separated as in `PATH` (`:`, `;` on Windows) (see [Which folders](#which-folders)). |
 | `MOKURO_WEBDAV_URL`, `MOKURO_WEBDAV_USERNAME`, `MOKURO_WEBDAV_ALLOW_HTTP` | — | `storage.library.webdav.url`, `username`, `allow_http`. |
 | `MOKURO_WEBDAV_PASSWORD_FILE` | — | A file holding the WebDAV library's password (never set in `config.yaml`). |
 | `MOKURO_GOOGLE_PROJECT` | `release` | `storage.library.google_project`: `release` or `beta`. |

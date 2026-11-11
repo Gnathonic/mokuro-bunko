@@ -130,7 +130,7 @@ impl ProviderOps for FakeOps {
             }
             let (_, check) = check_backend(&*self.fake, folder, create, ours).await?;
             // A folder's account is its path, as the live driver's.
-            if let Auth::Folder { path } = auth {
+            if let Auth::Folder { path, .. } = auth {
                 let id = bunko_remote::folder::account_id(path);
                 let probe = bunko_remote::folder::FolderProbe::default();
                 return Ok((
@@ -1425,7 +1425,7 @@ async fn a_folder_connects_by_its_path() {
     {
         let held = e.connector.0.held.lock();
         let held = held.as_ref().unwrap();
-        assert!(matches!(&held.auth, Auth::Folder { path } if path == &manga));
+        assert!(matches!(&held.auth, Auth::Folder { path, .. } if path == &manga));
         assert_eq!(held.store_id, id);
     }
 

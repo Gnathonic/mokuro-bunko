@@ -1122,7 +1122,13 @@ fn plan_inner(lib: &LibraryConfig, layout: &StorageLayout) -> io::Result<Plan> {
             let Some(path) = lib.path.as_deref().filter(|p| !p.as_os_str().is_empty()) else {
                 return Ok(Plan::Unconnected("storage.library.path must be set".into()));
             };
-            let path = match folder::check_path(path, &layout.base) {
+            // config.yaml and the environment are the operator's own.
+            let path = match folder::check_path(
+                path,
+                &layout.base,
+                &lib.folder_roots,
+                folder::Asker::Operator,
+            ) {
                 Ok(p) => p,
                 Err(why) => return Ok(Plan::Unconnected(why)),
             };

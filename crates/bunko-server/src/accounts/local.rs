@@ -80,6 +80,24 @@ pub fn browser_on_this_machine(client: &Client, headers: &HeaderMap) -> bool {
         && !FORWARDED.iter().any(|h| headers.contains_key(*h))
 }
 
+/// [`browser_on_this_machine`] from a request's parts: its connection's address (none
+/// known: not local) and the client address the server resolved for it.
+pub fn request_on_this_machine(
+    peer: Option<std::net::IpAddr>,
+    client_ip: &str,
+    headers: &HeaderMap,
+) -> bool {
+    let Some(peer) = peer else {
+        return false;
+    };
+    let client = Client {
+        peer,
+        peer_known: true,
+        ip: client_ip.to_string(),
+    };
+    browser_on_this_machine(&client, headers)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1043,6 +1043,8 @@ services:
       - PGID=1000
       - MOKURO_LIBRARY_BACKEND=folder
       - MOKURO_LIBRARY_PATH=/library
+      # Lets the setup wizard and the Storage tab choose a folder in the mount.
+      - MOKURO_LIBRARY_FOLDER_ROOTS=/library
 volumes:
   mokuro-data:
 ```
@@ -1054,6 +1056,13 @@ volumes:
 - In the setup wizard, type `/library`: **Browse…** is offered only in a browser
   on the server's own machine, and inside a container it would list the
   container's folders anyway.
+- A browser on the Docker host reaches the container through Docker's network, so
+  Bunko counts it as another computer: the wizard and the Storage tab connect a
+  library folder only at or under `MOKURO_LIBRARY_FOLDER_ROOTS`
+  (`storage.library.folder_roots`), which no page can change. Without it they
+  refuse and say so; `docker exec -it mokuro-bunko mokuro-bunko library connect
+  folder --path /library` works either way. See [Which
+  folders](configuration.md#which-folders).
 - On Docker Desktop (Mac, Windows) the container hears nothing of changes made on
   the host: they show at `storage.library.poll.idle_s` (300 s by default). On Linux
   a bind mount passes changes on at once.

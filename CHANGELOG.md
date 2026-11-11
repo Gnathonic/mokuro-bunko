@@ -233,7 +233,16 @@
   `.mokuro-bunko-trash` folder inside the library, kept 30 days. The setup wizard and
   the admin panel's Storage tab offer **Local folder**, with **Browse…** for a browser
   on the server's own machine (`/setup/api/fs`, `/_admin/api/fs`, which refuse any
-  other caller); elsewhere the path is typed.
+  other caller, a request a proxy forwarded or a page naming another host included);
+  elsewhere the path is typed. A browser on another computer may connect a folder
+  only at or under `storage.library.folder_roots` (`MOKURO_LIBRARY_FOLDER_ROOTS`),
+  which only the config file or the environment sets and is empty by default; the
+  refusal says how to allow it. Nobody may choose the top of the system disk, a
+  system folder, Bunko's own folder or settings folder, or a folder holding one;
+  the setup and admin pages never take a Windows network share or device path
+  (`\\server\share`, `\\?\…`), which only the config, the environment and the CLI
+  may name. A browser elsewhere is told the same for any folder it cannot use, so
+  the Check tells it nothing about the server's disk.
 - **`mokuro-bunko library connect folder --path DIR [--create]`** connects a library
   folder from a terminal.
 - **OCR can take work volume by volume.** With `ocr.queue_order: volume` (Admin → OCR →

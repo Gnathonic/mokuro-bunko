@@ -29,6 +29,29 @@ pub fn requested(raw: Option<&str>) -> Result<PathBuf, String> {
     }
 }
 
+/// [`requested`] for the setup and admin pages: never a Windows network share or
+/// device path (opening one makes Windows connect to that computer with this server's
+/// credentials), refused before anything looks at it.
+pub fn requested_over_http(raw: Option<&str>) -> Result<PathBuf, String> {
+    let text = raw.map(str::trim).unwrap_or("");
+    if cfg!(windows) && crate::storage::folder::windows_network_or_device(text) {
+        return Err(format!(
+            "{text}: a network share or a device; Browse shows this computer's own disks"
+        ));
+    }
+    let p = requested(raw)?;
+    #[cfg(windows)]
+    if !matches!(
+        p.components().next(),
+        Some(std::path::Component::Prefix(pre)) if matches!(pre.kind(), std::path::Prefix::Disk(_))
+    ) {
+        return Err(format!(
+            "{text}: a network share or a device; Browse shows this computer's own disks"
+        ));
+    }
+    Ok(p)
+}
+
 /// The subfolders of `dir`, and the files whose extension is in `exts` (empty: none).
 /// Dot folders are hidden, as are a drive's `$RECYCLE.BIN` and `System Volume
 /// Information`. On Windows, `drives` lists the drives at a drive's root.
