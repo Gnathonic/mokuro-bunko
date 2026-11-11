@@ -883,6 +883,26 @@ async fn the_folder_browser_answers_this_computer_only() {
             .starts_with("manga: not a full path")
     );
 
+    // A browser here naming this machine is served. A page that rebinds its own name
+    // to this machine reaches it over loopback too, but names its host; a local proxy
+    // forwards requests from anywhere. Both are refused, and see nothing.
+    let r = env
+        .send(empty(
+            req("GET", &fs_query(&root)).header("host", "localhost:18100"),
+        ))
+        .await;
+    assert_eq!(r.status, 200, "{}", r.text());
+    for (name, value) in [
+        ("host", "rebind.example.com:18100"),
+        ("x-forwarded-for", "203.0.113.10"),
+    ] {
+        let r = env
+            .send(empty(req("GET", &fs_query(&root)).header(name, value)))
+            .await;
+        assert_eq!(r.status, 403, "{name}: {}", r.text());
+        assert!(!r.text().contains("Manga"), "{name}");
+    }
+
     // Another computer: refused without the code, and with it.
     let far = "203.0.113.10";
     let r = env

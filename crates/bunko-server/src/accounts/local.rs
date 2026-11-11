@@ -54,17 +54,29 @@ fn host_header_is_local(headers: &HeaderMap) -> bool {
     loopback_host(name)
 }
 
+/// Headers a proxy adds when it forwards a request.
+const FORWARDED: [&str; 4] = [
+    "forwarded",
+    "x-forwarded-for",
+    "x-forwarded-host",
+    "x-real-ip",
+];
+
 /// A passwordless account may sign in on this request (module docs).
 pub fn passwordless_sign_in(core: &Core, client: &Client, headers: &HeaderMap) -> bool {
-    const FORWARDED: [&str; 4] = [
-        "forwarded",
-        "x-forwarded-for",
-        "x-forwarded-host",
-        "x-real-ip",
-    ];
     local_only(core)
         && is_local(client)
         && host_header_is_local(headers)
+        && !FORWARDED.iter().any(|h| headers.contains_key(*h))
+}
+
+/// A browser on this computer, as the folder browser needs it (it lists this disk):
+/// a local connection ([`is_local`]) that no proxy forwarded, and whose `Host`, when it
+/// names one, is this machine. A DNS-rebinding page reaches the server over loopback
+/// too, but names its own host.
+pub fn browser_on_this_machine(client: &Client, headers: &HeaderMap) -> bool {
+    is_local(client)
+        && (!headers.contains_key(header::HOST) || host_header_is_local(headers))
         && !FORWARDED.iter().any(|h| headers.contains_key(*h))
 }
 
@@ -110,5 +122,40 @@ mod tests {
         assert!(!of("evil.example:18100"));
         assert!(!of("127.0.0.1.nip.io:18100"));
         assert!(!host_header_is_local(&HeaderMap::new()));
+    }
+
+    #[test]
+    fn the_folder_browser_wants_a_browser_here() {
+        let here = Client {
+            peer: "127.0.0.1".parse().unwrap(),
+            peer_known: true,
+            ip: "127.0.0.1".into(),
+        };
+        let with = |pairs: &[(&'static str, &str)]| {
+            let mut h = HeaderMap::new();
+            for (k, v) in pairs {
+                h.insert(*k, v.parse().unwrap());
+            }
+            h
+        };
+        assert!(browser_on_this_machine(&here, &HeaderMap::new()));
+        assert!(browser_on_this_machine(
+            &here,
+            &with(&[("host", "localhost:18100")])
+        ));
+        assert!(!browser_on_this_machine(
+            &here,
+            &with(&[("host", "rebind.example.com")])
+        ));
+        assert!(!browser_on_this_machine(
+            &here,
+            &with(&[("host", "localhost"), ("x-real-ip", "203.0.113.4")])
+        ));
+        let far = Client {
+            peer: "203.0.113.4".parse().unwrap(),
+            peer_known: true,
+            ip: "203.0.113.4".into(),
+        };
+        assert!(!browser_on_this_machine(&far, &HeaderMap::new()));
     }
 }

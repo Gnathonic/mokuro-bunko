@@ -226,8 +226,9 @@ struct FsQuery {
 }
 
 /// `GET /setup/api/fs?path=…`: Browse… for the library folder, the subfolders of a
-/// folder on this machine. A caller on this machine only (403 for any other, a setup
-/// code holder included: it would show them what is on this disk).
+/// folder on this machine. A browser on this machine only (403 for any other, a setup
+/// code holder, a forwarded request and a page that names another host included: it
+/// would show them what is on this disk).
 async fn fs(
     State(d): State<AccountsDeps>,
     client: Client,
@@ -237,7 +238,7 @@ async fn fs(
     if let Err(r) = allowed(&d, &client, &parts).await {
         return r;
     }
-    if !is_local(&client) {
+    if !crate::accounts::local::browser_on_this_machine(&client, &parts.headers) {
         return json_error(403, crate::fs_browse::REMOTE_REFUSAL);
     }
     let dir = match crate::fs_browse::requested(q.path.as_deref()) {
