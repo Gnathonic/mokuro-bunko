@@ -117,7 +117,10 @@ impl Watch {
         {
             roots.push(c);
         }
-        let made = notify::recommended_watcher(
+        // Never into a folder link inside the library (the walk skips them too): one
+        // leading out of it would have the watch cover, and wake on, a folder elsewhere.
+        // The library folder itself may be a link; it is still watched.
+        let made = notify::RecommendedWatcher::new(
             move |res: notify::Result<notify::Event>| match res {
                 Ok(ev) => {
                     if matches!(ev.kind, EventKind::Access(_)) {
@@ -154,6 +157,7 @@ impl Watch {
                     state.hit();
                 }
             },
+            notify::Config::default().with_follow_symlinks(false),
         );
         let mut w = match made {
             Ok(w) => w,

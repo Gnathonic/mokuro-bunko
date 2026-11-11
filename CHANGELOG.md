@@ -243,8 +243,8 @@
   (`\\server\share`, `\\?\…`), which only the config, the environment and the CLI
   may name. A browser elsewhere is told the same for any folder it cannot use, so
   the Check tells it nothing about the server's disk. Inside the library, symbolic
-  links and junctions are neither listed nor followed: no read, write, move, trash or
-  delete goes through a linked folder, wherever it sits on the path.
+  links and junctions are neither listed, watched nor followed: no read, write, move,
+  trash or delete goes through a linked folder, wherever it sits on the path.
 - **`mokuro-bunko library connect folder --path DIR [--create]`** connects a library
   folder from a terminal.
 - **OCR can take work volume by volume.** With `ocr.queue_order: volume` (Admin → OCR →

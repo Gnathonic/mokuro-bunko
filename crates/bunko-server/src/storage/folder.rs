@@ -414,9 +414,17 @@ pub fn ensure_stub(cloud: &Path, id: &str, account: &str) {
 }
 
 /// `p` with whatever of it exists resolved (symlinks, `..`, the on-disk spelling where
-/// the filesystem gives it), the rest appended as written.
+/// the filesystem gives it), the rest appended as written. A link whose target is
+/// missing is followed too: it leads there the moment that target is made.
 // unmounted: Bunko's own folder and the library folder are plain paths.
 fn resolve(p: &Path) -> PathBuf {
+    resolve_in(p, 0)
+}
+
+/// The most links [`resolve`] follows by hand, as many as the kernel does.
+const MAX_LINKS: u32 = 40;
+
+fn resolve_in(p: &Path, links: u32) -> PathBuf {
     let p = PathBuf::from(bunko_remote::folder::account_id(p));
     let mut rest: Vec<std::ffi::OsString> = Vec::new();
     let mut cur = p.as_path();
@@ -427,6 +435,20 @@ fn resolve(p: &Path) -> PathBuf {
                 out.push(part);
             }
             return out;
+        }
+        // A dangling link (canonicalize found no target): where it points, from its
+        // resolved folder, then the rest.
+        if links < MAX_LINKS
+            && let Ok(target) = bunko_store::fs::read_link(cur)
+        {
+            let mut next = match cur.parent() {
+                Some(parent) => resolve_in(parent, links + 1).join(target),
+                None => target,
+            };
+            for part in rest.iter().rev() {
+                next.push(part);
+            }
+            return resolve_in(&next, links + 1);
         }
         match (cur.file_name(), cur.parent()) {
             (Some(name), Some(parent)) => {
@@ -793,6 +815,51 @@ mod tests {
         let roots = [linked.clone()];
         assert!(check_path(&linked.join("Manga"), &base, &roots, Asker::Elsewhere).is_ok());
         assert!(check_path(&linked.join("out"), &base, &roots, Asker::Elsewhere).is_err());
+    }
+
+    /// A link in a root whose target is missing still leads where it points: refused
+    /// for a caller elsewhere when that is out of the roots (it would lead out the
+    /// moment the target is made), and for everyone when it points into a system
+    /// folder or Bunko's own.
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_link_leads_where_it_points() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("bunko");
+        let root = dir.path().join("library");
+        let outside = dir.path().join("elsewhere");
+        bunko_store::fs::create_dir_all(root.join("Inside")).unwrap();
+        bunko_store::fs::create_dir_all(&outside).unwrap();
+        let link = |name: &str, to: &Path| std::os::unix::fs::symlink(to, root.join(name)).unwrap();
+        link("out", &outside.join("later"));
+        link("out-deep", &outside.join("a/b"));
+        link("out-rel", Path::new("../elsewhere/later"));
+        link("chain", Path::new("out"));
+        link("in", Path::new("Inside/later"));
+        link("etc", Path::new("/etc/bunko-later"));
+        link("own", &base.join("cloud/later"));
+        let roots = [root.clone()];
+        let elsewhere = |p: &Path| check_path(p, &base, &roots, Asker::Elsewhere);
+        for name in [
+            "out",
+            "out-deep",
+            "out-rel",
+            "chain",
+            "out/sub",
+            "chain/sub",
+        ] {
+            let e = elsewhere(&root.join(name)).unwrap_err();
+            assert!(e.contains("is not inside the folders"), "{name}: {e}");
+        }
+        // One that stays inside the root is fine.
+        assert!(elsewhere(&root.join("in")).is_ok());
+        let e = op(&root.join("etc"), &base).unwrap_err();
+        assert!(e.contains("is a system folder"), "{e}");
+        let e = op(&root.join("own"), &base).unwrap_err();
+        assert!(e.contains("part of Bunko's own folder"), "{e}");
+        // A loop resolves to nothing usable, and never hangs.
+        link("loop", Path::new("loop"));
+        let _ = elsewhere(&root.join("loop"));
     }
 
     #[test]

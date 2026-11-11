@@ -560,6 +560,41 @@ async fn a_linked_trash_folder_is_never_followed() {
     );
 }
 
+/// The watcher never descends into a folder link either: a write in the folder the
+/// link leads to (outside the library) wakes nothing, and nothing outside is watched.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_watcher_never_follows_a_folder_link() {
+    let lib = Lib::new();
+    let outside = outside_folder(&lib);
+    std::os::unix::fs::symlink(&outside, lib.abs("Link")).unwrap();
+    let b = lib.open_watching().await;
+    if !b.probe().watcher {
+        eprintln!("no watcher on this host: nothing to check");
+        return;
+    }
+    let c = b.start_cursor().await.unwrap();
+    let (_, c) = page(&b, &c).await;
+    let w = {
+        let outside = outside.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            std::fs::write(outside.join("sub/New.cbz"), b"new").unwrap();
+            std::fs::write(outside.join("Vol 9.cbz"), b"changed").unwrap();
+        })
+    };
+    let t0 = Instant::now();
+    b.wait_change(&c, Duration::from_millis(3500))
+        .await
+        .unwrap();
+    w.await.unwrap();
+    assert!(
+        t0.elapsed() >= Duration::from_millis(3400),
+        "a write outside the library, through a link, woke the feed after {:?}",
+        t0.elapsed()
+    );
+}
+
 // ---- 4. uploads --------------------------------------------------------------------
 
 #[tokio::test]

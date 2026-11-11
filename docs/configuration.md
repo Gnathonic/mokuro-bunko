@@ -221,7 +221,8 @@ folders may be chosen depends on who chooses:
   `$Recycle.Bin` and `System Volume Information`), Bunko's own folder (`base_path`,
   except `base_path/library/`), Bunko's settings folder (where `config.yaml` is by
   default), or a folder holding either. Paths are checked as written and with
-  symbolic links resolved, without case.
+  symbolic links resolved (a link whose target does not exist yet included: it is
+  checked where it points), without case.
 - **Network shares and device paths** on Windows (`\\server\share`, `\\?\…`,
   `\\.\…`) are taken only from the operator (`config.yaml`, the environment, the
   CLI): the setup and admin pages refuse them before anything opens them, as opening
