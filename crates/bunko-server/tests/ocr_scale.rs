@@ -5,6 +5,13 @@
 //! page take from 1.5 s to over 30 s. These tests time what runs on the scheduler
 //! thread, so a regression shows as a number, not as a stalled server.
 //!
+//! They time one message at a time on an idle scheduler. The waits over 30 s seen with
+//! such a library came from these messages queueing behind each other (the queue page
+//! and the queue file every 2 s, the local OCR's events, a processor's reconnects),
+//! which they do not replay: the largest single cost measured before the fix was about
+//! 6 s. They measure only the code they run on; the "before" figures quoted for the
+//! fix were taken on its parent commit (473d3fca).
+//!
 //! `scheduler_costs_at_scale` is ignored (it prints a table, and its size is set by
 //! `OCR_SCALE_VOLUMES`, default 2000, over `OCR_SCALE_STORE` = `local`, `cloud` or
 //! `both`, default both):
@@ -401,6 +408,9 @@ fn measure(volumes: usize, cloud: bool, version: &str) {
     let mut seen: std::collections::HashSet<String> = tower_bids(&x.s).into_iter().collect();
     println!("  benchmarks announced on arrival: {}", seen.len());
     let lane = tower_lane(&x.s, &pid);
+    // In a running server the claim that asks for the benchmarks starts one, and the
+    // benchmark then holds the machine, so its later claims return at once: this cost
+    // is paid about once per socket open, not after every change to the queue.
     let (d, _) = x.median(move |s| {
         // Its benchmark holds it; the claim of the moment it is not held (between two).
         let held = s.holds.remove("tower");

@@ -145,9 +145,11 @@ is skipped there.
   the libtorch pack second on a machine with a GPU (`hwdetect::vulkan_wanted`). The
   background install of `serve` and `processor serve` fetches the libtorch pack alone
   (`MOKURO_INSTALL_NO_EXTRAS=1`) and then the Vulkan pack on its own
-  (`install-ocr --variant vulkan --no-models`). That fetch never marks the machine as
+  (`install-ocr --variant vulkan --no-models`). That fetch does not mark the machine as
   installing, and a failed one waits before the next try (`.optional-pack.json`;
-  `install_ocr::Need::Extra`). A runtime's
+  `install_ocr::Need::Extra`). The exception is a machine whose only GPU route it is
+  (`Need::Extra { route: true }`: `ocr.backend: vulkan`, or a libtorch choice of `cpu`):
+  its first fetch is waited for as an install is. A runtime's
   graphs (~0.8–1 GB each) are fetched when a benchmark trial or a session first needs them
   (`models download` on a Vulkan-only GPU fetches them smallest first).
 * **Windows.** Windows lists its GPUs through DXGI: AMD and Intel adapters (no libtorch GPU

@@ -301,6 +301,42 @@ fn fake_cloudflared(env: &Env) -> (std::process::Command, std::path::PathBuf) {
 #[cfg(unix)]
 const FAKE_TUNNEL_URL: &str = "https://fake-tunnel.trycloudflare.com";
 
+/// A line of cloudflared's log that is not UTF-8 failed the read, and the command ended
+/// with an error that took cloudflared down with it.
+#[cfg(unix)]
+#[test]
+fn tunnel_cloudflare_keeps_running_past_a_log_line_that_is_not_utf8() {
+    let env = Env::new();
+    env.write_config("");
+    let (mut cmd, marker) = fake_cloudflared(&env);
+    let script = env.root().join("fake-bin").join("cloudflared");
+    let body = std::fs::read_to_string(&script).unwrap();
+    std::fs::write(
+        &script,
+        body.replacen(
+            "#!/bin/sh\n",
+            "#!/bin/sh\nprintf 'INF \\377 not utf-8\\n' >&2\n",
+            1,
+        ),
+    )
+    .unwrap();
+    let out = cmd
+        .args(["tunnel", "cloudflare", "--cors", "no"])
+        .output()
+        .unwrap();
+    let (stdout, stderr) = (common::stdout(&out), common::stderr(&out));
+    assert!(out.status.success(), "{stdout}{stderr}");
+    assert!(stderr.contains("not utf-8"), "{stderr}");
+    assert!(
+        stdout.contains(&format!("Tunnel URL: {FAKE_TUNNEL_URL}")),
+        "{stdout}"
+    );
+    assert!(
+        marker.exists(),
+        "cloudflared was stopped early: {stdout}{stderr}"
+    );
+}
+
 /// A tunnel started without a terminal (detached, stdin /dev/null) used to read end of
 /// input at the CORS question, abort, and take cloudflared down with it.
 #[cfg(unix)]

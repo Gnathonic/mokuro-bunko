@@ -1078,6 +1078,9 @@ impl Scheduler {
         for pid in pids {
             self.drop_processor(&pid, "the server is stopping");
         }
+        // Runs parked by processors that dropped off earlier: none returns to this
+        // process.
+        self.bench_unpark_all();
     }
 
     /// Restart-free reconfiguration (`OCRWorker.apply_settings`).

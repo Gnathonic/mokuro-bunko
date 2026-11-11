@@ -115,6 +115,12 @@ mod full {
             variant: String,
             reason: String,
             have: String,
+            /// The optional pack is this machine's only GPU route: the libtorch choice
+            /// is the CPU (`ocr.backend: vulkan`, AMD or Intel on Windows, an AMD GPU
+            /// with no ROCm build, an NVIDIA driver too old for CUDA). Its first fetch
+            /// is waited for, as an install is, so the machine is not benchmarked on
+            /// the CPU meanwhile; after a failure it runs on the CPU.
+            route: bool,
         },
     }
 
@@ -234,6 +240,7 @@ mod full {
                             variant: VULKAN.to_string(),
                             reason: why,
                             have: m,
+                            route: choice.variant == "cpu",
                         }
                     }
                     _ => Need::Satisfied(m),
@@ -1896,9 +1903,29 @@ pub(crate) mod tests {
             "the optional Vulkan pack counts as a missing backend: {n:?}"
         );
         assert!(
-            matches!(&n, Need::Extra { variant, have, .. } if variant == VULKAN && have.contains("torch-cu130-test")),
+            matches!(&n, Need::Extra { variant, have, route: false, .. } if variant == VULKAN && have.contains("torch-cu130-test")),
             "{n:?}"
         );
+        // Pinned to Vulkan, the libtorch choice is the CPU floor: the Vulkan pack is
+        // the machine's GPU route, and its first fetch is waited for.
+        std::fs::write(
+            &config,
+            format!(
+                "storage:\n  base_path: {}\nocr:\n  backend: vulkan\n",
+                dir.path().display()
+            ),
+        )
+        .unwrap();
+        let n = need(&target(), &hw);
+        assert!(
+            matches!(&n, Need::Extra { variant, route: true, .. } if variant == VULKAN),
+            "{n:?}"
+        );
+        std::fs::write(
+            &config,
+            format!("storage:\n  base_path: {}\n", dir.path().display()),
+        )
+        .unwrap();
         // Both in place: nothing at all.
         fake_pack(&backends, VULKAN);
         assert!(matches!(need(&target(), &hw), Need::Satisfied(_)));

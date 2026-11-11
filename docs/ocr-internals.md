@@ -295,7 +295,9 @@ processor waiting for its benchmarks costs a large queue nothing. A processor
 that drops off keeps its queued autobench runs for 10 minutes: back with the
 same host and catalog, it carries on where it was, with the sample already
 packed, and no benchmark is asked for again. Back changed, or later, it is
-measured afresh.
+measured afresh. While a run waits for its machine, the benchmark API shows it
+as queued (`waiting_for_machine`) and cancels it, and a server that stops ends
+every such run and removes its sample.
 
 ## Remote processors
 

@@ -745,6 +745,20 @@ impl Scheduler {
             data.insert("queue".into(), self.queue_value());
             return Value::Object(data);
         }
+        // Parked for its machine's return: queued, with no place in a line yet.
+        if let Some(run) = self
+            .bench
+            .parked
+            .get(machine)
+            .and_then(|p| p.runs.iter().find(|r| r.key == key))
+        {
+            let mut data = run.data.clone();
+            data.insert("progress".into(), Value::Null);
+            data.insert("position".into(), Value::Null);
+            data.insert("waiting_for_machine".into(), json!(true));
+            data.insert("queue".into(), self.queue_value());
+            return Value::Object(data);
+        }
         let mut found = self
             .bench
             .recent
@@ -773,6 +787,9 @@ impl Scheduler {
         } else {
             machine.to_string()
         };
+        if self.bench_cancel_parked(key, &machine) {
+            return Ok(self.bench_get(key, &machine));
+        }
         let Some(pos) = self
             .bench
             .lines
@@ -796,6 +813,35 @@ impl Scheduler {
         }
         self.bench_finish(&machine, pos, "cancelled", None);
         Ok(self.bench_get(key, &machine))
+    }
+
+    /// Cancel a run parked for its machine's return (true when there was one): it
+    /// leaves at once, as a queued run does, and its sample goes with it.
+    fn bench_cancel_parked(&mut self, key: &str, machine: &str) -> bool {
+        let Some(parked) = self.bench.parked.get_mut(machine) else {
+            return false;
+        };
+        let Some(pos) = parked.runs.iter().position(|r| r.key == key) else {
+            return false;
+        };
+        let Some(mut run) = parked.runs.remove(pos) else {
+            return false;
+        };
+        if parked.runs.is_empty() {
+            self.bench.parked.remove(machine);
+        }
+        // unmounted: the benchmark sample lives in the `.processing` spool.
+        #[allow(clippy::disallowed_methods)]
+        let _ = std::fs::remove_file(self.sample_path(&run.bid));
+        run.data.insert("state".into(), json!("cancelled"));
+        run.data.insert("finished_at".into(), json!(self.now_iso()));
+        run.data.insert("progress".into(), Value::Null);
+        run.data.insert("waiting_for_queue".into(), json!(false));
+        self.bench
+            .recent
+            .insert((run.key, machine.to_string()), run.data);
+        self.bump_page();
+        true
     }
 
     /// `paused_for_benchmark()`: the head of the global line.
@@ -1528,11 +1574,35 @@ impl Scheduler {
             .map(|(m, _)| m.clone())
             .collect();
         for machine in expired {
+            // A machine connected again but still paused (installing, paused by its
+            // owner) did not go away: it never became available.
+            let why = if self.machine_by_name(&machine).is_some() {
+                format!(
+                    "{machine} did not become available within {} minutes",
+                    (BENCH_PARK_SECONDS / 60.0).round()
+                )
+            } else {
+                format!("{machine} disconnected")
+            };
             if let Some(parked) = self.bench.parked.remove(&machine) {
                 for run in parked.runs {
-                    self.bench_gone(&machine, run, format!("{machine} disconnected"));
+                    self.bench_gone(&machine, run, why.clone());
                 }
                 self.bump_page();
+            }
+        }
+    }
+
+    /// Every parked run ends: the server stops, and no processor returns to this
+    /// process. Their samples would otherwise outlive the restart in `.processing`,
+    /// which nothing sweeps.
+    pub fn bench_unpark_all(&mut self) {
+        let machines: Vec<String> = self.bench.parked.keys().cloned().collect();
+        for machine in machines {
+            if let Some(parked) = self.bench.parked.remove(&machine) {
+                for run in parked.runs {
+                    self.bench_gone(&machine, run, "the server stopped".into());
+                }
             }
         }
     }

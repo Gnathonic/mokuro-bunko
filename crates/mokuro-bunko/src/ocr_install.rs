@@ -421,19 +421,24 @@ impl Installer {
                 false
             }
             // The backend serves: the optional pack is fetched on the side, and the
-            // machine waits for nothing.
-            Ok(Decision::Extra { variant, reason }) => {
+            // machine waits for nothing (only for a first fetch of its one GPU route).
+            Ok(Decision::Extra {
+                variant,
+                reason,
+                route,
+            }) => {
                 if auto {
-                    self.start_extra(variant, reason, false);
+                    self.start_extra(variant, reason, false, route)
                 } else {
                     tracing::debug!(
                         "OCR backend: the optional {variant} pack is not installed ({reason}); automatic installs are off"
                     );
+                    false
                 }
-                false
             }
             Ok(Decision::Nothing(why)) => {
                 tracing::debug!("OCR backend: {why}");
+                self.drop_stale_extra();
                 false
             }
             Err(e) => {
@@ -443,8 +448,25 @@ impl Installer {
         }
     }
 
-    /// Start (or retry) by hand: whatever the automatic-install setting says.
+    /// Start (or retry) by hand: whatever the automatic-install setting says, and
+    /// without waiting for an earlier failed fetch of the optional pack. Returns
+    /// whether an install the machine waits for runs now (its end bumps
+    /// [`BackgroundInstall::finished`]); a fetch of the optional pack on the side is
+    /// not one ([`Self::fetching_extra`]).
     pub fn start_manual(&self) -> Result<bool, String> {
+        self.start_asked(true)
+    }
+
+    /// A setting changed (local processing turned on, another backend preference): the
+    /// backend installs as if asked for, but the optional pack is fetched only as an
+    /// automatic fetch is (automatic installs on, no earlier failure to wait for). A
+    /// toggle is not a retry, and treating it as one fetched the pack again at once on
+    /// every save. Returns what [`Self::start_manual`] does.
+    pub fn start_for_settings(&self) -> Result<bool, String> {
+        self.start_asked(false)
+    }
+
+    fn start_asked(&self, owner: bool) -> Result<bool, String> {
         *self.0.retries.lock() = 0;
         if self.0.running.load(Ordering::SeqCst) {
             return Ok(true);
@@ -455,18 +477,77 @@ impl Installer {
                 self.spawn();
                 Ok(true)
             }
-            Decision::Extra { variant, reason } => {
+            Decision::Extra {
+                variant,
+                reason,
+                route,
+            } => {
                 // The backend is in place: a failure of an earlier install is over.
                 self.drop_stale_failure();
-                Ok(self.start_extra(variant, reason, true))
+                let (auto, _) = install_ocr::auto_install_setting(|n| std::env::var(n).ok());
+                if !owner && !auto {
+                    return Ok(false);
+                }
+                Ok(self.start_extra(variant, reason, owner, route))
             }
             Decision::Nothing(why) => {
                 // Nothing to do any more (installed meanwhile, or OCR turned off).
                 self.drop_stale_failure();
+                self.drop_stale_extra();
                 info!("OCR backend: nothing to install ({why})");
                 Ok(false)
             }
         }
+    }
+
+    /// The optional pack's fetch runs on the side (nothing waits for it).
+    pub fn fetching_extra(&self) -> bool {
+        self.0.extra_running.load(Ordering::SeqCst)
+    }
+
+    /// The optional pack is in place after all (installed by hand, as with
+    /// `install-ocr --variant vulkan`): its recorded failure no longer stands, so the
+    /// warning goes. It ends as a fetch that worked does, so a processor registers
+    /// again with the new runtimes and the server's own OCR restarts with them.
+    fn drop_stale_extra(&self) {
+        let Ok(target) = self.target() else {
+            return;
+        };
+        let backends = target.backends_dir();
+        let standing = self
+            .0
+            .extra_failed
+            .lock()
+            .clone()
+            .or_else(|| ExtraAttempt::read(&backends, install_ocr::VULKAN));
+        let Some(a) = standing else {
+            return;
+        };
+        let Some(pack) = install_ocr::already_fits(&target.backends_dirs(), &a.variant) else {
+            return;
+        };
+        ExtraAttempt::clear(&backends);
+        *self.0.extra_failed.lock() = None;
+        self.refresh_problems();
+        info!(
+            "OCR backend: the optional {} pack is installed now ({pack}); its runtimes are benchmark candidates",
+            a.variant
+        );
+        if self.0.running.load(Ordering::SeqCst) || self.0.extra_running.load(Ordering::SeqCst) {
+            return; // That run publishes its own end.
+        }
+        self.publish(Some(OcrInstall {
+            state: OcrInstall::DONE.into(),
+            stage: "done".into(),
+            percent: Some(100),
+            variant: Some(a.variant.clone()),
+            since: Some(now()),
+            ..OcrInstall::default()
+        }));
+        if let Some(c) = self.0.control.lock().as_ref() {
+            c.set_backend_pack(crate::control::pack_name(&target.backends_dirs()));
+        }
+        self.0.finished.send_modify(|n| *n += 1);
     }
 
     /// A failed or missing backend that no longer stands: drop it and say the install
@@ -524,8 +605,15 @@ impl Installer {
                 models_only: true,
             }),
             Need::Extra {
-                variant, reason, ..
-            } => Ok(Decision::Extra { variant, reason }),
+                variant,
+                reason,
+                route,
+                ..
+            } => Ok(Decision::Extra {
+                variant,
+                reason,
+                route,
+            }),
             Need::Satisfied(why) => Ok(Decision::Nothing(why)),
         }
     }
@@ -814,8 +902,14 @@ impl Installer {
     /// without its pack must not start again from here.
     fn start_extra_if_wanted(&self) {
         let (auto, _) = install_ocr::auto_install_setting(|n| std::env::var(n).ok());
-        if auto && let Ok(Decision::Extra { variant, reason }) = self.decide() {
-            self.start_extra(variant, reason, false);
+        if auto
+            && let Ok(Decision::Extra {
+                variant,
+                reason,
+                route,
+            }) = self.decide()
+        {
+            self.start_extra(variant, reason, false, route);
         }
     }
 
@@ -826,14 +920,17 @@ impl Installer {
                 self.spawn();
                 Ok(true)
             }
-            Decision::Extra { variant, reason } => {
+            Decision::Extra {
+                variant,
+                reason,
+                route,
+            } => {
                 // The backend was put in place meanwhile: the install ends as below,
                 // and the optional pack is fetched on the side.
                 self.publish(None);
                 self.0.finished.send_modify(|n| *n += 1);
                 info!("OCR backend: nothing left to install for the backend");
-                self.start_extra(variant, reason, false);
-                Ok(false)
+                Ok(self.start_extra(variant, reason, false, route))
             }
             Decision::Nothing(why) => {
                 // Nothing to do any more (installed by hand meanwhile, or OCR turned
@@ -851,8 +948,11 @@ impl Installer {
     /// Fetch the optional pack `variant` in the background unless an earlier failure
     /// says to wait (`manual`: the owner asked, so no wait). Nothing is published
     /// while it runs: a processor stays available, and the server's own OCR does not
-    /// wait. Returns whether a fetch runs now.
-    fn start_extra(&self, variant: String, reason: String, manual: bool) -> bool {
+    /// wait. Only when the pack is the machine's one GPU route (`route`) and no fetch
+    /// of it failed yet does the machine wait for it as for an install, so that it is
+    /// not benchmarked on the CPU meanwhile. Returns whether such a fetch, one the
+    /// machine waits for, runs now: its end bumps [`BackgroundInstall::finished`].
+    fn start_extra(&self, variant: String, reason: String, manual: bool, route: bool) -> bool {
         let backends = match self.target() {
             Ok(t) => t.backends_dir(),
             Err(e) => {
@@ -860,27 +960,45 @@ impl Installer {
                 return false;
             }
         };
+        let mut failed_before = false;
         if manual {
             ExtraAttempt::clear(&backends);
             *self.0.extra_failed.lock() = None;
             self.refresh_problems();
-        } else if let Some(a) = self.extra_attempt(&backends, &variant)
-            && a.next_at > unix_now()
-        {
-            tracing::debug!(
-                "OCR backend: the optional {variant} pack is not installed ({}); the next automatic fetch is due at {}",
-                a.message,
-                rfc3339(a.next_at)
-            );
-            self.schedule_extra(a.next_at);
-            return false;
+        } else if let Some(a) = self.extra_attempt(&backends, &variant) {
+            if a.next_at > unix_now() {
+                tracing::debug!(
+                    "OCR backend: the optional {variant} pack is not installed ({}); the next automatic fetch is due at {}",
+                    a.message,
+                    rfc3339(a.next_at)
+                );
+                self.schedule_extra(a.next_at);
+                return false;
+            }
+            failed_before = true;
         }
         if self.0.extra_running.swap(true, Ordering::SeqCst) {
-            return true;
+            // A fetch runs already: the machine waits for it if it holds the machine.
+            return route && self.0.running.load(Ordering::SeqCst);
         }
-        info!(
-            "OCR backend: fetching the optional {variant} pack in the background ({reason}); OCR runs without it meanwhile"
-        );
+        // After a failure the machine runs on the CPU, and a later try goes on the side.
+        let holds = route && !failed_before && !self.0.running.swap(true, Ordering::SeqCst);
+        if holds {
+            info!(
+                "OCR backend: fetching the {variant} pack, this machine's GPU route ({reason}); OCR waits for it"
+            );
+            self.publish(Some(OcrInstall {
+                state: OcrInstall::RUNNING.into(),
+                stage: "checking".into(),
+                variant: Some(variant.clone()),
+                since: Some(now()),
+                ..OcrInstall::default()
+            }));
+        } else {
+            info!(
+                "OCR backend: fetching the optional {variant} pack in the background ({reason}); OCR runs without it meanwhile"
+            );
+        }
         let me = self.clone();
         let fetch = variant.clone();
         let run = async move {
@@ -888,19 +1006,27 @@ impl Installer {
             let outcome = me.run_child(now(), Some(&variant)).await;
             let me2 = me.clone();
             let ended =
-                tokio::task::spawn_blocking(move || me2.finish_extra(&variant, outcome)).await;
+                tokio::task::spawn_blocking(move || me2.finish_extra(&variant, outcome, holds))
+                    .await;
             if ended.is_err() {
                 me.0.extra_running.store(false, Ordering::SeqCst);
+                if holds {
+                    me.0.running.store(false, Ordering::SeqCst);
+                }
             }
         };
         match tokio::runtime::Handle::try_current() {
             Ok(h) => {
                 h.spawn(run);
-                true
+                holds
             }
             Err(_) => {
                 warn!("OCR backend: no runtime to fetch the optional {variant} pack in");
                 self.0.extra_running.store(false, Ordering::SeqCst);
+                if holds {
+                    self.0.running.store(false, Ordering::SeqCst);
+                    self.publish(None);
+                }
                 false
             }
         }
@@ -909,8 +1035,9 @@ impl Installer {
     /// The optional pack's fetch ended. A pack that is now in place ends like an
     /// install (the machine registers again with its runtimes). Anything else is a
     /// warning and a wait: it publishes no state, so nothing registers again, and the
-    /// next registration does not fetch again.
-    fn finish_extra(&self, variant: &str, outcome: Outcome) {
+    /// next registration does not fetch again. A fetch the machine waited for
+    /// (`holds`) ends either way, so the machine goes on, on the CPU after a failure.
+    fn finish_extra(&self, variant: &str, outcome: Outcome, holds: bool) {
         let target = self.target();
         // Exit 0 is not proof: only a pack the backend check now finds counts. An end
         // without one would register again and fetch again, without end.
@@ -934,7 +1061,7 @@ impl Installer {
                 );
                 self.0.extra_running.store(false, Ordering::SeqCst);
                 // An install of the backend that runs meanwhile publishes its own end.
-                if !self.0.running.load(Ordering::SeqCst) {
+                if holds || !self.0.running.load(Ordering::SeqCst) {
                     self.publish(Some(OcrInstall {
                         state: OcrInstall::DONE.into(),
                         stage: "done".into(),
@@ -944,6 +1071,9 @@ impl Installer {
                         since: Some(now()),
                         ..OcrInstall::default()
                     }));
+                    if holds {
+                        self.0.running.store(false, Ordering::SeqCst);
+                    }
                     if let Some(c) = self.0.control.lock().as_ref()
                         && let Ok(t) = &target
                     {
@@ -990,6 +1120,14 @@ impl Installer {
         *self.0.extra_failed.lock() = Some(attempt);
         self.refresh_problems();
         self.0.extra_running.store(false, Ordering::SeqCst);
+        if holds {
+            // The machine waited for it: it goes on without it (the warning stands),
+            // as after an install that ended. A processor registers again on the CPU,
+            // and that registration waits for the next automatic fetch.
+            self.publish(None);
+            self.0.running.store(false, Ordering::SeqCst);
+            self.0.finished.send_modify(|n| *n += 1);
+        }
         self.schedule_extra(next_at);
     }
 
@@ -1127,6 +1265,10 @@ impl BackgroundInstall for Installer {
         self.start_manual()
     }
 
+    fn start_for_settings(&self) -> Result<bool, String> {
+        Installer::start_for_settings(self)
+    }
+
     fn finished(&self) -> watch::Receiver<u64> {
         self.0.finished.subscribe()
     }
@@ -1154,10 +1296,12 @@ enum Decision {
         /// The pack is in place: only models are fetched.
         models_only: bool,
     },
-    /// The backend is in place; an optional pack beside it is missing.
+    /// The backend is in place; an optional pack beside it is missing (`route`: it is
+    /// the machine's one GPU route, [`Need::Extra`]).
     Extra {
         variant: String,
         reason: String,
+        route: bool,
     },
     Nothing(String),
 }
@@ -1841,10 +1985,222 @@ exit 1"#,
         again.start_if_needed();
         tokio::time::sleep(Duration::from_millis(800)).await;
         assert_eq!(lines(&calls).len(), 1, "fetched again after a restart");
-        // The owner's retry fetches it at once.
-        assert!(inst.start_manual().unwrap());
+        // A settings change (local processing turned on, a backend saved) is no retry:
+        // it waits as a registration does.
+        assert!(!inst.start_for_settings().unwrap());
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(lines(&calls).len(), 1, "fetched again at a settings change");
+        // The owner's retry fetches it at once, and says no install runs: nothing may
+        // wait for the end of a fetch on the side.
+        assert!(!inst.start_manual().unwrap());
+        assert!(inst.fetching_extra());
         until("the owner's retry", || lines(&calls).len() == 2).await;
         assert!(!rx.borrow().as_ref().is_some_and(|v| v.running()));
+    }
+
+    /// Local processing turned on (or another backend saved) on a server whose backend
+    /// is in place and whose optional Vulkan pack is missing. The start answered "an
+    /// install runs" for the fetch on the side, so the server waited for an end that a
+    /// failed fetch never announces, and its own OCR stayed stopped until a restart.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn turning_ocr_on_never_waits_for_the_optional_pack() {
+        let dir = tempfile::tempdir().unwrap();
+        let calls = dir.path().join("calls");
+        let Some(inst) = main_pack_in_place(
+            dir.path(),
+            &format!(
+                r#"echo "$@" >> {}
+echo '@@ocr-install {{"stage":"failed","message":"network down","needs_owner":false}}'
+exit 1"#,
+                calls.display()
+            ),
+        ) else {
+            return;
+        };
+        let control = Control::new(bunko_control::ControlConfig::new(
+            bunko_control::Role::Server,
+            "box",
+            "0",
+            dir.path(),
+        ));
+        inst.attach_control(&control);
+        let finished = BackgroundInstall::finished(&inst);
+        // What `apply_config` and the backend preference's save call.
+        assert!(
+            !BackgroundInstall::start_for_settings(&inst).unwrap(),
+            "the server would wait for the optional pack"
+        );
+        until("the fetch to fail", || {
+            control
+                .status()
+                .problems
+                .iter()
+                .any(|p| p.severity == Severity::Warn && p.text.contains("vulkan"))
+        })
+        .await;
+        assert_eq!(lines(&calls).len(), 1);
+        assert!(!finished.has_changed().unwrap());
+        // The admin panel's Retry is the same answer.
+        assert!(!BackgroundInstall::start(&inst).unwrap());
+    }
+
+    /// An installer whose machine has only the CPU libtorch pack and wants the Vulkan
+    /// pack as its one GPU route (`ocr.backend: vulkan`; AMD or Intel on Windows). The
+    /// probe reads the Vulkan pack from the backends directory.
+    #[cfg(unix)]
+    fn vulkan_route(dir: &Path, script: &str) -> Installer {
+        let who = library(dir);
+        crate::cmd::install_ocr::tests::fake_pack(&dir.join("storage").join("backends"), "cpu");
+        Installer::with_exe(who, fake_exe(dir, script)).with_probe(|t| {
+            let have = install_ocr::already_fits(&t.backends_dirs(), "cpu").unwrap_or_default();
+            let need =
+                if install_ocr::already_fits(&t.backends_dirs(), install_ocr::VULKAN).is_some() {
+                    Need::Satisfied(have)
+                } else {
+                    Need::Extra {
+                        variant: install_ocr::VULKAN.into(),
+                        reason: "ocr.backend: vulkan".into(),
+                        have,
+                        route: true,
+                    }
+                };
+            Lack {
+                need,
+                models: false,
+                variant: "cpu".into(),
+            }
+        })
+    }
+
+    /// Where the Vulkan pack is the machine's one GPU route, its first fetch is waited
+    /// for as an install is: the machine says it is installing, so it is not
+    /// benchmarked on the CPU meanwhile. A failure ends that wait (the machine runs on
+    /// the CPU), and the next registration does not fetch again.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_vulkan_only_machine_waits_for_its_first_fetch_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let calls = dir.path().join("calls");
+        let inst = vulkan_route(
+            dir.path(),
+            &format!(
+                r#"echo "$@" >> {}
+sleep 0.3
+echo '@@ocr-install {{"stage":"failed","message":"no release has been published yet","needs_owner":false,"lasting":true}}'
+exit 1"#,
+                calls.display()
+            ),
+        );
+        let rx = inst.subscribe();
+        let mut finished = BackgroundInstall::finished(&inst);
+        assert!(
+            inst.start_if_needed(),
+            "the GPU route's fetch is not waited for"
+        );
+        assert!(rx.borrow().as_ref().is_some_and(|v| v.running()));
+        tokio::time::timeout(Duration::from_secs(10), finished.changed())
+            .await
+            .expect("the wait never ended")
+            .unwrap();
+        assert!(rx.borrow().is_none(), "{:?}", rx.borrow());
+        assert!(!BackgroundInstall::running(&inst));
+        // The registration that follows runs on the CPU and fetches nothing.
+        assert!(!inst.start_if_needed());
+        assert!(!inst.start_for_settings().unwrap());
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(lines(&calls).len(), 1);
+        assert!(!finished.has_changed().unwrap());
+        assert!(rx.borrow().is_none());
+    }
+
+    /// The GPU route's fetch that works ends like an install: done, and the machine
+    /// registers again with its Vulkan runtimes.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_vulkan_only_machine_that_gets_its_pack_ends_as_an_install() {
+        let dir = tempfile::tempdir().unwrap();
+        let pack = dir.path().join("storage/backends/vulkan-test");
+        let json = serde_json::json!({
+            "format": 1, "name": "vulkan-test", "variant": "vulkan", "torch": "",
+            "target": bunko_update::TARGET, "os": "linux", "arch": "x86_64", "abi": 1,
+            "library": "", "bunko_version": bunko_core::VERSION, "files": []
+        });
+        let inst = vulkan_route(
+            dir.path(),
+            &format!(
+                r#"mkdir -p {pack}
+echo '{json}' > {pack}/pack.json
+echo '@@ocr-install {{"stage":"installed","variant":"vulkan","pack":"vulkan-test"}}'
+exit 0"#,
+                pack = pack.display(),
+            ),
+        );
+        let mut rx = inst.subscribe();
+        let mut finished = BackgroundInstall::finished(&inst);
+        assert!(BackgroundInstall::start_for_settings(&inst).unwrap());
+        let v = wait_state(&mut rx, "done").await;
+        assert_eq!(v.variant.as_deref(), Some("vulkan"));
+        tokio::time::timeout(Duration::from_secs(5), finished.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!BackgroundInstall::running(&inst));
+        assert!(!inst.start_if_needed());
+    }
+
+    /// The optional pack installed another way after a failed fetch (`install-ocr
+    /// --variant vulkan` by hand): the next look drops the warning and the recorded
+    /// failure, and ends as a fetch that worked, so a processor registers again with
+    /// the new runtimes. The warning used to stay until a restart.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_optional_pack_installed_by_hand_clears_its_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some(inst) = main_pack_in_place(
+            dir.path(),
+            r#"echo '@@ocr-install {"stage":"failed","message":"network down","needs_owner":false}'
+exit 1"#,
+        ) else {
+            return;
+        };
+        let control = Control::new(bunko_control::ControlConfig::new(
+            bunko_control::Role::Processor,
+            "box",
+            "0",
+            dir.path(),
+        ));
+        inst.attach_control(&control);
+        let mut rx = inst.subscribe();
+        let mut finished = BackgroundInstall::finished(&inst);
+        let warned = || {
+            control
+                .status()
+                .problems
+                .iter()
+                .any(|p| p.text.contains("optional vulkan"))
+        };
+        inst.start_if_needed();
+        until("the fetch to fail", warned).await;
+        let backends = dir.path().join("storage").join("backends");
+        assert!(backends.join(ExtraAttempt::FILE).is_file());
+        assert!(!finished.has_changed().unwrap());
+        // `install-ocr --variant vulkan` by hand.
+        crate::cmd::install_ocr::tests::fake_pack(&backends, install_ocr::VULKAN);
+        inst.start_if_needed();
+        assert!(!warned(), "{:?}", control.status().problems);
+        assert!(!backends.join(ExtraAttempt::FILE).exists());
+        assert_eq!(
+            wait_state(&mut rx, "done").await.variant.as_deref(),
+            Some("vulkan")
+        );
+        tokio::time::timeout(Duration::from_secs(5), finished.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        // Once: nothing stands any more.
+        inst.start_if_needed();
+        assert!(!finished.has_changed().unwrap());
     }
 
     /// The optional pack fetched: the machine registers again once (its runtimes are

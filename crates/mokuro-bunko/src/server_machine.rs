@@ -527,6 +527,7 @@ mod full {
                 variant,
                 reason,
                 have,
+                ..
             } => {
                 json!({"state": "ok", "text": have, "extra": {"variant": variant, "text": reason}})
             }
@@ -648,7 +649,9 @@ mod full {
             }
         }
         let restart = backend_changed && needs_process_restart(m, config);
-        match installer.start_manual() {
+        // `true` only for an install whose end is waited for: a fetch of the optional
+        // pack on the side never ends with `finished`, so nothing may wait for it.
+        match installer.start_for_settings() {
             Ok(true) => {
                 if restart {
                     restart_after_install(m, &installer);
@@ -719,8 +722,14 @@ mod full {
         if running && restart {
             restart_after_install(m, &installer);
         }
-        Ok(json!({"installing": running, "install": installer.view(),
-                  "message": if running { "" } else { "Nothing to install: the backend is in place." }}))
+        let message = if running {
+            ""
+        } else if installer.fetching_extra() {
+            "The backend is in place; the optional Vulkan pack downloads in the background, and OCR runs without it meanwhile."
+        } else {
+            "Nothing to install: the backend is in place."
+        };
+        Ok(json!({"installing": running, "install": installer.view(), "message": message}))
     }
 
     pub(super) fn remove(m: &ServerMachine) -> Result<Value, String> {

@@ -198,8 +198,18 @@ not installed, OCR runs without it) with a Retry button, and is recorded in
 `<backends>/.optional-pack.json`. The next automatic fetch waits 5, 15 and 60
 minutes, then a day; a release that has published nothing for it waits a day
 at once. Reconnects and restarts do not fetch it again sooner, and neither does
-another release (it starts afresh). A fetch that succeeds makes a processor
-register again once, so its new runtimes join the benchmark.
+another release (it starts afresh), and neither does turning local processing
+on or saving the backend preference: only Retry fetches at once. A fetch that
+succeeds makes a processor register again once, so its new runtimes join the
+benchmark, and so does a Vulkan pack installed by hand after a failed fetch (its
+warning goes at the next check).
+
+Where the Vulkan pack is the machine's only GPU route (`ocr.backend: vulkan`, AMD
+and Intel GPUs on Windows, an AMD GPU with no ROCm build, an NVIDIA driver too old
+for CUDA), the libtorch pack it has is the CPU one. Its first fetch is then waited
+for as an install is, so the machine is not benchmarked on the CPU meanwhile. A
+failed fetch ends that wait: the machine runs on the CPU, and the later tries above
+run on the side.
 
 While the install runs, and after a failed one with no pack in place, the
 machine does no OCR at all, ppocr-manga included; other processors keep

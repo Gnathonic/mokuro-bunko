@@ -2041,12 +2041,34 @@ fn a_processor_back_while_installing_carries_on_once_available() {
         reason: "the socket closed".into(),
     });
     // It registers again, unchanged but still installing (a pack it fetches).
+    let mut p = reconnect_installing(&mut h, "box", host, catalog);
+    assert!(
+        bench_op(&p.drain()).is_none(),
+        "nothing runs while it installs"
+    );
+    h.event(
+        &p,
+        Event::Availability(bunko_proto::Availability::default()),
+    );
+    let again = bench_op(&p.drain()).expect("its benchmark carries on");
+    assert_eq!(again.bid, first.bid);
+}
+
+/// Register `name` again with `host` and `catalog`, paused while it installs, and open
+/// its socket.
+fn reconnect_installing(
+    h: &mut H,
+    name: &str,
+    host: serde_json::Value,
+    catalog: serde_json::Value,
+) -> Proc {
+    let username = format!("acct-{name}");
     let (reply, mut rx) = tokio::sync::oneshot::channel();
     h.s.handle(Msg::Register {
         input: bunko_server::ocr::sched::RegisterInput {
-            username: "acct-box".into(),
+            username: username.clone(),
             body: serde_json::json!({
-                "protocol": 3, "name": "box", "host": host, "catalog": catalog,
+                "protocol": 3, "name": name, "host": host, "catalog": catalog,
                 "max_sessions": 1,
                 "availability": {"paused": true, "reason": "installing"},
             }),
@@ -2062,24 +2084,93 @@ fn a_processor_back_while_installing_carries_on_once_available() {
     let (reply, mut rx) = tokio::sync::oneshot::channel();
     h.s.handle(Msg::SocketOpen {
         pid: pid.clone(),
-        username: "acct-box".into(),
+        username,
         ops: tx,
         reply,
     });
     rx.try_recv().unwrap().unwrap();
-    let mut p = Proc {
+    Proc {
         pid,
-        name: "box".into(),
+        name: name.into(),
         ops,
-    };
-    assert!(
-        bench_op(&p.drain()).is_none(),
-        "nothing runs while it installs"
+    }
+}
+
+/// A benchmark parked for its machine's return shows as queued and can be cancelled.
+/// It used to read as idle (or an old result) for up to ten minutes, and cancelling it
+/// was refused.
+#[test]
+fn a_parked_benchmark_shows_as_queued_and_cancels() {
+    let mut h = harness(vec![primary()]);
+    h.s.settings.autobench = true;
+    h.add("A/V1.cbz", 2);
+    h.at(0.0);
+    let mut p = h.connect_gpu("box", &["fp32"]);
+    let first = bench_op(&p.drain()).expect("the first autobench");
+    h.s.handle(Msg::Drop {
+        pid: p.pid.clone(),
+        reason: "the socket closed".into(),
+    });
+    let got = h.s.bench_get("g-1", "box");
+    assert_eq!(got["state"], "queued", "{got}");
+    assert_eq!(got["waiting_for_machine"], true, "{got}");
+    let got = h.s.bench_cancel("g-1", "box").expect("cancelled");
+    assert_eq!(got["state"], "cancelled", "{got}");
+    assert!(h.s.bench.parked.is_empty());
+    let sample = h
+        .storage()
+        .join(".processing")
+        .join(format!("{}.cbz", first.bid));
+    assert!(!sample.exists(), "its sample is removed");
+}
+
+/// A clean stop ends the runs parked for processors that dropped off earlier and
+/// removes their samples: no processor returns to this process, and nothing else
+/// removes them from `.processing`.
+#[test]
+fn a_stop_removes_the_samples_of_parked_benchmarks() {
+    let mut h = harness(vec![primary()]);
+    h.s.settings.autobench = true;
+    h.add("A/V1.cbz", 2);
+    h.at(0.0);
+    let mut p = h.connect_gpu("box", &["fp32"]);
+    let first = bench_op(&p.drain()).expect("the first autobench");
+    h.s.handle(Msg::Drop {
+        pid: p.pid.clone(),
+        reason: "the socket closed".into(),
+    });
+    let sample = h
+        .storage()
+        .join(".processing")
+        .join(format!("{}.cbz", first.bid));
+    assert!(sample.is_file(), "kept for the return");
+    h.s.handle(Msg::Stop);
+    assert!(h.s.bench.parked.is_empty());
+    assert!(!sample.exists(), "a parked sample outlived the stop");
+}
+
+/// A machine back but still paused when its parked runs expire did not disconnect: the
+/// error says it never became available.
+#[test]
+fn a_parked_benchmark_of_a_paused_machine_expires_as_unavailable() {
+    let mut h = harness(vec![primary()]);
+    h.s.settings.autobench = true;
+    h.add("A/V1.cbz", 2);
+    h.at(0.0);
+    let mut p = h.connect_gpu("box", &["fp32"]);
+    bench_op(&p.drain()).expect("the first autobench");
+    let catalog = h.s.machines[&p.pid].catalog_value.clone();
+    let host = h.s.machines[&p.pid].host_value.clone();
+    h.s.handle(Msg::Drop {
+        pid: p.pid.clone(),
+        reason: "the socket closed".into(),
+    });
+    let _p = reconnect_installing(&mut h, "box", host, catalog);
+    h.at(bunko_server::ocr::sched::BENCH_PARK_SECONDS + 60.0);
+    let got = h.s.bench_get("g-1", "box");
+    assert_eq!(got["state"], "failed", "{got}");
+    assert_eq!(
+        got["error"], "box did not become available within 10 minutes",
+        "{got}"
     );
-    h.event(
-        &p,
-        Event::Availability(bunko_proto::Availability::default()),
-    );
-    let again = bench_op(&p.drain()).expect("its benchmark carries on");
-    assert_eq!(again.bid, first.bid);
 }

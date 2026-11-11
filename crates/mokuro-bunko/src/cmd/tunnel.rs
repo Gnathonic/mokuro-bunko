@@ -78,21 +78,31 @@ fn cloudflare(ctx: &Ctx, port: Option<u16>, cors: CorsAnswer) -> CmdResult {
             .spawn()
             .map_err(Fail::msg)?;
         let stderr = child.stderr.take().ok_or_else(|| Fail::msg("cloudflared has no stderr"))?;
-        let mut lines = BufReader::new(stderr).lines();
+        let mut stderr = BufReader::new(stderr);
+        let mut buf = Vec::new();
         let mut tunnel_url: Option<String> = None;
         loop {
+            buf.clear();
             tokio::select! {
-                line = lines.next_line() => match line {
-                    Ok(Some(line)) => {
+                read = stderr.read_until(b'\n', &mut buf) => match read {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        // Read as bytes: a line that is not UTF-8 failed the read, and the
+                        // error ended the command, which took cloudflared down with it.
+                        let line = String::from_utf8_lossy(&buf);
+                        let line = line.trim_end_matches(['\n', '\r']);
                         eprintln!("{line}");
-                        if let Some(url) = tunnel_url.is_none().then(|| find_tunnel_url(&line)).flatten() {
+                        if let Some(url) = tunnel_url.is_none().then(|| find_tunnel_url(line)).flatten() {
                             println!("\nTunnel URL: {url}\n");
                             offer_cors(ctx, &url, cors);
                             tunnel_url = Some(url);
                         }
                     }
-                    Ok(None) => break,
-                    Err(e) => return Err(Fail::msg(e)),
+                    // The tunnel does not depend on its log: wait for cloudflared instead.
+                    Err(e) => {
+                        eprintln!("Warning: cannot read cloudflared's output any more ({e}); the tunnel keeps running");
+                        break;
+                    }
                 },
                 _ = tokio::signal::ctrl_c() => {
                     println!("\nStopping tunnel...");

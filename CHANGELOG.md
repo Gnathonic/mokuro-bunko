@@ -669,18 +669,25 @@
   downloads. A failed fetch is a warning with a Retry button, and the machine waits
   5, 15 and 60 minutes and then a day before it tries again; a release with nothing
   published waits a day at once. The wait is kept in the backends directory, so a
-  reconnect or a restart does not fetch it again sooner. The server's own OCR no longer
-  waits for the Vulkan pack either. A Vulkan pack installed on its own also no longer
-  replaces a backend variant picked by hand.
+  reconnect or a restart does not fetch it again sooner, and neither does turning local
+  processing on or saving the backend preference (only Retry does). The server's own
+  OCR no longer waits for the Vulkan pack either. Where the Vulkan pack is the machine's
+  only GPU route (`ocr.backend: vulkan`, AMD or Intel GPUs on Windows, an AMD GPU with
+  no ROCm build, an NVIDIA driver too old for CUDA), its first fetch is waited for as an
+  install is, so the machine is not benchmarked on the CPU meanwhile; if it fails, the
+  machine runs on the CPU and later tries run on the side. A Vulkan pack installed by
+  hand after a failed fetch clears the warning at the next check. A Vulkan pack
+  installed on its own also no longer replaces a backend variant picked by hand.
 - **A library with a large OCR queue answers a processor's registration at once.** A
   processor that has not benchmarked a row takes none of that row's volumes, yet each of
   its claims looked every one of them up in the library, with several folder listings
   each (index reads on a cloud library). With 10,000 jobs queued, such a claim took
-  1.5 s on a local disk and 6 s on a cloud library, and it ran again after every change
-  to the queue. The queue page, the reader's queue file and a reader's question about a
-  volume also read each processor's profile from disk once per queued job and machine,
-  about 0.6 s per build at 10,000 jobs. The OCR scheduler answers registrations and all
-  of these one at a time, so it fell behind: a registration waited past the
+  1.5 s on a local disk and 6 s on a cloud library, about once each time the processor
+  opened its socket. The queue page, the reader's queue file and a reader's question
+  about a volume also read each processor's profile from disk once per queued job and
+  machine, about 0.6 s per build at 10,000 jobs. The OCR scheduler answers registrations and all
+  of these one at a time, and the queue page and the queue file are built every few
+  seconds, so it likely fell behind on them: a registration waited past the
   processor's 30 s timeout, the processor registered again, and the queue page took
   from seconds to over 30 s. A claim now passes over the volumes of a row whose
   benchmark it has asked for, and a queue estimate reads each machine's profile once
@@ -695,11 +702,15 @@
   picks its line up where it was, and the benchmark it was running is sent again with
   the sample already packed. One back with another catalog, or later, is measured
   afresh, and one back while it still installs its backend waits until it is available.
+  A benchmark waiting for its processor's return shows as queued and can be cancelled,
+  and a server that stops removes the samples packed for such benchmarks.
 - **A processor waits 90 s for the library to answer its registration and open its
   socket** (30 s before). The library's OCR scheduler answers both, so a busy library
   can take longer, and a processor that gave up registered again, which only added to
-  the scheduler's queue. 90 s stays under the 100 s a Cloudflare tunnel holds a request
-  open.
+  the scheduler's queue. The library also waits up to 85 s for its scheduler before it
+  opens the socket; it refused the socket after 30 s with "OCR is not running", and now
+  says the scheduler is busy when it does give up. 90 s stays under the 100 s a
+  Cloudflare tunnel holds a request open.
 - **`mokuro-bunko tunnel cloudflare` keeps running without a terminal.** Started
   detached or as a service (stdin not a terminal), it printed the tunnel URL, read end of
   input at "Add tunnel URL to CORS allowed origins?", aborted, and took cloudflared down
