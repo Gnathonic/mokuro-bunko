@@ -33,6 +33,7 @@
                 <p class="form-hint" id="where-pinned" hidden></p>
                 <div class="radio-cards" id="where-cards">
                     <label class="radio-card"><input type="radio" name="where" value="local" checked><div class="radio-card__content"><strong>This computer</strong><span id="where-local-folder">The library folder on this machine.</span></div></label>
+                    <label class="radio-card"><input type="radio" name="where" value="folder"><div class="radio-card__content"><strong>Local folder</strong><span>A folder you choose: on this computer, a second disk or a mounted share. Pick the same folder as Mokuro Reader's Local Folder.</span></div></label>
                     <label class="radio-card"><input type="radio" name="where" value="gdrive"><div class="radio-card__content"><strong>Google Drive</strong><span>The mokuro-reader folder Mokuro Reader keeps in your Drive.</span></div></label>
                     <label class="radio-card"><input type="radio" name="where" value="onedrive"><div class="radio-card__content"><strong>OneDrive</strong><span>The mokuro-reader folder in your OneDrive.</span></div></label>
                     <label class="radio-card"><input type="radio" name="where" value="mega"><div class="radio-card__content"><strong>MEGA</strong><span>The mokuro-reader folder in your MEGA account.</span></div></label>
@@ -140,6 +141,18 @@
                         <input class="form-input" id="dav-password" type="password" autocomplete="new-password">
                     </div>
                     <label class="toggle"><input type="checkbox" role="switch" id="dav-http"><span class="toggle__text"><strong>Allow http://</strong><span>Only for a server on your own network: the password travels unencrypted. A server on this computer (localhost, 127.0.0.1) needs no tick.</span></span></label>
+                </div>
+                <div id="connect-folder" hidden>
+                    <div class="form-group">
+                        <label class="form-label" for="folder-path">The library folder</label>
+                        <div class="fs-row">
+                            <input class="form-input" id="folder-path" placeholder="/srv/manga or D:\Manga" autocomplete="off" autocapitalize="off" spellcheck="false">
+                            <button type="button" class="btn btn--secondary" id="folder-browse" hidden>Browse…</button>
+                        </div>
+                        <p class="form-hint">The full path as this server sees it. In Docker, mount the folder into the container first (for example <code>-v /srv/manga:/library</code>) and type <code>/library</code>.</p>
+                        <p class="form-hint" id="folder-pinned" hidden></p>
+                    </div>
+                    <div class="fs-picker" id="folder-picker" hidden></div>
                 </div>
                 <div class="connect-live mt-3" id="connect-live" role="status" aria-live="polite" hidden></div>
                 <div class="connect-paste mt-3" id="connect-paste" hidden>
