@@ -353,7 +353,10 @@ async fn queue_file_document_etag_gzip_and_refusals() {
     );
     assert_eq!(
         vol["jobs"][0],
-        json!({"kind": "ocr", "id": "hayai-nova", "state": "held", "eta": null, "progress": null})
+        json!({"kind": "ocr", "id": "hayai-nova",
+               "parts": [{"role": "recognizer", "name": "Hayai Nova", "version": "2.5"},
+                         {"role": "detector", "name": "PP-OCR Manga", "version": "0.3"}],
+               "state": "held", "eta": null, "progress": null})
     );
     let etag = headers["etag"].to_str().unwrap().to_string();
     assert_eq!(etag.len(), 34, "{etag}");

@@ -35,6 +35,7 @@ bunko-vlm.workspace = true
 bunko-torch = { path = "../bunko-torch", optional = true }
 libloading = { version = "0.9", optional = true }
 thiserror.workspace = true
+bunko-core.workspace = true
 bunko-layout.workspace = true
 bunko-processor.workspace = true
 bunko-proto.workspace = true
