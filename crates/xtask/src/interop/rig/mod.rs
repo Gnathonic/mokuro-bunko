@@ -2,13 +2,15 @@
 //! server, cloudsim, rclone, the fake OCR processor, the reader), one suite per
 //! provider (docs/design/interop-testing.md §7.1). The `cloud` suite (Bunko and the
 //! cloud, no reader) runs here in Rust; the browser suites drive the pinned reader
-//! through Bunko's Playwright install in `interop/`.
+//! through Bunko's Playwright install in `interop/`. The `folder` provider is a library
+//! folder on this disk that Bunko keeps as a storage backend, the way it keeps a cloud.
 
 mod browser;
 mod cloud;
 mod cloudsim;
 mod control;
 mod fakeproc;
+mod folder;
 mod playwright;
 mod rclone;
 mod reader;
@@ -25,7 +27,8 @@ pub struct RigArgs {
     #[arg(value_enum, value_delimiter = ',', required = true)]
     suites: Vec<SuiteArg>,
     /// The providers to run them on; a suite runs on those it applies to (dav and api:
-    /// local; the others: the clouds and rclone).
+    /// local; direct and shared: the clouds and rclone; bridge and cloud: those and
+    /// folder).
     #[arg(long, value_enum, value_delimiter = ',', default_value = "all")]
     provider: Vec<ProviderArg>,
     /// A testing-feature server (default: target/release/mokuro-bunko), built with
@@ -75,6 +78,7 @@ enum ProviderArg {
     Microsoft,
     Mega,
     Rclone,
+    Folder,
     All,
 }
 
@@ -102,6 +106,7 @@ impl ProviderArg {
             ProviderArg::Microsoft => Provider::Microsoft,
             ProviderArg::Mega => Provider::Mega,
             ProviderArg::Rclone => Provider::Rclone,
+            ProviderArg::Folder => Provider::Folder,
             ProviderArg::All => return None,
         })
     }
@@ -124,6 +129,9 @@ pub enum Provider {
     Microsoft,
     Mega,
     Rclone,
+    /// A library folder on this disk, Bunko's `folder` backend: no reader can be driven
+    /// on it (the reader's Local Folder needs the File System Access picker).
+    Folder,
 }
 
 const SUITES: [Suite; 6] = [
@@ -134,18 +142,27 @@ const SUITES: [Suite; 6] = [
     Suite::Shared,
     Suite::Cloud,
 ];
-const PROVIDERS: [Provider; 5] = [
+const PROVIDERS: [Provider; 6] = [
     Provider::Local,
     Provider::Google,
     Provider::Microsoft,
     Provider::Mega,
     Provider::Rclone,
+    Provider::Folder,
 ];
 const CLOUDS: [Provider; 4] = [
     Provider::Google,
     Provider::Microsoft,
     Provider::Mega,
     Provider::Rclone,
+];
+/// Where a Bunko can keep its library apart from its own disk: the clouds and a folder.
+const BACKENDS: [Provider; 5] = [
+    Provider::Google,
+    Provider::Microsoft,
+    Provider::Mega,
+    Provider::Rclone,
+    Provider::Folder,
 ];
 
 impl Suite {
@@ -160,11 +177,15 @@ impl Suite {
         }
     }
 
-    /// The providers this suite runs on.
+    /// The providers this suite runs on. A folder runs the suites with no reader on
+    /// the library itself (cloud) or the reader signed in to Bunko (bridge); direct and
+    /// shared need the reader's Local Folder, which only the File System Access picker
+    /// opens.
     fn providers(self) -> &'static [Provider] {
         match self {
             Suite::Dav | Suite::Api => &[Provider::Local],
-            Suite::Bridge | Suite::Direct | Suite::Shared | Suite::Cloud => &CLOUDS,
+            Suite::Cloud | Suite::Bridge => &BACKENDS,
+            Suite::Direct | Suite::Shared => &CLOUDS,
         }
     }
 
@@ -182,24 +203,27 @@ impl Provider {
             Provider::Microsoft => "microsoft",
             Provider::Mega => "mega",
             Provider::Rclone => "rclone",
+            Provider::Folder => "folder",
         }
     }
 
-    /// The provider's name in cloudsim's control API.
+    /// The provider's name in cloudsim's control API. One cloudsim does not play keeps
+    /// its own name, which cloudsim refuses, rather than another provider's.
     pub fn sim_name(self) -> &'static str {
         match self {
+            Provider::Google => "google",
             Provider::Microsoft => "microsoft",
             Provider::Mega => "mega",
-            _ => "google",
+            Provider::Local | Provider::Rclone | Provider::Folder => self.name(),
         }
     }
 
     /// Played by cloudsim (not rclone, not this disk).
     pub fn simulated(self) -> bool {
-        matches!(
-            self,
-            Provider::Google | Provider::Microsoft | Provider::Mega
-        )
+        match self {
+            Provider::Google | Provider::Microsoft | Provider::Mega => true,
+            Provider::Local | Provider::Rclone | Provider::Folder => false,
+        }
     }
 }
 
@@ -530,7 +554,8 @@ mod tests {
                 ("cloud", "google"),
                 ("cloud", "microsoft"),
                 ("cloud", "mega"),
-                ("cloud", "rclone")
+                ("cloud", "rclone"),
+                ("cloud", "folder")
             ]
         );
         assert_eq!(
@@ -543,7 +568,9 @@ mod tests {
             [("dav", "local"), ("shared", "rclone")]
         );
         let all = expand(&[S::All], &[P::All]).unwrap();
-        assert_eq!(all.len(), 2 + 4 * 4);
+        // dav and api on local; direct and shared on the four clouds; bridge and cloud
+        // on those and a folder.
+        assert_eq!(all.len(), 2 + 2 * 4 + 2 * 5);
         // A suite named on its own with no provider it runs on is an error.
         let err = expand(&[S::Dav], &[P::Google]).unwrap_err().to_string();
         assert!(err.contains("dav suite runs on local only"), "{err}");
@@ -558,6 +585,36 @@ mod tests {
                 ("cloud", "mega")
             ]
         );
+        // A folder: cloud and bridge, in suite order; direct and shared cannot drive
+        // the reader's Local Folder.
+        assert_eq!(
+            pairs(&[S::Cloud, S::Bridge], &[P::Folder]),
+            [("bridge", "folder"), ("cloud", "folder")]
+        );
+        assert_eq!(
+            pairs(&[S::All], &[P::Folder]),
+            [("bridge", "folder"), ("cloud", "folder")]
+        );
+        for s in [S::Direct, S::Shared, S::Dav, S::Api] {
+            assert!(expand(&[s], &[P::Folder]).is_err(), "{s:?}");
+        }
+        // The CI legs: the cloud leg on the four clouds, the folder leg on its own,
+        // so no pair runs twice.
+        let cloud_leg = pairs(&[S::Cloud], &[P::Google, P::Microsoft, P::Mega, P::Rclone]);
+        let folder_leg = pairs(&[S::Cloud, S::Bridge], &[P::Folder]);
+        assert!(cloud_leg.iter().all(|p| !folder_leg.contains(p)));
+        assert_eq!(cloud_leg.len() + 1, pairs(&[S::Cloud], &[P::All]).len());
+    }
+
+    #[test]
+    fn only_cloudsim_providers_have_a_cloudsim_name_of_their_own() {
+        for p in PROVIDERS {
+            let own = matches!(p.sim_name(), "google" | "microsoft" | "mega");
+            assert_eq!(own, p.simulated(), "{p:?}");
+            if !p.simulated() {
+                assert_eq!(p.sim_name(), p.name());
+            }
+        }
     }
 
     #[test]
@@ -573,6 +630,9 @@ mod tests {
         assert_eq!(t.rig.suites, [SuiteArg::Cloud, SuiteArg::Dav]);
         assert_eq!(t.rig.provider, [ProviderArg::Google, ProviderArg::Local]);
         assert!(t.rig.keep);
+        let t = T::try_parse_from(["x", "cloud,bridge", "--provider", "folder"]).unwrap();
+        assert_eq!(t.rig.suites, [SuiteArg::Cloud, SuiteArg::Bridge]);
+        assert_eq!(t.rig.provider, [ProviderArg::Folder]);
         let t = T::try_parse_from(["x", "all"]).unwrap();
         assert_eq!(t.rig.provider, [ProviderArg::All]);
         assert!(T::try_parse_from(["x"]).is_err());

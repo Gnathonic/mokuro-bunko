@@ -9,6 +9,7 @@ use super::cloud::{self, ACCOUNT};
 use super::cloudsim::{self, Cloudsim};
 use super::control::{self, Control};
 use super::fakeproc::{FakeOptions, FakeProcessor};
+use super::folder::Folder;
 use super::playwright::{self, Env};
 use super::rclone::{self, Rclone};
 use super::results::{Outcome, Report, Scenario};
@@ -41,7 +42,7 @@ const FAKE_PAGE_TEXT: &str = "偽の文字";
 pub enum BunkoOn {
     /// Its own disk.
     Local,
-    /// The suite's cloud (cloudsim or rclone).
+    /// The suite's cloud (cloudsim, rclone, or a library folder on this disk).
     Cloud,
 }
 
@@ -190,6 +191,8 @@ struct Running {
     server: Option<Arc<Mutex<Server>>>,
     /// Held only to keep it serving until the suite ends.
     _rclone: Option<Rclone>,
+    /// The library folder (the folder provider): only Bunko reads it.
+    _folder: Option<Folder>,
     sim: Option<Cloudsim>,
     env: Env,
 }
@@ -217,9 +220,15 @@ fn setup(paths: &Paths, suite: Suite, p: Provider, work: &Path, reader: &str) ->
         let names: Vec<&str> = uploads.iter().map(|(rel, _)| rel.as_str()).collect();
         context["uploads"] = json!({"dir": dir, "files": names});
     }
-    let (mut sim, mut rc) = (None, None);
+    let (mut sim, mut rc, mut folder) = (None, None, None);
     if want.cloud {
-        if p == Provider::Rclone {
+        if p == Provider::Folder {
+            // Bunko's library folder; the reader reaches it only through Bunko.
+            let f = Folder::create(work)?;
+            f.seed(&files)?;
+            context["folder"] = json!({"path": f.root});
+            folder = Some(f);
+        } else if p == Provider::Rclone {
             let bin = rclone::binary(paths.rclone_bin.as_deref(), &paths.tools)?;
             // The reader's origin: its PROPFINDs carry Authorization, which a `*` does
             // not allow.
@@ -261,9 +270,10 @@ fn setup(paths: &Paths, suite: Suite, p: Provider, work: &Path, reader: &str) ->
                 }
                 Backend::Local
             }
-            BunkoOn::Cloud => Backend::Cloud(match (&sim, &rc) {
-                (Some(s), _) => s.login(p, ACCOUNT)?,
-                (_, Some(r)) => cloud::rclone_login(r),
+            BunkoOn::Cloud => Backend::Cloud(match (&sim, &rc, &folder) {
+                (Some(s), _, _) => s.login(p, ACCOUNT)?,
+                (_, Some(r), _) => cloud::rclone_login(r),
+                (_, _, Some(f)) => f.login(),
                 _ => unreachable!("a cloud backend runs with a cloud"),
             }),
         };
@@ -349,6 +359,7 @@ fn setup(paths: &Paths, suite: Suite, p: Provider, work: &Path, reader: &str) ->
         fake,
         server,
         _rclone: rc,
+        _folder: folder,
         sim,
         env,
     })
@@ -542,6 +553,7 @@ mod tests {
             Provider::Microsoft,
             Provider::Mega,
             Provider::Rclone,
+            Provider::Folder,
         ] {
             let ttl = control::tune_value(&lease_tune(Suite::Shared, p), "lease_ttl_s").unwrap();
             // The reader re-reads a cloud marker every 60 s and calls one unchanged for
