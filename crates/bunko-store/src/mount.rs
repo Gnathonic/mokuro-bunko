@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use parking_lot::RwLock;
 
-use crate::store::LibraryStore;
+use crate::store::{Activity, LibraryStore};
 
 struct Mount {
     id: u64,
@@ -99,6 +99,12 @@ pub fn store_for(p: &Path) -> Option<Arc<dyn LibraryStore>> {
         .filter(|mount| under(bytes, &mount.root))
         .max_by_key(|mount| mount.root.len())
         .map(|mount| Arc::clone(&mount.store))
+}
+
+/// Tell the store that covers `p` (if any) that `why` keeps it busy
+/// ([`LibraryStore::note_activity`]). No store covers it: nothing.
+pub fn note_activity(p: &Path, why: Activity) {
+    route(p, |s| s.note_activity(why), || ());
 }
 
 /// Whether two handles are the same mounted store.

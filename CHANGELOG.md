@@ -712,6 +712,19 @@
 - **Dependency updates**: zip 9, rcgen 0.14, windows 0.62, windows-sys 0.61.
 
 ### Fixed
+- **A cloud library polls for changes at its active interval while it is in use.**
+  The change feed of a Google Drive, OneDrive or WebDAV library was meant to poll every
+  30 s (Drive) or 60 s while active and every 5 minutes otherwise, but nothing ever
+  made it active, so a volume a reader uploaded straight to the cloud could wait 5
+  minutes before Bunko saw it and queued its OCR. The feed is now active for 5 minutes
+  after the last of: a WebDAV request through Bunko, OCR work in flight on the library
+  (a held queue does not count: only a running claim), or a change in the cloud that
+  was not Bunko's own write (a reader writing directly; another install's lease
+  marker and queue file do not count). The first of them polls at
+  once. `storage.library.poll.active_s` and `idle_s` still set the intervals. MEGA
+  pushes its changes and is unaffected. The admin Storage panel and `mokuro-bunko
+  library status` show the current interval and why (`Polling: every 30 s (OCR
+  running)`), and the admin storage status carries it as `poll`.
 - **A processor whose OCR backend works takes work while the optional Vulkan pack is
   missing.** With `ocr.backend: auto` and a GPU, a missing Vulkan pack counted as a
   missing OCR backend, although its runtimes are only more benchmark candidates beside

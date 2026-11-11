@@ -59,7 +59,8 @@ pub use backend::{
 };
 pub use cache::CacheStats;
 pub use feed::{
-    CloudHooks, EngineState, Feed, FeedConfig, FeedHandle, FeedState, NoFeedState, SubmissionResult,
+    ACTIVE_FOR, CloudHooks, EngineState, Feed, FeedConfig, FeedHandle, FeedState, NoFeedState,
+    PollCadence, SubmissionResult,
 };
 pub use governor::{ApiClass, ApiStats, ClassStats, Governed, Governor, Limits};
 pub use merge::{CaseMergePolicy, MergeChoice, MergeRecord, ResolveChoice};

@@ -65,8 +65,13 @@ impl Req {
 
 /// Answer one DAV request, with a [`DavInfo`] on every response (the server's request
 /// accounting reads it, design analytics.md §4.2). A method that resolved the path
-/// itself may have set a finer one ([`read::get`]); it is kept.
+/// itself may have set a finer one ([`read::get`]); it is kept. Every request notes
+/// [`bunko_store::Activity::Bridge`] on the library's store.
 pub(crate) async fn dispatch(inner: Arc<Inner>, req: Request<Body>, ctx: DavContext) -> Resp {
+    // A reader is using the library through the bridge: a cloud library's change feed
+    // polls at its active cadence for a while (0.8 design §5.3). A shared read of the
+    // mount table and an atomic store.
+    bunko_store::note_activity(&inner.roots.library, bunko_store::Activity::Bridge);
     let info = request_info(&req);
     let mut resp = dispatch_method(inner, req, ctx).await;
     if resp.extensions().get::<DavInfo>().is_none() {

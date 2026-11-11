@@ -118,6 +118,41 @@ fn bytes(n: u64) -> String {
     }
 }
 
+/// How often the change feed asks the provider for changes, and why (0.8 §5.3).
+fn poll_line(p: &Value) -> Option<String> {
+    if !p.is_object() {
+        return None;
+    }
+    if p["push"] == true {
+        return Some("Polling: none (the provider pushes its changes)".to_string());
+    }
+    let s = p["every_s"].as_u64()?;
+    let every = if s >= 60 && s % 60 == 0 {
+        format!("{} min", s / 60)
+    } else {
+        format!("{s} s")
+    };
+    let because: Vec<&str> = p["because"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|b| match b.as_str()? {
+            "ocr" => Some("OCR running"),
+            "bridge" => Some("reader requests through Bunko"),
+            "reader" => Some("reader changes in the cloud"),
+            _ => None,
+        })
+        .collect();
+    let why = if !because.is_empty() {
+        because.join(", ")
+    } else if p["active"] == true {
+        "active".to_string()
+    } else {
+        "idle".to_string()
+    };
+    Some(format!("Polling: every {every} ({why})"))
+}
+
 /// The lines `library status` prints for a `library.storage` block.
 pub fn describe(v: &Value, source: &str) -> Vec<String> {
     let backend = text(&v["backend"]).unwrap_or_else(|| "?".into());
@@ -173,6 +208,9 @@ pub fn describe(v: &Value, source: &str) -> Vec<String> {
             }
         }
         out.push(h);
+        if let Some(line) = poll_line(&v["poll"]) {
+            out.push(line);
+        }
     } else if let Some(indexed) = v["indexed"].as_bool() {
         out.push(format!(
             "Index:   {}",
@@ -1235,6 +1273,7 @@ mod tests {
             "account": "me@example.com", "pairing": "release", "connected": true, "problem": null,
             "health": {"state": "syncing", "done": 10, "total": 0}, "engine": "full-sync",
             "sync": {"done": 10, "total": null},
+            "poll": {"push": false, "every_s": 300, "active": false, "because": []},
             "cache": {"blobs": 2, "blob_bytes": 2048, "zipdirs": 1, "blocks": 0, "block_bytes": 0, "spools": 1, "spool_bytes": 5242880},
         });
         let lines = describe(&v, "running server");
@@ -1245,6 +1284,7 @@ mod tests {
                 "Account: me@example.com",
                 "Store:   0123456789abcdef",
                 "Health:  syncing (feed: full-sync), 10 synced",
+                "Polling: every 5 min (idle)",
                 "Cache:   2 small files (2.0 KiB), 1 archive directories, 1 spooled archives (5.0 MiB)",
                 "(from the running server)",
             ]
@@ -1263,6 +1303,17 @@ mod tests {
             "holder": {"name": "nas", "ours": false}});
         assert!(
             describe(&v, "running server").contains(&"Lease:   standby (held by nas)".to_string())
+        );
+        // The feed's cadence (§5.3): what keeps it at the active interval.
+        v["poll"] =
+            json!({"push": false, "every_s": 30, "active": true, "because": ["ocr", "reader"]});
+        assert!(describe(&v, "running server").contains(
+            &"Polling: every 30 s (OCR running, reader changes in the cloud)".to_string()
+        ));
+        v["poll"] = json!({"push": true, "every_s": 300, "active": false, "because": []});
+        assert!(
+            describe(&v, "running server")
+                .contains(&"Polling: none (the provider pushes its changes)".to_string())
         );
     }
 

@@ -704,6 +704,7 @@ impl Scheduler {
         self.check_sessions();
         self.check_storage_hold();
         self.check_upgrade_hold();
+        self.note_ocr_activity();
         let now = self.mono();
         if now - self.last_poll_tick >= self.settings.poll_interval {
             self.last_poll_tick = now;
@@ -715,6 +716,18 @@ impl Scheduler {
             if lane.waiting_for_faster {
                 lane.idle_at = None;
             }
+        }
+    }
+
+    /// OCR is running (§5.3 poll cadence): a claim is in flight on the library, so a
+    /// cloud library's change feed polls at its active interval until five minutes
+    /// after the last one ends. Waiting jobs alone do not count: a job a lane can run
+    /// is claimed within a tick, and one that cannot run (no processor, a paused or
+    /// held queue, a missing backend) never is, so a held queue never keeps the feed
+    /// polling fast.
+    fn note_ocr_activity(&self) {
+        if !self.cards.is_empty() {
+            bunko_store::note_activity(&self.library(), bunko_store::Activity::Ocr);
         }
     }
 
