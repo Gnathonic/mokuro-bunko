@@ -25,6 +25,9 @@
 //! * **MEGA**: email, password and the optional two-factor code, once; the session
 //!   blob is kept, the password never is.
 //! * **WebDAV**: URL, user and app password; the driver's capability probe runs live.
+//! * **Local folder**: a path on this computer, checked against Bunko's own folder
+//!   ([`super::folder::check_path`]); nothing to sign in to. Its account is the path,
+//!   so choosing another folder is an account change, as on the clouds.
 //!
 //! Then the **Check**: the account, the `mokuro-reader/` folder ("N volumes in M
 //! series", or "Create it?"), duplicate roots, another Bunko's lease, and on Drive the
@@ -81,6 +84,7 @@ pub fn provider_name(b: LibraryBackend) -> &'static str {
         LibraryBackend::OneDrive => "OneDrive",
         LibraryBackend::Mega => "MEGA",
         LibraryBackend::WebDav => "the WebDAV server",
+        LibraryBackend::Folder => "the library folder",
     }
 }
 
@@ -133,12 +137,15 @@ pub struct MegaForm {
 #[derive(Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct ConnectRequest {
-    /// `gdrive`, `onedrive`, `mega` or `webdav`.
+    /// `gdrive`, `onedrive`, `mega`, `webdav` or `folder`.
     pub provider: String,
     /// Drive only: `release` (reader.mokuro.app, the default) or `beta` (D25).
     pub reader: Option<String>,
-    /// The cloud folder (default: the configured one, `mokuro-reader`).
+    /// The cloud folder (default: the configured one, `mokuro-reader`). Ignored for
+    /// `folder`, whose root is the folder at `path`.
     pub folder: Option<String>,
+    /// `folder`: the library folder's full path, as this server sees it.
+    pub path: Option<String>,
     /// Google Drive and OneDrive: `loopback` (or `browser`: a browser on the server's
     /// computer comes back to it), `device` (a code; OneDrive: work or school accounts
     /// only) or `paste` (sign in anywhere, paste the address back). None: chosen from
@@ -156,6 +163,7 @@ impl fmt::Debug for ConnectRequest {
             .field("provider", &self.provider)
             .field("reader", &self.reader)
             .field("folder", &self.folder)
+            .field("path", &self.path)
             .field("flow", &self.flow)
             .field(
                 "webdav",
@@ -383,6 +391,55 @@ pub async fn check_backend<B: Backend>(
     Ok((account, report))
 }
 
+/// The Check of a folder library, from [`check_backend`]'s: the folder named by its
+/// path, and the warnings a folder can need (§3.3).
+pub fn folder_report(
+    mut report: CheckReport,
+    path: &Path,
+    probe: &bunko_remote::folder::FolderProbe,
+    nested_reader_folder: bool,
+) -> CheckReport {
+    let shown = path.display().to_string();
+    report.folder = shown.clone();
+    report.summary = if report.found {
+        format!(
+            "Found {shown}: {} in {}.",
+            plural(report.volumes, "volume", "volumes"),
+            plural(report.series, "series", "series"),
+        )
+    } else {
+        format!("There is no folder at {shown} yet. Create it?")
+    };
+    let mut warnings = Vec::new();
+    if report.found && probe.reachable && !probe.writable {
+        warnings.push(
+            "Bunko cannot write to this folder, so OCR results, covers and series info cannot be saved there.",
+        );
+    }
+    if nested_reader_folder {
+        warnings.push(
+            "This folder holds a mokuro-reader folder. If Mokuro Reader uses that one, choose it instead.",
+        );
+    }
+    if !warnings.is_empty() {
+        report.warning = Some(warnings.join(" "));
+    }
+    report
+}
+
+/// The folder's top level holds a folder named like the reader's own (`mokuro-reader`
+/// in any case): the person likely picked its parent.
+async fn nested_reader_folder<B: Backend>(b: &B, folder: &str) -> bool {
+    let want = folder.to_lowercase();
+    let mut found = false;
+    let mut sink = |n: RNode| {
+        if n.is_dir && !n.trashed && String::from_utf8_lossy(&n.name_raw).to_lowercase() == want {
+            found = true;
+        }
+    };
+    b.list_dir("", &mut sink).await.is_ok() && found
+}
+
 // ---------------------------------------------------------------- provider seam
 
 /// The secret a provider is opened with, held in memory only.
@@ -398,6 +455,10 @@ pub enum Auth {
         password: String,
         allow_http: bool,
     },
+    /// No secret: the folder's path.
+    Folder {
+        path: PathBuf,
+    },
 }
 
 impl fmt::Debug for Auth {
@@ -406,6 +467,7 @@ impl fmt::Debug for Auth {
             Auth::OAuth { .. } => "Auth::OAuth(<redacted>)",
             Auth::Mega(_) => "Auth::Mega(<redacted>)",
             Auth::WebDav { .. } => "Auth::WebDav(<redacted>)",
+            Auth::Folder { .. } => "Auth::Folder",
         })
     }
 }
@@ -498,6 +560,24 @@ impl ProviderOps for LiveOps {
                     )
                     .await?;
                     check_backend(&b, folder, create, ours).await
+                }
+                (LibraryBackend::Folder, Auth::Folder { path }) => {
+                    let b = bunko_remote::folder::FolderBackend::connect(
+                        bunko_remote::folder::FolderConfig {
+                            path: path.clone(),
+                            root_name: folder.to_string(),
+                            state_dir: scratch.join("folder"),
+                            watch: false,
+                        },
+                    )
+                    .await?;
+                    let (account, report) = check_backend(&b, folder, create, ours).await?;
+                    let nested = if report.found && report.volumes == 0 {
+                        nested_reader_folder(&b, folder).await
+                    } else {
+                        false
+                    };
+                    Ok((account, folder_report(report, path, &b.probe(), nested)))
                 }
                 _ => Err(BErr::Fatal(
                     "this sign-in does not open that provider".into(),
@@ -612,6 +692,8 @@ pub struct LibraryChoice {
     pub webdav_url: Option<String>,
     pub webdav_username: Option<String>,
     pub webdav_allow_http: bool,
+    /// `folder`: the library folder.
+    pub path: Option<PathBuf>,
 }
 
 impl LibraryChoice {
@@ -628,6 +710,9 @@ impl LibraryChoice {
             lib.webdav.url = self.webdav_url.clone();
             lib.webdav.username = self.webdav_username.clone();
             lib.webdav.allow_http = self.webdav_allow_http;
+        }
+        if self.backend == LibraryBackend::Folder {
+            lib.path = self.path.clone();
         }
     }
 }
@@ -920,14 +1005,17 @@ impl Connector {
             .filter(|b| b.is_cloud())
             .ok_or_else(|| {
                 format!(
-                    "unknown provider {:?}: gdrive, onedrive, mega or webdav",
+                    "unknown provider {:?}: gdrive, onedrive, mega, webdav or folder",
                     req.provider
                 )
             })?;
         let lib = (self.0.config)();
+        // A folder library's root is the folder at `path`; its name stays the
+        // configured one (the store id's folder part).
         let folder = req
             .folder
             .clone()
+            .filter(|_| backend != LibraryBackend::Folder)
             .map(|f| f.trim().trim_matches('/').to_string())
             .filter(|f| !f.is_empty())
             .unwrap_or_else(|| lib.folder.clone());
@@ -970,7 +1058,13 @@ impl Connector {
                 }
                 ""
             }
-            _ => "",
+            LibraryBackend::Folder => {
+                if req.path.as_deref().is_none_or(|p| p.trim().is_empty()) {
+                    return Err(super::folder::EMPTY.into());
+                }
+                "form"
+            }
+            LibraryBackend::Local => "",
         };
         // The pairing a Drive sign-in uses: overrides make it custom (no question).
         if let Some(t) = self.0.task.lock().take() {
@@ -1012,7 +1106,9 @@ impl Connector {
                     .await
             }
             LibraryBackend::Mega => self.mega(session, &folder, req).await,
-            _ => self.webdav(session, &folder, req).await,
+            LibraryBackend::WebDav => self.webdav(session, &folder, req).await,
+            LibraryBackend::Folder => self.folder(session, &folder, req).await,
+            LibraryBackend::Local => Err("the library on this computer needs no Connect".into()),
         };
         let held = match outcome {
             Ok(Some(h)) => h,
@@ -1053,11 +1149,18 @@ impl Connector {
                     s.state = "account-mismatch";
                     s.account = Some(held.account.label.clone());
                     s.previous_account = Some(previous.clone());
-                    s.message = Some(format!(
-                        "This Bunko's {} library belongs to {previous}, not {}. Sign in with that account, or choose \"Use this account's library instead\".",
-                        provider_name(held.backend),
-                        held.account.label
-                    ));
+                    s.message = Some(if held.backend == LibraryBackend::Folder {
+                        format!(
+                            "This Bunko's library is in {previous}, not {}. Choose that folder, or choose \"Use this folder instead\".",
+                            held.account.label
+                        )
+                    } else {
+                        format!(
+                            "This Bunko's {} library belongs to {previous}, not {}. Sign in with that account, or choose \"Use this account's library instead\".",
+                            provider_name(held.backend),
+                            held.account.label
+                        )
+                    });
                 });
                 *self.0.held.lock() = Some(held);
             }
@@ -1136,6 +1239,14 @@ impl Connector {
                 format!(
                     "This Bunko's Google Drive library uses the {old} pairing: a pairing change is a different library. Disconnect it first (admin → Storage → Disconnect, or `mokuro-bunko library disconnect`), then connect with the new pairing."
                 )
+            } else if c.provider == super::folder::PROVIDER {
+                format!(
+                    "This Bunko already manages the library in {}: this is a different library. Disconnect it first (admin → Storage → Disconnect, or `mokuro-bunko library disconnect`).",
+                    c.account_label
+                        .as_deref()
+                        .or(c.account_id.as_deref())
+                        .unwrap_or("a folder")
+                )
             } else {
                 format!(
                     "This Bunko already manages a {old_name} library: this is a different library. Disconnect it first (admin → Storage → Disconnect, or `mokuro-bunko library disconnect`)."
@@ -1213,6 +1324,11 @@ impl Connector {
                 self.status().pairing,
             )
         };
+        if let Auth::Folder { path } = &auth
+            && let Some(why) = super::folder::precheck(path)
+        {
+            return Err(why);
+        }
         let ours = our_instances(&self.0.cloud_dir);
         let scratch = self.scratch_dir();
         let (_, mut check) = self
@@ -1220,7 +1336,12 @@ impl Connector {
             .ops
             .inspect(backend, &auth, &folder, true, &scratch, &ours)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| match (e, &auth) {
+                (BErr::Transient(_) | BErr::NotFound, Auth::Folder { path }) => {
+                    super::folder::missing_parent(path)
+                }
+                (e, _) => e.to_string(),
+            })?;
         if let Some(p) = pairing.as_deref() {
             check.pairing_advice(p);
         }
@@ -1258,12 +1379,15 @@ impl Connector {
             .ops
             .inspect(backend, auth, folder, false, &scratch, &ours)
             .await
-            .map_err(|e| match e {
-                BErr::AuthExpired | BErr::AuthRevoked => format!(
+            .map_err(|e| match (e, auth) {
+                (BErr::Transient(_) | BErr::NotFound, Auth::Folder { path }) => {
+                    super::folder::missing_parent(path)
+                }
+                (BErr::AuthExpired | BErr::AuthRevoked, _) => format!(
                     "{} refused the sign-in: check the account and try again",
                     provider_name(backend)
                 ),
-                other => format!("{}: {other}", provider_name(backend)),
+                (other, _) => format!("{}: {other}", provider_name(backend)),
             })
     }
 
@@ -1461,6 +1585,7 @@ impl Connector {
                 webdav_url: None,
                 webdav_username: None,
                 webdav_allow_http: false,
+                path: None,
             },
             replaces: Vec::new(),
             other_account: None,
@@ -1690,6 +1815,7 @@ impl Connector {
                 webdav_url: None,
                 webdav_username: None,
                 webdav_allow_http: false,
+                path: None,
             },
             replaces: Vec::new(),
             other_account: None,
@@ -1747,6 +1873,58 @@ impl Connector {
                 webdav_url: Some(url),
                 webdav_username: Some(user),
                 webdav_allow_http: form.allow_http,
+                path: None,
+            },
+            replaces: Vec::new(),
+            other_account: None,
+            session,
+        }))
+    }
+
+    /// A library in a folder: the path checked against Bunko's own folder, then the
+    /// Check. The account is the path; the credentials entry holds no secret.
+    async fn folder(
+        &self,
+        session: u64,
+        folder: &str,
+        req: ConnectRequest,
+    ) -> Result<Option<Held>, String> {
+        let typed = req.path.unwrap_or_default();
+        let base = self
+            .0
+            .cloud_dir
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_default();
+        let path = super::folder::check_path(Path::new(typed.trim()), &base)?;
+        if let Some(why) = super::folder::precheck(&path) {
+            return Err(why);
+        }
+        let auth = Auth::Folder { path: path.clone() };
+        let (_, check) = self
+            .inspect(session, LibraryBackend::Folder, &auth, folder)
+            .await?;
+        let id = bunko_remote::folder::account_id(&path);
+        let account = AccountInfo {
+            id: id.clone(),
+            label: id,
+        };
+        self.checked(session, &account, &check, None);
+        let store_id = store_id(super::folder::PROVIDER, "", &account.id, folder);
+        Ok(Some(Held {
+            backend: LibraryBackend::Folder,
+            auth,
+            cred: super::folder::stub(&account.id),
+            store_id,
+            account,
+            choice: LibraryChoice {
+                backend: LibraryBackend::Folder,
+                folder: folder.to_string(),
+                google_project: None,
+                webdav_url: None,
+                webdav_username: None,
+                webdav_allow_http: false,
+                path: Some(path),
             },
             replaces: Vec::new(),
             other_account: None,

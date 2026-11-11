@@ -7,7 +7,10 @@ license.workspace = true
 rust-version.workspace = true
 
 [features]
-default = ["webdav", "gdrive", "onedrive", "mega", "oauth"]
+default = ["webdav", "gdrive", "onedrive", "mega", "oauth", "folder"]
+# The local folder driver (`folder::FolderBackend`): a library in a folder on this
+# computer, treated like a cloud provider.
+folder = ["dep:notify", "dep:fs4", "dep:libc", "dep:windows-sys"]
 # The Google Drive driver (`gdrive::GDriveBackend`).
 gdrive = ["dep:reqwest", "dep:time", "dep:httpdate"]
 # The OneDrive (Microsoft Graph v1.0) driver (`onedrive::OneDriveBackend`).
@@ -69,6 +72,17 @@ chacha20poly1305 = { version = "0.10", optional = true }
 md-5 = "0.10"
 bunko-mega = { path = "../bunko-mega", optional = true }
 zeroize = { version = "1", optional = true }
+# folder: the watcher that wakes the change feed, and the folder's free space.
+notify = { workspace = true, optional = true }
+fs4 = { version = "1", default-features = false, optional = true }
+
+[target.'cfg(unix)'.dependencies]
+# folder: renameat2 / renamex_np (rename without replacing), errno values.
+libc = { version = "0.2", optional = true }
+
+[target.'cfg(windows)'.dependencies]
+# folder: MoveFileExW (rename without replacing), the trash's hidden attribute.
+windows-sys = { version = "0.61", optional = true, features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 # tests/{gdrive,onedrive}_mock.rs: the cloud simulator, in-process.

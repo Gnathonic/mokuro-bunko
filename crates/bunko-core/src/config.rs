@@ -425,15 +425,19 @@ pub enum LibraryBackend {
     OneDrive,
     Mega,
     WebDav,
+    /// A folder chosen by path (`storage.library.path`), kept like a cloud folder: the
+    /// folder Mokuro Reader's Local Folder uses.
+    Folder,
 }
 
 impl LibraryBackend {
-    pub const ALL: [LibraryBackend; 5] = [
+    pub const ALL: [LibraryBackend; 6] = [
         LibraryBackend::Local,
         LibraryBackend::GDrive,
         LibraryBackend::OneDrive,
         LibraryBackend::Mega,
         LibraryBackend::WebDav,
+        LibraryBackend::Folder,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -443,6 +447,7 @@ impl LibraryBackend {
             LibraryBackend::OneDrive => "onedrive",
             LibraryBackend::Mega => "mega",
             LibraryBackend::WebDav => "webdav",
+            LibraryBackend::Folder => "folder",
         }
     }
 
@@ -451,7 +456,8 @@ impl LibraryBackend {
         Self::ALL.into_iter().find(|b| b.as_str() == s)
     }
 
-    /// Every backend but `local` keeps the library in a cloud folder.
+    /// Every backend but `local` keeps the library in a cloud folder (`folder` counts:
+    /// Bunko keeps it exactly as it keeps a cloud folder).
     pub fn is_cloud(self) -> bool {
         self != LibraryBackend::Local
     }
@@ -553,6 +559,9 @@ pub struct LibraryConfig {
     /// The library folder in the cloud account.
     pub folder: String,
     pub webdav: WebDavLibraryConfig,
+    /// `backend: folder`: the library folder, as written (`~` is expanded where it is
+    /// used). Kept, and ignored, while another backend is set.
+    pub path: Option<PathBuf>,
     pub cache_mb: u32,
     pub spool_gb: u32,
     pub outbox_hold_mb: u32,
@@ -575,6 +584,7 @@ impl Default for LibraryConfig {
             backend: LibraryBackend::Local,
             folder: "mokuro-reader".into(),
             webdav: WebDavLibraryConfig::default(),
+            path: None,
             cache_mb: 1024,
             spool_gb: 4,
             outbox_hold_mb: 2048,
@@ -595,6 +605,7 @@ impl Default for LibraryConfig {
 const LIBRARY_ENV: &[(&str, &str)] = &[
     ("MOKURO_LIBRARY_BACKEND", "storage.library.backend"),
     ("MOKURO_LIBRARY_FOLDER", "storage.library.folder"),
+    ("MOKURO_LIBRARY_PATH", "storage.library.path"),
     ("MOKURO_WEBDAV_URL", "storage.library.webdav.url"),
     ("MOKURO_WEBDAV_USERNAME", "storage.library.webdav.username"),
     (
@@ -632,6 +643,7 @@ impl LibraryConfig {
         l.webdav.url = get_opt_str(&webdav, "url");
         l.webdav.username = get_opt_str(&webdav, "username");
         l.webdav.allow_http = get_bool(&webdav, "storage.library.webdav", "allow_http", false)?;
+        l.path = get_opt_str(&m, "path").map(PathBuf::from);
         l.cache_mb = get_positive(&m, SEC, "cache_mb", d.cache_mb)?;
         l.spool_gb = get_positive(&m, SEC, "spool_gb", d.spool_gb)?;
         l.outbox_hold_mb = get_positive(&m, SEC, "outbox_hold_mb", d.outbox_hold_mb)?;
@@ -671,6 +683,7 @@ impl LibraryConfig {
                 "backend",
                 "folder",
                 "webdav",
+                "path",
                 "cache_mb",
                 "spool_gb",
                 "outbox_hold_mb",
@@ -742,6 +755,20 @@ impl LibraryConfig {
                 )));
             }
         }
+        if let Some(path) = &self.path {
+            let full = storage::expand_user(path);
+            if !full.is_absolute() {
+                return Err(invalid(format!(
+                    "storage.library.path: {} is not a full path",
+                    path.display()
+                )));
+            }
+        }
+        if self.backend == LibraryBackend::Folder && self.path.is_none() {
+            return Err(invalid(
+                "storage.library.backend: folder needs storage.library.path (MOKURO_LIBRARY_PATH)",
+            ));
+        }
         if self.backend == LibraryBackend::WebDav && self.webdav.url.is_none() {
             return Err(invalid(
                 "storage.library.backend: webdav needs storage.library.webdav.url (MOKURO_WEBDAV_URL)",
@@ -798,6 +825,7 @@ impl LibraryConfig {
                 "username": self.webdav.username,
                 "allow_http": self.webdav.allow_http,
             },
+            "path": self.path.as_ref().map(|p| p.to_string_lossy()),
             "cache_mb": self.cache_mb,
             "spool_gb": self.spool_gb,
             "outbox_hold_mb": self.outbox_hold_mb,
@@ -850,6 +878,7 @@ impl LibraryConfig {
             "webdav.username" => self.webdav.username = opt(),
             "webdav.allow_http" => self.webdav.allow_http = b()?,
             "webdav.password" => return Err(invalid(WEBDAV_PASSWORD_REFUSED)),
+            "path" => self.path = opt().map(PathBuf::from),
             "cache_mb" => self.cache_mb = pos()?,
             "spool_gb" => self.spool_gb = pos()?,
             "outbox_hold_mb" => self.outbox_hold_mb = pos()?,
@@ -883,6 +912,7 @@ impl LibraryConfig {
         "webdav.url",
         "webdav.username",
         "webdav.allow_http",
+        "path",
         "cache_mb",
         "spool_gb",
         "outbox_hold_mb",
@@ -2563,5 +2593,119 @@ mod tests {
             Config::default().set_by_dotted_key("storage.library.webdav.password", "x"),
             Err(ConfigError::Invalid(_))
         ));
+    }
+
+    /// `backend: folder` with `storage.library.path`: parsed, kept as written, set by
+    /// dotted key and by `MOKURO_LIBRARY_PATH`, and refused without a full path.
+    #[test]
+    fn library_folder_backend() {
+        let full = if cfg!(windows) {
+            r"D:\Manga"
+        } else {
+            "/srv/manga"
+        };
+        let c = Config::from_value(&yaml(&format!(
+            "storage:\n  library:\n    backend: folder\n    path: '{full}'\n"
+        )))
+        .unwrap();
+        assert_eq!(c.library_backend(), LibraryBackend::Folder);
+        assert!(c.is_cloud_library());
+        assert_eq!(c.storage.library.path.as_deref(), Some(Path::new(full)));
+        assert_eq!(c.storage.library.folder, "mokuro-reader");
+        let v = c.to_value();
+        assert_eq!(v["storage"]["library"]["backend"], "folder");
+        assert_eq!(v["storage"]["library"]["path"], full);
+        let again = Config::from_value(&v).unwrap();
+        assert_eq!(again.storage, c.storage);
+        assert_eq!(
+            LibraryBackend::parse("folder"),
+            Some(LibraryBackend::Folder)
+        );
+
+        // `~` is a full path; it stays as written in the file.
+        let c = Config::from_value(&yaml(
+            "storage: {library: {backend: folder, path: '~/Manga'}}",
+        ))
+        .unwrap();
+        assert_eq!(
+            c.storage.library.path.as_deref(),
+            Some(Path::new("~/Manga"))
+        );
+
+        // A path kept while another backend is set is ignored, not refused.
+        let c = Config::from_value(&yaml(&format!(
+            "storage: {{library: {{backend: local, path: '{full}'}}}}"
+        )))
+        .unwrap();
+        assert_eq!(c.library_backend(), LibraryBackend::Local);
+        assert!(c.storage.library.path.is_some());
+
+        // The two refusals.
+        let bad = |y: &str| {
+            Config::from_value(&yaml(y))
+                .err()
+                .unwrap_or_else(|| panic!("accepted: {y}"))
+                .to_string()
+        };
+        let e = bad("storage: {library: {backend: folder}}");
+        assert!(
+            e.contains("folder needs storage.library.path (MOKURO_LIBRARY_PATH)"),
+            "{e}"
+        );
+        let e = bad("storage: {library: {backend: folder, path: manga}}");
+        assert!(
+            e.contains("storage.library.path: manga is not a full path"),
+            "{e}"
+        );
+
+        // Dotted keys: the path first, then the backend; `null` clears the path.
+        let mut c = Config::default();
+        assert!(
+            c.set_by_dotted_key("storage.library.backend", "folder")
+                .is_err()
+        );
+        c.set_by_dotted_key("storage.library.path", full).unwrap();
+        c.set_by_dotted_key("storage.library.backend", "folder")
+            .unwrap();
+        assert_eq!(c.library_backend(), LibraryBackend::Folder);
+        assert!(
+            c.set_by_dotted_key("storage.library.path", "relative/dir")
+                .is_err()
+        );
+        assert!(LibraryConfig::KEYS.contains(&"path"));
+        let mut c = Config::default();
+        c.set_by_dotted_key("storage.library.path", full).unwrap();
+        c.set_by_dotted_key("storage.library.path", "null").unwrap();
+        assert_eq!(c.storage.library.path, None);
+
+        // The environment pins it; the backend may come before its path.
+        let env = |k: &str| match k {
+            "MOKURO_LIBRARY_BACKEND" => Some("folder".to_string()),
+            "MOKURO_LIBRARY_PATH" => Some(full.to_string()),
+            _ => None,
+        };
+        let mut c = Config::default();
+        c.apply_env_overrides(env).unwrap();
+        assert_eq!(c.library_backend(), LibraryBackend::Folder);
+        assert_eq!(c.storage.library.path.as_deref(), Some(Path::new(full)));
+        let mut c = Config::default();
+        let e = c
+            .apply_env_overrides(|k: &str| {
+                (k == "MOKURO_LIBRARY_BACKEND").then(|| "folder".to_string())
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("MOKURO_LIBRARY_PATH"), "{e}");
+        let mut c = Config::default();
+        let e = c
+            .apply_env_overrides(|k: &str| {
+                (k == "MOKURO_LIBRARY_PATH").then(|| "relative".to_string())
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("MOKURO_LIBRARY_PATH") && e.contains("full path"),
+            "{e}"
+        );
     }
 }
