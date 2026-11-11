@@ -32,7 +32,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::sched::{self, Exec, Msg, SchedDeps, Scheduler, Settings};
 use super::types::{self, LibraryFacts, PathLocks};
-use super::{actor, api, queue_api, queue_file, upgrade};
+use super::{actor, api, queue_api, queue_file, series_queue, upgrade};
 use crate::core::Core;
 
 pub use super::sched::BenchRequest;
@@ -138,6 +138,7 @@ struct Inner {
     /// Archives that arrived after the published owed board was built.
     fresh: actor::FreshArrivals,
     queue_file: queue_file::QueueFile,
+    series_queue: series_queue::SeriesQueueHttp,
     status: queue_api::StatusCache,
     storage: PathBuf,
 }
@@ -255,6 +256,7 @@ impl OcrControl {
             owed: actor::OwedVolumes::default(),
             fresh: actor::FreshArrivals::default(),
             queue_file: queue_file::QueueFile::default(),
+            series_queue: series_queue::SeriesQueueHttp::new(),
             status: queue_api::StatusCache::default(),
             storage: layout.base.clone(),
         }))
@@ -279,6 +281,11 @@ impl OcrControl {
 
     pub(crate) fn queue_file_state(&self) -> &queue_file::QueueFile {
         &self.0.queue_file
+    }
+
+    /// The HTTP sink of the queue file v2 (one file per series).
+    pub fn series_queue_state(&self) -> &series_queue::SeriesQueueHttp {
+        &self.0.series_queue
     }
 
     pub(crate) fn status_cache(&self) -> &queue_api::StatusCache {

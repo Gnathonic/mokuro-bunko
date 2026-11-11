@@ -305,6 +305,11 @@ impl StoreHandle {
         self.store.is_some()
     }
 
+    /// The connected store's instance id (the lease marker's), if a store runs.
+    pub fn instance_id(&self) -> Option<String> {
+        self.store.as_ref().map(|s| s.instance_id())
+    }
+
     /// First adoption is done (true without a store: there is nothing to adopt).
     pub fn adopted(&self) -> bool {
         self.store.as_ref().is_none_or(|s| s.adopted())

@@ -317,6 +317,20 @@ impl Services {
             })
         };
         let _ = late_ocr.set(ocr.clone());
+        {
+            // The queue file v2 over HTTP: a finished job leaves its series' file once
+            // the series' metadata has no recompile pending (§5.4); a connected store's
+            // instance id is the one its files carry.
+            let lib = Arc::downgrade(&library);
+            ocr.series_queue_state()
+                .set_settled(Arc::new(move |folder: &str| {
+                    lib.upgrade()
+                        .is_none_or(|l| !l.series_regeneration_pending(folder))
+                }));
+            if let Some(id) = storage.as_ref().and_then(|s| s.instance_id()) {
+                ocr.series_queue_state().set_instance_id(&id);
+            }
+        }
         dav_hooks.add_listener(Arc::new(ocr.clone()));
         let analytics = crate::analytics::Analytics::open(crate::analytics::AnalyticsDeps {
             core: core.clone(),
