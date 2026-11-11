@@ -465,6 +465,8 @@ async fn options(State(d): State<AccountsDeps>, client: Client, parts: Parts) ->
             json!({
                 "backend": c.storage.library.backend.as_str(),
                 "folder": c.storage.library.folder,
+                // Local folder: the library folder on file.
+                "path": c.storage.library.path,
                 "local_folder": c.storage.layout().library(),
             }),
         )

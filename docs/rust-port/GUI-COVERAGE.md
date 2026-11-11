@@ -138,6 +138,7 @@ front (`--config`).
 | `library status --json` | CLI-only because it is the same report for scripts ([Storage](/_admin#storage) reads it as `/_admin/api/storage`) |
 | `library connect` | [setup](/setup) → Where does your library live? → Connect → Check; later [Storage](/_admin#storage) → Connect a library… / Sign in again… (`Tray → "Sign in again…"` opens it). One Connect button: a browser on the server signs in through the loopback page; elsewhere Google Drive gets a code to enter on any device, and OneDrive the sign-in page plus a field for the address the browser ends on |
 | `library connect <PROVIDER>` | [setup](/setup) → Where does your library live? (This computer, Local folder, Google Drive, OneDrive, MEGA, A WebDAV server); [Storage](/_admin#storage) → Connect → Where does your library live? |
+| `library connect --path` | [setup](/setup) → Local folder → Choose the library folder (the path, or Browse… in a browser on the server's machine); [Storage](/_admin#storage) → Connect → Local folder |
 | `library connect --reader` | [setup](/setup) → Connect → "Which Mokuro Reader do you use?" (reader.mokuro.app or the beta); [Storage](/_admin#storage) → Change pairing… (a Disconnect, then a Connect with the other reader) |
 | `library connect --folder` | CLI-only because the pages connect the reader's own `mokuro-reader/` folder; another name is for a folder made by hand (`storage.library.folder`) |
 | `library connect --url` | [setup](/setup) → Connect → Server address; [Storage](/_admin#storage) → A WebDAV server → Server address |
