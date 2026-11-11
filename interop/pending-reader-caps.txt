@@ -8,3 +8,6 @@
 # on its series page, no root queue file. Until interop/reader.ref pins a reader with
 # it (reader branch feat/queue-file-v2), its specs are skipped on the pinned reader.
 series-queue-v2
+# The reader's Local Folder signed in to a folder the rig drops on the page
+# (`connectFolder`), for the shared suite on the folder provider; same reader branch.
+local-folder

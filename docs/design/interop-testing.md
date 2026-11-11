@@ -296,7 +296,7 @@ shaped profiles (§8.2).
 | `api` | reader ↔ Bunko | the reader's series-page queue reads and pending view on a real queue (304s; the v1 root for older readers), login and account flows, nav config with readers off, error banners for 401/429/503 |
 | `bridge` | reader ↔ Bunko ↔ cloudsim (each provider), rclone and a library folder | reader reads through Bunko from a cloud library; bridge PUT; 503 during the lease claim; restart resumes |
 | `direct` | reader ↔ cloudsim (each provider) and rclone | reader alone: list, read, upload, 401 refresh, revoked token banner, 403 quota, 429 backoff, 412 conflict |
-| `shared` | reader and Bunko on one cloudsim folder (each provider) and rclone | the M7 exit checks: Bunko progress for a volume the reader uploaded; sidecar pulled once its job leaves the series' queue file (one series file read, no root queue file); reader stops writing `series.json`/`catalog.json` while the marker is fresh and resumes 2 × ttl after Bunko stops or at once on `released`; edits go up as `<Vol>.edit.mokuro` and never as the main sidecar; a Bunko case merge shows as a rename with progress kept; duplicate roots (two top-level `mokuro-reader` folders plus a nested one) converge into the canonical root whether Bunko, the reader or both merge them, with the nested root untouched and no `Suspect` |
+| `shared` | reader and Bunko on one cloudsim folder (each provider), rclone and a library folder (its Local Folder specs) | the M7 exit checks: Bunko progress for a volume the reader uploaded; sidecar pulled once its job leaves the series' queue file (one series file read, no root queue file); reader stops writing `series.json`/`catalog.json` while the marker is fresh and resumes 2 × ttl after Bunko stops or at once on `released`; edits go up as `<Vol>.edit.mokuro` and never as the main sidecar; a Bunko case merge shows as a rename with progress kept; duplicate roots (two top-level `mokuro-reader` folders plus a nested one) converge into the canonical root whether Bunko, the reader or both merge them, with the nested root untouched and no `Suspect` |
 | `cloud` | Bunko ↔ cloudsim, rclone and a library folder (no reader) | the Rust-side Bunko ↔ cloud scenarios at process level: cold start, adoption, outbox under faults, lease handover, quota pauses; on a folder, a reader's writes and renames on the disk and the folder unplugged |
 | `perf` | all of the above, shaped | §8 |
 
@@ -316,29 +316,39 @@ needed on either side):
 | S8 a spine offset cleared (no PUT on the next two syncs) | `dav/`, `shared/spine-offset-clear` | `dav`; `shared` on every cloud | none |
 | S9 reader-only dedup, then a Bunko restart with no hold | `direct/dup-roots`; its restart in `shared/dup-roots-lease` | `direct` and `shared`; google, mega | `dedup` |
 | A folder library: the reader's writes, renames, an unplugged folder | `cloud` scenarios `reader-writes`, `reader-rename`, `unplug` (Rust, `rig/cloud.rs`) | `cloud`; folder | none |
+| A folder library: the OCR round trip with the reader's Local Folder on it | `shared/ocr-local-folder` | `shared`; folder | `series-queue-v2`, `local-folder` |
 
 **The `folder` provider** is a library folder on the rig's disk that Bunko keeps as its
 storage backend (`storage.library.backend: folder`, `storage.library.path`), as it keeps
 a cloud: the folder is the library root, the part a cloud's `mokuro-reader` folder plays.
-It runs `cloud` and `bridge`. `direct` and `shared` are not drivable on it: the reader's
-Local Folder opens a folder only through the File System Access picker
-(`showDirectoryPicker`), which Playwright cannot answer, and the OPFS storage Chromium
-offers instead is no folder on disk that Bunko could read. The reader's side of a folder
-library (reading Bunko's marker and queue from the folder) is covered by the reader's
-own vitest suite and a manual run in Chrome.
+It runs `cloud`, `bridge` and `shared`; `shared` on a folder runs only its Local Folder
+specs (`*-local-folder.spec.mjs`, playwright.config.mjs), since the others sign the
+reader in to a cloud. The reader's Local Folder opens a folder only through the File
+System Access picker (`showDirectoryPicker`), which Playwright cannot answer (Chromium
+aborts it: "Intercepted by Page.setInterceptFileChooserDialog()"), and the OPFS storage
+Chromium offers instead is no folder on disk that Bunko could read. So the rig drops the
+library folder on the reader's page (CDP `Input.dispatchDragEvent` with its path), which
+gives the page a real handle to it (`DataTransferItem.getAsFileSystemHandle`); the
+reader's driver hands that to its Local Folder in place of the picker (`connectFolder`,
+capability `local-folder`). For the reader to write there with no prompt, such a spec
+runs (`test.use({folderBrowser: true})`) in full Chromium (`channel: 'chromium'`; the
+headless shell denies the grant) on a fresh profile whose File System Access write
+guard allows the reader's origin (`interop/e2e/rig/local-folder.mjs`). `direct` has no
+folder specs: the reader's own vitest suite covers its Local Folder alone.
 
 A spec that needs a capability (`test.use({ needs: [...] })`) FAILS when the reader's
 driver lacks it, unless `interop/pending-reader-caps.txt` lists that capability: then it
 is skipped and the results JSON reports the skip with its capability. A Bunko change
 that needs a newer reader than `interop/reader.ref` lists the capability there until
 the PR that bumps `reader.ref` empties it again. It lists `series-queue-v2` (queue file
-v2) until `reader.ref` pins a reader with it; I3 is done only while it lists nothing.
+v2) and `local-folder` (the driver's `connectFolder`) until `reader.ref` pins a reader
+with them; I3 is done only while it lists nothing.
 
 **As built (I3, runner core):** `cargo xtask interop rig <suites> [--provider P,…]
 [--bin B] [--cloudsim-bin C] [--reader-dir D | --reader-ref SHA] [--grep G] [--headed]
 [--keep]`. Suites and providers expand to the pairs that apply (`dav` and `api` on
-`local`; `direct` and `shared` on `google`, `microsoft`, `mega` and `rclone`; `bridge`
-and `cloud` on those and `folder`; `all` for either).
+`local`; `direct` on `google`, `microsoft`, `mega` and `rclone`; `bridge`, `shared` and
+`cloud` on those and `folder`; `all` for either).
 `--bin` must be a testing build (checked through `processor-fake --help`). `--grep`
 keeps the scenarios and specs whose name contains G, as plain case-sensitive text in
 every suite (Playwright gets it escaped, inside `/…/`, with `--pass-with-no-tests`). Each pair
@@ -594,10 +604,10 @@ out a debounce and decide at its end whether to write.
   that file and no other series' (a watch of the upload reads only its own series),
   and the card shows the job; once processor-fake lets go the volume leaves `vols`
   with a `done` entry, Bunko's sidecar is beside the archive and the volume's OCR is
-  on the device. `shared/ocr-local-folder` is the same flow on a Local Folder library
-  (no request log: a folder is read with no network); it is skipped until the rig has
-  a `folder` provider, which needs Bunko's local-folder backend (a separate PR) and a
-  reader driver `connectFolder` behind the capability `local-folder`.
+  on the device. `shared/ocr-local-folder` is the same flow on the `folder` provider,
+  the reader's Local Folder signed in to the library folder Bunko keeps (dropped on
+  its page, §7.1), its checks read off the folder on disk (no request log: a folder is
+  read with no network).
 - `shared/edits`: an edit goes up as `Vol 1.edit.mokuro` (an `edited` block, no
   `ocr_engine`); the reader writes no `Vol 1.mokuro`, through two more syncs, and the
   main is byte for byte as it was.
@@ -1100,12 +1110,13 @@ to `main` and `0.8/remote-storage`, and on demand; `catalog-perf` is unchanged.
   | local | `dav,api` | `local` |
   | google, microsoft, mega, rclone | `bridge,direct,shared` | that one |
   | cloud | `cloud` | `google,microsoft,mega,rclone` |
-  | folder | `cloud,bridge` | `folder` |
+  | folder | `cloud,bridge,shared` | `folder` |
 
-  The folder leg runs `cloud` and `bridge`; `direct` and `shared` are not drivable on a
-  folder (the File System Access picker, §7.1), the reader's side of a folder library
-  being covered by its vitest suite and a manual Chrome run. The cloud leg names its four
-  providers rather than `all`, so the folder's `cloud` suite runs in one leg only.
+  The folder leg runs `cloud`, `bridge` and `shared` (its Local Folder specs, the folder
+  dropped on the reader's page, §7.1); there is no `direct` on a folder. The cloud leg
+  names its four providers rather than `all`, so the folder's `cloud` suite runs in one
+  leg only. `playwright install chromium` brings full Chromium beside the headless
+  shell, which the Local Folder specs need.
 
   The rclone and cloud legs use the rig's pinned rclone download. The reader's build
   cache is per machine (rig/reader.rs), so a leg runs `vite build` once more over the
