@@ -234,11 +234,14 @@ fn a_store_write_lands_in_the_folder() {
 #[test]
 fn a_chrome_style_write_shows_only_after_the_swap() {
     let t = T::new(&[("S/Vol 1.cbz", b"zip")]);
-    // Chromium: an empty file, then the bytes into the swap file beside it.
+    // Chromium: an empty file (`getFileHandle`), then the bytes into the swap file
+    // beside it (`createWritable`). The watcher wakes the feed after its quiet period,
+    // so a walk sees each step alone: the empty file is held back either way.
     std::fs::write(t.disk("S/Vol 2.cbz"), b"").unwrap();
+    std::thread::sleep(Duration::from_secs(4));
+    assert!(!fs::exists(t.abs("S/Vol 2.cbz")));
     let bytes = pattern(200_000);
     std::fs::write(t.disk("S/Vol 2.cbz.crswap"), &bytes).unwrap();
-    // The watcher wakes the feed after the quiet period: nothing to show yet.
     std::thread::sleep(Duration::from_secs(4));
     assert!(!fs::exists(t.abs("S/Vol 2.cbz")));
     assert!(!fs::exists(t.abs("S/Vol 2.cbz.crswap")));

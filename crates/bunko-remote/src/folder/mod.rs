@@ -16,10 +16,11 @@
 //! WebDAV's; a filesystem watcher only wakes the feed early ([`watch`]).
 //!
 //! **Hidden.** Bunko's internal names (`names::is_reserved_name`: staged uploads,
-//! probe and case-rename leftovers, the trash), Chromium's `*.crswap` swap files and a
-//! 0-byte file while its swap file exists (a reader write in progress), symbolic links
-//! and junctions, names that are not UTF-8, and at the top `$RECYCLE.BIN`,
-//! `System Volume Information` and `lost+found`.
+//! probe and case-rename leftovers, the trash), Chromium's `*.crswap` swap files, a
+//! reader write in progress (a 0-byte file while its swap file exists, or written less
+//! than [`EMPTY_SETTLE`] ago, unless Bunko wrote it), symbolic links and junctions,
+//! names that are not UTF-8, and at the top `$RECYCLE.BIN`, `System Volume Information`
+//! and `lost+found`.
 //!
 //! **Writes.** Uploads go to `.bunko-<token>.tmp` beside the target, are checked
 //! against the staged sha256, fsynced, then renamed into place (a create never
@@ -83,6 +84,21 @@ const DIR_CACHE_TTL: Duration = Duration::from_secs(1);
 const LEFTOVER_AGE: Duration = Duration::from_secs(86_400);
 /// The trash is purged this often.
 const PURGE_EVERY: Duration = Duration::from_secs(86_400);
+/// An empty file written less than this long ago is a write in progress, swap file or
+/// not. Chromium makes the empty target at `getFileHandle(create)` and the swap file
+/// at `createWritable()`: Mokuro Reader calls the two back to back, so the gap is
+/// milliseconds, a few seconds on a slow share. The margin is for the rest: a
+/// filesystem keeping times to 2 s (FAT), and a share whose clock runs behind this
+/// computer's (its stamp looks older than it is). Holding an empty file back costs
+/// next to nothing: an empty archive or sidecar is no volume and no OCR.
+pub const EMPTY_SETTLE: Duration = Duration::from_secs(60);
+/// A modification time further ahead of this computer's clock than this is a wrong
+/// clock, not a write just made (5 minutes: the clock skew Kerberos, and so a domain
+/// share, tolerates). Without the bound, a far-future stamp would hide a file forever.
+const CLOCK_AHEAD: Duration = Duration::from_secs(300);
+/// How long after an empty file settles the feed looks again (stamps of 2 s and the
+/// gap between the two clocks it is measured by).
+const SETTLE_SLACK: Duration = Duration::from_millis(500);
 /// Top-level names a filesystem or OS keeps for itself.
 const ROOT_SYSTEM: [&str; 3] = ["$RECYCLE.BIN", "System Volume Information", "lost+found"];
 
@@ -146,6 +162,8 @@ impl std::fmt::Debug for FolderBackend {
 struct Knobs {
     granularity_ns: std::sync::atomic::AtomicI64,
     stop_case_rename: std::sync::atomic::AtomicBool,
+    /// Check spellings against folder listings, as on a case-folding filesystem.
+    spell_exact: std::sync::atomic::AtomicBool,
     /// Runs once in the next replace, after its copy and before its rename.
     before_replace: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
@@ -169,6 +187,9 @@ struct Inner {
     warned: Mutex<HashSet<PathBuf>>,
     watch: watch::Watch,
     last_purge: Mutex<Option<Instant>>,
+    /// When the youngest empty file held back as a write in progress settles: no event
+    /// marks that moment, so `wait_change` returns by then.
+    settles: Mutex<Option<Instant>>,
     #[cfg(feature = "testing")]
     knobs: Knobs,
 }
@@ -305,6 +326,19 @@ fn is_swap_of(candidate: &str, name: &str) -> bool {
     n.is_empty()
         || n.strip_suffix('.')
             .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// How much longer an empty file last written at `mtime` is a write in progress, as of
+/// `now`: `None` once it is not ([`EMPTY_SETTLE`] after its time; at once when its time
+/// is more than [`CLOCK_AHEAD`] ahead of `now`).
+fn unsettled_for(mtime: SystemTime, now: SystemTime) -> Option<Duration> {
+    match now.duration_since(mtime) {
+        Ok(age) => EMPTY_SETTLE.checked_sub(age).filter(|d| !d.is_zero()),
+        Err(ahead) => {
+            let ahead = ahead.duration();
+            (ahead <= CLOCK_AHEAD).then(|| ahead + EMPTY_SETTLE)
+        }
+    }
 }
 
 /// One path segment the driver can address: a single normal component.
@@ -478,6 +512,10 @@ impl Inner {
     /// Whether a lookup can succeed in another spelling than the one on disk (or it
     /// is not known yet): `stat` then checks every segment against its folder.
     fn needs_exact(&self) -> bool {
+        #[cfg(feature = "testing")]
+        if self.knobs.spell_exact.load(Ordering::Relaxed) {
+            return true;
+        }
         let g = self.probe.read();
         !g.1.ran || g.0.folds_case || g.0.rewrites_names || g.1.folds_unicode
     }
@@ -598,9 +636,10 @@ impl Inner {
         self.dirs.lock().clear();
     }
 
-    /// The names in `dir` (cached for [`DIR_CACHE_TTL`]).
-    fn dir_names(&self, dir: &Path) -> std::io::Result<Arc<HashSet<OsString>>> {
-        if let Some((at, names)) = self.dirs.lock().get(dir)
+    /// The names in `dir` (cached for [`DIR_CACHE_TTL`]; read afresh when `fresh`).
+    fn dir_names(&self, dir: &Path, fresh: bool) -> std::io::Result<Arc<HashSet<OsString>>> {
+        if !fresh
+            && let Some((at, names)) = self.dirs.lock().get(dir)
             && at.elapsed() < DIR_CACHE_TTL
         {
             return Ok(names.clone());
@@ -716,26 +755,79 @@ impl Inner {
         if self.needs_exact() {
             let mut dir = self.root.clone();
             for seg in &segs {
-                match self.dir_names(&dir) {
-                    Ok(names) if names.contains(OsStr::new(seg)) => {}
-                    Ok(_) => return Ok(None),
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-                    Err(e) => return Err(io_err(&e, Act::Read, pid)),
+                let mut fresh = false;
+                loop {
+                    match self.dir_names(&dir, fresh) {
+                        Ok(names) if names.contains(OsStr::new(seg)) => break,
+                        // The file is there but the listing read a moment ago lacks the
+                        // name: made since then, or spelled otherwise. Read it again.
+                        Ok(_) if !fresh => fresh = true,
+                        Ok(_) => return Ok(None),
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                        Err(e) => return Err(io_err(&e, Act::Read, pid)),
+                    }
                 }
                 dir.push(seg);
             }
         }
-        if m.is_file() && m.len() == 0 {
-            let (dir, name) = (abs.parent().unwrap_or(&self.root), split_pid(pid).1);
-            let swapping = std::fs::read_dir(dir).is_ok_and(|rd| {
+        let (dir, name) = (abs.parent().unwrap_or(&self.root), split_pid(pid).1);
+        let writing = self.writing(pid, &m, || {
+            std::fs::read_dir(dir).is_ok_and(|rd| {
                 rd.flatten()
                     .any(|e| e.file_name().to_str().is_some_and(|n| is_swap_of(n, name)))
-            });
-            if swapping {
-                return Ok(None);
-            }
+            })
+        });
+        if writing {
+            return Ok(None);
         }
         Ok(Some(m))
+    }
+
+    /// The file at `pid` (metadata `m`) is a reader's write in progress, listed by
+    /// nothing: an empty file while a swap file beside it exists (`swapping` asks;
+    /// a slow write keeps it however long it takes), or one written less than
+    /// [`EMPTY_SETTLE`] ago that Bunko did not write itself (Chromium makes the empty
+    /// target before the swap file). An older empty file is a file.
+    fn writing(&self, pid: &str, m: &Metadata, swapping: impl FnOnce() -> bool) -> bool {
+        if !(m.is_file() && m.len() == 0) {
+            return false;
+        }
+        if let Ok(t) = m.modified()
+            && let Some(left) = unsettled_for(t, SystemTime::now())
+            // Bunko's own empty files are in the memo (an upload's or copy's version).
+            && self.memo.get(pid, &version_of(m)).is_none()
+        {
+            self.settles_in(left);
+            return true;
+        }
+        swapping()
+    }
+
+    /// An empty file held back settles in `left`: the feed looks again by then.
+    /// The earliest such time is kept, even once past: a file that settled before the
+    /// feed got to its wait is due a look at once ([`Inner::snapshot`] starts afresh).
+    fn settles_in(&self, left: Duration) {
+        let at = Instant::now() + left + SETTLE_SLACK;
+        let mut g = self.settles.lock();
+        if g.is_none_or(|t| at < t) {
+            *g = Some(at);
+        }
+    }
+
+    /// `max`, or less when an empty file held back settles sooner: nothing when one
+    /// has settled since the last walk began.
+    fn until_settled(&self, max: Duration) -> Duration {
+        let mut g = self.settles.lock();
+        match *g {
+            None => max,
+            Some(t) => {
+                let left = t.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    *g = None;
+                }
+                max.min(left)
+            }
+        }
     }
 
     /// A folder (`dir`, at `dir_abs`) Bunko must be able to write into.
@@ -796,15 +888,11 @@ impl Inner {
             if m.file_type().is_symlink() {
                 continue;
             }
-            if m.is_file() && m.len() == 0 && all.iter().any(|n| is_swap_of(n, &name)) {
-                continue; // a reader write in progress
+            let pid = join_pid(dir_pid, &name);
+            if self.writing(&pid, &m, || all.iter().any(|n| is_swap_of(n, &name))) {
+                continue;
             }
-            out.push(node_of(
-                join_pid(dir_pid, &name),
-                Some(dir_pid.to_string()),
-                &name,
-                &m,
-            ));
+            out.push(node_of(pid, Some(dir_pid.to_string()), &name, &m));
         }
         out.sort_by(|a, b| a.name_raw.cmp(&b.name_raw));
         Ok(out)
@@ -876,6 +964,8 @@ impl Inner {
     /// The whole library (the root included) as a generation's entries, and its nodes.
     /// A missing folder is an empty one; one that is away fails.
     fn snapshot(&self, carry: Option<&Generation>) -> Result<(Vec<RNode>, Entries), BErr> {
+        // This walk sees every file held back: it notes again those still unsettled.
+        *self.settles.lock() = None;
         let m = match self.root_state() {
             RootState::Dir(m) => m,
             RootState::Missing => return Ok((Vec::new(), Entries::new())),
@@ -1362,10 +1452,16 @@ impl Inner {
             if let Ok(f) = std::fs::OpenOptions::new().write(true).open(&tmp) {
                 let _ = f.sync_all();
             }
-            let cver = std::fs::symlink_metadata(&tmp)
-                .map(|m| version_of(&m))
-                .map_err(|e| io_err(&e, Act::Create, &dest))?;
-            let hash = self.memo.get(pid, &version_of(&sm));
+            let made =
+                std::fs::symlink_metadata(&tmp).map_err(|e| io_err(&e, Act::Create, &dest))?;
+            let cver = version_of(&made);
+            // An empty copy's hash is known; the memo then also marks it Bunko's own
+            // (`Inner::writing`), its time being new.
+            let hash = if made.len() == 0 {
+                Some(hex::encode(Sha256::digest(b"")))
+            } else {
+                self.memo.get(pid, &version_of(&sm))
+            };
             if let Some(h) = &hash {
                 self.memo.put(&dest, &cver, h);
             }
@@ -1389,6 +1485,10 @@ impl Inner {
         fsops::fsync_dir(&parent_abs);
         self.memo.keep_only(&dest, &cver);
         let node = self.read_back(parent, &parent_abs, name)?;
+        if node.pid != dest {
+            // A filesystem that rewrote the name: the memo follows its spelling.
+            self.memo.rebase(&dest, &node.pid);
+        }
         Ok(self.with_hash(node))
     }
 
@@ -1565,6 +1665,7 @@ impl FolderBackend {
             replayed: std::sync::atomic::AtomicBool::new(false),
             warned: Mutex::new(HashSet::new()),
             last_purge: Mutex::new(None),
+            settles: Mutex::new(None),
             #[cfg(feature = "testing")]
             knobs: Knobs::default(),
         });
@@ -1689,6 +1790,12 @@ impl FolderBackend {
     /// probe found).
     pub fn force_mtime_granularity(&self, ns: i64) {
         self.inner.knobs.granularity_ns.store(ns, Ordering::Relaxed);
+    }
+
+    /// Tests: check every spelling against folder listings, as on a filesystem that
+    /// folds case (macOS, Windows), whatever the probe found.
+    pub fn force_exact_spelling(&self) {
+        self.inner.knobs.spell_exact.store(true, Ordering::Relaxed);
     }
 
     /// Tests: the next case-only rename stops after its first rename, as a crash
@@ -1946,8 +2053,11 @@ impl Backend for FolderBackend {
     }
 
     /// Returns once the watcher saw a change after the walk behind `c` started and the
-    /// folder has been quiet a moment, or at `max`. Never fails.
+    /// folder has been quiet a moment, when an empty file held back as a write in
+    /// progress settles, or at `max`. Never fails.
     async fn wait_change(&self, c: &Cursor, max: Duration) -> Result<(), BErr> {
+        // An empty file held back as a write in progress settles without an event.
+        let max = self.inner.until_settled(max);
         if !self.inner.watch_on {
             tokio::time::sleep(max).await;
             return Ok(());
@@ -2279,6 +2389,28 @@ mod tests {
         assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists);
         rename_new_fallback(&p("D"), &p("F"), true, true).unwrap();
         assert_eq!(std::fs::read(p("F/x")).unwrap(), b"x");
+    }
+
+    #[test]
+    fn an_empty_file_settles_after_its_time_and_a_wrong_clock_holds_nothing() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let s = Duration::from_secs;
+        assert_eq!(unsettled_for(now, now), Some(EMPTY_SETTLE));
+        assert_eq!(unsettled_for(now - s(20), now), Some(EMPTY_SETTLE - s(20)));
+        // A FAT stamp, rounded down to an even second, is a little older.
+        assert_eq!(unsettled_for(now - s(1), now), Some(EMPTY_SETTLE - s(1)));
+        assert_eq!(unsettled_for(now - EMPTY_SETTLE, now), None);
+        assert_eq!(unsettled_for(now - EMPTY_SETTLE - s(1), now), None);
+        assert_eq!(unsettled_for(UNIX_EPOCH, now), None);
+        // A share's clock ahead of ours: the stamp counts from when it is reached.
+        assert_eq!(unsettled_for(now + s(10), now), Some(EMPTY_SETTLE + s(10)));
+        assert_eq!(
+            unsettled_for(now + CLOCK_AHEAD, now),
+            Some(EMPTY_SETTLE + CLOCK_AHEAD)
+        );
+        // Further ahead is a wrong clock: nothing is held back for it.
+        assert_eq!(unsettled_for(now + CLOCK_AHEAD + s(1), now), None);
+        assert_eq!(unsettled_for(now + s(365 * 86_400), now), None);
     }
 
     #[test]
