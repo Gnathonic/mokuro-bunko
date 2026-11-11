@@ -2293,6 +2293,9 @@ struct CountedLocal {
     install: Arc<FakeInstall>,
     starts: std::sync::atomic::AtomicUsize,
     ended: Arc<std::sync::atomic::AtomicUsize>,
+    /// How much longer than its sessions its end takes (ms): a processor slow to free
+    /// its models.
+    end_delay_ms: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl bunko_server::ocr::LocalProcessorFactory for CountedLocal {
@@ -2304,9 +2307,12 @@ impl bunko_server::ocr::LocalProcessorFactory for CountedLocal {
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let mut channels = FakeLocal(self.fake.clone()).start(results_dir)?;
         let ended = self.ended.clone();
+        let delay = self.end_delay_ms.clone();
         channels.finished = channels.finished.map(|f| {
             tokio::spawn(async move {
                 let _ = f.await;
+                let ms = delay.load(std::sync::atomic::Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(ms)).await;
                 ended.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             })
         });
@@ -2401,6 +2407,7 @@ impl LocalRun {
             install: FakeInstall::new(None),
             starts: std::sync::atomic::AtomicUsize::new(0),
             ended: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            end_delay_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         });
         let ocr = OcrControl::new(OcrDeps {
             core: core.clone(),
@@ -2615,4 +2622,32 @@ async fn a_backend_change_restarts_this_servers_ocr_cleanly() {
     .await;
     run.stop.cancel();
     run.ocr.stop().await;
+}
+
+/// The server stopping right after this server's OCR was turned off waits for the old
+/// processor's wind-down: the stop that turning it off spawned had taken the
+/// processor's end, so the server's stop found nothing to wait for and returned while
+/// the processor and its engine were still being torn down.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stop_right_after_turning_this_servers_ocr_off_waits_for_its_wind_down() {
+    let run = LocalRun::start().await;
+    run.factory
+        .end_delay_ms
+        .store(1500, std::sync::atomic::Ordering::SeqCst);
+    run.set_local(false).await;
+    // The wind-down that turning it off started is under way.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(run.ended(), 0, "still winding down");
+
+    run.stop.cancel();
+    run.ocr.stop().await;
+
+    assert_eq!(
+        run.ended(),
+        1,
+        "the server's stop returned before its OCR ended"
+    );
+    // Nothing starts it again once stopped.
+    run.ocr.restart_local("an install ended").await;
+    assert_eq!(run.starts(), 1);
 }

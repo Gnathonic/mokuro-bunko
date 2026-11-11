@@ -139,8 +139,11 @@ struct Inner {
     /// Which start of the local processor is current: a stopped one's late "it ended"
     /// must not drop its successor.
     local_gen: std::sync::atomic::AtomicU64,
-    /// One (re)start of the local processor at a time.
+    /// One (re)start or stop of the local processor at a time. The server's stop takes
+    /// it too: a wind-down under way (OCR on this machine just turned off) ends first.
     local_restart: tokio::sync::Mutex<()>,
+    /// The server is stopping: no local processor starts any more.
+    stopped: std::sync::atomic::AtomicBool,
     /// The runtime `start` ran in (restarts from synchronous code use it).
     runtime: Mutex<Option<tokio::runtime::Handle>>,
     upgrade: Arc<upgrade::Upgrade>,
@@ -263,6 +266,7 @@ impl OcrControl {
             local_finished: Mutex::new(None),
             local_gen: std::sync::atomic::AtomicU64::new(0),
             local_restart: tokio::sync::Mutex::new(()),
+            stopped: std::sync::atomic::AtomicBool::new(false),
             runtime: Mutex::new(None),
             upgrade: up,
             running_jobs: actor::RunningJobs::default(),
@@ -570,6 +574,9 @@ impl OcrControl {
     }
 
     fn start_local(&self, factory: &dyn LocalProcessorFactory) {
+        if self.0.stopped.load(std::sync::atomic::Ordering::SeqCst) {
+            return; // The server is stopping.
+        }
         // Each start is a generation of its own, taken before its `LocalUp`: a processor
         // let go before it (turned off, restarted, or one that stopped by itself) never
         // speaks for it or drops it.
@@ -641,14 +648,31 @@ impl OcrControl {
 
     /// Stop the scheduler (in-flight volumes go back unrecorded) and wait for it, then
     /// for the local processor it let go of: its sessions wind down and free their
-    /// models before this returns (bounded), not under the process exit.
+    /// models before this returns (bounded), not under the process exit. A stop, restart
+    /// or start of the local processor under way (OCR on this machine turned off just
+    /// before) ends first: it may hold the processor's end and be waiting for it.
     pub async fn stop(&self) {
+        self.0
+            .stopped
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         // A paced direct-upgrade job ends after its current volume.
         self.0.upgrade.halt();
         self.send(Msg::Stop);
         let handle = self.0.thread.lock().take();
         if let Some(h) = handle {
             let _ = tokio::task::spawn_blocking(move || h.join()).await;
+        }
+        // Bounded: that wind-down waits for the processor at most LOCAL_STOP_WAIT itself,
+        // and with the scheduler gone it gets no answer to wait for.
+        let waited = tokio::time::timeout(
+            LOCAL_STOP_WAIT + Duration::from_secs(5),
+            self.0.local_restart.lock(),
+        )
+        .await;
+        if waited.is_err() {
+            tracing::warn!(
+                "this server's OCR was still being stopped or restarted; exiting anyway"
+            );
         }
         let local = self.0.local_finished.lock().take();
         if let Some(f) = local
