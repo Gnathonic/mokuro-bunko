@@ -229,7 +229,7 @@ fn a_direct_replace_keeps_a_layer_an_enabled_row_writes() {
 }
 
 #[test]
-fn a_volume_without_a_match_gets_an_upgrade_job_after_ordinary_work() {
+fn a_volume_without_a_match_gets_an_upgrade_job_after_the_primarys_gaps() {
     let mut h = harness_full(vec![primary()], Arc::new(FileFacts), Some(enabled()));
     h.add("A/V1.cbz", 3);
     h.add("B/V9.cbz", 3);
@@ -240,7 +240,8 @@ fn a_volume_without_a_match_gets_an_upgrade_job_after_ordinary_work() {
     let mut p = h.connect("box", 1);
     let ops = p.drain();
     let vols = volumes(&ops);
-    // A volume with no OCR beats one with old OCR.
+    // A volume with no OCR beats one with old OCR: the primary's missing files come
+    // before its upgrades.
     assert_eq!(vols[0].2, "/mokuro-reader/B/V9.cbz");
     assert_eq!(vols[1].2, "/mokuro-reader/A/V1.cbz");
     assert!(h.s.claims.contains_key(&Job::upgrade("A/V1.cbz", "g-1")));
@@ -784,4 +785,189 @@ fn a_stale_layer_in_another_spelling_is_run_again() {
         [Arc::<str>::from("g-2")],
         "the stale layer is owed, not the main"
     );
+}
+
+/// What the queue would run next, in order: `(volume, row, upgrade)`.
+fn queue_order(h: &mut H) -> Vec<(String, String, bool)> {
+    h.s.candidates(&std::collections::HashSet::new(), false)
+        .into_iter()
+        .map(|j| (j.rel.to_string(), j.gid.to_string(), j.upgrade))
+        .collect()
+}
+
+fn job(rel: &str, gid: &str, upgrade: bool) -> (String, String, bool) {
+    (rel.into(), gid.into(), upgrade)
+}
+
+/// The primary's upgrade jobs run at the primary's place: after its missing files and
+/// before the next row's. They used to wait behind every job of every layer.
+#[test]
+fn primary_upgrades_run_after_its_gaps_and_before_the_next_rows_gaps() {
+    let mut h = harness_db(
+        vec![primary(), layer("g-2", "fast")],
+        Arc::new(FileFacts),
+        Some(enabled()),
+    );
+    h.add("A/V1.cbz", 3);
+    h.add("B/V9.cbz", 3);
+    h.add("C/V5.cbz", 3);
+    let lib = h.library();
+    // A: old OCR (the upgrade, then the layer). B: none. C: today's OCR, no layer.
+    std::fs::write(lib.join("A/V1.mokuro"), LEGACY).unwrap();
+    h.bunko_wrote("C/V5.mokuro", hayai(), &primary());
+    h.at(0.0);
+    assert_eq!(
+        queue_order(&mut h),
+        [
+            job("B/V9.cbz", "g-1", false),
+            job("A/V1.cbz", "g-1", true),
+            job("A/V1.cbz", "g-2", false),
+            job("B/V9.cbz", "g-2", false),
+            job("C/V5.cbz", "g-2", false),
+        ]
+    );
+}
+
+/// A layer Bunko wrote at an older engine revision is an upgrade of its row: it runs
+/// after that row's missing files and before the next row's.
+#[test]
+fn an_outdated_layer_runs_after_its_rows_gaps_and_before_the_next_rows() {
+    let (before, bumped) = (current(), current() + 1);
+    let main = sealed(&hayai_at(bumped));
+    let stale = sealed(&hayai_at(before).replace(
+        r#""patch_budget":512"#,
+        r#""patch_budget":512,"generation":"fast""#,
+    ));
+    let on = UpgradeConfig {
+        enabled: true,
+        replace: vec![],
+    };
+    let rows = vec![primary(), layer("g-2", "fast"), layer("g-3", "slow")];
+    let mut h = harness_db(rows, Arc::new(FileFacts), Some(on));
+    h.add("A/V1.cbz", 3);
+    h.add("B/V2.cbz", 3);
+    let lib = h.library();
+    std::fs::write(lib.join("A/V1.mokuro"), &main).unwrap();
+    std::fs::write(lib.join("A/V1.fast.mokuro"), &stale).unwrap();
+    std::fs::write(lib.join("B/V2.mokuro"), &main).unwrap();
+    upgrade_of(&h).set_engine_revision("hayai-nova", bumped);
+    h.at(0.0);
+    assert_eq!(
+        h.s.owed.volumes["A/V1.cbz"].outdated,
+        [Arc::<str>::from("g-2")]
+    );
+    assert!(h.s.owed.volumes["B/V2.cbz"].outdated.is_empty());
+    assert_eq!(
+        queue_order(&mut h),
+        [
+            job("B/V2.cbz", "g-2", false),
+            job("A/V1.cbz", "g-2", false),
+            job("A/V1.cbz", "g-3", false),
+            job("B/V2.cbz", "g-3", false),
+        ]
+    );
+}
+
+/// A row's missing files and its upgrades take series turns separately: each group
+/// has its own cursor.
+#[test]
+fn gap_and_upgrade_turns_keep_their_own_cursor() {
+    let (before, bumped) = (current(), current() + 1);
+    let main = sealed(&hayai_at(bumped));
+    let stale = sealed(&hayai_at(before).replace(
+        r#""patch_budget":512"#,
+        r#""patch_budget":512,"generation":"fast""#,
+    ));
+    let on = UpgradeConfig {
+        enabled: true,
+        replace: vec![],
+    };
+    let mut h = harness_db(
+        vec![primary(), layer("g-2", "fast")],
+        Arc::new(FileFacts),
+        Some(on),
+    );
+    let lib = h.library();
+    for s in ["A", "B", "C", "D"] {
+        h.add(&format!("{s}/V1.cbz"), 3);
+        std::fs::write(lib.join(format!("{s}/V1.mokuro")), &main).unwrap();
+    }
+    for s in ["A", "B"] {
+        std::fs::write(lib.join(format!("{s}/V1.fast.mokuro")), &stale).unwrap();
+    }
+    upgrade_of(&h).set_engine_revision("hayai-nova", bumped);
+    h.at(0.0);
+    let gaps = h.s.job_key(&Job::new("C/V1.cbz", "g-2")).generation_id;
+    let upgrades = h.s.job_key(&Job::new("A/V1.cbz", "g-2")).generation_id;
+    assert_ne!(gaps, upgrades);
+    let rels = |h: &mut H| -> Vec<String> { queue_order(h).into_iter().map(|j| j.0).collect() };
+
+    h.s.last_served.insert(gaps.clone(), "C".into());
+    assert_eq!(
+        rels(&mut h),
+        ["D/V1.cbz", "C/V1.cbz", "A/V1.cbz", "B/V1.cbz"]
+    );
+
+    h.s.last_served.insert(upgrades, "A".into());
+    assert_eq!(
+        rels(&mut h),
+        ["D/V1.cbz", "C/V1.cbz", "B/V1.cbz", "A/V1.cbz"]
+    );
+}
+
+/// The primary's upgrades come before a layer's work, so a session on that layer
+/// drains when they appear, as it does for the primary's missing files.
+#[test]
+fn a_layer_session_drains_when_the_primary_has_upgrades() {
+    let mut h = harness_db(
+        vec![primary(), layer("g-2", "fast")],
+        Arc::new(FileFacts),
+        Some(enabled()),
+    );
+    h.add("A/V1.cbz", 3);
+    h.bunko_wrote("A/V1.mokuro", hayai(), &primary());
+    h.at(0.0);
+    let mut p = h.connect("box", 1);
+    let ops = p.drain();
+    assert_eq!(volumes(&ops).len(), 1);
+    let sid = opened(&ops)[0].clone();
+    assert_eq!(h.s.sessions[&sid].row.id, "g-2");
+    assert!(h.s.sessions[&sid].draining.is_none());
+
+    h.add("B/V1.cbz", 3);
+    std::fs::write(h.library().join("B/V1.mokuro"), LEGACY).unwrap();
+    h.at(31.0);
+    assert!(h.s.owed.volumes["B/V1.cbz"].upgrade);
+    assert_eq!(
+        h.s.sessions[&sid].draining.as_deref(),
+        Some("an earlier generation has work")
+    );
+}
+
+/// An earlier job this machine gave back does not drain its session: it would only
+/// reopen on its own row and drain again.
+#[test]
+fn a_layer_session_keeps_running_past_an_upgrade_it_gave_back() {
+    let mut h = harness_db(
+        vec![primary(), layer("g-2", "fast")],
+        Arc::new(FileFacts),
+        Some(enabled()),
+    );
+    h.add("A/V1.cbz", 3);
+    h.bunko_wrote("A/V1.mokuro", hayai(), &primary());
+    h.at(0.0);
+    let mut p = h.connect("box", 1);
+    let ops = p.drain();
+    let sid = opened(&ops)[0].clone();
+    assert_eq!(h.s.sessions[&sid].row.id, "g-2");
+
+    h.s.returned_by.insert(
+        Job::upgrade("B/V1.cbz", "g-1"),
+        std::collections::HashSet::from([p.pid.clone()]),
+    );
+    h.add("B/V1.cbz", 3);
+    std::fs::write(h.library().join("B/V1.mokuro"), LEGACY).unwrap();
+    h.at(31.0);
+    assert!(h.s.owed.volumes["B/V1.cbz"].upgrade);
+    assert!(h.s.sessions[&sid].draining.is_none());
 }

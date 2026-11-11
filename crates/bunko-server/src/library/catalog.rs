@@ -747,6 +747,14 @@ fn build_manifest(deps: &LibraryDeps, series: &str, volume: &str, headers: &Head
         .as_ref()
         .map(|o| o.volume_outlook(&archive, series, volume))
         .unwrap_or_default();
+    if outlook.busy {
+        return json_bytes(
+            503,
+            br#"{"error": "The OCR queue did not answer in time; ask again shortly"}"#.to_vec(),
+            Some(headers),
+            &[("retry-after", "5"), ("cache-control", "no-store")],
+        );
+    }
     manifest.insert(
         "pending",
         JsonValue::Array(outlook.pending.iter().map(to_py).collect()),

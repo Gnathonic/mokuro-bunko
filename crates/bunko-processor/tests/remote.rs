@@ -27,6 +27,15 @@ enum Mode {
     RoundTrip,
     /// Close the first socket at the first page of the first volume.
     DropOnFirstPage,
+    /// Two sessions one after the other on the same archive (a library taking work by
+    /// volume): the first claim says `keep_archive: keep`, the second names the ETag
+    /// `second_etag` and, unless `let_go`, the archive among those the processor still
+    /// runs (`kept_archives`).
+    TwoClaims {
+        keep: bool,
+        second_etag: &'static str,
+        let_go: bool,
+    },
 }
 
 struct Lib {
@@ -41,6 +50,8 @@ struct Lib {
     registers: Vec<RegisterRequest>,
     uploads: HashMap<String, (String, String, Vec<u8>)>,
     sockets: u32,
+    /// Archive GETs answered.
+    gets: u32,
 }
 
 type Shared = Arc<(Mutex<Lib>, Notify)>;
@@ -120,7 +131,11 @@ async fn archive(
     if path != "Series A/Vol 1.cbz" {
         return StatusCode::NOT_FOUND.into_response();
     }
-    let body = lib.0.lock().archive.clone();
+    let body = {
+        let mut l = lib.0.lock();
+        l.gets += 1;
+        l.archive.clone()
+    };
     (
         [(header::ETAG, "\"a1\""), (header::ACCEPT_RANGES, "bytes")],
         body,
@@ -176,18 +191,32 @@ fn op(op: &Op) -> Message {
     Message::Text(serde_json::to_string(op).unwrap().into())
 }
 
+const ARCHIVE: &str = "/mokuro-reader/Series A/Vol 1.cbz";
+
 fn volume() -> Op {
+    volume_of("s1", "v1", "\"a1\"", false, None)
+}
+
+fn volume_of(
+    sid: &str,
+    claim: &str,
+    etag: &str,
+    keep_archive: bool,
+    kept_archives: Option<Vec<String>>,
+) -> Op {
     Op::Volume(VolumeOp {
-        sid: "s1".into(),
-        claim: "v1".into(),
-        archive: "/mokuro-reader/Series A/Vol 1.cbz".into(),
+        sid: sid.into(),
+        claim: claim.into(),
+        archive: ARCHIVE.into(),
         sidecar_name: "Vol 1.mokuro".into(),
         title: "Series A".into(),
         volume_title: "Vol 1".into(),
         title_uuid: Some("tu".into()),
         volume_uuid: Some("vu".into()),
         size: None,
-        etag: Some("\"a1\"".into()),
+        etag: Some(etag.into()),
+        keep_archive,
+        kept_archives,
     })
 }
 
@@ -223,6 +252,42 @@ async fn drive(mut ws: WebSocket, lib: Shared, n: u32) {
         if n != 1 {
             continue;
         }
+        if let Mode::TwoClaims {
+            keep,
+            second_etag,
+            let_go,
+        } = mode
+        {
+            let held = || Some(vec![ARCHIVE.to_string()]);
+            match &event {
+                Event::Ready { sid, .. } if sid == "s1" => {
+                    ws.send(op(&volume_of("s1", "v1", "\"a1\"", keep, held())))
+                        .await
+                        .unwrap();
+                }
+                Event::Ready { sid, .. } => {
+                    let named = if let_go { Some(Vec::new()) } else { held() };
+                    ws.send(op(&volume_of(sid, "v2", second_etag, false, named)))
+                        .await
+                        .unwrap();
+                }
+                Event::VolumeDone { sid, .. } | Event::VolumeFailed { sid, .. } => {
+                    ws.send(op(&Op::CloseSession { sid: sid.clone() }))
+                        .await
+                        .unwrap();
+                }
+                Event::Exit { sid, .. } if sid == "s1" => {
+                    ws.send(op(&Op::OpenSession {
+                        sid: "s2".into(),
+                        generation: common::row("fake"),
+                    }))
+                    .await
+                    .unwrap();
+                }
+                _ => {}
+            }
+            continue;
+        }
         match (&event, mode) {
             (Event::Ready { .. }, _) => ws.send(op(&volume())).await.unwrap(),
             (Event::Page { .. }, Mode::DropOnFirstPage) => return,
@@ -248,6 +313,7 @@ async fn library(mode: Mode, token_ok: bool, upload_status: u16) -> (String, Sha
             registers: Vec::new(),
             uploads: HashMap::new(),
             sockets: 0,
+            gets: 0,
         }),
         Notify::new(),
     ));
@@ -526,4 +592,120 @@ async fn a_dropped_socket_ends_everything_silently_and_registers_again() {
         .unwrap()
         .unwrap()
         .unwrap();
+}
+
+/// Two claims of one archive, the first asking to keep it (by volume): `(GETs, the
+/// second claim's fetch-ready detail)`.
+async fn two_claims(
+    keep: bool,
+    second_etag: &'static str,
+    let_go: bool,
+) -> (u32, serde_json::Value) {
+    two_claims_with(keep, second_etag, let_go, FakeConfig::default()).await
+}
+
+/// [`two_claims`] over a fake pipeline configured as `fake`.
+async fn two_claims_with(
+    keep: bool,
+    second_etag: &'static str,
+    let_go: bool,
+    fake: FakeConfig,
+) -> (u32, serde_json::Value) {
+    let dir = tempfile::tempdir().unwrap();
+    let mode = Mode::TwoClaims {
+        keep,
+        second_etag,
+        let_go,
+    };
+    let (url, lib) = library(mode, true, 200).await;
+    let mut options =
+        ServeOptions::new(config(&url, dir.path()), Arc::new(FakePipeline::new(fake)));
+    options.backoff_start = Duration::from_millis(100);
+    let shutdown = options.shutdown.clone();
+    let task = tokio::spawn(serve(options));
+    wait_for(&lib, 15, |l| {
+        l.events
+            .iter()
+            .any(|(_, e)| matches!(e, Event::Exit { sid, .. } if sid == "s2"))
+    })
+    .await;
+    let (gets, ready, log) = {
+        let l = lib.0.lock();
+        let ready = l.events.iter().find_map(|(_, e)| match e {
+            Event::Fetch {
+                id, state, detail, ..
+            } if id == "v2" && state == "ready" => Some(serde_json::to_value(detail).unwrap()),
+            _ => None,
+        });
+        (l.gets, ready, l.log.clone())
+    };
+    assert!(
+        log.iter().any(|e| e == "1:volume_done:v2"),
+        "the second claim ran: {log:?}"
+    );
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    // Nothing kept outlives the connection.
+    assert_eq!(
+        std::fs::read_dir(dir.path().join(".processing/archives"))
+            .unwrap()
+            .count(),
+        0
+    );
+    (gets, ready.expect("the second claim's fetch ready"))
+}
+
+/// By volume the library asks to keep the archive after a claim: the volume's next
+/// claim (another session, another row) runs on the kept copy, downloaded once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_kept_archive_serves_the_next_claim_of_its_volume() {
+    let (gets, ready) = two_claims(true, "\"a1\"", false).await;
+    assert_eq!(gets, 1, "one download for both claims");
+    assert_eq!(ready["reused"], true);
+    assert_eq!(ready["requests"], 0);
+    assert_eq!(ready["members"], 3);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn without_keep_archive_each_claim_downloads() {
+    let (gets, ready) = two_claims(false, "\"a1\"", false).await;
+    assert_eq!(gets, 2);
+    assert!(ready.get("reused").is_none(), "{ready}");
+}
+
+/// The library names another ETag for the second claim (the archive was replaced):
+/// the kept copy is not used.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_kept_archive_of_another_version_is_downloaded_again() {
+    let (gets, ready) = two_claims(true, "\"a2\"", false).await;
+    assert_eq!(gets, 2);
+    assert!(ready.get("reused").is_none(), "{ready}");
+}
+
+/// The library stopped naming the archive among those it runs on this processor (it
+/// let the volume go): the kept copy is dropped, and a later claim downloads again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_kept_archive_the_library_lets_go_is_dropped() {
+    let (gets, ready) = two_claims(true, "\"a1\"", true).await;
+    assert_eq!(gets, 2);
+    assert!(ready.get("reused").is_none(), "{ready}");
+}
+
+/// Finding: a claim's copy was kept whenever the library asked, even when its run
+/// failed or was cancelled (a late worker could then add a copy after the connection
+/// cleared its copies). Only a run that completed keeps its copy: after a failed one
+/// the next claim downloads the archive again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_run_keeps_no_copy() {
+    let fake = FakeConfig {
+        fail_volumes: ["v1".to_string()].into_iter().collect(),
+        ..FakeConfig::default()
+    };
+    let (gets, ready) = two_claims_with(true, "\"a1\"", false, fake).await;
+    assert_eq!(gets, 2, "the failed claim's copy was not kept");
+    assert!(ready.get("reused").is_none(), "{ready}");
 }

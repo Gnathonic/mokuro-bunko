@@ -133,6 +133,10 @@ struct Inner {
     running_jobs: actor::RunningJobs,
     /// What the scheduler thread last published of its failing volumes.
     failing: actor::FailingVolumes,
+    /// What the scheduler thread last published of the rows each volume is owed.
+    owed: actor::OwedVolumes,
+    /// Archives that arrived after the published owed board was built.
+    fresh: actor::FreshArrivals,
     queue_file: queue_file::QueueFile,
     status: queue_api::StatusCache,
     storage: PathBuf,
@@ -141,6 +145,16 @@ struct Inner {
 /// The public handle of the OCR orchestrator (cheap to clone).
 #[derive(Clone)]
 pub struct OcrControl(Arc<Inner>);
+
+/// What [`OcrControl::ask_within`] got back.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Asked<T> {
+    Answer(T),
+    /// The scheduler is running but did not answer in time (busy, or starting).
+    TimedOut,
+    /// The scheduler is not running.
+    Gone,
+}
 
 /// `generator`: `mokuro-bunko <version>`.
 pub fn generator() -> String {
@@ -156,6 +170,7 @@ pub fn settings_from_config(config: &Config, local_available: bool) -> Settings 
         concurrency: config.ocr.concurrency.max(1),
         autobench: config.ocr.autobench,
         upgrade: config.ocr.upgrade.clone(),
+        by_volume: config.queue_order() == bunko_core::config::QueueOrder::Volume,
     }
 }
 
@@ -237,6 +252,8 @@ impl OcrControl {
             upgrade: up,
             running_jobs: actor::RunningJobs::default(),
             failing: actor::FailingVolumes::default(),
+            owed: actor::OwedVolumes::default(),
+            fresh: actor::FreshArrivals::default(),
             queue_file: queue_file::QueueFile::default(),
             status: queue_api::StatusCache::default(),
             storage: layout.base.clone(),
@@ -288,6 +305,22 @@ impl OcrControl {
             .cloned()
     }
 
+    /// The manifest's `pending` for `rel` (library-relative archive path) as the
+    /// scheduler last published it (within seconds), without finishing times; None
+    /// before it first published. Never waits on the scheduler.
+    pub fn owed_pending(&self, rel: &str) -> Option<Vec<serde_json::Value>> {
+        let board = self.0.owed.read().clone()?;
+        Some(board.pending(rel))
+    }
+
+    /// `rel` (library-relative archive path) arrived after the published owed board
+    /// was built: the board's `[]` for it says nothing. Read it before
+    /// [`Self::owed_pending`] (an arrival is settled after the board that knows it is
+    /// published). Never waits on the scheduler.
+    pub fn arrival_unsettled(&self, rel: &str) -> bool {
+        actor::arrival_unsettled(&self.0.fresh, rel)
+    }
+
     /// Start the scheduler thread, the in-process processor (full build, local
     /// processing on) and the stop watcher. Must be called inside a tokio runtime.
     pub fn start(&self, stop: CancellationToken) {
@@ -300,6 +333,8 @@ impl OcrControl {
             rx,
             self.0.running_jobs.clone(),
             self.0.failing.clone(),
+            self.0.owed.clone(),
+            self.0.fresh.clone(),
         ) {
             Ok(handle) => *self.0.thread.lock() = Some(handle),
             Err(e) => {
@@ -580,20 +615,42 @@ impl OcrControl {
         wait: Duration,
         f: impl FnOnce(&mut Scheduler) -> T + Send + 'static,
     ) -> Option<T> {
+        match self.ask_within(wait, f) {
+            Asked::Answer(t) => Some(t),
+            Asked::TimedOut | Asked::Gone => None,
+        }
+    }
+
+    /// [`Self::ask_blocking`] that tells a scheduler too busy to answer within `wait`
+    /// from one that is not running.
+    pub fn ask_within<T: Send + 'static>(
+        &self,
+        wait: Duration,
+        f: impl FnOnce(&mut Scheduler) -> T + Send + 'static,
+    ) -> Asked<T> {
         let (reply, rx) = std::sync::mpsc::channel();
         let q: sched::Query = Box::new(move |s: &mut Scheduler| {
             let _ = reply.send(f(s));
         });
         if !self.send(Msg::Query(q)) {
-            return None;
+            return Asked::Gone;
         }
-        rx.recv_timeout(wait).ok()
+        match rx.recv_timeout(wait) {
+            Ok(t) => Asked::Answer(t),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Asked::TimedOut,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Asked::Gone,
+        }
     }
 
     // --- hooks the DAV layer calls (from blocking threads) ------------------------------------
 
     /// A library `.cbz` is in place (PUT, MOVE/COPY into place): queue its OCR now.
     pub fn archive_arrived(&self, cbz: &Path) {
+        // Noted before the scheduler hears of it: a manifest asked meanwhile must not
+        // read the published board's `[]` as "nothing owed".
+        if let Some(rel) = types::arrival_rel(&self.0.core.layout.library(), cbz) {
+            actor::note_arrival(&self.0.fresh, rel);
+        }
         self.send(Msg::ArchiveArrived(cbz.to_path_buf()));
     }
 
@@ -798,4 +855,25 @@ pub fn processor_router(ocr: OcrControl) -> axum::Router {
 /// `/queue`, `/queue/`, `/queue/api/config`, `/queue/api/status`, `/queue/<file>`.
 pub fn queue_router(ocr: OcrControl) -> axum::Router {
     queue_api::router(ocr)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bunko_core::config::{LibraryBackend, QueueOrder};
+
+    /// The live settings take work by volume on a MEGA library (its transfer quota
+    /// counts every download) unless `ocr.queue_order` says otherwise.
+    #[test]
+    fn settings_take_work_by_volume_on_mega_unless_set() {
+        let mut config = Config::default();
+        assert!(!settings_from_config(&config, true).by_volume);
+        config.storage.library.backend = LibraryBackend::Mega;
+        assert!(settings_from_config(&config, true).by_volume);
+        config.ocr.queue_order = Some(QueueOrder::Generation);
+        assert!(!settings_from_config(&config, true).by_volume);
+        config.storage.library.backend = LibraryBackend::GDrive;
+        config.ocr.queue_order = Some(QueueOrder::Volume);
+        assert!(settings_from_config(&config, true).by_volume);
+    }
 }
