@@ -1353,10 +1353,14 @@
     return Math.min(100, value);
   }
 
+  // Safe in text AND in a quoted attribute (nameHtml's title): the quotes too.
   function escapeHtml(s) {
-    var d = document.createElement("div");
-    d.textContent = s;
-    return d.innerHTML;
+    return String(s == null ? "" : s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
   }
 
   // The backend as it is written, not as the config spells it.
