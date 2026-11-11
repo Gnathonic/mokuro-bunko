@@ -26,6 +26,7 @@ pub mod py;
 pub mod pyjson;
 pub mod queue_window;
 pub mod rate;
+pub mod series_queue;
 pub mod speed;
 pub mod throughput;
 mod unicode_tables;
