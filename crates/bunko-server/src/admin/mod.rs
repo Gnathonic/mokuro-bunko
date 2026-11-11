@@ -413,6 +413,7 @@ async fn dispatch(s: &AdminState, api_path: &str, req: ApiRequest) -> Response {
             storage::resolve_conflict(s, &req, id).await
         }
         ["storage", "readers"] if put => storage::readers(s, &req).await,
+        ["fs"] if get => storage::fs(&req).await,
 
         ["analytics", rest @ ..] => match &s.deps.analytics {
             Some(a) => crate::analytics::api::dispatch(a, rest, &req.method, &req.query).await,

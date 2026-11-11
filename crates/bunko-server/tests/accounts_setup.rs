@@ -826,3 +826,238 @@ async fn a_server_open_to_the_network_needs_the_admin_password() {
     );
     assert!(env.db.get_user("owner").unwrap().is_none());
 }
+
+/// `?path=` for a path: every byte but `A-Za-z0-9-_.~/` percent-encoded.
+fn fs_query(p: &std::path::Path) -> String {
+    let mut q = String::from("/setup/api/fs?path=");
+    for b in p.to_string_lossy().bytes() {
+        if b.is_ascii_alphanumeric() || b"-_.~/".contains(&b) {
+            q.push(b as char);
+        } else {
+            q.push_str(&format!("%{b:02X}"));
+        }
+    }
+    q
+}
+
+/// Browse… for a library in a folder you choose: the subfolders of a folder on this
+/// machine, for a browser on this machine only. Elsewhere the path is typed: a setup
+/// code holder gets 403 too, as the listing would show them the server's disk.
+#[tokio::test]
+async fn the_folder_browser_answers_this_computer_only() {
+    let env = Env::new();
+    let root = env.dir.path().join("disk");
+    std::fs::create_dir_all(root.join("Manga").join("Series A")).unwrap();
+    std::fs::create_dir_all(root.join(".cache")).unwrap();
+    std::fs::write(root.join("notes.txt"), "x").unwrap();
+    let r = env.send(empty(req("GET", &fs_query(&root)))).await;
+    assert_eq!(r.status, 200, "{}", r.text());
+    let v = r.json();
+    assert_eq!(v["dirs"], json!(["Manga"]));
+    assert_eq!(v["files"], json!([]));
+    assert!(v["path"].as_str().unwrap().ends_with("disk"), "{v}");
+    assert!(v["parent"].as_str().is_some());
+    // Not a folder, missing, not a full path: 400 naming it.
+    let r = env
+        .send(empty(req("GET", &fs_query(&root.join("notes.txt")))))
+        .await;
+    assert_eq!(r.status, 400);
+    assert!(
+        r.json()["error"]
+            .as_str()
+            .unwrap()
+            .ends_with("is a file, not a folder")
+    );
+    let r = env
+        .send(empty(req("GET", &fs_query(&root.join("nope")))))
+        .await;
+    assert_eq!(r.status, 400);
+    let r = env
+        .send(empty(req("GET", "/setup/api/fs?path=manga")))
+        .await;
+    assert_eq!(r.status, 400);
+    assert!(
+        r.json()["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("manga: not a full path")
+    );
+
+    // Another computer: refused without the code, and with it.
+    let far = "203.0.113.10";
+    let r = env
+        .send(empty(from_peer("GET", &fs_query(&root), far)))
+        .await;
+    assert_eq!((r.status, r.json()), (403, remote_refusal()));
+    let code = normalize_code(&env.deps.setup.issue_code());
+    let r = env
+        .send(empty(
+            from_peer("GET", &fs_query(&root), far).header("x-setup-code", code.as_str()),
+        ))
+        .await;
+    assert_eq!(
+        (r.status, r.json()),
+        (
+            403,
+            json!({"error": "Browse works on this computer only: type the folder's path."})
+        )
+    );
+    // The options tell the page whether to offer Browse… at all.
+    let r = env
+        .send(empty(
+            from_peer("GET", "/setup/api/options", far).header("x-setup-code", code.as_str()),
+        ))
+        .await;
+    assert_eq!(r.json()["local"], false);
+
+    // Once set up, nobody browses through setup.
+    let r = complete(&env, req("POST", "/setup/api/complete")).await;
+    assert_eq!(r.status, 201, "{}", r.text());
+    let r = env.send(empty(req("GET", &fs_query(&root)))).await;
+    assert_eq!(r.status, 410);
+    assert!(!r.text().contains("Manga"));
+}
+
+/// Wait for the setup Connect to settle (no longer starting or checking).
+async fn settled_connect(env: &Env) -> serde_json::Value {
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let r = env
+            .send(empty(req("GET", "/setup/api/storage/connect")))
+            .await;
+        assert_eq!(r.status, 200, "{}", r.text());
+        let v = r.json();
+        if !matches!(v["state"].as_str(), Some("starting" | "checking")) {
+            return v;
+        }
+        assert!(std::time::Instant::now() < until, "{v}");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+/// Local folder through the setup API: the options carry the path on file and whether
+/// MOKURO_LIBRARY_PATH pins it, and a Connect without a full path is refused with the
+/// wizard's words before any folder is opened.
+#[tokio::test]
+async fn the_folder_step_takes_a_full_path() {
+    let env = Env::with_config(|c| c.storage.library.path = Some("/srv/manga".into()));
+    let v = env
+        .send(empty(req("GET", "/setup/api/options")))
+        .await
+        .json();
+    assert_eq!(v["library"]["path"], "/srv/manga");
+    let pinned = v["pinned"].as_object().unwrap();
+    assert!(pinned.contains_key("path"), "{v}");
+    // No path: refused at once.
+    let r = env
+        .send(json_body(
+            req("POST", "/setup/api/storage/connect"),
+            json!({"provider": "folder", "path": "  "}),
+        ))
+        .await;
+    assert_eq!(r.status, 400, "{}", r.text());
+    assert_eq!(r.json()["error"], "Enter the folder's full path.");
+    // A relative path: the Connect fails before any folder is opened.
+    let r = env
+        .send(json_body(
+            req("POST", "/setup/api/storage/connect"),
+            json!({"provider": "folder", "path": "manga"}),
+        ))
+        .await;
+    assert_eq!(r.status, 200, "{}", r.text());
+    let v = settled_connect(&env).await;
+    assert_eq!(v["state"], "failed", "{v}");
+    assert_eq!(
+        v["error"], "Enter the full path: it starts with / or a drive letter.",
+        "{v}"
+    );
+    assert_eq!(
+        env.deps.core.config.read().storage.library.backend,
+        bunko_core::LibraryBackend::Local
+    );
+}
+
+/// Local folder through the setup API, end to end on the live folder driver: Connect
+/// with the path, the Check counts the volumes and series, the config names the folder
+/// and the credentials keep its stub; a missing folder offers "Create it?", which makes
+/// it.
+#[tokio::test]
+#[ignore = "needs the folder driver (chunk A): on the API skeleton the Check fails with Unsupported"]
+async fn a_folder_library_connects_through_setup() {
+    let env = Env::new();
+    let folder = env.dir.path().join("Manga");
+    std::fs::create_dir_all(folder.join("Series A")).unwrap();
+    std::fs::create_dir_all(folder.join("Series B")).unwrap();
+    std::fs::write(folder.join("Series A/Vol 1.cbz"), b"zip-1").unwrap();
+    std::fs::write(folder.join("Series A/Vol 2.cbz"), b"zip-2").unwrap();
+    std::fs::write(folder.join("Series B/Vol 1.cbz"), b"zip-3").unwrap();
+    let shown = folder.to_string_lossy().into_owned();
+    let r = env
+        .send(json_body(
+            req("POST", "/setup/api/storage/connect"),
+            json!({"provider": "folder", "path": shown}),
+        ))
+        .await;
+    assert_eq!(r.status, 200, "{}", r.text());
+    let v = settled_connect(&env).await;
+    assert_eq!(v["state"], "connected", "{v}");
+    assert_eq!(v["provider"], "folder");
+    assert_eq!(v["account"], shown.as_str());
+    assert_eq!(v["check"]["folder"], shown.as_str());
+    assert_eq!(
+        v["check"]["summary"],
+        format!("Found {shown}: 3 volumes in 2 series.")
+    );
+    let c = env.deps.core.config.read().clone();
+    assert_eq!(
+        c.storage.library.backend,
+        bunko_core::LibraryBackend::Folder
+    );
+    assert_eq!(c.storage.library.path.as_deref(), Some(folder.as_path()));
+    let saved = std::fs::read_to_string(env.dir.path().join("config.yaml")).unwrap();
+    assert!(saved.contains("backend: folder"), "{saved}");
+    let creds =
+        std::fs::read_to_string(env.deps.core.layout.cloud_dir().join("credentials.json")).unwrap();
+    assert!(creds.contains("\"folder\""), "{creds}");
+    let v = env
+        .send(empty(req("GET", "/setup/api/storage")))
+        .await
+        .json();
+    assert_eq!(v["configured"]["backend"], "folder");
+    assert_eq!(v["configured"]["path"], shown.as_str());
+    // Connecting changed nothing in the folder.
+    assert!(!folder.join(".mokuro-bunko.json").exists());
+}
+
+/// "Create it?" through setup: a folder whose parent exists is made, one level only.
+#[tokio::test]
+#[ignore = "needs the folder driver (chunk A): on the API skeleton the Check fails with Unsupported"]
+async fn setup_creates_a_missing_library_folder() {
+    let env = Env::new();
+    let folder = env.dir.path().join("New Manga");
+    let shown = folder.to_string_lossy().into_owned();
+    let r = env
+        .send(json_body(
+            req("POST", "/setup/api/storage/connect"),
+            json!({"provider": "folder", "path": shown}),
+        ))
+        .await;
+    assert_eq!(r.status, 200, "{}", r.text());
+    let v = settled_connect(&env).await;
+    assert_eq!(v["state"], "connected", "{v}");
+    assert_eq!(v["check"]["found"], false, "{v}");
+    assert_eq!(
+        v["check"]["summary"],
+        format!("There is no folder at {shown} yet. Create it?")
+    );
+    assert!(!folder.exists());
+    let r = env
+        .send(json_body(
+            req("POST", "/setup/api/storage/connect/create"),
+            json!({}),
+        ))
+        .await;
+    assert_eq!(r.status, 200, "{}", r.text());
+    assert_eq!(r.json()["check"]["found"], true, "{}", r.text());
+    assert!(folder.is_dir());
+}

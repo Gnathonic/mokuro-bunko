@@ -84,20 +84,23 @@ base_path/
 └── mokuro.db                # SQLite database
 ```
 
-With a cloud library (`storage.library.backend` other than `local`) there is no
-`library/` folder on disk: the library is the cloud folder, and `cloud/` holds
-Bunko's local state for it.
+With a cloud library or a library folder you chose (`storage.library.backend`
+other than `local`) Bunko's own `library/` folder is not used: the library is the
+cloud folder (or `storage.library.path`), and `cloud/` holds Bunko's local state
+for it.
 
 #### Library location
 
-New in 0.8. The library is `base_path/library/` (`local`, the default), or the
-Mokuro Reader folder of a cloud account.
+New in 0.8. The library is `base_path/library/` (`local`, the default), a folder
+you choose (`folder`: the one Mokuro Reader's Local Folder uses), or the Mokuro
+Reader folder of a cloud account.
 
 ```yaml
 storage:
   library:
-    backend: local          # local | gdrive | onedrive | mega | webdav
+    backend: local          # local | folder | gdrive | onedrive | mega | webdav
     folder: mokuro-reader   # the library folder in the cloud account
+    path: null              # backend folder: the library folder, e.g. /srv/manga or D:\Manga
     webdav: {url: null, username: null, allow_http: false}
     cache_mb: 1024
     spool_gb: 4
@@ -117,8 +120,9 @@ storage:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `backend` | string | `local` | `local`, `gdrive` (Google Drive), `onedrive`, `mega` or `webdav`. `MOKURO_LIBRARY_BACKEND`. |
-| `folder` | string | `mokuro-reader` | The library folder in the cloud account (the one Mokuro Reader uses). `MOKURO_LIBRARY_FOLDER`. |
+| `backend` | string | `local` | `local`, `folder` (a folder you choose), `gdrive` (Google Drive), `onedrive`, `mega` or `webdav`. `MOKURO_LIBRARY_BACKEND`. |
+| `folder` | string | `mokuro-reader` | The library folder in the cloud account (the one Mokuro Reader uses). `MOKURO_LIBRARY_FOLDER`. With `backend: folder` it is only the name the library's top folder is known by, whatever it is called on disk: leave it as it is. |
+| `path` | string | — | Required for `folder`: the library folder, a full path as the server sees it (`/srv/manga`, `D:\Manga`, `\\files.example.com\manga`; `~` is expanded). It may not be Bunko's `base_path`, hold it, or lie inside it, except in `base_path/library/` (so a library on this computer can become a folder library in place). Ignored by the other backends. `MOKURO_LIBRARY_PATH`. |
 | `webdav.url` | string | — | The WebDAV server's folder URL; required for `webdav`. `http://` is refused unless `webdav.allow_http` is `true`, except for a server on this machine (`localhost`, `127.0.0.0/8`, `[::1]`). `MOKURO_WEBDAV_URL`. |
 | `webdav.username` | string | — | `MOKURO_WEBDAV_USERNAME`. |
 | `webdav.allow_http` | boolean | `false` | Allow a plain `http://` URL (the password then travels unencrypted). Not needed for a loopback host (`localhost`, `127.0.0.0/8`, `[::1]`). `MOKURO_WEBDAV_ALLOW_HTTP`. |
@@ -127,7 +131,7 @@ storage:
 | `outbox_hold_mb` | integer | `2048` | New OCR claims wait while this many MiB of results are still uploading. At most `outbox_max_gb`. |
 | `outbox_max_gb` | integer | `8` | Uploads beyond this many GiB in the outbox are refused. |
 | `quiet_s` | integer | `120` | Seconds a removed file counts as recently removed (a reader replacing a file deletes it first). |
-| `poll.active_s`, `poll.idle_s` | integer | provider default | How often the cloud folder is checked for changes, while busy and while idle. |
+| `poll.active_s`, `poll.idle_s` | integer | provider default | How often the cloud folder is checked for changes, while busy and while idle. A library folder is watched, so changes usually show within seconds; these are its fallback (60 s and 300 s), for network shares and Docker Desktop, where the watcher sees nothing. |
 | `drive_background_units_per_min` | integer | `20000` | Google Drive API quota units per minute for background work. |
 | `status_files` | boolean | `true` | Write the OCR queue and server status files into the cloud folder for readers. |
 | `dedup` | boolean | `true` | Google Drive and MEGA: merge folders that have the same name in the same place (two `mokuro-reader` folders, two copies of a series folder) the way Mokuro Reader does, and tell readers so they leave it to Bunko. On Google Drive a copy that looks empty to Bunko can still hold files added through the Drive website (Bunko, like Mokuro Reader, sees only the files made through Mokuro Reader's Google project); the merge moves that copy to Drive's trash with them, for 30 days, as Mokuro Reader's merge does. After a merge `volume-data.json`, `goals.json` and `positions.json` can stay as two copies until a reader reading the cloud folder directly writes them again; of two copies of any other file (folders and Bunko's own status files excepted, which are kept as both) the strictly newer stays and the other goes to the trash (on a tie, or when a time is unknown, the copy in the folder that is kept stays). |
@@ -166,6 +170,55 @@ On the command line, `--browser`, `--device` or `--paste` choose the sign-in
 instead. `--browser` without a desktop prints the address to open on this
 computer; `$BROWSER` is used to open it when set. Pasting needs a terminal: run
 `docker exec -it <container> mokuro-bunko library connect onedrive`.
+
+#### A library folder you choose
+
+`backend: folder` keeps the library in `storage.library.path`, read and written in
+place: on this computer, a second disk or a mounted network share. Choose the same
+folder as Mokuro Reader's **Local Folder** (Chrome or Edge on a desktop); the folder
+itself is the library's top folder, as the `mokuro-reader` folder is in a cloud
+account. Bunko treats it exactly like a cloud folder: it writes the reader's queue
+file (`.mokuro-queue.json`) and its marker (`.mokuro-bunko.json`) at the top, and the
+OCR files, covers, `series.json` and `catalog.json` next to the volumes. It is
+distinct from `local`, whose library is Bunko's own `base_path/library/`.
+
+```yaml
+storage:
+  library:
+    backend: folder
+    path: /srv/manga
+```
+
+`mokuro-bunko library connect folder --path /srv/manga` does the same and checks the
+folder first (`--create` makes it when it is missing; only the last folder of the
+path is made). In the setup wizard and the Storage tab, **Browse…** lists the
+server's folders only in a browser on the server's own machine; from anywhere else,
+type the path.
+
+- **Switching** to another folder, to a cloud account or to This computer is a
+  different library: Disconnect first. The old folder is left as it is.
+- **Disconnect** leaves every file in the folder where it is; only the marker says
+  that this Bunko let it go.
+- **Removed files** go to the hidden `.mokuro-bunko-trash/` folder inside the
+  library, renamed to `*.bunko-trashed`, so no reader lists them. They are kept 30
+  days; until then they can be moved back by hand.
+- **A missing folder** (an unplugged disk, a share that is down) makes the library
+  offline: Bunko retries and removes nothing. A library folder that is gone while
+  its parent is still there (deleted or renamed) is held as a changed library, as a
+  cloud folder that disappears is.
+- **Names**: the library's paths are case-insensitive and case-preserving on every
+  host, as on Windows. On Windows, Bunko cannot write a name Windows refuses
+  (`<>:"|?*`, a trailing dot or space, `CON`, `NUL`…): that write shows as failed in
+  the Storage tab, and is not retried. A folder made case-insensitive on its own (`chattr +F`) inside a
+  case-sensitive disk is not noticed.
+- **Network shares** have no change notifications: changes show at
+  `poll.idle_s`. Disks whose timestamps are coarse (FAT: 2 s) can miss two
+  same-size changes by another program within one tick.
+- **Docker**: mount the folder and point `MOKURO_LIBRARY_PATH` at the mount (see
+  [deployment](deployment.md)). Bunko never changes the folder's owner: run it as
+  that owner (`PUID`/`PGID`).
+- **Windows service**: a service does not see mapped drive letters; use the share's
+  UNC path (`\\files.example.com\manga`).
 
 #### Upload verdicts
 
@@ -1661,6 +1714,7 @@ Other variables:
 | `MOKURO_HOST`, `MOKURO_PORT`, `MOKURO_STORAGE` | — | Short aliases for `server.host`, `server.port`, `storage.base_path`. |
 | `MOKURO_SERVE_READERS` | — | Short alias for `server.serve_readers`. |
 | `MOKURO_LIBRARY_BACKEND`, `MOKURO_LIBRARY_FOLDER` | — | `storage.library.backend` and `folder` (see [Library location](#library-location)). |
+| `MOKURO_LIBRARY_PATH` | — | `storage.library.path`: the library folder of `backend: folder` (see [A library folder you choose](#a-library-folder-you-choose)). |
 | `MOKURO_WEBDAV_URL`, `MOKURO_WEBDAV_USERNAME`, `MOKURO_WEBDAV_ALLOW_HTTP` | — | `storage.library.webdav.url`, `username`, `allow_http`. |
 | `MOKURO_WEBDAV_PASSWORD_FILE` | — | A file holding the WebDAV library's password (never set in `config.yaml`). |
 | `MOKURO_GOOGLE_PROJECT` | `release` | `storage.library.google_project`: `release` or `beta`. |

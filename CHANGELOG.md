@@ -223,6 +223,19 @@
   fails to load, with an error naming that row, until it is renamed.
 
 ### Added
+- **Keep the library in a folder you choose** (`storage.library.backend: folder`,
+  `storage.library.path`, `MOKURO_LIBRARY_PATH`): the same folder Mokuro Reader's
+  Local Folder uses, on this computer, a second disk or a mounted share. Bunko treats
+  it like a cloud folder (queue file, marker, OCR results written in place) and
+  watches it, so changes the reader makes show within seconds. It is distinct from
+  This computer (Bunko's own `library` folder); switching between them, or to another
+  folder, leaves the old library where it is. Bunko's removals go to a hidden
+  `.mokuro-bunko-trash` folder inside the library, kept 30 days. The setup wizard and
+  the admin panel's Storage tab offer **Local folder**, with **Browse…** for a browser
+  on the server's own machine (`/setup/api/fs`, `/_admin/api/fs`, which refuse any
+  other caller); elsewhere the path is typed.
+- **`mokuro-bunko library connect folder --path DIR [--create]`** connects a library
+  folder from a terminal.
 - **Sidecars and the queue file name the OCR's parts with versions.** A sidecar Bunko
   writes now carries `ocr_engine.parts`, e.g. `[{"role": "recognizer", "name":
   "Hayai Nova", "version": "2.5"}, {"role": "detector", "name": "PP-OCR Manga",

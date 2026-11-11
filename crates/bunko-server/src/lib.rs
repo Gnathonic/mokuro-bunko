@@ -12,6 +12,7 @@ pub mod auth;
 pub mod backend;
 pub mod core;
 pub mod davhooks;
+pub mod fs_browse;
 pub mod glue;
 pub mod http;
 pub mod library;
