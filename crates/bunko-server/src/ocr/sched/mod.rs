@@ -745,7 +745,13 @@ impl Scheduler {
                 self.maybe_start_scan();
                 self.maybe_start_direct();
             }
-            _ => {}
+            _ => {
+                // Only the time left changed (each second in the last minute): the
+                // queue page says so; the lanes have no new work to look for.
+                self.pending_cache = None;
+                self.bump_page();
+                return;
+            }
         }
         self.bump();
         self.bump_page();

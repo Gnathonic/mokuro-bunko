@@ -32,6 +32,9 @@ pub struct OwedVolume {
     pub missing_pages: i64,
     /// The primary row is owed a generation upgrade (generate, then swap).
     pub upgrade: bool,
+    /// Rows owed again over their own outdated layer (critique C10): the result
+    /// replaces that file in place, a Sync write, as an upgrade's swap is.
+    pub refresh: Vec<Arc<str>>,
     /// The metadata cache's page count, else the zip directory's own.
     pub pages: Option<i64>,
     /// The page suffixes read from the archive at that version (`(size, mtime_ns)`),
@@ -227,10 +230,20 @@ fn compute_in(
         return None;
     }
     let enabled: Vec<&Generation> = bunko_core::generations::enabled_generations(rows).collect();
+    let mut refresh: Vec<Arc<str>> = Vec::new();
     let mut owed: Vec<&Generation> = enabled
         .iter()
         .copied()
-        .filter(|r| !row_done(cbz, r, folder) || upgrade.is_some_and(|p| p.layer_outdated(cbz, r)))
+        .filter(|r| {
+            if !row_done(cbz, r, folder) {
+                return true;
+            }
+            let again = upgrade.is_some_and(|p| p.layer_outdated(cbz, r));
+            if again {
+                refresh.push(Arc::from(r.id.as_str()));
+            }
+            again
+        })
         .filter(|r| writable(&r.sidecar_suffix()))
         .collect();
     let primary_done = enabled
@@ -261,6 +274,7 @@ fn compute_in(
     if owed.is_empty() && skipped.is_empty() && !wants_upgrade {
         return None;
     }
+    refresh.retain(|g| owed.iter().any(|r| *r.id == **g));
     let mtime = meta
         .modified()
         .ok()
@@ -274,6 +288,7 @@ fn compute_in(
         skipped,
         missing_pages,
         upgrade: wants_upgrade,
+        refresh,
         pages: None,
         page_suffixes: None,
     })

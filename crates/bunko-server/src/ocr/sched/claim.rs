@@ -754,11 +754,25 @@ impl Scheduler {
         }
     }
 
-    /// Why upgrade jobs wait while the rest of the queue runs, or None: on a cloud
-    /// library this Bunko is still claiming (its first sync, the settle wait, or
-    /// confirming its claim, spec §9.2). An upgrade's swap replaces the cloud's current
-    /// version with a Sync write, which only the Bunko holding the library may make;
-    /// a new OCR file is a Deferred write that waits in the outbox, so other jobs run.
+    /// Does `job`'s result replace a file the library has, in place: an upgrade's swap,
+    /// or a generation layer written again over its own outdated file (critique C10)?
+    /// That is a Sync write; a new file is a Deferred one.
+    pub fn replaces_in_place(&self, job: &Job) -> bool {
+        job.upgrade
+            || self
+                .owed
+                .volumes
+                .get(&*job.rel)
+                .is_some_and(|v| v.refresh.iter().any(|g| **g == *job.gid))
+    }
+
+    /// Why the jobs that replace a file in place ([`Self::replaces_in_place`]: upgrades,
+    /// and outdated layers written again) wait while the rest of the queue runs, or
+    /// None: on a cloud library this Bunko is still claiming (its first sync, the
+    /// settle wait, or confirming its claim, spec §9.2). Such a replace is a Sync write
+    /// checked against the cloud's current version, which only the Bunko holding the
+    /// library may make; a new OCR file is a Deferred write that waits in the outbox,
+    /// so other jobs run.
     pub fn upgrade_hold(&self) -> Option<String> {
         let store = bunko_store::store_for(&self.library())?;
         if !store.caps().remote {
@@ -964,11 +978,12 @@ impl Scheduler {
             .cloned()
             .chain(self.attempted.iter().cloned())
             .collect();
-        // Phase B. Upgrade jobs wait while this Bunko is still claiming a cloud library
-        // (their swap needs the lease); the rest of the queue runs.
+        // Phase B. Upgrade jobs (and outdated layers written again) wait while this
+        // Bunko is still claiming a cloud library: their replace needs the lease. The
+        // rest of the queue runs.
         let mut proposed = self.candidates(&unavailable, true);
         if self.upgrade_hold().is_some() {
-            proposed.retain(|j| !j.upgrade);
+            proposed.retain(|j| !self.replaces_in_place(j));
         }
         let mut offered: HashMap<String, bool> = HashMap::new();
         let mut walked_rows: Vec<String> = Vec::new();

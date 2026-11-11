@@ -1649,3 +1649,189 @@ fn upgrade_jobs_wait_while_this_bunko_claims_the_cloud_library() {
         "{pending:?}"
     );
 }
+
+/// hayai-nova's output for `Series/Vol 3` at `revision`, as the generation `layer`
+/// when given (the main sidecar otherwise), sealed as Bunko's install leaves it.
+fn hayai_vol3(revision: u32, layer: Option<&str>) -> String {
+    let generation = layer.map_or(String::new(), |g| format!(r#","generation":"{g}""#));
+    ocr_common::sealed(&format!(
+        r#"{{"version":"0.2.5","title":"Series","volume":"Vol 3","volume_uuid":"vu-3","ocr_engine":{{"id":"hayai-nova","revision":{revision},"detector":"ppocr-manga","patch_budget":512{generation}}},"pages":[{{"img_path":"001.jpg","blocks":[]}},{{"img_path":"002.jpg","blocks":[]}},{{"img_path":"003.jpg","blocks":[]}}]}}"#
+    ))
+}
+
+/// A generation layer Bunko wrote at an older revision of its engine is owed again
+/// (critique C10), and its result replaces that file in place: a Sync write, as an
+/// upgrade's swap is. While this Bunko is still claiming the cloud library such a job
+/// waits with the upgrades (its result could only be refused, its OCR run thrown away,
+/// scan after scan), and the queue page says why; a new layer of the volume being
+/// upgraded is not held. Once the lease is held it waits no more.
+#[test]
+fn layers_written_again_in_place_wait_while_this_bunko_claims_the_cloud_library() {
+    use bunko_remote::status::LeaseEvent;
+    let current = bunko_layout::sidecar::engine_revision("hayai-nova");
+    assert!(current > 1, "an older revision exists");
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("storage");
+    let fake = Arc::new(FakeBackend::drive_like());
+    // Vol 1: an old main (an upgrade) and no "fast" layer (a new file).
+    fake.reader_put(&format!("{ROOT}/Series/Vol 1.cbz"), &cbz(3, 100));
+    fake.reader_put(&format!("{ROOT}/Series/Vol 1.mokuro"), LEGACY.as_bytes());
+    // Vol 3: a current main and Bunko's own "fast" layer of an older revision.
+    fake.reader_put(&format!("{ROOT}/Series/Vol 3.cbz"), &cbz(3, 100));
+    fake.reader_put(
+        &format!("{ROOT}/Series/Vol 3.mokuro"),
+        hayai_vol3(current, None).as_bytes(),
+    );
+    fake.reader_put(
+        &format!("{ROOT}/Series/Vol 3.fast.mokuro"),
+        hayai_vol3(current - 1, Some("fast")).as_bytes(),
+    );
+    bunko_server::storage::testing::register_tuned(&base, fake, Some(claim_in_seconds));
+    let config = cloud_config(base.clone(), true);
+    let layout = config.storage.layout();
+    layout.ensure_directories().unwrap();
+    let (store, _mount, handle) = bunko_server::storage::open_library_store(&config, &layout)
+        .unwrap()
+        .unwrap();
+    assert!(handle.wait_steady(Duration::from_secs(20)));
+    let layout = layout.with_library_root(store.root());
+    let remote = handle.fake_store().unwrap().clone();
+    let claiming = || remote.lease().and_then(|l| l.claiming_left()).is_some();
+    eventually_sync("the claim's settle wait", claiming);
+
+    let rows = vec![primary(), ocr_common::layer("g-2", "fast")];
+    let upgrade = Arc::new(bunko_server::ocr::upgrade::Upgrade::new(
+        layout.library(),
+        None,
+        Arc::new(FileFacts),
+        Arc::new(bunko_library::service::NoPathLocks),
+        "mokuro-bunko test".into(),
+    ));
+    upgrade.configure(
+        &bunko_core::config::UpgradeConfig {
+            enabled: true,
+            replace: vec!["mokuro-legacy".into(), "mokuro".into()],
+        },
+        &rows,
+    );
+    let t0 = ocr_common::t0();
+    let clock = Arc::new(bunko_sched::rate::ManualClock::new(t0));
+    let mut s = settings(rows);
+    s.local_processing = true;
+    s.concurrency = 2;
+    let mut sched = Scheduler::new(
+        SchedDeps {
+            layout: layout.clone(),
+            db: None,
+            facts: Arc::new(FileFacts),
+            locks: Arc::new(bunko_library::service::NoPathLocks),
+            clock: clock.clone(),
+            exec: Exec::Inline,
+            upgrade: Some(upgrade),
+            generator: "mokuro-bunko test".into(),
+            version: "0.8.0-test".into(),
+        },
+        s,
+    );
+    sched.handle(Msg::Tick);
+    let upgrade_job = Job::upgrade("Series/Vol 1.cbz", "g-1");
+    let new_layer = Job::new("Series/Vol 1.cbz", "g-2");
+    let refresh = Job::new("Series/Vol 3.cbz", "g-2");
+    assert!(sched.owed.volumes["Series/Vol 1.cbz"].upgrade);
+    assert_eq!(
+        sched.owed.volumes["Series/Vol 3.cbz"].rows,
+        [Arc::<str>::from("g-2")],
+        "the outdated layer is owed again"
+    );
+    assert!(sched.replaces_in_place(&upgrade_job) && sched.replaces_in_place(&refresh));
+    assert!(!sched.replaces_in_place(&new_layer));
+
+    let (tx, mut ops) = tokio::sync::mpsc::unbounded_channel();
+    let catalog: bunko_proto::Catalog = serde_json::from_value(serde_json::json!({
+        "engines": ocr_common::ENGINES,
+        "detectors": ["ppocr-manga"],
+        "devices": [{"id": "cpu", "label": "CPU"}],
+        "engine_revisions": ocr_common::current_revisions(ocr_common::ENGINES),
+    }))
+    .unwrap();
+    sched.handle(Msg::LocalUp {
+        ops: tx,
+        catalog,
+        host: bunko_proto::HostInfo {
+            cpu: "Test CPU".into(),
+            backend: "cpu".into(),
+            ..Default::default()
+        },
+    });
+    let local = sched
+        .machines
+        .values()
+        .find(|m| m.local)
+        .unwrap()
+        .pid
+        .clone();
+    // A few rounds while claiming: every session is made ready; the claims are kept.
+    let mut claimed: Vec<Job> = Vec::new();
+    for step in 1..=4 {
+        clock.set(t0 + f64::from(step));
+        sched.handle(Msg::Tick);
+        for op in drain(&mut ops) {
+            if let Op::OpenSession { sid, .. } = op {
+                sched.handle(Msg::Event {
+                    pid: local.clone(),
+                    event: ready(&sid),
+                });
+            }
+        }
+        claimed.extend(sched.claims.keys().cloned());
+    }
+    assert!(claiming(), "all of the above ran while claiming");
+    assert!(claimed.contains(&new_layer), "{claimed:?}");
+    assert!(
+        !claimed.contains(&upgrade_job) && !claimed.contains(&refresh),
+        "nothing that replaces a file in place while claiming: {claimed:?}"
+    );
+    assert!(sched.failures.is_empty(), "no failure recorded");
+    assert_eq!(sched.storage_hold(), None);
+    let pending = sched.pending_jobs();
+    let entry = pending
+        .iter()
+        .find(|e| e["volume"] == "Vol 3")
+        .unwrap_or_else(|| panic!("the layer is listed: {pending:?}"));
+    assert_eq!(entry["held"], true, "{entry:?}");
+    assert!(
+        entry["reason"]
+            .as_str()
+            .is_some_and(|r| r.starts_with("Upgrades wait until this Bunko holds the library")),
+        "{entry:?}"
+    );
+
+    // Once this Bunko holds the library, the layer is handed out (the upgrades too:
+    // `upgrade_jobs_wait_while_this_bunko_claims_the_cloud_library`).
+    eventually_sync("the lease", || {
+        remote.lease().map(|l| l.event()) == Some(LeaseEvent::Acquired)
+    });
+    let mut claimed: Vec<Job> = Vec::new();
+    for step in 5..=8 {
+        clock.set(t0 + f64::from(step));
+        sched.handle(Msg::Tick);
+        for op in drain(&mut ops) {
+            if let Op::OpenSession { sid, .. } = op {
+                sched.handle(Msg::Event {
+                    pid: local.clone(),
+                    event: ready(&sid),
+                });
+            }
+        }
+        claimed.extend(sched.claims.keys().cloned());
+    }
+    assert!(
+        claimed.contains(&refresh),
+        "it runs once the lease is held: {claimed:?}"
+    );
+    let pending = sched.pending_jobs();
+    assert!(
+        pending.iter().all(|e| e.get("held").is_none()),
+        "{pending:?}"
+    );
+}

@@ -886,11 +886,12 @@
   OCR files, every upgrade ran its OCR and then failed with "could not install
   …: No such file or directory": the refused upload had taken the new file with it,
   and the error hid the refusal. Each volume was then recorded as failed and retried
-  later. Upgrade jobs now wait until this Bunko holds the library, and the queue page
-  says so, with the time left; the other OCR jobs keep running, and the upgrades start
-  as soon as the claim ends. A refused upload no longer takes the file it was given,
-  and should an upgrade still meet such a refusal, the real reason is reported and the
-  job goes back to the queue instead of failing.
+  later. Upgrade jobs, and OCR layers written again over Bunko's own older output, now
+  wait until this Bunko holds the library, and the queue page says so, with the time
+  left; the other OCR jobs keep running, and the waiting ones start as soon as the
+  claim ends. A refused upload no longer takes the file it was given, and should an
+  upgrade still meet such a refusal, the real reason is reported and the job goes back
+  to the queue instead of failing.
 - **Failed WebDAV requests are logged.** A request that ends in a server error (5xx),
   uploads included, is logged with its method, path, user and cause (503s as warnings,
   other failures as errors); before, a failed upload left no trace in the log.
