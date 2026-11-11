@@ -712,6 +712,22 @@
 - **Dependency updates**: zip 9, rcgen 0.14, windows 0.62, windows-sys 0.61.
 
 ### Fixed
+- **Turning this server's OCR off stops it at once.** With OCR on this machine turned
+  off mid-queue (This server, the OCR settings or the setup wizard), the server went on
+  claiming volumes for its own OCR for minutes: the setting retired only its idle slots,
+  the busy one stayed and its session never drained, so it kept fetching archives from a
+  cloud library, reading them, weighing itself when placing volumes ("this server would
+  take ~Ns") and showing as a machine. It now stops in the same step: the volumes it was
+  reading are cancelled and go back to the queue unrecorded, where a connected processor
+  (or this server, turned on again) takes them; nothing it was running is installed (a
+  finished result already being moved into place still is); its OCR engine shuts down
+  and frees its memory; and what its sessions left in `.processing` is removed. It is no
+  machine of the queue page, the admin panel or the placement any more, and nothing
+  starts it again while it is off (an OCR backend install that ends included). Turned on
+  again, it starts without a restart. A restart for another OCR backend sweeps the old
+  sessions' leftovers the same way. A cloud archive fetched for this server's OCR after
+  its claim went back no longer returns another processor's claim of that volume to the
+  queue (that processor's result was then thrown away as late).
 - **A library folder never takes a volume Mokuro Reader is still writing.** The
   reader's Local Folder writes the way Chromium does: an empty file first, then the
   bytes into `<name>.crswap` beside it, renamed over the empty file at the end. Bunko

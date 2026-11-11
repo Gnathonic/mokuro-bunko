@@ -1001,12 +1001,18 @@ impl Scheduler {
         let Some(lane) = self.lanes.iter().find(|l| l.id == lane_id).cloned() else {
             return (None, false);
         };
-        let Some(mname) = self.machines.get(&lane.pid).map(|m| m.name.clone()) else {
+        let Some((mname, local)) = self
+            .machines
+            .get(&lane.pid)
+            .map(|m| (m.name.clone(), m.local))
+        else {
             return (None, false);
         };
         let pid = lane.pid.clone();
-        // Phase A.
+        // Phase A. This server's own OCR turned off takes nothing (turning it off drops
+        // its lanes; this holds whatever path the setting took).
         if self.stopping
+            || (local && !self.settings.local_processing)
             || self.held(&mname)
             || self.breaker_open(&pid)
             || self.machine_paused(&pid)
@@ -1281,7 +1287,10 @@ impl Scheduler {
             let Some(machine) = self.machines.get(&lane.pid) else {
                 continue;
             };
-            if self.held(&machine.name) || (!machine.local && self.breaker_open(&lane.pid)) {
+            if self.held(&machine.name)
+                || (!machine.local && self.breaker_open(&lane.pid))
+                || (machine.local && !self.settings.local_processing)
+            {
                 continue;
             }
             // By volume a lane with a volume to finish runs that next, not this work.
