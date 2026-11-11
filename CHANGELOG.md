@@ -712,6 +712,17 @@
 - **Dependency updates**: zip 9, rcgen 0.14, windows 0.62, windows-sys 0.61.
 
 ### Fixed
+- **A library folder never takes a volume Mokuro Reader is still writing.** The
+  reader's Local Folder writes the way Chromium does: an empty file first, then the
+  bytes into `<name>.crswap` beside it, renamed over the empty file at the end. Bunko
+  held the empty file back only while the swap file was there, so a look at the folder
+  between the two steps found a 0-byte volume and judged it (OCR, cover, failure
+  record) until the real bytes landed. An empty file written in the last minute is now
+  a write in progress, swap file or not (a stamp up to 5 minutes ahead of this
+  computer's clock, from a share whose clock runs ahead, counts from when that time
+  comes; one further ahead is a wrong clock and holds nothing back). Once older it is
+  listed as the empty file it is, without waiting for the next poll. An empty file
+  Bunko wrote itself shows at once.
 - **A cloud library polls for changes at its active interval while it is in use.**
   The change feed of a Google Drive, OneDrive or WebDAV library was meant to poll every
   30 s (Drive) or 60 s while active and every 5 minutes otherwise, but nothing ever
