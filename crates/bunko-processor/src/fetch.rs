@@ -127,7 +127,8 @@ impl From<TransferFault> for FetchError {
 }
 
 /// A verified archive (or one proven damaged at the library), held until its claim's
-/// terminal event. Dropping it releases the placement.
+/// terminal event. Dropping it releases the placement; [`FetchedArchive::finish`] keeps
+/// it in the spool when the library asked for that.
 #[derive(Debug)]
 pub struct FetchedArchive {
     pub placement: Placement,
@@ -142,6 +143,11 @@ pub struct FetchedArchive {
     pub damaged: Vec<String>,
     pub structural: Option<String>,
     pub verdict: Option<String>,
+    /// The strong ETag the library served it with.
+    pub etag: Option<String>,
+    /// The library asked to keep it for the volume's next job (`keep_archive`): the
+    /// spool and the archive's path there.
+    pub keep: Option<(Arc<ArchiveSpool>, String)>,
 }
 
 /// Appended to the pipeline's own failure for a volume whose archive was proven
@@ -179,6 +185,51 @@ impl FetchedArchive {
             }
         }
         out
+    }
+
+    /// The detail of a `fetch {state: "ready"}` event for a copy kept from the volume's
+    /// earlier job: nothing was downloaded (`reused`).
+    pub fn reused_summary(&self) -> BTreeMap<String, Value> {
+        let mut out = self.summary();
+        out.insert("seconds".into(), json!(0.0));
+        out.insert("mb_per_s".into(), Value::Null);
+        out.insert("requests".into(), json!(0));
+        out.insert("restarts".into(), json!(0));
+        out.insert("repairs".into(), json!(0));
+        out.insert("verify_seconds".into(), json!(0.0));
+        out.insert("reused".into(), json!(true));
+        out
+    }
+
+    /// The claim is over: kept in the spool for the volume's next job when the library
+    /// asked for that and the copy has a strong ETag to be matched by, else released.
+    pub fn finish(mut self) {
+        if let Some((spool, url)) = self.keep.take()
+            && let Some(etag) = self.etag.clone()
+        {
+            spool.keep(&url, etag, self);
+        }
+    }
+
+    /// An archive around a placement already written (spool tests).
+    #[cfg(test)]
+    pub(crate) fn for_tests(placement: Placement, size: u64) -> FetchedArchive {
+        FetchedArchive {
+            placement,
+            size,
+            crc32: 0,
+            requests: 1,
+            restarts: 0,
+            repairs: 0,
+            seconds: 0.0,
+            verify_seconds: 0.0,
+            members: 0,
+            damaged: Vec::new(),
+            structural: None,
+            verdict: None,
+            etag: None,
+            keep: None,
+        }
     }
 
     /// The note for a failed volume whose archive was damaged at the library.
@@ -415,6 +466,21 @@ impl ArchiveFetcher {
         &self.timing
     }
 
+    /// The spool its downloads are placed in.
+    pub fn spool(&self) -> Arc<ArchiveSpool> {
+        self.spool.clone()
+    }
+
+    /// A copy kept of `url_path` ([`ArchiveSpool::take_kept`]).
+    pub fn take_kept(
+        &self,
+        url_path: &str,
+        size: Option<u64>,
+        etag: Option<&str>,
+    ) -> Option<FetchedArchive> {
+        self.spool.take_kept(url_path, size, etag)
+    }
+
     /// Download, verify and hold one archive — or say why not. Whatever it returns,
     /// nothing it placed is left held but the archive it hands over.
     pub async fn fetch(
@@ -548,6 +614,8 @@ impl ArchiveFetcher {
                 None
             },
             verdict: verdict.map(str::to_string),
+            etag: copy.etag.clone(),
+            keep: None,
         };
         tracing::info!(
             "fetched {}: {} MB in {:.2} s to {}, {} request(s){}{}; {} members verified in {:.2} s (crc32 {:08x})",

@@ -220,9 +220,12 @@ All ids matching `[A-Za-z0-9_-]{1,64}` or the processor drops the whole op with 
   "sidecar_name":"<stem>.mokuro" | "<stem>.<row name>.mokuro",   // volume.output.name: stem + generation.sidecar_suffix (generations.py:282-287)
   "title":"<series dir name>", "volume_title":"<stem>",
   "title_uuid": "<uuid5(NAMESPACE_DNS, series name)>", "volume_uuid": "<...>"|null,
-  "size": <bytes>        // optional: library's stat().st_size at claim time
+  "size": <bytes>,       // optional: library's stat().st_size at claim time
+  "etag": "\"<mtime:.6f>-<size>\"",  // Rust: optional, the strong ETag a GET of the archive serves
+  "keep_archive": true   // Rust: optional, omitted when false; more of this volume follows on this processor
 }
 ```
+   **Rust:** the library takes work by volume (`ocr.queue_order: volume`) and sends `keep_archive` when the processor will be offered another job of the same archive. After the claim's terminal event the processor keeps its copy (`ArchiveSpool::keep`), keyed by `archive`, size and the ETag the GET served, at most `KEPT_ARCHIVE_SECONDS` (600) and at most `max_sessions` copies (oldest out first). A later volume op of the same `archive` whose `size` and `etag` match takes the copy (`ArchiveSpool::take_kept`) instead of downloading, and its `fetch ready` detail carries `"reused": true` with zero requests and seconds; the library then counts no transfer. A copy of another size or ETag is dropped. Kept copies expire on the connection's 1 s tick, give way to new placements (a RAM copy before a new archive would fall back to disk, any copy before `no_room`) and are dropped when the connection ends. Older processors ignore both fields.
    (`ocr/processor.py:1811-1850` builds the `SessionVolume`.) The library refuses to send (returns False, logged) when: volume has no archive (only an extracted dir), archive is outside `<storage>/library` (resolved), or the session already has 2 outstanding claims (`session.py:240-266`). The send registers `_volumes[claim]` and appends to `_order` BEFORE queuing; a failed send un-registers it. It then appends one line to the volume log: `processed remotely on <label>; the runner's own log is on that host` (`session.py:301-311`).
 3. **`cancel`**: `{"op":"cancel","sid","claim"}` for a volume (one per outstanding claim) or `{"op":"cancel","bid"}` for a benchmark. Semantics: nothing is recorded for a cancelled claim; processor kills the whole session runner (no per-volume un-submit).
 4. **`close_session`** `{"sid"}`: finish everything the runner already accepted; abandon claims still downloading with no event; then exit.

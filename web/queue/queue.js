@@ -992,7 +992,7 @@
     setHidden($pendingOcrEmpty, list.length > 0);
     setHidden($pendingOcrList, !list.length);
     setHidden($pendingOcrOrder, compact || !list.length);
-    setText($pendingOcrOrder, pendingOrderSentence(data.generations || []));
+    setText($pendingOcrOrder, pendingOrderSentence(data.generations || [], data.queue_order));
     $pendingOcrList.classList.toggle("pending-compact", compact);
     reconcile(
       $pendingOcrList,
@@ -1012,7 +1012,14 @@
     setText($queueDone, at ? "everything done by " + at : "");
   }
 
-  function pendingOrderSentence(generations) {
+  function pendingOrderSentence(generations, order) {
+    if (order === "volume") {
+      return (
+        "Next job first. Volumes run one at a time" +
+        (generations.length > 1 ? ", each through its generations in their configured order" : "") +
+        "; series take turns, each in reading order."
+      );
+    }
     return (
       "Next job first." +
       (generations.length > 1 ? " Generations run in their configured order;" : "") +

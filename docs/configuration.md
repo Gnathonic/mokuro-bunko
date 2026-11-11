@@ -918,6 +918,7 @@ ocr:
   concurrency: 1
   local_processing: true
   autobench: true
+  # queue_order: volume   # unset: volume on a MEGA library, generation otherwise
   upgrade:
     enabled: false
     replace: [mokuro-legacy, mokuro]
@@ -939,6 +940,7 @@ run on this machine.
 | `sessions` | boolean | `true` | Accepted so old files load, and ignored: models always stay loaded between volumes. | Never. |
 | `local_processing` | boolean | `true` | Whether the machine serving the library runs OCR at all. A file edit applies at the next start; the admin panel's Machine card applies it at once (refused when `MOKURO_OCR_LOCAL_PROCESSING` sets it). | `false` on a small always-on server that leaves OCR to [remote processors](#remote-ocr-processors). |
 | `autobench` | boolean | `true` | Benchmark a generation on a machine the first time it is seen there, and apply the widths found, before offering it volumes. At startup. | `false` if you prefer to run the derived settings and benchmark by hand. |
+| `queue_order` | string | unset | How the queue takes work: `generation` or `volume` (see [Queue order](#queue-order-by-generation-or-by-volume)). Unset (or `auto`): `volume` on a MEGA library, `generation` otherwise. Live (Admin → OCR). | `volume` to download each archive once (any cloud library with a transfer quota); `generation` for the first generation across the whole library soonest. |
 | `upgrade.enabled` | boolean | `false` | Replace old primary OCR with the current primary generation's (see [Replacing old OCR](#replacing-old-ocr)). | After moving from 0.5.x, when you want the whole library on the new engine. |
 | `upgrade.replace` | list | `[mokuro-legacy, mokuro]` | Which existing primary sidecars may be replaced: an engine id, or `mokuro-legacy` for files written by mokuro itself. | To also re-run when you change the primary's recipe, list the primary's own engine. |
 | `generations` | list | one `hayai-nova` row | The OCR recipes every volume gets a sidecar from, in the order the queue runs them. | To add OCR layers, change engines, or reorder. See below. |
@@ -1096,6 +1098,50 @@ Existing `<Volume>.mokuro` files are untouched. See
 > `ocr.detector`, `ocr.patch_budget` or `ocr.char_map` (or the matching
 > `MOKURO_OCR_*` variables) are refused at startup with a message saying what
 > to write instead.
+
+#### Queue order: by generation or by volume
+
+`ocr.queue_order` (Admin → OCR → Queue order) sets how the queue takes work:
+
+- **By generation** (`generation`): each generation runs across the whole
+  library in the order of `ocr.generations`, each generation's upgrades after
+  its missing files, series taking turns. Every job downloads the volume's
+  archive again (a processor fetches it from the library; on a cloud library
+  this server's own OCR fetches it from the provider, unless the spool still
+  holds it). The first generation reaches every volume soonest.
+- **By volume** (`volume`): volumes come one at a time, in the order their
+  first job would come by generation, and one machine runs every job of a
+  volume back to back from one download of its archive. While that machine
+  is connected and able to run the volume's next job, no other machine is
+  offered it. A job that machine cannot run (an engine it does not have, a
+  generation stopped or backed off there) goes to another machine, which
+  downloads the archive itself. A volume never starts at a later job while
+  some machine can run its first. A volume whose machine left goes before
+  volumes nobody started.
+- Unset or `auto`: by volume on a **MEGA** library, whose transfer quota
+  counts every download, and by generation otherwise. A set value always
+  wins. A change of the library's storage changes the automatic choice the
+  next time the OCR settings are applied or the server restarts.
+
+By volume costs throughput: a machine loads each generation's models again
+for every volume (a session runs one generation), it takes no volume ahead
+of the one it runs, and it runs the rest of a volume even when another
+machine would be faster. A machine that keeps a volume but takes none of its
+jobs for 10 minutes, while not held or benchmarking, gives the volume up.
+
+The archive is downloaded once per volume per machine:
+
+- This server's own OCR on a cloud library keeps the volume's spooled archive
+  pinned from its first job until its last job ends (or the volume is given
+  up), so the provider sends it once even when other archives need the
+  spool's room (`storage.library.spool_gb`).
+- A processor of this release keeps its copy between the volume's jobs when
+  the library asks it to (`processor.archive_memory_mb` holds it, or the
+  processor's storage), for at most 10 minutes; a kept copy makes way for
+  any new download. Older processors download the archive for each job.
+
+The queue page, the reader's queue file and the ETAs follow the order: by
+volume a volume's jobs are planned back to back on the machine running it.
 
 #### Replacing old OCR
 
@@ -1475,7 +1521,7 @@ while that runs.
 | `processor.public_name` | unset | What queue-page visitors see; unset, they see "machine 1", "machine 2"…. At most 64 characters. |
 | `processor.max_sessions` | `1` | How many OCR pipelines this machine runs at once: one per card is the rule, like `ocr.concurrency`. |
 | `processor.storage` | `$XDG_DATA_HOME/mokuro-bunko-processor` (`~/.local/share/...`) on Linux and macOS, `%LOCALAPPDATA%\mokuro-bunko-processor` on Windows | Logs, working directories, archives too big for memory, the status file, the downloaded OCR models (`<storage>/models`, several GB), the backend pack (`<storage>/backends`) and update state. One per processor; a second processor on the same storage refuses to start. |
-| `processor.archive_memory_mb` | `2048` | RAM for the archives being read and the one on deck, shared by every session (in-memory files on Linux); an archive that does not fit goes to `storage`. `0` keeps every archive on disk. Other platforms always use `storage`. |
+| `processor.archive_memory_mb` | `2048` | RAM for the archives being read and the one on deck, shared by every session (in-memory files on Linux), and, when the library takes work [by volume](#queue-order-by-generation-or-by-volume), the copy of a volume's archive kept for its next job; an archive that does not fit goes to `storage`. `0` keeps every archive on disk. Other platforms always use `storage`. |
 | `processor.auto_update` | `false` | Follow the library: when it reports a newer version, finish the running volume, install exactly the library's release and restart (never a downgrade). See [Automatic updates](#automatic-updates). |
 | `update.manifest_url`, `update.public_key` | GitHub latest, empty | A mirror or fork's latest `release.json`, and its signing key (from this file only; logged loudly). Used by `auto_update` and by the processor's OCR backend pack downloads. |
 

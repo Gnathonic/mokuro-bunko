@@ -64,6 +64,7 @@ fn volume_op(sid: &str, claim: &str, archive: &Path) -> Op {
         volume_uuid: None,
         size: None,
         etag: None,
+        keep_archive: false,
     })
 }
 

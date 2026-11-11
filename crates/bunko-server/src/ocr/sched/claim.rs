@@ -288,22 +288,7 @@ impl Scheduler {
         let mut jobs = Vec::new();
         let mut stale: Vec<String> = Vec::new();
         for (rel, vol) in &self.owed.volumes {
-            let mut owed: Vec<Job> = vol
-                .rows
-                .iter()
-                .map(|g| Job {
-                    rel: rel.as_str().into(),
-                    gid: g.clone(),
-                    upgrade: false,
-                })
-                .collect();
-            if vol.upgrade
-                && let Some(p) = &primary
-                && !vol.rows.iter().any(|g| &**g == p)
-            {
-                owed.push(Job::upgrade(rel, p));
-            }
-            for job in owed {
+            for job in super::by_volume::owed_jobs(rel, vol, primary.as_deref()) {
                 let Some(row) = self.row(&job.gid) else {
                     continue;
                 };
@@ -325,12 +310,17 @@ impl Scheduler {
             }
             self.save_failures();
         }
-        order_jobs(
+        let ordered = order_jobs(
             jobs,
             &self.order_rank(),
             |j| self.job_key(j),
             &self.last_served,
-        )
+        );
+        if self.settings.by_volume {
+            self.volume_order(ordered)
+        } else {
+            ordered
+        }
     }
 
     /// A job is no longer owed (taken, finished, or found done at claim).
@@ -344,6 +334,7 @@ impl Scheduler {
             }
             if vol.rows.is_empty() && !vol.upgrade && vol.skipped.is_empty() {
                 self.owed.volumes.remove(&*job.rel);
+                self.volumes_started.remove(&*job.rel);
             }
         }
     }
@@ -480,17 +471,23 @@ impl Scheduler {
     /// that can instead of failing there; so does one whose pages are not known yet
     /// (being read on a helper, remote store).
     pub fn machine_reads(&mut self, pid: &str, job: &Job) -> bool {
+        self.machine_reading(pid, job) == Some(true)
+    }
+
+    /// [`Self::machine_reads`], telling a volume whose pages are still being read
+    /// (None) from one the machine cannot read (`Some(false)`).
+    pub(super) fn machine_reading(&mut self, pid: &str, job: &Job) -> Option<bool> {
         let Some(machine) = self.machines.get(pid) else {
-            return false;
+            return Some(false);
         };
         if machine.local || bunko_proto::release_reads_every_page_format(&machine.host.version) {
-            return true;
+            return Some(true);
         }
         let (version, label) = (machine.host.version.clone(), machine.label());
         let suffixes = match self.page_suffixes(&job.rel) {
             Suffixes::Known(suffixes) => suffixes,
-            Suffixes::Unknown => return true,
-            Suffixes::Wait => return false,
+            Suffixes::Unknown => return Some(true),
+            Suffixes::Wait => return None,
         };
         let unread: Vec<&str> = suffixes
             .iter()
@@ -498,7 +495,7 @@ impl Scheduler {
             .map(String::as_str)
             .collect();
         if unread.is_empty() {
-            return true;
+            return Some(true);
         }
         if self.unreadable_logged.insert((job.clone(), label.clone())) {
             let version = if version.is_empty() {
@@ -512,7 +509,7 @@ impl Scheduler {
                 unread.join(", ")
             ));
         }
-        false
+        Some(false)
     }
 
     /// The release machine `pid` runs: what it registered with; this server's own OCR
@@ -528,7 +525,7 @@ impl Scheduler {
     /// Whether machine `pid` may try `job` again, given its failure record: a failure of
     /// the volume itself only by a release that has not tried it (or any once the
     /// library's release changed); see `bunko_sched::failures::machine_may_retry`.
-    fn may_retry_on(&self, pid: &str, job: &Job) -> bool {
+    pub(super) fn may_retry_on(&self, pid: &str, job: &Job) -> bool {
         let Some(row) = self.row(&job.gid) else {
             return true;
         };
@@ -976,9 +973,17 @@ impl Scheduler {
             .collect();
         // Phase B.
         let proposed = self.candidates(&unavailable, true);
+        // By volume: the jobs of volumes this lane started come first and are never left
+        // to another lane; of the rest, only the jobs open to it.
+        let by_volume = self.settings.by_volume;
+        let (mine, proposed) = if by_volume {
+            self.volume_turns(&lane, proposed)
+        } else {
+            (Vec::new(), proposed)
+        };
         let mut offered: HashMap<String, bool> = HashMap::new();
         let mut walked_rows: Vec<String> = Vec::new();
-        for job in &proposed {
+        for job in mine.iter().chain(&proposed) {
             if !offered.contains_key(&*job.gid) {
                 walked_rows.push(job.gid.to_string());
                 let ok = self
@@ -997,7 +1002,9 @@ impl Scheduler {
             }
         }
         let backed_off = self.backed_off_rows(&pid, &walked_rows);
-        let left_to_warm = if gid.is_none() {
+        // By volume a warm session elsewhere runs its own volume next, not this row's
+        // last volume.
+        let left_to_warm = if gid.is_none() && !by_volume {
             self.rows_left_to_warm(&lane, &proposed)
         } else {
             HashSet::new()
@@ -1006,10 +1013,13 @@ impl Scheduler {
         // Phase C.
         // A session on row i (rank 2i) drains for any job ranked before it that this
         // machine would take: an earlier row's missing files or upgrades. Its own row's
-        // upgrades rank after it and never do.
+        // upgrades rank after it and never do. By volume a session drains when the
+        // lane's next job is another row's (the walk below).
         let rank = self.order_rank();
         let mut preempt = false;
-        if let Some(g) = gid {
+        if let Some(g) = gid
+            && !by_volume
+        {
             let mine = rank.get(g).copied().unwrap_or(rank.len());
             let ranks: Vec<usize> = proposed
                 .iter()
@@ -1047,27 +1057,33 @@ impl Scheduler {
                 ordered = free.into_iter().chain(taken).collect();
             }
         }
-        if let Some(mine) = &eft.mine {
-            if gid.is_some_and(|g| *mine.gid != *g) {
+        if let Some(best) = &eft.mine {
+            if gid.is_some_and(|g| *best.gid != *g) {
                 ordered.clear();
-            } else if let Some(pos) = ordered.iter().position(|j| j == mine) {
+                // By volume the session makes way for the lane's best next job.
+                preempt |= by_volume && mine.is_empty();
+            } else if let Some(pos) = ordered.iter().position(|j| j == best) {
                 let j = ordered.remove(pos);
                 ordered.insert(0, j);
             }
         }
         let library = self.library();
         let mut taken: Option<(Job, Generation)> = None;
-        for job in ordered {
-            if gid.is_some_and(|g| *job.gid != *g) {
+        let walk = mine
+            .into_iter()
+            .map(|j| (j, true))
+            .chain(ordered.into_iter().map(|j| (j, false)));
+        for (job, owned) in walk {
+            if !by_volume && gid.is_some_and(|g| *job.gid != *g) {
                 continue;
             }
             if self.stopped.contains(&(job.gid.to_string(), mname.clone()))
                 || backed_off.contains(&*job.gid)
-                || left_to_warm.contains(&*job.gid)
+                || (!owned && left_to_warm.contains(&*job.gid))
             {
                 continue;
             }
-            if eft.skip.contains(&job)
+            if (!owned && eft.skip.contains(&job))
                 || self.claims.contains_key(&job)
                 || self.attempted.contains(&job)
             {
@@ -1094,12 +1110,31 @@ impl Scheduler {
                 self.forget_candidate(&job);
                 continue;
             }
-            if !self.machine_takes(&pid, &job) {
+            if !self.may_retry_on(&pid, &job) {
                 continue;
+            }
+            match self.machine_reading(&pid, &job) {
+                Some(true) => {}
+                Some(false) => continue,
+                // Its pages are being read: a lane running the volume waits for them
+                // rather than start another volume.
+                None if owned => break,
+                None => continue,
             }
             if unmeasured.contains(&*job.gid) {
                 self.want_autobench(&pid, &row);
+                if owned {
+                    // The volume's next job waits for the benchmark, on this lane.
+                    preempt |= gid.is_some_and(|g| *job.gid != *g);
+                    break;
+                }
                 continue;
+            }
+            if by_volume && gid.is_some_and(|g| *job.gid != *g) {
+                // The lane's next job is another row's: this session ends, and the lane
+                // opens one for it.
+                preempt = true;
+                break;
             }
             taken = Some((job, row));
             break;
@@ -1126,8 +1161,14 @@ impl Scheduler {
         if let Some(l) = self.lanes.iter_mut().find(|l| l.id == lane.id) {
             l.waiting_for_faster = false;
         }
-        let key = self.job_key(job);
-        self.last_served.insert(key.generation_id, key.series);
+        // By volume a series' turn is taken when one of its volumes starts.
+        if !self.settings.by_volume || !self.volumes_started.contains(&*job.rel) {
+            let key = self.job_key(job);
+            self.last_served.insert(key.generation_id, key.series);
+        }
+        if self.settings.by_volume {
+            self.own_volume(lane, job);
+        }
         self.claims.insert(
             job.clone(),
             Claimed {
@@ -1181,6 +1222,10 @@ impl Scheduler {
                 continue;
             };
             if self.held(&machine.name) || (!machine.local && self.breaker_open(&lane.pid)) {
+                continue;
+            }
+            // By volume a lane with a volume to finish runs that next, not this work.
+            if lane.id != asker.id && self.lane_runs_a_volume(lane.id) {
                 continue;
             }
             let cards = self.lane_cards(lane.id);

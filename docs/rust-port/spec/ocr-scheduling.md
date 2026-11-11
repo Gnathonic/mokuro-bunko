@@ -314,6 +314,26 @@ whatever the outcome (`watcher.py:2830-2833`); in memory only.
 > before 2i that the machine would take, unless that job is left for a faster
 > lane or the machine gave it back.
 
+> **Rust, by volume** (`ocr.queue_order: volume`, `Settings.by_volume`; the
+> default on a MEGA library): `candidates` regroups the `order_jobs` order by
+> volume (`Scheduler::volume_order`): owned volumes first, then volumes started
+> earlier (`volumes_started`), then the rest, each class in the order of its
+> volumes' first job, a volume's jobs together in group order. The lane that
+> takes a volume's job records itself as the volume's owner
+> (`Scheduler::volume_owners`, `sched/by_volume.rs`); `claim()` splits the queue
+> into the lane's own volumes' jobs (walked first, never left to another lane)
+> and the jobs open to it: an owned volume's job is open only when the owner
+> cannot run it, an unowned volume's later job only when no connected machine
+> can run its first. The rank-based preemption is off; instead a session
+> drains when the lane's next job is of another row. The `last_served` cursor
+> moves only on a volume's first claim. `pump()` prunes owners first: gone,
+> nothing left they can run, or 600 s without a claim of the volume while able
+> (holds and their own autobench do not count). An owner keeps a local claim's
+> spooled archive (`VolumeOwner.spool`) for the volume's next job; a remote
+> claim says `keep_archive` when more of the volume follows on that processor.
+> The plan (`PlanInputs.by_volume`) keeps a volume's jobs on the lane that took
+> its first.
+
 `_ocr_candidates(exclude, reset_stale_failures)` (`watcher.py:1592-1623`) =
 eligible − exclude → `order_jobs(..., last_served=copy)`. `_upcoming_ocr_jobs` =
 `_ocr_candidates(exclude=inflight ∪ attempted)` — the single source for claims

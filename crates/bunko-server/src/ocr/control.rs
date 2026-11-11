@@ -166,6 +166,7 @@ pub fn settings_from_config(config: &Config, local_available: bool) -> Settings 
         concurrency: config.ocr.concurrency.max(1),
         autobench: config.ocr.autobench,
         upgrade: config.ocr.upgrade.clone(),
+        by_volume: config.queue_order() == bunko_core::config::QueueOrder::Volume,
     }
 }
 
@@ -825,4 +826,25 @@ pub fn processor_router(ocr: OcrControl) -> axum::Router {
 /// `/queue`, `/queue/`, `/queue/api/config`, `/queue/api/status`, `/queue/<file>`.
 pub fn queue_router(ocr: OcrControl) -> axum::Router {
     queue_api::router(ocr)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bunko_core::config::{LibraryBackend, QueueOrder};
+
+    /// The live settings take work by volume on a MEGA library (its transfer quota
+    /// counts every download) unless `ocr.queue_order` says otherwise.
+    #[test]
+    fn settings_take_work_by_volume_on_mega_unless_set() {
+        let mut config = Config::default();
+        assert!(!settings_from_config(&config, true).by_volume);
+        config.storage.library.backend = LibraryBackend::Mega;
+        assert!(settings_from_config(&config, true).by_volume);
+        config.ocr.queue_order = Some(QueueOrder::Generation);
+        assert!(!settings_from_config(&config, true).by_volume);
+        config.storage.library.backend = LibraryBackend::GDrive;
+        config.ocr.queue_order = Some(QueueOrder::Volume);
+        assert!(settings_from_config(&config, true).by_volume);
+    }
 }

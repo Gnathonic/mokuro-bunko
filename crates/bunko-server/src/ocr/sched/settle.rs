@@ -451,14 +451,23 @@ impl Scheduler {
             .entry(pid.to_string())
             .or_insert_with(|| DownloadBreaker::new(label.clone()))
             .note_delivered();
+        // A copy the processor kept from the volume's earlier job was not downloaded:
+        // it says nothing about the transfer.
+        let reused = detail.get("reused").and_then(Value::as_bool) == Some(true);
         if let Some(m) = self.machines.get_mut(pid) {
-            m.transfer.note_ready(detail);
+            if !reused {
+                m.transfer.note_ready(detail);
+            }
             m.transfer.held_until = None;
             m.transfer.held_error.clear();
         }
         if reopened {
             self.log(format!("{label} fetched an archive again; no longer held"));
             self.bump();
+        }
+        if reused {
+            self.log(format!("{label} reused its copy of {}", job.rel));
+            return;
         }
         let requests = detail
             .get("requests")

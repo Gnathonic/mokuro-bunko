@@ -9,7 +9,7 @@
 use super::{AdminState, ApiRequest, blocking, error, json_response, ok, save_config};
 use axum::response::Response;
 use bunko_core::config::{
-    DEFAULT_ROLES, DYNDNS_PROVIDERS, QUEUE_DISPLAY_LEVELS, REGISTRATION_MODES,
+    DEFAULT_ROLES, DYNDNS_PROVIDERS, QUEUE_DISPLAY_LEVELS, QueueOrder, REGISTRATION_MODES,
 };
 use bunko_db::pyfmt::truthy;
 use serde_json::{Map, Value, json};
@@ -69,6 +69,7 @@ pub(super) async fn get(s: &AdminState) -> Response {
         m.insert("ocr_runtime".into(), runtime);
         if let Some(Value::Object(o)) = m.get_mut("ocr") {
             o.insert("upgrade".into(), upgrade_value(&cfg.ocr.upgrade));
+            insert_queue_order(o, &cfg);
         }
         // New in 0.7: migration notes (removed engines/detectors), for the admin to read.
         m.insert("config_warnings".into(), json!(cfg.warnings));
@@ -324,6 +325,24 @@ pub(super) async fn ocr(s: &AdminState, req: &ApiRequest) -> Response {
                     Err(m) => return error(400, m),
                 }
             }
+            if let Some(v) = data.get("queue_order") {
+                let parsed = match v {
+                    Value::Null => Ok(None),
+                    Value::String(t) => bunko_core::config::parse_queue_order(Some(t)).map_err(|_| ()),
+                    _ => Err(()),
+                };
+                match parsed {
+                    Ok(order) => {
+                        let mut cfg = s2.core().config.write();
+                        // A change of the setting that leaves the order as it was
+                        // (auto to its default) applies nothing.
+                        let before = cfg.queue_order();
+                        cfg.ocr.queue_order = order;
+                        changed |= cfg.queue_order() != before;
+                    }
+                    Err(()) => return error(400, "queue_order must be auto, generation or volume"),
+                }
+            }
             if let Err(r) = save_config(&s2) {
                 return r;
             }
@@ -343,12 +362,30 @@ pub(super) async fn ocr(s: &AdminState, req: &ApiRequest) -> Response {
         {
             o.insert("upgrade".into(), upgrade_value(&snapshot.ocr.upgrade));
         }
+        if data.contains_key("queue_order")
+            && let Some(Value::Object(o)) = body.get_mut("ocr")
+        {
+            insert_queue_order(o, &snapshot);
+        }
         merge(&mut body, outcome);
         body.insert("ocr_runtime".into(), ocr.runtime_status(&snapshot));
         ok(Value::Object(body))
     })
     .await
     .unwrap_or_else(|r| r)
+}
+
+/// `queue_order` as configured (`auto` when unset) and `queue_order_effective`, the
+/// order the queue takes work in now (unset: by volume on a MEGA library).
+fn insert_queue_order(o: &mut Map<String, Value>, cfg: &bunko_core::Config) {
+    o.insert(
+        "queue_order".into(),
+        json!(cfg.ocr.queue_order.map_or("auto", QueueOrder::as_str)),
+    );
+    o.insert(
+        "queue_order_effective".into(),
+        json!(cfg.queue_order().as_str()),
+    );
 }
 
 fn upgrade_value(u: &bunko_core::config::UpgradeConfig) -> Value {

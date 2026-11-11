@@ -112,7 +112,7 @@ impl Outbox {
 
 /// The archive a volume runs on, held until its terminal event.
 pub(crate) enum ArchiveHandle {
-    Fetched(FetchedArchive),
+    Fetched(Box<FetchedArchive>),
     Local(PathBuf),
 }
 
@@ -121,6 +121,15 @@ impl ArchiveHandle {
         match self {
             ArchiveHandle::Fetched(f) => f.path(),
             ArchiveHandle::Local(p) => p,
+        }
+    }
+
+    /// The claim is over: a fetched copy the library asked to keep waits in the spool
+    /// for the volume's next job; anything else is released.
+    fn finish(self) {
+        match self {
+            ArchiveHandle::Fetched(f) => (*f).finish(),
+            ArchiveHandle::Local(_) => {}
         }
     }
 }
@@ -209,15 +218,36 @@ impl Link {
                     .collect::<Vec<_>>()
                     .join("/");
                 let label = format!("{} {}", op.claim, where_);
-                let fetched = remote
+                let keep = || {
+                    op.keep_archive
+                        .then(|| (remote.fetcher.spool(), op.archive.clone()))
+                };
+                // The library takes work by volume: the copy kept from the volume's
+                // earlier job serves this one while it is still the library's file.
+                if let Some(mut kept) =
+                    remote
+                        .fetcher
+                        .take_kept(&op.archive, op.size, op.etag.as_deref())
+                {
+                    tracing::info!("{label}: using the copy kept from the volume's earlier job");
+                    kept.keep = keep();
+                    let note = kept.damaged_note();
+                    return Ok(Delivered {
+                        ready: Some(kept.reused_summary()),
+                        damaged_note: note,
+                        archive: ArchiveHandle::Fetched(Box::new(kept)),
+                    });
+                }
+                let mut fetched = remote
                     .fetcher
                     .fetch(&op.archive, op.size, cancel, Some(&progress), &label)
                     .await?;
+                fetched.keep = keep();
                 let note = fetched.damaged_note();
                 Ok(Delivered {
                     ready: Some(fetched.summary()),
                     damaged_note: note,
-                    archive: ArchiveHandle::Fetched(fetched),
+                    archive: ArchiveHandle::Fetched(Box::new(fetched)),
                 })
             }
             Link::Local(_) => {
@@ -1608,7 +1638,7 @@ fn work(shared: &Shared) {
             other_cpu: None,
         };
         if released {
-            drop(job.archive);
+            job.archive.finish();
             let _ = shared.reports.send(Msg::Terminal(Box::new(terminal)));
             continue;
         }
@@ -1664,8 +1694,10 @@ fn work(shared: &Shared) {
             )))
         });
         // The archive goes back BEFORE the terminal event: the library's top-up that
-        // event triggers must never find three archives held here.
-        drop(job.archive);
+        // event triggers must never find three archives held here. A copy the library
+        // asked to keep waits in the spool, and gives way to any new download that
+        // needs its room.
+        job.archive.finish();
         let result = match result {
             Err(RunError::Fatal(error)) => {
                 tracing::error!(
@@ -1895,6 +1927,7 @@ mod tests {
             volume_uuid: None,
             size: None,
             etag: None,
+            keep_archive: false,
         }
     }
 

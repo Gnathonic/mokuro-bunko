@@ -47,6 +47,7 @@ pub use cache::{CacheConfig, PropfindCache};
 pub use hooks::{AuditEvent, DavHooks, HookGuard, NoHooks, PutFollowUp};
 pub use path_case::{LibraryPathCanonicalizer, PathCase, fold_name};
 pub use personal::{EDITS_DIR, MAX_LAYER_BYTES, PersonalOverlays};
+pub use resource::strong_file_etag;
 pub use upload::{DamageMemory, DigestAlgo, parse_content_digest};
 pub use write_locks::{AccountWriteGuard, AccountWriteLocks, PathWriteLocks, WriteLockGuard};
 

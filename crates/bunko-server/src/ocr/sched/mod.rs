@@ -13,6 +13,7 @@
 
 mod availability;
 mod bench;
+mod by_volume;
 mod claim;
 mod registry;
 mod session;
@@ -45,6 +46,7 @@ use super::types::{Job, LibraryFacts, PathLocks};
 
 pub use availability::availability_of;
 pub use bench::{BenchRequest, BenchState, cpu_label, physical_cores};
+pub use by_volume::{OWNER_PATIENCE_SECONDS, VolumeOwner};
 pub use claim::{SUFFIX_BATCH, catalog_can_run, supported_for};
 pub use registry::{
     FailedLogin, Machine, PublicNames, RegisterInput, RegisterOutcome, SocketRefusal, TransferStats,
@@ -77,6 +79,10 @@ pub struct Settings {
     pub concurrency: u32,
     pub autobench: bool,
     pub upgrade: UpgradeConfig,
+    /// Take work by volume (`ocr.queue_order`, [`bunko_core::Config::queue_order`]):
+    /// one lane runs every job of a volume it can, back to back, from one copy of its
+    /// archive.
+    pub by_volume: bool,
 }
 
 /// Where helper-thread work runs.
@@ -407,6 +413,11 @@ pub struct Scheduler {
     pub last_poll_tick: f64,
     /// When the per-scan state (attempted, strikes, stopped rows...) was last reset.
     pub scan_reset_at: f64,
+    /// By volume: the lane that started each volume ([`by_volume`]).
+    pub volume_owners: HashMap<Arc<str>, VolumeOwner>,
+    /// By volume: volumes a job of which was claimed and that are still owed; they go
+    /// before volumes nobody started once their owner lets them go.
+    pub volumes_started: HashSet<Arc<str>>,
 }
 
 impl Scheduler {
@@ -485,6 +496,8 @@ impl Scheduler {
             update_drain: false,
             last_poll_tick: f64::NEG_INFINITY,
             scan_reset_at: f64::NEG_INFINITY,
+            volume_owners: HashMap::new(),
+            volumes_started: HashSet::new(),
             deps,
         }
     }
@@ -798,6 +811,8 @@ impl Scheduler {
             }
         }
         self.owed = index;
+        let owed = &self.owed.volumes;
+        self.volumes_started.retain(|rel| owed.contains_key(&**rel));
         self.suffixes_failed.clear();
         self.last_walk_at = Some(self.mono());
         self.walks += 1;
@@ -970,8 +985,13 @@ impl Scheduler {
         if !jobs.is_empty() {
             let volumes: HashSet<&str> = jobs.iter().map(|j| &*j.rel).collect();
             let order: Vec<String> = self.enabled_rows().iter().map(|r| r.name.clone()).collect();
+            let how = if self.settings.by_volume {
+                "volume by volume, each through its generations in run order"
+            } else {
+                "generations in run order"
+            };
             self.log(format!(
-                "Found {} missing OCR sidecar(s) across {} CBZ file(s) (generations, in run order: {}; each generation's upgrades after its missing files; within each, series take turns)",
+                "Found {} missing OCR sidecar(s) across {} CBZ file(s) ({how}: {}; each generation's upgrades after its missing files; within each, series take turns)",
                 jobs.len(),
                 volumes.len(),
                 order.join(", ")
@@ -1018,6 +1038,7 @@ impl Scheduler {
         if self.stopping {
             return;
         }
+        self.prune_volume_owners();
         self.drain_autobench_requests();
         let lane_ids: Vec<u64> = self.lanes.iter().map(|l| l.id).collect();
         for id in lane_ids {
@@ -1060,6 +1081,7 @@ impl Scheduler {
 
     fn stop(&mut self) {
         self.stopping = true;
+        self.forget_volume_owners();
         // Everything in flight goes back untouched: a shutdown is nobody's failure.
         let sids: Vec<String> = self.sessions.keys().cloned().collect();
         for sid in sids {
@@ -1074,6 +1096,10 @@ impl Scheduler {
     /// Restart-free reconfiguration (`OCRWorker.apply_settings`).
     pub fn apply_settings(&mut self, settings: Settings) {
         let local_changed = self.settings.local_processing != settings.local_processing;
+        if !settings.by_volume {
+            // Claims in flight finish; nothing stays tied to a machine.
+            self.forget_volume_owners();
+        }
         self.settings = settings;
         self.autobench.asked.clear();
         self.autobench.failed.clear();
@@ -1109,7 +1135,12 @@ impl Scheduler {
         self.start_walk();
         let order: Vec<String> = self.enabled_rows().iter().map(|r| r.name.clone()).collect();
         self.log(format!(
-            "OCR settings applied (generations, in run order: {})",
+            "OCR settings applied (work taken {}; generations, in run order: {})",
+            if self.settings.by_volume {
+                "by volume"
+            } else {
+                "by generation"
+            },
             order.join(", ")
         ));
         if local_changed {

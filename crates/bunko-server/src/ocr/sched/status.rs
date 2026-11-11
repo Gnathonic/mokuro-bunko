@@ -366,6 +366,7 @@ impl Scheduler {
             through,
             refusal_for: Some(&refusal),
             hold_for: Some(&hold),
+            by_volume: self.settings.by_volume,
         };
         plan_queue(running, pending, &inputs)
     }
@@ -521,6 +522,14 @@ impl Scheduler {
         raw.insert("failed".into(), Value::Array(self.failed_list()));
         raw.insert("backend".into(), json!(self.backend_label()));
         raw.insert("generations".into(), Value::Array(self.generation_order()));
+        raw.insert(
+            "queue_order".into(),
+            json!(if self.settings.by_volume {
+                "volume"
+            } else {
+                "generation"
+            }),
+        );
         raw.insert(
             "skipped_missing_pages".into(),
             Value::Array(self.skipped_missing_pages()),

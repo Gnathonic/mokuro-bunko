@@ -30,7 +30,7 @@ use bunko_server::app::{ServeOptions, Services, assemble};
 use bunko_server::ocr::sched::{Exec, Msg, SchedDeps, Scheduler};
 use bunko_server::ocr::types::{FileFacts, LibraryFacts};
 use http::{Request, StatusCode};
-use ocr_common::{exit, primary, ready, settings, started};
+use ocr_common::{exit, layer, primary, ready, settings, started};
 use tower::ServiceExt;
 
 const ROOT: &str = "mokuro-reader";
@@ -282,6 +282,10 @@ async fn the_bridge_lists_and_streams_a_cloud_library() {
     assert!(full.header("x-accel-redirect").is_none());
     let etag = full.header("etag").expect("an ETag").to_string();
     let size = env.lib.vol1.len();
+    // The ETag the OCR scheduler names in a volume op (a processor matches the copy it
+    // kept for a volume's next job by it) is the one a GET serves.
+    let meta = bunko_store::fs::metadata(layout_root.join("Series/Vol 1.cbz")).unwrap();
+    assert_eq!(etag, bunko_dav::strong_file_etag(&meta));
 
     // Range, and If-Range against the ETag.
     let part = env
@@ -1054,6 +1058,177 @@ fn run_local_claim(refuse: bool) {
             .is_none(),
         "nothing was written to the cloud"
     );
+}
+
+/// A spool with room for two of [`local_volume_jobs`]' archives, not three.
+fn two_archive_spool(c: &mut bunko_remote::RemoteStoreConfig) {
+    c.lease = false;
+    c.spool_bytes = cbz(3, 1000).len() as u64 * 5 / 2;
+    c.spool_wait = Duration::from_millis(500);
+}
+
+/// By volume, this server's own OCR on a cloud library fetches a volume's archive once
+/// for all its jobs: the spooled copy stays pinned between them while other archives
+/// take the spool's room. By generation the second job fetches it again once the
+/// copy was evicted.
+#[test]
+fn local_volume_mode_fetches_a_cloud_archive_once_for_all_its_jobs() {
+    assert_eq!(local_volume_jobs(true), 1, "by volume");
+    assert_eq!(local_volume_jobs(false), 2, "by generation");
+}
+
+/// Run both jobs (main file, then a layer) of `Series/Vol 2.cbz` on this server's own
+/// OCR, spooling two other archives between them: how many times the provider sent
+/// the whole archive.
+fn local_volume_jobs(by_volume: bool) -> usize {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("storage");
+    let fake = Arc::new(FakeBackend::drive_like());
+    fake.reader_put(&format!("{ROOT}/Series/Vol 2.cbz"), &cbz(3, 1000));
+    // Done volumes: what other work spools meanwhile.
+    for f in ["F1", "F2"] {
+        fake.reader_put(&format!("{ROOT}/Filler/{f}.cbz"), &cbz(3, 1000));
+        fake.reader_put(&format!("{ROOT}/Filler/{f}.mokuro"), &mokuro("f", 3));
+        fake.reader_put(&format!("{ROOT}/Filler/{f}.Lines.mokuro"), &mokuro("f", 3));
+    }
+    bunko_server::storage::testing::register_tuned(&base, fake, Some(two_archive_spool));
+    let config = cloud_config(base.clone(), true);
+    let layout = config.storage.layout();
+    layout.ensure_directories().unwrap();
+    let (store, _mount, handle) = bunko_server::storage::open_library_store(&config, &layout)
+        .unwrap()
+        .unwrap();
+    assert!(handle.wait_steady(Duration::from_secs(20)));
+    let layout = layout.with_library_root(store.root());
+    let remote = handle.fake_store().unwrap().clone();
+    remote.backend().reset_calls();
+    let vol2 = remote
+        .backend()
+        .node_at(&format!("{ROOT}/Series/Vol 2.cbz"))
+        .unwrap();
+
+    let t0 = ocr_common::t0();
+    let clock = Arc::new(bunko_sched::rate::ManualClock::new(t0));
+    let mut s = settings(vec![primary(), layer("g-2", "Lines")]);
+    s.local_processing = true;
+    s.by_volume = by_volume;
+    let mut sched = Scheduler::new(
+        SchedDeps {
+            layout: layout.clone(),
+            db: None,
+            facts: Arc::new(FileFacts),
+            locks: Arc::new(bunko_library::service::NoPathLocks),
+            clock: clock.clone(),
+            exec: Exec::Inline,
+            upgrade: None,
+            generator: "mokuro-bunko test".into(),
+            version: "0.8.0-test".into(),
+        },
+        s,
+    );
+    sched.handle(Msg::Tick);
+    let owed: Vec<String> = sched.owed.volumes.keys().cloned().collect();
+    assert_eq!(owed, ["Series/Vol 2.cbz"]);
+    let (tx, mut ops) = tokio::sync::mpsc::unbounded_channel();
+    let catalog: bunko_proto::Catalog = serde_json::from_value(serde_json::json!({
+        "engines": ocr_common::ENGINES,
+        "detectors": ["ppocr-manga"],
+        "devices": [{"id": "cpu", "label": "CPU"}],
+        "engine_revisions": ocr_common::current_revisions(ocr_common::ENGINES),
+    }))
+    .unwrap();
+    sched.handle(Msg::LocalUp {
+        ops: tx,
+        catalog,
+        host: bunko_proto::HostInfo {
+            cpu: "Test CPU".into(),
+            backend: "cpu".into(),
+            ..Default::default()
+        },
+    });
+    let event = |sched: &mut Scheduler, event: Event| {
+        sched.handle(Msg::Event {
+            pid: "local".into(),
+            event,
+        })
+    };
+    // One job: (session, its volume op), run to its end; the session closes.
+    let run_next = |sched: &mut Scheduler, ops: &mut tokio::sync::mpsc::UnboundedReceiver<Op>| {
+        let sent = drain(ops);
+        let sid = sent
+            .iter()
+            .find_map(|o| match o {
+                Op::OpenSession { sid, .. } => Some(sid.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("a local session opens: {sent:?}"));
+        let vol = sent
+            .iter()
+            .find_map(|o| match o {
+                Op::Volume(v) => Some(v.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("the volume is submitted once spooled: {sent:?}"));
+        assert_eq!(std::fs::read(&vol.archive).unwrap(), cbz(3, 1000));
+        event(sched, ready(&sid));
+        event(sched, started(&sid, &vol.claim, 3));
+        let result_dir = base.join(".processing").join(&sid).join(&vol.claim);
+        std::fs::create_dir_all(&result_dir).unwrap();
+        let result = result_dir.join(bunko_proto::RESULT_FILE);
+        std::fs::write(&result, mokuro("vol-2-uuid", 3)).unwrap();
+        let sha = bunko_server::ocr::collect::sha256_file(&result).unwrap();
+        event(
+            sched,
+            Event::VolumeDone {
+                sid: sid.clone(),
+                id: vol.claim.clone(),
+                pages: 3,
+                failed_pages: 0,
+                seconds: 2.0,
+                stats: serde_json::Value::Null,
+                cpu_pressure: None,
+                other_cpu: None,
+                sidecar_sha256: Some(sha),
+            },
+        );
+        assert!(sched.claims.is_empty(), "the claim ended");
+        (sid, vol)
+    };
+    clock.set(t0 + 1.0);
+    sched.handle(Msg::Tick);
+    let (sid, first) = run_next(&mut sched, &mut ops);
+    assert_eq!(
+        sched
+            .volume_owners
+            .get("Series/Vol 2.cbz")
+            .is_some_and(|o| o.spool.is_some()),
+        by_volume,
+        "by volume the owner keeps the archive spooled between the jobs"
+    );
+    // Other work fills the spool meanwhile.
+    for f in ["F1", "F2"] {
+        let path = layout.library().join(format!("Filler/{f}.cbz"));
+        drop(store.local_path(&path, None).unwrap());
+    }
+    event(&mut sched, exit(&sid, Some(0)));
+    let (sid, second) = run_next(&mut sched, &mut ops);
+    assert_eq!(sched.sessions[&sid].row.id, "g-2");
+    if by_volume {
+        assert_eq!(second.archive, first.archive, "the same spooled copy");
+    }
+    event(&mut sched, exit(&sid, Some(0)));
+    assert!(sched.claims.is_empty());
+    assert!(
+        sched.volume_owners.is_empty(),
+        "the copy goes once the volume's last job ended"
+    );
+    assert!(!sched.owed.volumes.contains_key("Series/Vol 2.cbz"));
+    remote
+        .backend()
+        .read_log()
+        .iter()
+        .filter(|r| r.pid == vol2.pid && r.range.is_none())
+        .count()
 }
 
 /// Register a remote processor of mokuro-bunko `version` and open its socket.

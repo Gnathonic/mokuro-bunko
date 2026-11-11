@@ -223,6 +223,19 @@
   fails to load, with an error naming that row, until it is renamed.
 
 ### Added
+- **OCR can take work volume by volume.** With `ocr.queue_order: volume` (Admin → OCR →
+  Queue order) volumes come one at a time, in the order their first job would come by
+  generation, and one machine runs every job of a volume back to back from one download
+  of its archive. While that machine is connected and able to run the volume's next job,
+  no other machine is offered it; a job it cannot run (an engine it does not have) goes
+  to another machine, which downloads the archive itself. This server's own OCR on a
+  cloud library keeps the spooled archive pinned for the whole volume, and a processor of
+  this release keeps its copy between the volume's jobs when the library asks it to
+  (older processors download it for each job). On a MEGA library this is the default,
+  because its transfer quota counts every download; elsewhere the queue still runs
+  generation by generation unless set. The cost is throughput: a machine loads each
+  generation's models again for every volume and takes no volume ahead. The queue page,
+  the reader's queue file and the ETAs follow the order.
 - **Sidecars and the queue file name the OCR's parts with versions.** A sidecar Bunko
   writes now carries `ocr_engine.parts`, e.g. `[{"role": "recognizer", "name":
   "Hayai Nova", "version": "2.5"}, {"role": "detector", "name": "PP-OCR Manga",
@@ -667,6 +680,10 @@
 - **Dependency updates**: zip 9, rcgen 0.14, windows 0.62, windows-sys 0.61.
 
 ### Fixed
+- **A cloud archive fetched for this server's own OCR is used even when its session
+  starts to drain meanwhile.** The claim went back to the queue unrun, and the archive
+  was fetched again later. A draining session finishes what it accepted, and a claim
+  whose archive is being fetched is one of them.
 - **The OCR queue file lists the next 100 jobs, soonest first.** It listed the next
   100 waiting volumes with every job each still owed, so a volume near the front
   brought along jobs planned days later. It now lists every running job, the jobs about
