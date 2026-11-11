@@ -356,15 +356,20 @@ impl Signals {
     fn current(&self, now: i64) -> Vec<Activity> {
         Activity::ALL
             .into_iter()
-            .filter(|a| {
-                let t = self.last[slot(*a)].load(Ordering::Relaxed);
-                t != i64::MIN && now.saturating_sub(t) < self.active_for
-            })
+            .filter(|a| self.recent(*a, now))
             .collect()
     }
 
+    /// Whether `why` was noted within `active_for` of `now`.
+    fn recent(&self, why: Activity, now: i64) -> bool {
+        let t = self.last[slot(why)].load(Ordering::Relaxed);
+        t != i64::MIN && now.saturating_sub(t) < self.active_for
+    }
+
+    /// No allocation: the bridge asks on every request.
     fn active(&self, now: i64) -> bool {
-        self.pinned.load(Ordering::Relaxed) || !self.current(now).is_empty()
+        self.pinned.load(Ordering::Relaxed)
+            || Activity::ALL.into_iter().any(|a| self.recent(a, now))
     }
 
     /// Note `why` at `now`; true when the feed was idle until now.
@@ -392,6 +397,22 @@ pub struct PollCadence {
 
 fn last_seg(rel: &RelPath) -> &str {
     rel.segments().last().map_or("", String::as_str)
+}
+
+/// One of Bunko's control files at the library root (the lease marker, the queue
+/// file): another install's heartbeat or queue update is not a reader's activity.
+fn is_control_file(rel: &RelPath) -> bool {
+    rel.segments().len() == 1 && CONTROL_FILES.contains(&last_seg(rel))
+}
+
+/// A change a reader made (§5.3 poll cadence): anything but a control file.
+fn reader_change(c: &IndexChange) -> bool {
+    match c {
+        IndexChange::Added { rel, .. }
+        | IndexChange::Removed { rel, .. }
+        | IndexChange::ContentChanged { rel } => !is_control_file(rel),
+        IndexChange::Moved { from, to, .. } => !is_control_file(from) || !is_control_file(to),
+    }
 }
 
 /// A main or layer sidecar: `.mokuro`, `.mokuro.gz`, `.<layer>.mokuro`.
@@ -683,7 +704,7 @@ impl<B: Backend> Core<B> {
             out.extend(changes);
             return Ok(false);
         }
-        let foreign = !changes.is_empty();
+        let foreign = changes.iter().any(reader_change);
         match (&pre, &post) {
             (Some(a), Some(b)) if a != b && idx.lookup(a).is_none() => {
                 self.queue_move(idx, c, a, b, n.is_dir, &n.pid, &n.cver)?;
@@ -2167,7 +2188,9 @@ impl<B: Backend> Engine<B> {
                 }
             }
             let dels = core.plan_deletes(&idx, &deletes, &out, core.caps.path_ids);
-            foreign |= dels.iter().any(|d| !d.echo && !dels[d.top].echo);
+            foreign |= dels.iter().any(|d| {
+                !d.echo && !dels[d.top].echo && d.path.as_ref().is_some_and(|p| !is_control_file(p))
+            });
             let count = Core::<B>::removal_count(&dels);
             let total = idx.node_count();
             // A root change holds everything that came with it (on path-id providers

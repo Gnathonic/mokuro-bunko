@@ -69,7 +69,8 @@ impl Req {
 /// [`bunko_store::Activity::Bridge`] on the library's store.
 pub(crate) async fn dispatch(inner: Arc<Inner>, req: Request<Body>, ctx: DavContext) -> Resp {
     // A reader is using the library through the bridge: a cloud library's change feed
-    // polls at its active cadence for a while (0.8 design §5.3). One atomic store.
+    // polls at its active cadence for a while (0.8 design §5.3). A shared read of the
+    // mount table and an atomic store.
     bunko_store::note_activity(&inner.roots.library, bunko_store::Activity::Bridge);
     let info = request_info(&req);
     let mut resp = dispatch_method(inner, req, ctx).await;
