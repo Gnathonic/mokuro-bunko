@@ -152,7 +152,8 @@ pub struct LoadOptions {
     /// packages' weights carry it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub embeddings: Option<String>,
-    /// hayai-nova `max_num_patches` (the packages are compiled for one budget, 512).
+    /// hayai-nova `max_num_patches`, 1 to 512 (the packages' patch axis; packs before
+    /// 0.8.0 read 512 only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub patch_budget: Option<u32>,
     /// CPU threads for the AOTInductor CPU kernels and ATen (OpenMP), set on every
