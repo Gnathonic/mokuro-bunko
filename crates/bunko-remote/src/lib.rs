@@ -1,6 +1,7 @@
 //! Remote library storage (0.8 design §5, §6).
 //!
-//! [`backend::Backend`] is the provider seam (WebDAV, Google Drive, OneDrive, MEGA).
+//! [`backend::Backend`] is the provider seam (WebDAV, Google Drive, OneDrive, MEGA, a
+//! local folder).
 //! The `testing` feature adds `fake::FakeBackend`, an in-memory provider with fault
 //! injection that the store's tests run on. [`index::Index`] is the disposable
 //! `index.sqlite` that maps provider nodes to library paths; [`names`] holds the NFC,
@@ -17,8 +18,9 @@
 //! [`status`]
 //! holds the marker lease (`.mokuro-bunko.json`) and the cloud queue document. Default
 //! features add the providers' drivers (`webdav::WebDavBackend`,
-//! `gdrive::GDriveBackend`, `onedrive::OneDriveBackend`, `mega::MegaBackend`) and
-//! [`auth`], which signs in to the OAuth providers and keeps their credentials.
+//! `gdrive::GDriveBackend`, `onedrive::OneDriveBackend`, `mega::MegaBackend`,
+//! `folder::FolderBackend`) and [`auth`], which signs in to the OAuth providers and
+//! keeps their credentials.
 
 #[cfg(feature = "oauth")]
 pub mod auth;
@@ -28,6 +30,8 @@ pub mod cache;
 pub mod fake;
 pub mod feed;
 pub mod file;
+#[cfg(feature = "folder")]
+pub mod folder;
 #[cfg(feature = "gdrive")]
 pub mod gdrive;
 pub mod governor;
