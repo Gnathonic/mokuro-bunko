@@ -155,6 +155,70 @@
     if (node && node.textContent !== text) node.textContent = text;
   }
 
+  // A name cut in its MIDDLE when its cell is short of room: its start and its
+  // end stay readable, which is where a series number ("S012 …") or a
+  // volume number ("… 05") sits. The name becomes a head that shrinks with an
+  // ellipsis and a tail that does not: the last words (a space within the last
+  // 16 characters, keeping at least 5), else the last 10 characters (a title
+  // without spaces, e.g. Japanese). A short name, or `plain` text such as a
+  // status line, is set as it is. `suffix` (" · hayai-nova + 2 more") goes
+  // on the end. The full name is the tooltip.
+  //
+  // Very short of room (a lane on a phone), a head of KEEP_MIN characters or
+  // more keeps its first few ("S012…") and the tail gives way from its
+  // start ("…巻 05"); a shorter head has no first few worth keeping.
+  var MIDDLE_MIN = 16;
+  var KEEP_MIN = 12;
+  function splitName(text) {
+    var chars = Array.from(text);
+    if (chars.length <= MIDDLE_MIN) return null;
+    for (var i = chars.length - MIDDLE_MIN; i < chars.length - 5; i++) {
+      if (chars[i] === " " && i > 0) {
+        return [chars.slice(0, i).join(""), chars.slice(i + 1).join(""), true];
+      }
+    }
+    return [chars.slice(0, chars.length - 10).join(""), chars.slice(chars.length - 10).join(""), false];
+  }
+
+  function setName(node, text, plain, suffix) {
+    if (!node) return;
+    suffix = suffix || "";
+    var key = (plain ? "p:" : "n:") + text + "\u0001" + suffix;
+    if (node.dataset.name === key) return;
+    node.dataset.name = key;
+    var parts = plain ? null : splitName(text);
+    if (!parts) {
+      node.textContent = text + suffix;
+      node.classList.remove("mid", "mid--keep");
+    } else {
+      node.textContent = "";
+      var head = el("span", "mid__head");
+      head.textContent = parts[0];
+      var tail = el("span", "mid__tail" + (parts[2] ? " mid__tail--word" : ""));
+      var end = document.createElement("bdi");
+      end.textContent = parts[1] + suffix;
+      tail.appendChild(end);
+      node.appendChild(head);
+      node.appendChild(tail);
+      node.classList.add("mid");
+      node.classList.toggle("mid--keep", Array.from(parts[0]).length >= KEEP_MIN);
+    }
+  }
+
+  // setName's markup, for the lists built as HTML.
+  function nameHtml(cls, text) {
+    var parts = splitName(text);
+    var title = text ? ' title="' + escapeHtml(text) + '"' : "";
+    if (!parts) return '<span class="' + cls + '"' + title + ">" + escapeHtml(text) + "</span>";
+    var keep = Array.from(parts[0]).length >= KEEP_MIN ? " mid--keep" : "";
+    return (
+      '<span class="' + cls + " mid" + keep + '"' + title + ">" +
+      '<span class="mid__head">' + escapeHtml(parts[0]) + "</span>" +
+      '<span class="mid__tail' + (parts[2] ? " mid__tail--word" : "") + '"><bdi>' +
+      escapeHtml(parts[1]) + "</bdi></span></span>"
+    );
+  }
+
   function setHidden(node, hidden) {
     if (node && node.hidden !== hidden) node.hidden = hidden;
   }
@@ -502,14 +566,17 @@
   // card), "+ N more" when more wait behind it on this machine -- or "None".
   function fillOnDeck(node, upcoming, withLayer) {
     var first = upcoming[0];
-    setText(
-      node,
-      first
-        ? whatText(first) +
-          (withLayer && first.generation ? " · " + first.generation : "") +
+    if (first) {
+      setName(
+        node,
+        whatText(first),
+        false,
+        (withLayer && first.generation ? " · " + first.generation : "") +
           (upcoming.length > 1 ? " + " + (upcoming.length - 1) + " more" : "")
-        : "None"
-    );
+      );
+    } else {
+      setName(node, "None", true);
+    }
     node.title = upcoming.map(function (item) {
       return whatText(item) + (item.generation ? " · " + item.generation : "");
     }).join("\n");
@@ -555,9 +622,9 @@
     setText(node.querySelector(".mline__name"), lane.machine.name);
     var what = node.querySelector(".mline__what");
     var empty = job ? "" : emptyLaneText(state, true, lane.machine);
-    setText(what, job ? whatText(job) : empty);
+    setName(what, job ? whatText(job) : empty, !job);
     // A narrow card cuts the line; the whole of it is on hover.
-    setAttr(what, "title", empty || null);
+    setAttr(what, "title", job ? whatText(job) : empty || null);
     node.title = job && job.generation ? "generation: " + job.generation : "";
     fillLane(node, job, state);
     setPill(node.querySelector(".state-pill"), state);
@@ -688,12 +755,14 @@
       node.querySelector(".lane__label"),
       lane.many ? "Processing · slot " + (lane.index + 1) : "Processing"
     );
-    setText(node.querySelector(".job__series"), (job && job.series) || HOLD);
+    var series = node.querySelector(".job__series");
+    setName(series, (job && job.series) || HOLD, !(job && job.series));
+    setAttr(series, "title", (job && job.series) || null);
     var volume = node.querySelector(".job__volume");
     var empty = job ? "" : emptyLaneText(state, false, lane.machine);
-    setText(volume, job ? job.volume || HOLD : empty);
+    setName(volume, job ? job.volume || HOLD : empty, !(job && job.volume));
     // A narrow card cuts the line; the whole of it is on hover.
-    setAttr(volume, "title", empty || null);
+    setAttr(volume, "title", (job && job.volume) || empty || null);
     setText(node.querySelector(".job__gen .badge--gen"), (job && job.generation) || "");
     var recipe = node.querySelector(".job-recipe");
     if (recipe) setText(recipe, job ? recipeText(job) : "");
@@ -950,8 +1019,11 @@
 
   function updatePending(node, item, index) {
     setText(node.querySelector(".pending-list__position"), String(index + 1));
-    setText(node.querySelector(".pending-list__series"), item.series || "");
-    setText(node.querySelector(".pending-list__volume"), item.volume || "");
+    setName(node.querySelector(".pending-list__series"), item.series || "");
+    setName(node.querySelector(".pending-list__volume"), item.volume || "");
+    // Both may be cut in the middle: the full names on hover.
+    setAttr(node.querySelector(".pending-list__series"), "title", item.series || null);
+    setAttr(node.querySelector(".pending-list__volume"), "title", item.volume || null);
     fillGen(node.querySelector(".pending-list__gen"), item);
     var attempt = node.querySelector(".pending-list__attempt");
     setText(attempt, item.attempts ? "attempt " + (item.attempts + 1) : "");
@@ -973,10 +1045,9 @@
   }
 
   function updateCompact(node, item) {
-    setText(
-      node.querySelector(".pc__what"),
-      (item.series ? item.series + " · " : "") + (item.volume || "")
-    );
+    var what = node.querySelector(".pc__what");
+    setName(what, whatText(item));
+    setAttr(what, "title", whatText(item) || null);
     setText(node.querySelector(".pc__gen"), item.generation || "");
     updatePendingEta(node.querySelector(".pending-list__eta"), item);
   }
@@ -1056,8 +1127,8 @@
     return (
       '<li class="pending-list__item pending-list__item--failed">' +
       '<div class="failed-item__header">' +
-      '<span class="pending-list__series">' + escapeHtml(item.series || "") + "</span>" +
-      '<span class="pending-list__volume">' + escapeHtml(item.volume || "") + "</span>" +
+      nameHtml("pending-list__series", item.series || "") +
+      nameHtml("pending-list__volume", item.volume || "") +
       '<span class="pending-list__gen">' + (item.generation
         ? '<span class="badge badge--gen">' + escapeHtml(item.generation) + "</span>"
         : "") + "</span>" +
@@ -1094,8 +1165,8 @@
     return (
       '<li class="pending-list__item pending-list__item--skipped">' +
       '<div class="skipped-item__header">' +
-      '<span class="pending-list__series">' + escapeHtml(item.series || "") + "</span>" +
-      '<span class="pending-list__volume">' + escapeHtml(item.volume || "") + "</span>" +
+      nameHtml("pending-list__series", item.series || "") +
+      nameHtml("pending-list__volume", item.volume || "") +
       '<span class="badge badge--muted">' + escapeHtml(missingPagesText(item)) + "</span>" +
       "</div>" +
       '<div class="skipped-item__gens">' +
@@ -1282,10 +1353,14 @@
     return Math.min(100, value);
   }
 
+  // Safe in text AND in a quoted attribute (nameHtml's title): the quotes too.
   function escapeHtml(s) {
-    var d = document.createElement("div");
-    d.textContent = s;
-    return d.innerHTML;
+    return String(s == null ? "" : s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
   }
 
   // The backend as it is written, not as the config spells it.
