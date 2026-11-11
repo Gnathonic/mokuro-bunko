@@ -5061,6 +5061,7 @@ function renderMachine(m) {
     });
     if (b.need && b.need.state === 'install') parts.push('Missing: the ' + b.need.variant + ' pack');
     if (b.need && b.need.state === 'off') parts.push('OCR here is off');
+    if (b.need && b.need.extra) parts.push('Not installed: the optional ' + b.need.extra.variant + ' pack (' + b.need.extra.text + ')');
     if (!parts.length) parts.push(b.need ? b.need.text : '-');
     document.getElementById('machine-pack').textContent = parts.join(' · ');
     renderMachineVulkan(m.vulkan);
@@ -5083,7 +5084,7 @@ function renderMachine(m) {
 
     renderMachineInstall(m.install);
     const running = m.install && m.install.state === 'running';
-    document.getElementById('machine-install-btn').hidden = !(b.need && b.need.state === 'install') || running;
+    document.getElementById('machine-install-btn').hidden = !(b.need && (b.need.state === 'install' || b.need.extra)) || running;
     document.getElementById('machine-install-btn').textContent =
         m.install && m.install.state === 'failed' ? 'Retry' : 'Install';
     document.getElementById('machine-reinstall-btn').hidden = running || !(m.packs || []).some((p) => p.removable);

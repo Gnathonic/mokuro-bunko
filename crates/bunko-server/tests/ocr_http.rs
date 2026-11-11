@@ -2223,3 +2223,63 @@ async fn a_testing_build_counts_the_walks_for_its_admin() {
     }
     e.stop.cancel();
 }
+
+/// A processor waits 90 s for its socket to open, because a library busy with a large
+/// queue answers late. The socket's opening asks the scheduler, and that ask gave up
+/// after 30 s and refused the socket with 503: the processor registered again, which
+/// only added to the scheduler's queue. A scheduler 35 s behind now still opens it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_socket_opens_when_the_scheduler_answers_after_30_seconds() {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let e = env(|_| {});
+    e.db.create_user(
+        "tower-acct",
+        "processor-pass-1",
+        Role::Processor,
+        UserStatus::Active,
+        "",
+    )
+    .unwrap();
+    let app = bunko_server::ocr::processor_router(e.ocr.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let auth = basic("tower-acct", "processor-pass-1");
+    let reg: Value = reqwest::Client::new()
+        .post(format!("http://{addr}/_processor/register"))
+        .header("authorization", &auth)
+        .json(&json!({"protocol": 3, "name": "tower", "catalog": {"engines": ["hayai-nova"], "detectors": ["ppocr-manga"], "engine_revisions": ocr_common::current_revisions(["hayai-nova"])}}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let pid = reg["processor_id"].as_str().unwrap().to_string();
+    // The scheduler is busy for 35 s.
+    assert!(
+        e.ocr
+            .send(bunko_server::ocr::sched::Msg::Query(Box::new(|_| {
+                std::thread::sleep(Duration::from_secs(35));
+            })))
+    );
+    let mut req = format!("ws://{addr}/_processor/{pid}/socket")
+        .into_client_request()
+        .unwrap();
+    req.headers_mut()
+        .insert("authorization", auth.parse().unwrap());
+    let started = std::time::Instant::now();
+    let opened = tokio::time::timeout(
+        Duration::from_secs(90),
+        tokio_tungstenite::connect_async(req),
+    )
+    .await
+    .expect("the socket's opening took longer than the processor waits");
+    assert!(
+        opened.is_ok(),
+        "refused after {:?}: {:?}",
+        started.elapsed(),
+        opened.err()
+    );
+    assert!(started.elapsed() >= Duration::from_secs(30));
+}

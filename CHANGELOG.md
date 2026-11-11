@@ -688,6 +688,67 @@
 - **Dependency updates**: zip 9, rcgen 0.14, windows 0.62, windows-sys 0.61.
 
 ### Fixed
+- **A processor whose OCR backend works takes work while the optional Vulkan pack is
+  missing.** With `ocr.backend: auto` and a GPU, a missing Vulkan pack counted as a
+  missing OCR backend, although its runtimes are only more benchmark candidates beside
+  the libtorch pack. A processor started the install again at every registration and
+  said it was installing, so the library gave it no work. When the Vulkan pack could not
+  be downloaded (its release was not published), the install ended without it, the
+  processor registered again, and the cycle repeated without end. The Vulkan pack is now
+  fetched on its own after the libtorch pack, and the machine stays available while it
+  downloads. A failed fetch is a warning with a Retry button, and the machine waits
+  5, 15 and 60 minutes and then a day before it tries again; a release with nothing
+  published waits a day at once. The wait is kept in the backends directory, so a
+  reconnect or a restart does not fetch it again sooner, and neither does turning local
+  processing on or saving the backend preference (only Retry does). The server's own
+  OCR no longer waits for the Vulkan pack either. Where the Vulkan pack is the machine's
+  only GPU route (`ocr.backend: vulkan`, AMD or Intel GPUs on Windows, an AMD GPU with
+  no ROCm build, an NVIDIA driver too old for CUDA), its first fetch is waited for as an
+  install is, so the machine is not benchmarked on the CPU meanwhile; if it fails, the
+  machine runs on the CPU and later tries run on the side. A Vulkan pack installed by
+  hand after a failed fetch clears the warning at the next check. A Vulkan pack
+  installed on its own also no longer replaces a backend variant picked by hand.
+- **A library with a large OCR queue answers a processor's registration at once.** A
+  processor that has not benchmarked a row takes none of that row's volumes, yet each of
+  its claims looked every one of them up in the library, with several folder listings
+  each (index reads on a cloud library). With 10,000 jobs queued, such a claim took
+  1.5 s on a local disk and 6 s on a cloud library, about once each time the processor
+  opened its socket. The queue page, the reader's queue file and a reader's question
+  about a volume also read each processor's profile from disk once per queued job and
+  machine, about 0.6 s per build at 10,000 jobs. The OCR scheduler answers registrations and all
+  of these one at a time, and the queue page and the queue file are built every few
+  seconds, so it likely fell behind on them: a registration waited past the
+  processor's 30 s timeout, the processor registered again, and the queue page took
+  from seconds to over 30 s. A claim now passes over the volumes of a row whose
+  benchmark it has asked for, and a queue estimate reads each machine's profile once
+  per row. At 10,000 jobs a processor's arrival now costs the scheduler 20 to 60 ms
+  instead of 1.5 to 6 s, and a queue page build 40 to 170 ms instead of 0.2 to 0.9 s
+  (`crates/bunko-server/tests/ocr_scale.rs` measures it).
+- **A processor that reconnects carries on with its benchmarks.** When a processor's
+  link dropped, its queued benchmarks failed, and on its return every one was asked for
+  again: each packed a new sample from the library (provider reads on a cloud library,
+  each on a helper thread of its own) and logged "Benchmarking ... before it runs there"
+  for every row. A processor back within 10 minutes with the same host and catalog now
+  picks its line up where it was, and the benchmark it was running is sent again with
+  the sample already packed. One back with another catalog, or later, is measured
+  afresh, and one back while it still installs its backend waits until it is available.
+  A benchmark waiting for its processor's return shows as queued and can be cancelled,
+  and a server that stops removes the samples packed for such benchmarks.
+- **A processor waits 90 s for the library to answer its registration and open its
+  socket** (30 s before). The library's OCR scheduler answers both, so a busy library
+  can take longer, and a processor that gave up registered again, which only added to
+  the scheduler's queue. The library also waits up to 85 s for its scheduler before it
+  opens the socket; it refused the socket after 30 s with "OCR is not running", and now
+  says the scheduler is busy when it does give up. 90 s stays under the 100 s a
+  Cloudflare tunnel holds a request open.
+- **`mokuro-bunko tunnel cloudflare` keeps running without a terminal.** Started
+  detached or as a service (stdin not a terminal), it printed the tunnel URL, read end of
+  input at "Add tunnel URL to CORS allowed origins?", aborted, and took cloudflared down
+  with it. The question is now asked only on a terminal. Without one, the command says
+  that it adds nothing and that `--cors yes` adds the URL, and the tunnel stays up. The
+  new `--cors yes|no|ask` option (default `ask`) answers the question ahead. A "no", a
+  Ctrl-D at the question, or a config file that cannot be saved also leaves the tunnel
+  running.
 - **A cloud archive fetched for this server's own OCR is used even when its session
   starts to drain meanwhile.** The claim went back to the queue unrun, and the archive
   was fetched again later. A draining session finishes what it accepted, and a claim

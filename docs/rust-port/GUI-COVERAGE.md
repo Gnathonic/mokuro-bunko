@@ -127,6 +127,7 @@ front (`--config`).
 | `tunnel status` | [Connectivity](/_admin#connectivity) → Cloudflare Tunnel (says when cloudflared is missing) |
 | `tunnel cloudflare` | [Connectivity](/_admin#connectivity) → Start Tunnel (the running server owns the tunnel) |
 | `tunnel cloudflare --port` | [Connectivity](/_admin#connectivity): the server tunnels its own port |
+| `tunnel cloudflare --cors` | [Settings](/_admin#settings) → CORS → the tunnel URL shown under [Connectivity](/_admin#connectivity) → Cloudflare Tunnel |
 | `dyndns` | [Connectivity](/_admin#connectivity) → Dynamic DNS |
 | `dyndns setup` | [setup](/setup) → Remote access → Dynamic DNS (provider, domain, token); later [Connectivity](/_admin#connectivity) → Dynamic DNS → Save Settings |
 | `dyndns status` | [Connectivity](/_admin#connectivity) → Dynamic DNS → Last Update |

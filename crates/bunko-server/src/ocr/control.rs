@@ -86,6 +86,12 @@ pub trait BackgroundInstall: Send + Sync {
     /// `Err` why it cannot start.
     fn start(&self) -> Result<bool, String>;
 
+    /// [`Self::start`] for a settings change (local processing turned on), which is no
+    /// retry: what an earlier failure says to wait for still waits. Same answer.
+    fn start_for_settings(&self) -> Result<bool, String> {
+        self.start()
+    }
+
     /// Bumped each time an install ends (done or failed): the local processor (re)starts
     /// with what is installed then, when that is a backend ([`Self::backend_ready`]).
     fn finished(&self) -> tokio::sync::watch::Receiver<u64>;
@@ -97,6 +103,15 @@ pub trait BackgroundInstall: Send + Sync {
     fn backend_ready(&self) -> bool {
         true
     }
+}
+
+/// Why [`OcrControl::ask_within`] got no answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unanswered {
+    /// The scheduler is not running.
+    Stopped,
+    /// It did not get to the question in time.
+    Busy,
 }
 
 /// What the OCR module is handed.
@@ -596,17 +611,30 @@ impl OcrControl {
         &self,
         f: impl FnOnce(&mut Scheduler) -> T + Send + 'static,
     ) -> Option<T> {
+        self.ask_with_deadline(Duration::from_secs(30), f)
+            .await
+            .ok()
+    }
+
+    /// [`Self::ask`] with its own deadline, saying why no answer came.
+    pub async fn ask_with_deadline<T: Send + 'static>(
+        &self,
+        wait: Duration,
+        f: impl FnOnce(&mut Scheduler) -> T + Send + 'static,
+    ) -> Result<T, Unanswered> {
         let (reply, rx) = tokio::sync::oneshot::channel();
         let q: sched::Query = Box::new(move |s: &mut Scheduler| {
             let _ = reply.send(f(s));
         });
         if !self.send(Msg::Query(q)) {
-            return None;
+            return Err(Unanswered::Stopped);
         }
-        tokio::time::timeout(Duration::from_secs(30), rx)
-            .await
-            .ok()?
-            .ok()
+        match tokio::time::timeout(wait, rx).await {
+            Ok(Ok(v)) => Ok(v),
+            // The scheduler dropped the question: it stopped.
+            Ok(Err(_)) => Err(Unanswered::Stopped),
+            Err(_) => Err(Unanswered::Busy),
+        }
     }
 
     /// [`Self::ask`] from synchronous code (a blocking thread), with a deadline.
@@ -719,7 +747,7 @@ impl OcrControl {
         } else if wanted_local && !local_running && self.0.pending.lock().is_none() {
             // Turned on: install the OCR backend first if it is missing (in the
             // background; its end starts this server's OCR), else start it now.
-            match self.installer().map(|i| i.start()) {
+            match self.installer().map(|i| i.start_for_settings()) {
                 Some(Ok(true)) => {
                     installing = true;
                     reason = "installing the OCR backend in the background; this server's OCR starts when it is done".into();

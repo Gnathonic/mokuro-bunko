@@ -58,6 +58,8 @@ pub struct BenchRun {
     pub started_mono: Option<f64>,
     /// The sample is being packed on a helper thread.
     pub building: bool,
+    /// The sample is packed (`pages`, `volumes`): a run sent again reuses it.
+    pub built: Option<(i64, i64)>,
     pub sent: bool,
     /// The processor's `fatal`, said before its `exit`.
     pub fatal: Option<String>,
@@ -73,6 +75,26 @@ pub struct BenchState {
     pub recent: indexmap::IndexMap<(String, String), Map<String, Value>>,
     /// Machines whose line holds (and pre-empted) their OCR.
     pub holding: HashMap<String, Vec<Value>>,
+    /// The autobench runs of processors that dropped off, by name, kept for their
+    /// return ([`Scheduler::bench_machine_back`]).
+    pub parked: HashMap<String, Parked>,
+}
+
+/// How long a processor that dropped off keeps its autobench runs for its return: past
+/// the longest wait between its reconnect attempts (5 minutes), with room for a restart.
+pub const BENCH_PARK_SECONDS: f64 = 600.0;
+
+/// A dropped processor's autobench runs. A processor reconnects whenever its link drops
+/// or its backend changes. Asking for every benchmark again on each return re-packs
+/// each sample from the library (provider reads on a cloud library), so the line waits
+/// here instead, for as long as the machine comes back unchanged.
+#[derive(Debug)]
+pub struct Parked {
+    /// What it registered with: `(host, catalog)`.
+    pub identity: (Value, Value),
+    /// The monotonic time after which the runs are given up.
+    pub until: f64,
+    pub runs: VecDeque<BenchRun>,
 }
 
 fn bench_error(status: u16, message: impl Into<String>) -> (u16, Value) {
@@ -694,6 +716,7 @@ impl Scheduler {
             data,
             started_mono: None,
             building: false,
+            built: None,
             sent: false,
             fatal: None,
         };
@@ -719,6 +742,20 @@ impl Scheduler {
                 data.insert("progress".into(), Value::Null);
             }
             data.insert("position".into(), json!(pos));
+            data.insert("queue".into(), self.queue_value());
+            return Value::Object(data);
+        }
+        // Parked for its machine's return: queued, with no place in a line yet.
+        if let Some(run) = self
+            .bench
+            .parked
+            .get(machine)
+            .and_then(|p| p.runs.iter().find(|r| r.key == key))
+        {
+            let mut data = run.data.clone();
+            data.insert("progress".into(), Value::Null);
+            data.insert("position".into(), Value::Null);
+            data.insert("waiting_for_machine".into(), json!(true));
             data.insert("queue".into(), self.queue_value());
             return Value::Object(data);
         }
@@ -750,6 +787,9 @@ impl Scheduler {
         } else {
             machine.to_string()
         };
+        if self.bench_cancel_parked(key, &machine) {
+            return Ok(self.bench_get(key, &machine));
+        }
         let Some(pos) = self
             .bench
             .lines
@@ -773,6 +813,35 @@ impl Scheduler {
         }
         self.bench_finish(&machine, pos, "cancelled", None);
         Ok(self.bench_get(key, &machine))
+    }
+
+    /// Cancel a run parked for its machine's return (true when there was one): it
+    /// leaves at once, as a queued run does, and its sample goes with it.
+    fn bench_cancel_parked(&mut self, key: &str, machine: &str) -> bool {
+        let Some(parked) = self.bench.parked.get_mut(machine) else {
+            return false;
+        };
+        let Some(pos) = parked.runs.iter().position(|r| r.key == key) else {
+            return false;
+        };
+        let Some(mut run) = parked.runs.remove(pos) else {
+            return false;
+        };
+        if parked.runs.is_empty() {
+            self.bench.parked.remove(machine);
+        }
+        // unmounted: the benchmark sample lives in the `.processing` spool.
+        #[allow(clippy::disallowed_methods)]
+        let _ = std::fs::remove_file(self.sample_path(&run.bid));
+        run.data.insert("state".into(), json!("cancelled"));
+        run.data.insert("finished_at".into(), json!(self.now_iso()));
+        run.data.insert("progress".into(), Value::Null);
+        run.data.insert("waiting_for_queue".into(), json!(false));
+        self.bench
+            .recent
+            .insert((run.key, machine.to_string()), run.data);
+        self.bump_page();
+        true
     }
 
     /// `paused_for_benchmark()`: the head of the global line.
@@ -885,7 +954,8 @@ impl Scheduler {
     }
 
     /// Start the head of a machine's line: hold the machine (once per line), then pack
-    /// the sample on a helper thread; [`Scheduler::bench_sample_built`] sends the op.
+    /// the sample on a helper thread; [`Scheduler::bench_sample_built`] sends the op. A
+    /// head whose sample is packed already (a line back from [`Parked`]) is sent at once.
     fn bench_advance(&mut self, machine: &str) {
         let Some(run) = self
             .bench
@@ -899,9 +969,8 @@ impl Scheduler {
             }
             return;
         };
-        if run.sent || run.building {
-            return;
-        }
+        // Held before anything else: a line back from parking may have its head's sample
+        // still being packed.
         if !self.bench.holding.contains_key(machine) {
             let preempted = self.preempt_for_bench(machine);
             self.bench
@@ -912,14 +981,24 @@ impl Scheduler {
                     .insert("preempted".into(), Value::Array(preempted));
             }
         }
+        if run.sent || run.building {
+            return;
+        }
         let host = self.bench_host(machine);
+        let packed = run
+            .built
+            .filter(|_| bunko_store::fs::is_file(self.sample_path(&run.bid)));
         if let Some(head) = self.head_mut(machine) {
-            head.building = true;
+            head.building = packed.is_none();
             head.data.insert("state".into(), json!("running"));
             head.data.insert("waiting_for_queue".into(), json!(false));
             head.data.insert("host".into(), host);
         }
         self.bump_page();
+        if let Some((pages, volumes)) = packed {
+            self.bench_send(machine, &run.bid, pages, volumes);
+            return;
+        }
         let library = self.library();
         let out = self.sample_path(&run.bid);
         let (bid, pages, machine) = (run.bid.clone(), run.pages, machine.to_string());
@@ -955,6 +1034,9 @@ impl Scheduler {
             .and_then(|l| l.front())
             .is_some_and(|r| r.bid == bid && r.building);
         if !is_head {
+            if self.parked_sample_built(machine, bid, &result) {
+                return;
+            }
             // Cancelled (or the machine left) while it was being packed.
             // unmounted: the benchmark sample lives in the `.processing` spool.
             #[allow(clippy::disallowed_methods)]
@@ -971,6 +1053,14 @@ impl Scheduler {
                 return;
             }
         };
+        if let Some(head) = self.head_mut(machine) {
+            head.built = Some((pages, volumes));
+        }
+        self.bench_send(machine, bid, pages, volumes);
+    }
+
+    /// Hand the line's head, its sample packed, to its machine.
+    fn bench_send(&mut self, machine: &str, bid: &str, pages: i64, volumes: i64) {
         let Some(target) = self
             .machine_by_name(machine)
             .map(|m| (m.pid.clone(), m.local))
@@ -1476,38 +1566,216 @@ impl Scheduler {
                 Some("the benchmark ran past its time budget and was stopped".into()),
             );
         }
+        let expired: Vec<String> = self
+            .bench
+            .parked
+            .iter()
+            .filter(|(_, p)| now > p.until)
+            .map(|(m, _)| m.clone())
+            .collect();
+        for machine in expired {
+            // A machine connected again but still paused (installing, paused by its
+            // owner) did not go away: it never became available.
+            let why = if self.machine_by_name(&machine).is_some() {
+                format!(
+                    "{machine} did not become available within {} minutes",
+                    (BENCH_PARK_SECONDS / 60.0).round()
+                )
+            } else {
+                format!("{machine} disconnected")
+            };
+            if let Some(parked) = self.bench.parked.remove(&machine) {
+                for run in parked.runs {
+                    self.bench_gone(&machine, run, why.clone());
+                }
+                self.bump_page();
+            }
+        }
     }
 
-    /// A machine left: its line ends (autobench pairs may be asked again).
-    pub fn bench_machine_left(&mut self, machine: &str) {
+    /// Every parked run ends: the server stops, and no processor returns to this
+    /// process. Their samples would otherwise outlive the restart in `.processing`,
+    /// which nothing sweeps.
+    pub fn bench_unpark_all(&mut self) {
+        let machines: Vec<String> = self.bench.parked.keys().cloned().collect();
+        for machine in machines {
+            if let Some(parked) = self.bench.parked.remove(&machine) {
+                for run in parked.runs {
+                    self.bench_gone(&machine, run, "the server stopped".into());
+                }
+            }
+        }
+    }
+
+    /// A machine left: its line ends. A remote processor's autobench runs are parked
+    /// for its return under the same `identity` (`(host, catalog)`); every other run
+    /// fails, and its autobench pair may be asked again.
+    pub fn bench_machine_left(&mut self, machine: &str, identity: Option<(Value, Value)>) {
         let Some(line) = self.bench.lines.remove(machine) else {
             return;
         };
         self.bench.order.retain(|(_, m)| m != machine);
-        let finished_at = self.now_iso();
+        let mut parked = VecDeque::new();
         for mut run in line {
-            // unmounted: the benchmark sample lives in the `.processing` spool.
-            #[allow(clippy::disallowed_methods)]
-            let _ = std::fs::remove_file(self.sample_path(&run.bid));
-            run.data.insert("state".into(), json!("failed"));
-            run.data.insert("finished_at".into(), json!(finished_at));
-            run.data.insert("progress".into(), Value::Null);
-            run.data.insert("waiting_for_queue".into(), json!(false));
-            run.data
-                .insert("error".into(), json!(format!("{machine} disconnected")));
-            self.bench
-                .recent
-                .insert((run.key.clone(), machine.to_string()), run.data.clone());
-            if run.autobench {
+            if identity.is_some() && run.autobench {
+                // The processor lost what it was running: the run starts over.
+                run.sent = false;
+                run.started_mono = None;
+                run.fatal = None;
+                for k in ["progress", "startup_seconds", "baseline", "best"] {
+                    run.data.insert(k.into(), Value::Null);
+                }
+                run.data.insert("trials".into(), json!([]));
+                run.data.insert("state".into(), json!("queued"));
+                run.data.insert("waiting_for_queue".into(), json!(true));
                 let key = (profile_key(machine).to_string(), run.row.id.clone());
                 self.autobench.inflight.remove(&key);
                 self.autobench.asked.remove(&key);
+                parked.push_back(run);
+                continue;
             }
+            self.bench_gone(machine, run, format!("{machine} disconnected"));
+        }
+        if let Some(identity) = identity.filter(|_| !parked.is_empty()) {
+            self.bench.parked.insert(
+                machine.to_string(),
+                Parked {
+                    identity,
+                    until: self.mono() + BENCH_PARK_SECONDS,
+                    runs: parked,
+                },
+            );
         }
         if self.bench.holding.remove(machine).is_some() {
             self.release_queue(machine);
         }
         self.bump_page();
+    }
+
+    /// A run that ends without running: failed with `error`, its sample removed, its
+    /// autobench pair free to be asked again.
+    fn bench_gone(&mut self, machine: &str, mut run: BenchRun, error: String) {
+        // unmounted: the benchmark sample lives in the `.processing` spool.
+        #[allow(clippy::disallowed_methods)]
+        let _ = std::fs::remove_file(self.sample_path(&run.bid));
+        run.data.insert("state".into(), json!("failed"));
+        run.data.insert("finished_at".into(), json!(self.now_iso()));
+        run.data.insert("progress".into(), Value::Null);
+        run.data.insert("waiting_for_queue".into(), json!(false));
+        run.data.insert("error".into(), json!(error));
+        if run.autobench {
+            let key = (profile_key(machine).to_string(), run.row.id.clone());
+            self.autobench.inflight.remove(&key);
+            self.autobench.asked.remove(&key);
+        }
+        self.bench
+            .recent
+            .insert((run.key, machine.to_string()), run.data);
+    }
+
+    /// A sample packed for a parked run: kept for the machine's return (true), or, when
+    /// it could not be packed, the run fails. False: no parked run waited for it.
+    fn parked_sample_built(
+        &mut self,
+        machine: &str,
+        bid: &str,
+        result: &Result<(i64, i64), String>,
+    ) -> bool {
+        let Some(parked) = self.bench.parked.get_mut(machine) else {
+            return false;
+        };
+        let Some(pos) = parked.runs.iter().position(|r| r.bid == bid && r.building) else {
+            return false;
+        };
+        match result {
+            Ok(built) => {
+                let run = &mut parked.runs[pos];
+                run.building = false;
+                run.built = Some(*built);
+            }
+            Err(e) => {
+                let Some(mut run) = parked.runs.remove(pos) else {
+                    return false;
+                };
+                if parked.runs.is_empty() {
+                    self.bench.parked.remove(machine);
+                }
+                run.building = false;
+                self.bench_gone(machine, run, e.clone());
+                self.bump_page();
+            }
+        }
+        true
+    }
+
+    /// Machine `pid` is connected and takes work: a line it left when it dropped off
+    /// carries on, its samples packed already, without asking for any benchmark again.
+    /// A run only goes back to the line while it is still what the row needs there; a
+    /// machine back with another host or catalog has every run given up, and the claims
+    /// ask for what it needs now.
+    pub fn bench_machine_back(&mut self, pid: &str) {
+        let Some((name, identity, label)) = self
+            .machines
+            .get(pid)
+            .filter(|m| m.connected() && m.pause.is_none())
+            .map(|m| {
+                (
+                    m.name.clone(),
+                    (m.host_value.clone(), m.catalog_value.clone()),
+                    m.label(),
+                )
+            })
+        else {
+            return;
+        };
+        let Some(parked) = self.bench.parked.remove(&name) else {
+            return;
+        };
+        let changed = parked.identity != identity;
+        let mut back = 0;
+        for run in parked.runs {
+            let row = self.row(&run.row.id).cloned();
+            let wanted = row.as_ref().and_then(|r| self.autobench_kind(pid, r));
+            if wanted.is_none() && !changed {
+                // Nothing to measure there now (measured meanwhile, or the row is gone).
+                // unmounted: the benchmark sample lives in the `.processing` spool.
+                #[allow(clippy::disallowed_methods)]
+                let _ = std::fs::remove_file(self.sample_path(&run.bid));
+                continue;
+            }
+            let kind = if run.precision_only {
+                "precision"
+            } else {
+                "full"
+            };
+            let same = !changed
+                && row.as_ref().is_some_and(|r| {
+                    r.output_affecting() == run.row.output_affecting()
+                        && r.precision == run.row.precision
+                })
+                && wanted == Some(kind);
+            if !same {
+                self.bench_gone(&name, run, format!("{name} disconnected"));
+                continue;
+            }
+            let key = (profile_key(&name).to_string(), run.row.id.clone());
+            self.autobench.asked.insert(key.clone());
+            self.autobench.inflight.insert(key);
+            self.bench.order.push((run.key.clone(), name.clone()));
+            self.bench
+                .lines
+                .entry(name.clone())
+                .or_default()
+                .push_back(run);
+            back += 1;
+        }
+        self.bump_page();
+        if back > 0 {
+            self.log(format!(
+                "{label} is back: its {back} queued benchmark(s) carry on"
+            ));
+            self.bench_advance(&name);
+        }
     }
 
     /// `_autobench_settled`.

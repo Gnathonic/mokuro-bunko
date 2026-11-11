@@ -146,6 +146,11 @@ struct Inner {
 }
 
 pub(crate) const JSON_TIMEOUT: Duration = Duration::from_secs(30);
+/// The registration and the socket's opening are answered by the library's OCR
+/// scheduler, one message at a time, so a library busy with a large queue may take a
+/// while. Giving up early re-registers, which only adds to its queue. 90 s stays under
+/// the 100 s a Cloudflare tunnel holds a request open.
+pub(crate) const REGISTER_TIMEOUT: Duration = Duration::from_secs(90);
 const UPLOAD_ATTEMPTS: usize = 3;
 
 impl LibraryClient {
@@ -245,7 +250,7 @@ impl LibraryClient {
             .header(AUTHORIZATION, self.inner.creds.header())
             .header(ACCEPT, "application/json")
             .json(request)
-            .timeout(JSON_TIMEOUT)
+            .timeout(REGISTER_TIMEOUT)
             .send()
             .await
             .map_err(|e| {
@@ -318,7 +323,7 @@ impl LibraryClient {
             false,
             Some(connector),
         );
-        let result = tokio::time::timeout(JSON_TIMEOUT, connect)
+        let result = tokio::time::timeout(REGISTER_TIMEOUT, connect)
             .await
             .map_err(|_| {
                 SocketRefusal::Other(ClientError::Library(

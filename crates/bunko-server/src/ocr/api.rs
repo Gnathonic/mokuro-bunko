@@ -27,8 +27,8 @@ use sha2::Digest;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{mpsc, oneshot};
 
-use super::OcrControl;
 use super::sched::{Msg, RegisterInput, RegisterOutcome};
+use super::{OcrControl, Unanswered};
 use crate::core::{Core, RequestCtx};
 
 impl FromRef<OcrControl> for Core {
@@ -170,6 +170,13 @@ async fn register(State(ocr): State<OcrControl>, ctx: RequestCtx, req: Request) 
 
 // --- the socket ---------------------------------------------------------------------------
 
+/// How long the socket's opening waits for the scheduler. The processor waits 90 s for
+/// the socket, as for its registration, because a library busy with a large queue
+/// answers late; [`OcrControl::ask`]'s 30 s would refuse it first, and a refused
+/// processor registers again, which only adds to the scheduler's queue. Just under 90 s,
+/// so the refusal still reaches a processor that waits that long.
+const SOCKET_PRECHECK_WAIT: Duration = Duration::from_secs(85);
+
 /// What the socket needs to know before upgrading.
 enum Precheck {
     Ok(Option<String>),
@@ -190,7 +197,7 @@ async fn socket(
     let user2 = username.clone();
     let pid2 = pid.clone();
     let check = ocr
-        .ask(move |s| match s.machines.get(&pid2) {
+        .ask_with_deadline(SOCKET_PRECHECK_WAIT, move |s| match s.machines.get(&pid2) {
             None => Precheck::Refused(404, "No such processor"),
             Some(m) if m.local || m.username.as_deref() != Some(user2.as_str()) => {
                 Precheck::Refused(403, "Not your processor")
@@ -203,10 +210,16 @@ async fn socket(
         })
         .await;
     let stamp = match check {
-        None => return error(503, "OCR is not running"),
-        Some(Precheck::Refused(status, msg)) => return error(status, msg),
-        Some(Precheck::Ghost) => return error(409, "Socket already open; register again"),
-        Some(Precheck::Ok(stamp)) => stamp,
+        Err(Unanswered::Stopped) => return error(503, "OCR is not running"),
+        Err(Unanswered::Busy) => {
+            return error(
+                503,
+                "The library's OCR scheduler is busy and did not answer in time; try again",
+            );
+        }
+        Ok(Precheck::Refused(status, msg)) => return error(status, msg),
+        Ok(Precheck::Ghost) => return error(409, "Socket already open; register again"),
+        Ok(Precheck::Ok(stamp)) => stamp,
     };
     // Events are small JSON objects (the largest, a `stats` pipeline snapshot or a
     // `volume_done` with its stage timings, is a few KiB); tungstenite's defaults (64 MiB

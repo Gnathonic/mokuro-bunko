@@ -295,11 +295,16 @@ impl Scheduler {
                 let Some(row) = self.row(&job.gid) else {
                     continue;
                 };
-                let key = self.failure_key_of(&job, row);
-                let record = self.failures.get(&key).and_then(Value::as_object);
+                // The key is a new string per job, and with no failure records there is
+                // nothing to look up with it.
+                let key = (!self.failures.is_empty()).then(|| self.failure_key_of(&job, row));
+                let record = key
+                    .as_ref()
+                    .and_then(|k| self.failures.get(k))
+                    .and_then(Value::as_object);
                 match eligibility_in(record, Some(vol.mtime), now, poll, &fleet) {
                     Eligibility::BackedOff | Eligibility::Parked => continue,
-                    Eligibility::Replaced => stale.push(key),
+                    Eligibility::Replaced => stale.extend(key),
                     _ => {}
                 }
                 if !exclude.contains(&job) {
@@ -953,6 +958,12 @@ impl Scheduler {
         precision_pick_needed(row, profile.as_ref(), supported.as_ref()).then_some("precision")
     }
 
+    /// The benchmark of row `gid` on the machine named `machine` is asked for or runs.
+    pub fn autobench_asked(&self, machine: &str, gid: &str) -> bool {
+        let key = (profile_key(machine).to_string(), gid.to_string());
+        self.autobench.asked.contains(&key) || self.autobench.inflight.contains(&key)
+    }
+
     pub fn want_autobench(&mut self, pid: &str, row: &Generation) {
         let Some(name) = self.machines.get(pid).map(|m| m.name.clone()) else {
             return;
@@ -1142,6 +1153,13 @@ impl Scheduler {
                 continue;
             };
             if offered.get(&*job.gid) != Some(&true) {
+                continue;
+            }
+            // A row this machine has not measured takes nothing here until its benchmark
+            // lands, so once that benchmark is asked for, the row's other volumes are
+            // passed over unread. Each look at a volume lists its folder several times (a
+            // provider index read on a cloud library), and a large queue holds thousands.
+            if unmeasured.contains(&*job.gid) && self.autobench_asked(&mname, &job.gid) {
                 continue;
             }
             let probe = self.upgrade_probe();

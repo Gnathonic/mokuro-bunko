@@ -2,11 +2,12 @@
 
 use super::Ctx;
 use crate::cfgfile;
-use crate::cli::TunnelCmd;
+use crate::cli::{CorsAnswer, TunnelCmd};
 use crate::out::{CmdResult, Fail, exit_with, runtime};
 use crate::prompt;
 use bunko_server::ops::tunnel::{INSTALL_URL, cloudflared_path, find_tunnel_url};
 use bunko_update::tools::Windowless;
+use std::io::IsTerminal;
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -14,7 +15,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 pub fn run(ctx: &Ctx, cmd: TunnelCmd) -> CmdResult {
     match cmd {
         TunnelCmd::Status => status(),
-        TunnelCmd::Cloudflare { port } => cloudflare(ctx, port),
+        TunnelCmd::Cloudflare { port, cors } => cloudflare(ctx, port, cors),
     }
 }
 
@@ -55,7 +56,7 @@ fn status() -> CmdResult {
     Ok(())
 }
 
-fn cloudflare(ctx: &Ctx, port: Option<u16>) -> CmdResult {
+fn cloudflare(ctx: &Ctx, port: Option<u16>, cors: CorsAnswer) -> CmdResult {
     let Some(bin) = cloudflared_path() else {
         eprintln!("Error: cloudflared is not installed");
         return Err(exit_with(format!("Install from: {INSTALL_URL}")));
@@ -77,21 +78,31 @@ fn cloudflare(ctx: &Ctx, port: Option<u16>) -> CmdResult {
             .spawn()
             .map_err(Fail::msg)?;
         let stderr = child.stderr.take().ok_or_else(|| Fail::msg("cloudflared has no stderr"))?;
-        let mut lines = BufReader::new(stderr).lines();
+        let mut stderr = BufReader::new(stderr);
+        let mut buf = Vec::new();
         let mut tunnel_url: Option<String> = None;
         loop {
+            buf.clear();
             tokio::select! {
-                line = lines.next_line() => match line {
-                    Ok(Some(line)) => {
+                read = stderr.read_until(b'\n', &mut buf) => match read {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        // Read as bytes: a line that is not UTF-8 failed the read, and the
+                        // error ended the command, which took cloudflared down with it.
+                        let line = String::from_utf8_lossy(&buf);
+                        let line = line.trim_end_matches(['\n', '\r']);
                         eprintln!("{line}");
-                        if let Some(url) = tunnel_url.is_none().then(|| find_tunnel_url(&line)).flatten() {
+                        if let Some(url) = tunnel_url.is_none().then(|| find_tunnel_url(line)).flatten() {
                             println!("\nTunnel URL: {url}\n");
-                            offer_cors(ctx, &url)?;
+                            offer_cors(ctx, &url, cors);
                             tunnel_url = Some(url);
                         }
                     }
-                    Ok(None) => break,
-                    Err(e) => return Err(Fail::msg(e)),
+                    // The tunnel does not depend on its log: wait for cloudflared instead.
+                    Err(e) => {
+                        eprintln!("Warning: cannot read cloudflared's output any more ({e}); the tunnel keeps running");
+                        break;
+                    }
                 },
                 _ = tokio::signal::ctrl_c() => {
                     println!("\nStopping tunnel...");
@@ -106,16 +117,88 @@ fn cloudflare(ctx: &Ctx, port: Option<u16>) -> CmdResult {
     })
 }
 
-/// `Add tunnel URL to CORS allowed origins?` — saved from the file alone (no env baking).
-fn offer_cors(ctx: &Ctx, url: &str) -> CmdResult {
-    if !prompt::confirm("Add tunnel URL to CORS allowed origins?", Some(true))? {
-        return Ok(());
+/// What `offer_cors` does with the tunnel URL.
+#[derive(Debug, PartialEq, Eq)]
+enum CorsStep {
+    Add,
+    Skip,
+    Ask,
+    /// `--cors ask` with no terminal to ask on.
+    SkipNoTerminal,
+}
+
+/// The CORS step for `--cors` and whether stdin is a terminal. Without a terminal there
+/// is nobody to answer, and an unanswered question would end the tunnel, so it is not asked.
+fn cors_step(answer: CorsAnswer, stdin_is_terminal: bool) -> CorsStep {
+    match answer {
+        CorsAnswer::Yes => CorsStep::Add,
+        CorsAnswer::No => CorsStep::Skip,
+        CorsAnswer::Ask if stdin_is_terminal => CorsStep::Ask,
+        CorsAnswer::Ask => CorsStep::SkipNoTerminal,
     }
+}
+
+/// `Add tunnel URL to CORS allowed origins?`, saved from the file alone (no env baking).
+/// Nothing here ends the command: cloudflared is the long-running process, so a "no", an
+/// end of input or a config that cannot be saved leaves the tunnel up.
+fn offer_cors(ctx: &Ctx, url: &str, answer: CorsAnswer) {
+    let add = match cors_step(answer, std::io::stdin().is_terminal()) {
+        CorsStep::Add => true,
+        CorsStep::Skip => false,
+        CorsStep::SkipNoTerminal => {
+            println!(
+                "Not adding the tunnel URL to CORS origins (stdin is not a terminal); \
+                 pass --cors yes to add it."
+            );
+            return;
+        }
+        CorsStep::Ask => {
+            match prompt::confirm_or_eof("Add tunnel URL to CORS allowed origins?", Some(true)) {
+                Ok(Some(yes)) => yes,
+                Ok(None) => {
+                    println!();
+                    false
+                }
+                Err(e) => {
+                    eprintln!("Warning: could not read an answer: {e}");
+                    false
+                }
+            }
+        }
+    };
+    if !add {
+        println!("Not adding {url} to CORS origins");
+        return;
+    }
+    match add_cors_origin(ctx, url) {
+        Ok(true) => println!("Added {url} to CORS origins"),
+        Ok(false) => println!("{url} is already a CORS origin"),
+        Err(e) => eprintln!("Warning: could not add {url} to CORS origins: {e}"),
+    }
+}
+
+/// Adds `url` to `cors.allowed_origins` in the config file; `false` when it was there.
+fn add_cors_origin(ctx: &Ctx, url: &str) -> Result<bool, Fail> {
     let mut config = cfgfile::load_for_write(&ctx.config_path)?;
-    if !config.cors.allowed_origins.iter().any(|o| o == url) {
-        config.cors.allowed_origins.push(url.to_string());
-        cfgfile::save(&config, &ctx.config_path)?;
-        println!("Added {url} to CORS origins");
+    if config.cors.allowed_origins.iter().any(|o| o == url) {
+        return Ok(false);
     }
-    Ok(())
+    config.cors.allowed_origins.push(url.to_string());
+    cfgfile::save(&config, &ctx.config_path)?;
+    Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cors_step_asks_only_on_a_terminal() {
+        assert_eq!(cors_step(CorsAnswer::Yes, false), CorsStep::Add);
+        assert_eq!(cors_step(CorsAnswer::Yes, true), CorsStep::Add);
+        assert_eq!(cors_step(CorsAnswer::No, false), CorsStep::Skip);
+        assert_eq!(cors_step(CorsAnswer::No, true), CorsStep::Skip);
+        assert_eq!(cors_step(CorsAnswer::Ask, true), CorsStep::Ask);
+        assert_eq!(cors_step(CorsAnswer::Ask, false), CorsStep::SkipNoTerminal);
+    }
 }

@@ -522,7 +522,12 @@ pub fn shape_status(
     };
     let connected = objects(raw.get("connected_machines"));
     let grouped = group_by_machine(&jobs, &connected);
-    let pending = objects(raw.get("pending_ocr"));
+    // Borrowed: a large queue lists thousands of entries, and only the first are shown.
+    let pending: Vec<&Map<String, Value>> = raw
+        .get("pending_ocr")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_object).collect())
+        .unwrap_or_default();
     let mut common = Map::new();
     common.insert("level".into(), json!(level));
     common.insert(

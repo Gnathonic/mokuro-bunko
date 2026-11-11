@@ -1882,3 +1882,295 @@ fn bunkos_own_older_revision_at_the_destination_is_replaced_in_place() {
     );
     assert!(rejected_reasons(&h).is_empty());
 }
+
+// --- a large queue, and processors that come and go -------------------------------------
+
+/// The ids of the benchmarks queued or running on `machine`, in line order.
+fn line_bids(h: &H, machine: &str) -> Vec<String> {
+    h.s.bench
+        .lines
+        .get(machine)
+        .map(|l| l.iter().map(|r| r.bid.clone()).collect())
+        .unwrap_or_default()
+}
+
+/// A processor that has measured none of its rows takes nothing until its benchmarks
+/// land. Once a row's benchmark is asked for, its claims pass over that row's other
+/// volumes without looking at them in the library. Each look lists the volume's folder
+/// several times (a provider index read on a cloud library), and claims that looked at
+/// every one of a large queue's volumes stalled the scheduler for seconds per claim.
+/// What shows it here: volumes gone since the walk stay listed, as nothing looked.
+#[test]
+fn an_unmeasured_processor_passes_over_the_volumes_of_a_row_it_waits_to_measure() {
+    let mut h = harness(vec![primary()]);
+    h.s.settings.autobench = true;
+    for v in 1..=4 {
+        h.add(&format!("A/V{v}.cbz"), 2);
+    }
+    h.at(0.0);
+    for v in 2..=4 {
+        std::fs::remove_file(h.library().join(format!("A/V{v}.cbz"))).unwrap();
+    }
+    let mut p = h.connect_gpu("box", &["fp32"]);
+    assert!(
+        bench_op(&p.drain()).is_some(),
+        "the row's benchmark is asked for"
+    );
+    for v in 2..=4 {
+        assert!(
+            h.s.owed.volumes.contains_key(&format!("A/V{v}.cbz")),
+            "V{v} was looked at"
+        );
+    }
+}
+
+/// A processor reconnects whenever its link drops or its backend changes. One that
+/// comes back unchanged carries on with the benchmarks it had queued: the one it was
+/// running is sent again with the sample already packed, and none is asked for again.
+/// Each ask packed a new sample from the library and logged "Benchmarking ...", for
+/// every row on every reconnect.
+#[test]
+fn a_processor_back_unchanged_carries_on_with_its_benchmarks() {
+    let mut h = harness(vec![primary(), layer("g-2", "fast")]);
+    h.s.settings.autobench = true;
+    h.add("A/V1.cbz", 2);
+    h.at(0.0);
+    let mut p = h.connect_gpu("box", &["fp32"]);
+    let first = bench_op(&p.drain()).expect("the first autobench");
+    let bids = line_bids(&h, "box");
+    assert_eq!(bids.len(), 2, "one benchmark per row");
+    assert_eq!(bids[0], first.bid);
+    let sample = h
+        .storage()
+        .join(".processing")
+        .join(format!("{}.cbz", first.bid));
+    assert!(sample.is_file());
+    for _ in 0..3 {
+        h.s.handle(Msg::Drop {
+            pid: p.pid.clone(),
+            reason: "the socket closed".into(),
+        });
+        assert!(line_bids(&h, "box").is_empty(), "no line while it is away");
+        assert!(!h.s.held("box"), "nothing is held for a machine away");
+        p = h.connect_gpu("box", &["fp32"]);
+        let again = bench_op(&p.drain()).expect("the running benchmark is sent again");
+        assert_eq!(again.bid, first.bid);
+        assert_eq!(line_bids(&h, "box"), bids, "no benchmark asked for again");
+        assert!(sample.is_file(), "its sample is kept");
+    }
+    // It ends as any benchmark does, and the queued one follows.
+    h.event(
+        &p,
+        Event::BenchDone {
+            bid: first.bid.clone(),
+            detail: detail(serde_json::json!({"best": {"trial": 1, "pages_per_second": 4.0}, "precision": "fp32", "precision_mode": "auto-accuracy"})),
+        },
+    );
+    assert_eq!(h.s.bench_get("g-1", "box")["state"], "done");
+    let next = bench_op(&p.drain()).expect("the queued benchmark follows");
+    assert_eq!(next.bid, bids[1]);
+}
+
+/// A processor back with another catalog (a pack installed, a card gone) is measured
+/// for what it is now: what it had queued is given up and asked for again.
+#[test]
+fn a_processor_back_changed_has_its_benchmarks_asked_again() {
+    let mut h = harness(vec![primary()]);
+    h.s.settings.autobench = true;
+    h.add("A/V1.cbz", 2);
+    h.at(0.0);
+    let mut p = h.connect_gpu("box", &["fp32"]);
+    let first = bench_op(&p.drain()).expect("the first autobench");
+    h.s.handle(Msg::Drop {
+        pid: p.pid.clone(),
+        reason: "the socket closed".into(),
+    });
+    let mut p = h.connect_gpu("box", &["fp32", "fp16"]);
+    let again = bench_op(&p.drain()).expect("asked for again");
+    assert_ne!(again.bid, first.bid);
+    let sample = h
+        .storage()
+        .join(".processing")
+        .join(format!("{}.cbz", first.bid));
+    assert!(!sample.exists(), "the old sample is removed");
+}
+
+/// A processor that stays away has its benchmarks given up after
+/// [`BENCH_PARK_SECONDS`], as one that left did at once before; back later, it is
+/// measured afresh.
+#[test]
+fn a_processor_away_too_long_has_its_benchmarks_given_up() {
+    let mut h = harness(vec![primary()]);
+    h.s.settings.autobench = true;
+    h.add("A/V1.cbz", 2);
+    h.at(0.0);
+    let mut p = h.connect_gpu("box", &["fp32"]);
+    let first = bench_op(&p.drain()).expect("the first autobench");
+    h.s.handle(Msg::Drop {
+        pid: p.pid.clone(),
+        reason: "the socket closed".into(),
+    });
+    h.at(bunko_server::ocr::sched::BENCH_PARK_SECONDS + 60.0);
+    let got = h.s.bench_get("g-1", "box");
+    assert_eq!(got["state"], "failed", "{got}");
+    assert_eq!(got["error"], "box disconnected");
+    let sample = h
+        .storage()
+        .join(".processing")
+        .join(format!("{}.cbz", first.bid));
+    assert!(!sample.exists(), "its sample is removed");
+    let mut p = h.connect_gpu("box", &["fp32"]);
+    let again = bench_op(&p.drain()).expect("measured afresh");
+    assert_ne!(again.bid, first.bid);
+}
+
+/// A processor back while it installs its backend runs no benchmark (one would fail
+/// there and leave the row unmeasured): its line carries on once it is available.
+#[test]
+fn a_processor_back_while_installing_carries_on_once_available() {
+    let mut h = harness(vec![primary()]);
+    h.s.settings.autobench = true;
+    h.add("A/V1.cbz", 2);
+    h.at(0.0);
+    let mut p = h.connect_gpu("box", &["fp32"]);
+    let first = bench_op(&p.drain()).expect("the first autobench");
+    let catalog = h.s.machines[&p.pid].catalog_value.clone();
+    let host = h.s.machines[&p.pid].host_value.clone();
+    h.s.handle(Msg::Drop {
+        pid: p.pid.clone(),
+        reason: "the socket closed".into(),
+    });
+    // It registers again, unchanged but still installing (a pack it fetches).
+    let mut p = reconnect_installing(&mut h, "box", host, catalog);
+    assert!(
+        bench_op(&p.drain()).is_none(),
+        "nothing runs while it installs"
+    );
+    h.event(
+        &p,
+        Event::Availability(bunko_proto::Availability::default()),
+    );
+    let again = bench_op(&p.drain()).expect("its benchmark carries on");
+    assert_eq!(again.bid, first.bid);
+}
+
+/// Register `name` again with `host` and `catalog`, paused while it installs, and open
+/// its socket.
+fn reconnect_installing(
+    h: &mut H,
+    name: &str,
+    host: serde_json::Value,
+    catalog: serde_json::Value,
+) -> Proc {
+    let username = format!("acct-{name}");
+    let (reply, mut rx) = tokio::sync::oneshot::channel();
+    h.s.handle(Msg::Register {
+        input: bunko_server::ocr::sched::RegisterInput {
+            username: username.clone(),
+            body: serde_json::json!({
+                "protocol": 3, "name": name, "host": host, "catalog": catalog,
+                "max_sessions": 1,
+                "availability": {"paused": true, "reason": "installing"},
+            }),
+            account_stamp: None,
+        },
+        reply,
+    });
+    let pid = match rx.try_recv().unwrap() {
+        bunko_server::ocr::sched::RegisterOutcome::Ok(r) => r.processor_id,
+        other => panic!("register refused: {other:?}"),
+    };
+    let (tx, ops) = tokio::sync::mpsc::unbounded_channel();
+    let (reply, mut rx) = tokio::sync::oneshot::channel();
+    h.s.handle(Msg::SocketOpen {
+        pid: pid.clone(),
+        username,
+        ops: tx,
+        reply,
+    });
+    rx.try_recv().unwrap().unwrap();
+    Proc {
+        pid,
+        name: name.into(),
+        ops,
+    }
+}
+
+/// A benchmark parked for its machine's return shows as queued and can be cancelled.
+/// It used to read as idle (or an old result) for up to ten minutes, and cancelling it
+/// was refused.
+#[test]
+fn a_parked_benchmark_shows_as_queued_and_cancels() {
+    let mut h = harness(vec![primary()]);
+    h.s.settings.autobench = true;
+    h.add("A/V1.cbz", 2);
+    h.at(0.0);
+    let mut p = h.connect_gpu("box", &["fp32"]);
+    let first = bench_op(&p.drain()).expect("the first autobench");
+    h.s.handle(Msg::Drop {
+        pid: p.pid.clone(),
+        reason: "the socket closed".into(),
+    });
+    let got = h.s.bench_get("g-1", "box");
+    assert_eq!(got["state"], "queued", "{got}");
+    assert_eq!(got["waiting_for_machine"], true, "{got}");
+    let got = h.s.bench_cancel("g-1", "box").expect("cancelled");
+    assert_eq!(got["state"], "cancelled", "{got}");
+    assert!(h.s.bench.parked.is_empty());
+    let sample = h
+        .storage()
+        .join(".processing")
+        .join(format!("{}.cbz", first.bid));
+    assert!(!sample.exists(), "its sample is removed");
+}
+
+/// A clean stop ends the runs parked for processors that dropped off earlier and
+/// removes their samples: no processor returns to this process, and nothing else
+/// removes them from `.processing`.
+#[test]
+fn a_stop_removes_the_samples_of_parked_benchmarks() {
+    let mut h = harness(vec![primary()]);
+    h.s.settings.autobench = true;
+    h.add("A/V1.cbz", 2);
+    h.at(0.0);
+    let mut p = h.connect_gpu("box", &["fp32"]);
+    let first = bench_op(&p.drain()).expect("the first autobench");
+    h.s.handle(Msg::Drop {
+        pid: p.pid.clone(),
+        reason: "the socket closed".into(),
+    });
+    let sample = h
+        .storage()
+        .join(".processing")
+        .join(format!("{}.cbz", first.bid));
+    assert!(sample.is_file(), "kept for the return");
+    h.s.handle(Msg::Stop);
+    assert!(h.s.bench.parked.is_empty());
+    assert!(!sample.exists(), "a parked sample outlived the stop");
+}
+
+/// A machine back but still paused when its parked runs expire did not disconnect: the
+/// error says it never became available.
+#[test]
+fn a_parked_benchmark_of_a_paused_machine_expires_as_unavailable() {
+    let mut h = harness(vec![primary()]);
+    h.s.settings.autobench = true;
+    h.add("A/V1.cbz", 2);
+    h.at(0.0);
+    let mut p = h.connect_gpu("box", &["fp32"]);
+    bench_op(&p.drain()).expect("the first autobench");
+    let catalog = h.s.machines[&p.pid].catalog_value.clone();
+    let host = h.s.machines[&p.pid].host_value.clone();
+    h.s.handle(Msg::Drop {
+        pid: p.pid.clone(),
+        reason: "the socket closed".into(),
+    });
+    let _p = reconnect_installing(&mut h, "box", host, catalog);
+    h.at(bunko_server::ocr::sched::BENCH_PARK_SECONDS + 60.0);
+    let got = h.s.bench_get("g-1", "box");
+    assert_eq!(got["state"], "failed", "{got}");
+    assert_eq!(
+        got["error"], "box did not become available within 10 minutes",
+        "{got}"
+    );
+}
