@@ -1,8 +1,22 @@
 # Changelog
 
-## [Unreleased]
+## [0.7.12] - 2026-11-10
+
+On Windows, a console window no longer flashes up every few seconds while the app runs.
 
 ### Fixed
+- **No more console windows flashing on Windows**
+  ([#79](https://github.com/Gnathonic/mokuro-bunko/issues/79)). With an NVIDIA card, the
+  app (`mokuro-bunko.exe`) ran `nvidia-smi` every few seconds to show GPU load. The app,
+  and the server and processor it starts, have no console of their own, so Windows
+  opened a console window for each run, and it flashed up on screen. `nvidia-smi` now
+  runs without a window. So do the other console programs they start: the hardware
+  check's `nvidia-smi`, `whoami` and `icacls` when a processor is paired, the
+  `cloudflared` a server starts (its window stayed for as long as the tunnel was up), and
+  the new version while an update fetches its files.
+- **A processor registers again after an install failure that cleared quickly.** If an
+  OCR backend install failed and the failure cleared before the processor looked, the
+  processor never registered with the library again until it restarted.
 - **Uploads with a stale Unicode name field are accepted.** Some zip tools store a
   second, UTF-8 copy of each member's name (the Info-ZIP Unicode Path field). When that
   copy no longer matched the name, upload verification refused the whole archive as "not
