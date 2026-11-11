@@ -593,3 +593,172 @@ fn the_live_block() {
 fn the_file_name_is_the_shared_one() {
     assert_eq!(FILE_NAME, bunko_core::names::SERIES_QUEUE_FILE);
 }
+
+#[test]
+fn the_marker_block_in_spec_order() {
+    let mut s = snap(T0, &[]);
+    s.held_rows.insert("lines".into());
+    let c = Clock::identity(T0 as i64);
+    let b = marker_block(Some(&s), &c, 120);
+    let keys: Vec<&str> = b.as_object().unwrap().keys().map(String::as_str).collect();
+    assert_eq!(
+        keys,
+        [
+            "v",
+            "file",
+            "batch_s",
+            "held",
+            "held_rows",
+            "clock",
+            "clock_at"
+        ]
+    );
+    assert_eq!(b["v"], 2);
+    assert_eq!(b["file"], ".mokuro-series-queue.json");
+    assert_eq!(b["held"], Value::Null);
+    assert_eq!(b["held_rows"], json!(["lines"]));
+    // Without a snapshot: nothing held.
+    assert_eq!(marker_block(None, &c, 300)["held_rows"], json!([]));
+}
+
+#[test]
+fn a_shifted_snapshot_moves_every_time_and_nothing_else() {
+    let mut s = snap(
+        T0,
+        &[(
+            "A",
+            &[
+                ("A 1", vec![q("main", Some(T0 + 600.0)), q("lines", None)]),
+                (
+                    "A 2",
+                    vec![LiveJob {
+                        row: "main".into(),
+                        state: LiveState::Running {
+                            t0: T0 - 60.0,
+                            e: Some(T0 + 60.0),
+                        },
+                    }],
+                ),
+            ],
+        )],
+    );
+    s.series.get_mut("a").unwrap().vols.insert(
+        "A 3".into(),
+        vec![LiveJob {
+            row: "main".into(),
+            state: LiveState::Claimed,
+        }],
+    );
+    let m = s.shifted(-100.0);
+    assert_eq!(m.now, T0 - 100.0);
+    let a = &m.series["a"];
+    assert_eq!(
+        a.vols["A 1"][0].state,
+        LiveState::Queued {
+            e: Some(T0 + 500.0)
+        }
+    );
+    assert_eq!(a.vols["A 1"][1].state, LiveState::Queued { e: None });
+    assert_eq!(
+        a.vols["A 2"][0].state,
+        LiveState::Running {
+            t0: T0 - 160.0,
+            e: Some(T0 - 40.0)
+        }
+    );
+    assert_eq!(a.vols["A 3"][0].state, LiveState::Claimed);
+    assert_eq!(s.shifted(0.0), s);
+    assert_eq!(a.soonest(), Some(T0 - 40.0));
+}
+
+#[test]
+fn the_backlog_orders_p0_and_p1_by_age_p2_by_soonest_finish_then_p3() {
+    let mut b: Backlog<&str> = Backlog::default();
+    b.mark("drift-late", Priority::P2, T0, Some(T0 + 900.0));
+    b.mark("tidy", Priority::P3, T0, None);
+    b.mark("state", Priority::P1, T0 + 1.0, None);
+    b.mark("hard-new", Priority::P0, T0 + 2.0, None);
+    b.mark("drift-soon", Priority::P2, T0 + 3.0, Some(T0 + 60.0));
+    b.mark("hard-old", Priority::P0, T0 + 1.5, None);
+    b.mark("drift-untimed", Priority::P2, T0, None);
+    assert_eq!(
+        b.order(),
+        [
+            "hard-old",
+            "hard-new",
+            "state",
+            "drift-soon",
+            "drift-late",
+            "drift-untimed",
+            "tidy"
+        ]
+    );
+    // Marks of one age (a take over marks every series at once): soonest first.
+    let mut t: Backlog<&str> = Backlog::default();
+    t.mark("far", Priority::P0, T0, Some(T0 + 9000.0));
+    t.mark("untimed", Priority::P0, T0, None);
+    t.mark("near", Priority::P0, T0, Some(T0 + 60.0));
+    assert_eq!(t.order(), ["near", "far", "untimed"]);
+    // A more urgent mark keeps its age; a less urgent one changes nothing.
+    b.mark("state", Priority::P0, T0 + 50.0, None);
+    assert_eq!(b.get(&"state").unwrap().since, T0 + 1.0);
+    assert_eq!(b.order()[0], "state");
+    b.mark("hard-old", Priority::P2, T0 + 60.0, None);
+    assert_eq!(b.get(&"hard-old").unwrap().priority, Priority::P0);
+    assert_eq!(b.unmark(&"tidy").map(|m| m.priority), Some(Priority::P3));
+    assert_eq!(b.len(), 6);
+}
+
+#[test]
+fn aging_promotes_p2_to_p1_to_p0_and_p3_to_p2() {
+    let w = 120.0;
+    let mut b: Backlog<&str> = Backlog::default();
+    b.mark("drift", Priority::P2, T0, Some(T0 + 60.0));
+    b.mark("tidy", Priority::P3, T0, None);
+    b.age(T0 + 6.0 * w, w);
+    assert_eq!(
+        b.get(&"drift").unwrap().priority,
+        Priority::P2,
+        "not more than 6 W"
+    );
+    b.age(T0 + 6.0 * w + 1.0, w);
+    assert_eq!(b.get(&"drift").unwrap().priority, Priority::P1);
+    // Six more windows at P1 make it P0.
+    b.age(T0 + 12.0 * w + 1.0, w);
+    assert_eq!(b.get(&"drift").unwrap().priority, Priority::P1);
+    b.age(T0 + 12.0 * w + 2.0, w);
+    assert_eq!(b.get(&"drift").unwrap().priority, Priority::P0);
+    assert_eq!(
+        b.get(&"tidy").unwrap().priority,
+        Priority::P3,
+        "1 h has not passed"
+    );
+    b.age(T0 + 3601.0, w);
+    assert_eq!(b.get(&"tidy").unwrap().priority, Priority::P2);
+    // P0 stays.
+    b.age(T0 + 100_000.0, w);
+    assert_eq!(b.get(&"drift").unwrap().priority, Priority::P0);
+}
+
+#[test]
+fn the_budget_halves_for_three_windows_then_recovers_by_one() {
+    let mut b = Budget::new(30);
+    assert_eq!(b.window(), 30);
+    b.throttled();
+    assert_eq!((0..3).map(|_| b.window()).collect::<Vec<_>>(), [15, 15, 15]);
+    assert_eq!(b.window(), 16);
+    assert_eq!(b.window(), 17);
+    // A second signal halves what it is now.
+    b.throttled();
+    assert_eq!(b.window(), 8);
+    for _ in 0..2 {
+        b.window();
+    }
+    let rest: Vec<usize> = (0..30).map(|_| b.window()).collect();
+    assert_eq!(rest[0], 9);
+    assert_eq!(*rest.last().unwrap(), 30, "back to the cap, and no further");
+    // Never below one.
+    let mut one = Budget::new(1);
+    one.throttled();
+    assert_eq!(one.window(), 1);
+}

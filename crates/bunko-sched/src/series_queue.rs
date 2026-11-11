@@ -16,7 +16,11 @@
 //! - **Renderer** ([`render`], [`Published::body`]): the stored JSON body.
 //!
 //! [`Sink`] ties them together for a sink without a budget (Bunko's HTTP copy): every
-//! dirty series is rendered at once.
+//! dirty series is rendered at once. A store's sink (`bunko_remote::series_queue`)
+//! writes under a budget instead: [`Backlog`] orders what it owes by [`Priority`] and
+//! age (§6.4), [`Budget`] caps each window and halves after a throttle signal,
+//! [`Snapshot::shifted`] puts the queue on the store's clock (§6.9), and
+//! [`marker_block`] is the lease marker's `series_queue` block (§4.2).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -346,6 +350,74 @@ pub fn live_block(snap: &Snapshot, clock: &Clock, batch_s: u64) -> Value {
         "clock_at": clock.at,
         "batch_s": batch_s,
     })
+}
+
+/// The lease marker's `series_queue` block (§4.2): `{v, file, batch_s, held, held_rows,
+/// clock, clock_at}`. `held` and `held_rows` come from `snap` (none without one).
+pub fn marker_block(snap: Option<&Snapshot>, clock: &Clock, batch_s: u64) -> Value {
+    let mut m = Map::new();
+    m.insert("v".into(), json!(FORMAT));
+    m.insert("file".into(), json!(FILE_NAME));
+    m.insert("batch_s".into(), json!(batch_s));
+    m.insert(
+        "held".into(),
+        snap.and_then(|s| s.held.as_ref())
+            .map_or(Value::Null, |r| json!({"reason": r})),
+    );
+    m.insert(
+        "held_rows".into(),
+        json!(
+            snap.map(|s| s.held_rows.iter().collect::<Vec<_>>())
+                .unwrap_or_default()
+        ),
+    );
+    m.insert("clock".into(), clock.knots_json());
+    m.insert("clock_at".into(), json!(clock.at));
+    Value::Object(m)
+}
+
+impl Snapshot {
+    /// The same queue with every time moved by `offset` seconds: `now`, each running
+    /// job's start and each predicted finish. A store sink renders on the store's
+    /// clock (§6.9) by shifting the scheduler's snapshot by the store's offset.
+    pub fn shifted(&self, offset: f64) -> Snapshot {
+        let mut s = self.clone();
+        if offset == 0.0 {
+            return s;
+        }
+        s.now += offset;
+        for live in s.series.values_mut() {
+            for jobs in live.vols.values_mut() {
+                for job in jobs {
+                    job.state = match job.state {
+                        LiveState::Queued { e } => LiveState::Queued {
+                            e: e.map(|e| e + offset),
+                        },
+                        LiveState::Claimed => LiveState::Claimed,
+                        LiveState::Running { t0, e } => LiveState::Running {
+                            t0: t0 + offset,
+                            e: e.map(|e| e + offset),
+                        },
+                    };
+                }
+            }
+        }
+        s
+    }
+}
+
+impl SeriesLive {
+    /// The soonest predicted finish of any of the series' jobs (P2 order, §6.4).
+    pub fn soonest(&self) -> Option<f64> {
+        self.vols
+            .values()
+            .flatten()
+            .filter_map(|j| match j.state {
+                LiveState::Queued { e } | LiveState::Running { e, .. } => e,
+                LiveState::Claimed => None,
+            })
+            .min_by(f64::total_cmp)
+    }
 }
 
 // --- the dirty test ------------------------------------------------------------------------------
@@ -805,6 +877,202 @@ impl Sink {
                 out.dropped.push(key);
             }
         }
+    }
+}
+
+// --- a store's budget (§6.4) ------------------------------------------------------------------
+
+/// How urgent a store write is (§6.4): P0 hard, P1 state, P2 drift, P3 tidy (a delete).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Priority {
+    P0,
+    P1,
+    P2,
+    P3,
+}
+
+impl From<Class> for Priority {
+    fn from(c: Class) -> Priority {
+        match c {
+            Class::Hard => Priority::P0,
+            Class::State => Priority::P1,
+            Class::Drift => Priority::P2,
+        }
+    }
+}
+
+/// A P2 or P1 write waiting longer than this many windows moves up one class.
+pub const AGE_WINDOWS: f64 = 6.0;
+/// A P3 tidy waiting longer than this many seconds becomes P2.
+pub const TIDY_AGE_SECONDS: f64 = 3600.0;
+/// Windows a throttle signal halves the budget for.
+pub const THROTTLE_WINDOWS: u32 = 3;
+
+/// One write waiting for its window.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Mark {
+    pub priority: Priority,
+    /// When it was first marked (FIFO order within P0, P1 and P3).
+    pub since: f64,
+    /// When it reached its current priority (aging).
+    pub level_since: f64,
+    /// The soonest predicted finish it concerns (P2 order: soonest first).
+    pub eta: Option<f64>,
+}
+
+/// The writes a store sink owes, by key (a series, or a file to delete), each with its
+/// priority and age (§6.4).
+#[derive(Clone, Debug)]
+pub struct Backlog<K: Ord + Clone> {
+    marks: BTreeMap<K, Mark>,
+}
+
+impl<K: Ord + Clone> Default for Backlog<K> {
+    fn default() -> Self {
+        Backlog {
+            marks: BTreeMap::new(),
+        }
+    }
+}
+
+impl<K: Ord + Clone> Backlog<K> {
+    /// Mark `key` at `priority` (a mark it already has keeps its age, and the more
+    /// urgent of the two priorities).
+    pub fn mark(&mut self, key: K, priority: Priority, now: f64, eta: Option<f64>) {
+        match self.marks.get_mut(&key) {
+            Some(m) => {
+                if priority < m.priority {
+                    m.priority = priority;
+                    m.level_since = now;
+                }
+                m.eta = eta;
+            }
+            None => {
+                self.marks.insert(
+                    key,
+                    Mark {
+                        priority,
+                        since: now,
+                        level_since: now,
+                        eta,
+                    },
+                );
+            }
+        }
+    }
+
+    /// Forget `key`'s mark (written, or no longer needed).
+    pub fn unmark(&mut self, key: &K) -> Option<Mark> {
+        self.marks.remove(key)
+    }
+
+    pub fn get(&self, key: &K) -> Option<&Mark> {
+        self.marks.get(key)
+    }
+
+    pub fn len(&self) -> usize {
+        self.marks.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.marks.is_empty()
+    }
+
+    pub fn keys(&self) -> impl Iterator<Item = &K> {
+        self.marks.keys()
+    }
+
+    /// Keep only the marks `f` keeps.
+    pub fn retain(&mut self, mut f: impl FnMut(&K, &Mark) -> bool) {
+        self.marks.retain(|k, m| f(k, m));
+    }
+
+    /// Aging (§6.4): P2 waiting more than [`AGE_WINDOWS`] windows becomes P1, P1
+    /// waiting that long becomes P0, P3 waiting more than [`TIDY_AGE_SECONDS`] becomes
+    /// P2.
+    pub fn age(&mut self, now: f64, window: f64) {
+        let long = AGE_WINDOWS * window;
+        for m in self.marks.values_mut() {
+            let waited = now - m.level_since;
+            let up = match m.priority {
+                Priority::P1 | Priority::P2 => waited > long,
+                Priority::P3 => waited > TIDY_AGE_SECONDS,
+                Priority::P0 => false,
+            };
+            if up {
+                m.priority = match m.priority {
+                    Priority::P2 => Priority::P1,
+                    Priority::P1 => Priority::P0,
+                    _ => Priority::P2,
+                };
+                m.level_since = now;
+            }
+        }
+    }
+
+    /// Every key in write order (§6.4): P0 oldest first, P1 oldest first, P2 soonest
+    /// finish first (untimed last), then P3 oldest first. Marks of one age (a first
+    /// publish, a take over: every series at once) go soonest finish first (§10).
+    pub fn order(&self) -> Vec<K> {
+        let mut all: Vec<(&K, &Mark)> = self.marks.iter().collect();
+        let eta = |m: &Mark| m.eta.unwrap_or(f64::INFINITY);
+        all.sort_by(|(_, a), (_, b)| {
+            a.priority.cmp(&b.priority).then_with(|| {
+                if a.priority == Priority::P2 {
+                    eta(a)
+                        .total_cmp(&eta(b))
+                        .then_with(|| a.since.total_cmp(&b.since))
+                } else {
+                    a.since
+                        .total_cmp(&b.since)
+                        .then_with(|| eta(a).total_cmp(&eta(b)))
+                }
+            })
+        });
+        all.into_iter().map(|(k, _)| k.clone()).collect()
+    }
+}
+
+/// The per-window cap B (§6.4): a throttle signal halves it for [`THROTTLE_WINDOWS`]
+/// windows, then it recovers by one per window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Budget {
+    pub cap: usize,
+    now: usize,
+    hold: u32,
+}
+
+impl Budget {
+    pub fn new(cap: usize) -> Budget {
+        let cap = cap.max(1);
+        Budget {
+            cap,
+            now: cap,
+            hold: 0,
+        }
+    }
+
+    /// The cap the next window may use.
+    pub fn current(&self) -> usize {
+        self.now
+    }
+
+    /// A throttle signal (Drive 403 `rateLimitExceeded` or 429, OneDrive 429 or
+    /// `Retry-After`, MEGA `EAGAIN`).
+    pub fn throttled(&mut self) {
+        self.now = (self.now / 2).max(1);
+        self.hold = THROTTLE_WINDOWS;
+    }
+
+    /// Start a window: its burst size. The cap recovers by one per window once the
+    /// halving's windows are over.
+    pub fn window(&mut self) -> usize {
+        if self.hold > 0 {
+            self.hold -= 1;
+        } else if self.now < self.cap {
+            self.now += 1;
+        }
+        self.now
     }
 }
 
