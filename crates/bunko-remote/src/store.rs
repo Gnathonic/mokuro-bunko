@@ -71,10 +71,11 @@ use crate::file::{ArchiveFile, CachedFile};
 use crate::governor::{self, ApiClass, ApiStats, Governed, Governor, Limits};
 use crate::index::{Entry, Index, RelPath};
 use crate::outbox::{Failpoint, Gate, Op, OpSummary};
+use crate::series_queue::{SeriesQueueSink, SeriesQueueSource, SeriesQueueTiming};
 use crate::state::StateDb;
 use crate::status::{
-    DEFAULT_TTL, DoneEntry, Fence, Lease, LeaseConfig, LeaseEvent, LeaseHandle, LeaseRecord,
-    LeaseStore, MEGA_TTL, SqliteLeaseStore,
+    DEFAULT_TTL, Fence, Lease, LeaseConfig, LeaseEvent, LeaseHandle, LeaseRecord, LeaseStore,
+    MEGA_TTL, SqliteLeaseStore,
 };
 
 thread_local! {
@@ -143,9 +144,14 @@ pub struct RemoteStoreConfig {
     pub lease_settle: Option<Duration>,
     /// The first retry delay of an outbox op (doubles per attempt, capped at 5 min).
     pub retry_base: Duration,
-    /// The shortest interval between two cloud queue-file writes; `None`: per
-    /// provider (WebDAV 30 s, Drive and OneDrive 60 s, MEGA 300 s).
+    /// The series queue files' batch window W (queue file v2 §6.4); `None`: per
+    /// provider (WebDAV 30 s, Drive and OneDrive 120 s, MEGA 300 s).
     pub queue_floor: Option<Duration>,
+    /// `status_files`: the lease holder writes each series' OCR queue file into the
+    /// store and the queue's block into its marker (queue file v2 §6.10; default on).
+    pub status_files: bool,
+    /// The series-file sink's early heartbeat and refit timings (tests shorten them).
+    pub series_queue_timing: SeriesQueueTiming,
     /// Local folders a file published (or copied) into the store from outside it
     /// may come from: the OCR result spool, upload temp files, scratch copies. A
     /// source anywhere else, a symlink, a hard-linked file, a file of another user,
@@ -219,6 +225,8 @@ impl RemoteStoreConfig {
             lease_settle: None,
             retry_base: Duration::from_secs(1),
             queue_floor: None,
+            status_files: true,
+            series_queue_timing: SeriesQueueTiming::default(),
             local_sources,
             limits: None,
             background_units_per_min: None,
@@ -532,11 +540,11 @@ pub(crate) struct Core<B: Backend> {
     pub hooks: Arc<dyn CloudHooks>,
     pub emit: Arc<dyn Fn(WatchEvent) + Send + Sync>,
     pub retry_base: Duration,
-    /// `done[]` of the cloud queue file.
-    pub done: Mutex<Vec<DoneEntry>>,
-    pub queue: Mutex<QueueState>,
     pub instance_id: String,
+    /// The series queue files' window W.
     pub queue_floor: Duration,
+    /// The series queue files' sink (queue file v2), unless `status_files` is off.
+    pub series_queue: Option<Arc<SeriesQueueSink>>,
     /// Staging files by library path (never published on drop).
     pub staging: Mutex<HashMap<RelPath, PathBuf>>,
     // ---- submissions and adoption (submissions.rs) ----
@@ -549,15 +557,6 @@ pub(crate) struct Core<B: Backend> {
     pub hooks_notify: Arc<tokio::sync::Notify>,
     /// One submission is fetched and applied at a time.
     pub subs_lock: tokio::sync::Mutex<()>,
-}
-
-/// The cloud queue file writer's state.
-#[derive(Default)]
-pub(crate) struct QueueState {
-    pub last: Option<serde_json::Value>,
-    pub last_write: Option<std::time::Instant>,
-    pub pending: Option<serde_json::Value>,
-    pub timer: bool,
 }
 
 /// Delivers the feed's foreign-JSON notifications to the core once it exists; the
@@ -913,12 +912,17 @@ impl<B: Backend> RemoteStore<B> {
                 }
             })
         };
-        let queue_floor = cfg.queue_floor.unwrap_or(if caps.path_ids {
-            Duration::from_secs(30)
-        } else if caps.push && !caps.atomic_replace {
-            Duration::from_secs(300)
-        } else {
-            Duration::from_secs(60)
+        let (window, cap) = crate::series_queue::pacing(&caps);
+        let queue_floor = cfg.queue_floor.unwrap_or(window);
+        let series_queue = cfg.status_files.then(|| {
+            Arc::new(SeriesQueueSink::new(
+                queue_floor,
+                cap,
+                cfg.series_queue_timing,
+                instance_id.clone(),
+                cfg.lease,
+                state.clone(),
+            ))
         });
         let handle = rt.handle().clone();
         let feed = feed.spawn(&handle);
@@ -963,10 +967,9 @@ impl<B: Backend> RemoteStore<B> {
             hooks: hooks.clone() as Arc<dyn CloudHooks>,
             emit,
             retry_base: cfg.retry_base,
-            done: Mutex::new(Vec::new()),
-            queue: Mutex::new(QueueState::default()),
             instance_id,
             queue_floor,
+            series_queue,
             staging: Mutex::new(HashMap::new()),
             adopted: AtomicBool::new(false),
             adopted_tx: tokio::sync::watch::channel(false).0,
@@ -990,6 +993,9 @@ impl<B: Backend> RemoteStore<B> {
         }
         handle.spawn(core.clone().adopt());
         handle.spawn(core.clone().worker());
+        if let Some(sink) = core.series_queue.clone() {
+            handle.spawn(crate::series_queue::run(Arc::downgrade(&core), sink));
+        }
         let lease: Arc<OnceLock<LeaseHandle>> = Arc::default();
         if cfg.lease {
             handle.spawn(start_lease(core.clone(), cfg.clone(), lease.clone()));
@@ -1019,6 +1025,20 @@ impl<B: Backend> RemoteStore<B> {
     /// The marker lease, once it started (after the first sync).
     pub fn lease(&self) -> Option<&LeaseHandle> {
         self.lease.get()
+    }
+
+    /// The OCR queue the series-file sink writes from (queue file v2): until one is
+    /// installed, no series file is written and the marker carries no queue block.
+    /// Nothing happens with `status_files` off.
+    pub fn set_series_queue_source(&self, src: Arc<dyn SeriesQueueSource>) {
+        if let Some(sink) = &self.core.series_queue {
+            sink.set_source(src);
+        }
+    }
+
+    /// The series-file sink, unless `status_files` is off.
+    pub fn series_queue(&self) -> Option<&Arc<SeriesQueueSink>> {
+        self.core.series_queue.as_ref()
     }
 
     /// Gate Deferred ops on `gate` in addition to the lease fence: while it answers
@@ -1324,10 +1344,6 @@ impl<B: Backend> RemoteStore<B> {
         }
     }
 
-    pub(crate) fn handle(&self) -> &Handle {
-        &self.handle
-    }
-
     pub(crate) fn arc(&self) -> Arc<RemoteStore<B>> {
         self.me
             .upgrade()
@@ -1546,10 +1562,17 @@ async fn start_lease<B: Backend>(
     lc.dedup = cfg.dedup && core.caps.duplicate_names;
     // The marker follows the canonical root: readers look in `roots()[0]`.
     let index = core.index.clone();
-    let lease = Lease::new(core.backend.clone(), root, lc, store, cfg.dir.join("lease"))
+    let mut lease = Lease::new(core.backend.clone(), root, lc, store, cfg.dir.join("lease"))
         .following(Arc::new(move || index.lock().roots()));
+    if let Some(sink) = &core.series_queue {
+        // The marker carries the queue's hold and work clock (queue file v2 §6.8).
+        lease = lease.with_marker_block(sink.clone());
+    }
     let _ = core.fence.set(lease.fence());
     let handle = lease.spawn();
+    if let (Some(sink), Some(fence)) = (&core.series_queue, core.fence.get()) {
+        sink.set_lease(fence.clone(), handle.heartbeat_requester());
+    }
     let mut events = handle.subscribe();
     let _ = slot.set(handle);
     core.wake.notify_one();

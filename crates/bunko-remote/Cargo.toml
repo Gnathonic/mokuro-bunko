@@ -43,6 +43,9 @@ oauth = [
 # OAuth reads.
 bunko-core.workspace = true
 bunko-store.workspace = true
+# The queue file v2's format, work clock, dirty test and budget (the store sink,
+# `series_queue.rs`).
+bunko-sched.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time", "macros"] }
 futures-util.workspace = true
 bytes.workspace = true

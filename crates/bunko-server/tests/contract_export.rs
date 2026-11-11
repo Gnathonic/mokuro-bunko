@@ -221,51 +221,11 @@ async fn queue(c: &mut Contract, server: &Server) {
         .header("etag")
         .expect("the queue file has an ETag")
         .to_string();
-    let doc = r.json().expect("the queue file is JSON");
     // Sent with the real ETag; recorded with the sentinel.
     let req = Req::new("GET", &path, "basic:reader").header("if-none-match", &etag);
     let resp = server.send(&req).await;
     assert_eq!(resp.status, 304, "{}", resp.text());
     c.golden("queue-file-http-not-modified", &fixture(&req, &resp));
-
-    // The cloud copy (`publish_cloud_queue`): the HTTP document, with `done[]`.
-    let generated = doc["generated_at"].as_str().expect("generated_at");
-    let now_ms =
-        time::OffsetDateTime::parse(generated, &time::format_description::well_known::Rfc3339)
-            .map(|t| (t.unix_timestamp_nanos() / 1_000_000) as i64)
-            .expect("generated_at is ISO");
-    let done = vec![
-        bunko_remote::status::DoneEntry {
-            series: "Contract Series".into(),
-            volume: "Volume 01".into(),
-            at_ms: now_ms - 60_000,
-            ocr: Some("Contract Series/Volume 01.mokuro".into()),
-            layers: vec![],
-        },
-        bunko_remote::status::DoneEntry {
-            series: "日本語シリーズ".into(),
-            volume: "第1巻".into(),
-            at_ms: now_ms - 120_000,
-            ocr: Some("日本語シリーズ/第1巻.mokuro".into()),
-            layers: vec![bunko_remote::status::DoneLayer {
-                id: "hayai".into(),
-                path: "日本語シリーズ/第1巻.hayai.mokuro".into(),
-            }],
-        },
-    ];
-    let full = bunko_remote::status::cloud_queue_doc(&doc, "contract-instance", &done, 1 << 20);
-    assert_eq!(full["done"].as_array().map(Vec::len), Some(2), "{full}");
-    c.golden(
-        "queue-file-cloud",
-        &file_fixture(".mokuro-queue.json", &full),
-    );
-    let size = serde_json::to_vec(&full).unwrap().len();
-    let cut = bunko_remote::status::cloud_queue_doc(&doc, "contract-instance", &done, size - 1);
-    assert_eq!(cut["truncated"], true, "{cut}");
-    c.golden(
-        "queue-file-cloud-truncated",
-        &file_fixture(".mokuro-queue.json", &cut),
-    );
 }
 
 /// A queue file v2 answer made independent of when it ran: every time (`at`,
@@ -274,7 +234,16 @@ async fn queue(c: &mut Contract, server: &Server) {
 /// time) set to 1. Knots stay strictly increasing, and every time keeps its distance
 /// to the others.
 fn steady_series_queue(resp: &contract_support::Resp) -> contract_support::Resp {
-    let mut v = resp.json().expect("the series queue file is JSON");
+    let v = steady_queue_body(resp.json().expect("the series queue file is JSON"));
+    contract_support::Resp {
+        status: resp.status,
+        headers: resp.headers.clone(),
+        body: serde_json::to_vec(&v).unwrap(),
+    }
+}
+
+/// [`steady_series_queue`] on a body.
+fn steady_queue_body(mut v: Value) -> Value {
     let fit = v["live"]["clock_at"]
         .as_i64()
         .or_else(|| v["clock_at"].as_i64())
@@ -314,11 +283,26 @@ fn steady_series_queue(resp: &contract_support::Resp) -> contract_support::Resp 
     {
         shift(x);
     }
-    contract_support::Resp {
-        status: resp.status,
-        headers: resp.headers.clone(),
-        body: serde_json::to_vec(&v).unwrap(),
+    v
+}
+
+/// The marker's `series_queue` block made independent of when it ran: its clock moved
+/// so its fit time lands on the epoch sentinel.
+fn steady_marker(mut m: Value) -> Value {
+    let Some(fit) = m["series_queue"]["clock_at"].as_i64() else {
+        return m;
+    };
+    let off = fit - contract_support::EPOCH_S;
+    let block = &mut m["series_queue"];
+    block["clock_at"] = json!(fit - off);
+    for knot in block["clock"].as_array_mut().into_iter().flatten() {
+        for x in knot.as_array_mut().into_iter().flatten() {
+            if let Some(n) = x.as_i64() {
+                *x = json!(n - off);
+            }
+        }
     }
+    m
 }
 
 /// The queue file v2 over HTTP (`docs/design/queue-file-v2.md` §7, §12.2): a series
@@ -923,11 +907,18 @@ fn no_lease(c: &mut bunko_remote::RemoteStoreConfig) {
     c.retry_base = Duration::from_millis(50);
 }
 
-/// The lease runs with a short settle wait: this Bunko holds it at once.
+/// The lease runs with a short settle wait: this Bunko holds it at once. A change of
+/// the queue's hold reaches the marker within a second.
 fn quick_claim(c: &mut bunko_remote::RemoteStoreConfig) {
     c.lease = true;
     c.lease_settle = Some(Duration::from_millis(100));
     c.retry_base = Duration::from_millis(50);
+    c.series_queue_timing = bunko_remote::SeriesQueueTiming {
+        hold_debounce: Duration::from_millis(100),
+        unhold_debounce: Duration::from_millis(100),
+        early_gap: Duration::from_millis(300),
+        refit_every: Duration::from_secs(3600),
+    };
 }
 
 /// The lease runs, and its first claim waits an hour before it may hold the lease.
@@ -968,10 +959,54 @@ async fn markers(c: &mut Contract, seed: &Seed) {
         },
     )
     .await;
+    // The queue rides in the marker and in each series' file (queue file v2): the
+    // marker's block shows the queue's hold (no processor) once the scheduler's first
+    // walk is over, and the series that owes OCR has its file.
+    let series_file = "Contract Series/.mokuro-series-queue.json";
+    eventually(
+        "the queue in the marker and the series' file",
+        Duration::from_secs(30),
+        || {
+            cloud_json(&server, ".mokuro-bunko.json")
+                .is_some_and(|m| m["series_queue"]["held"]["reason"] == "no-processor")
+                && cloud_json(&server, series_file).is_some()
+        },
+    )
+    .await;
     let active = cloud_json(&server, ".mokuro-bunko.json").unwrap();
+    assert_eq!(active["queue"], Value::Null, "{active}");
     c.golden(
         "marker-active",
-        &file_fixture(".mokuro-bunko.json", &active),
+        &file_fixture(".mokuro-bunko.json", &steady_marker(active)),
+    );
+    let stored = cloud_json(&server, series_file).unwrap();
+    assert_eq!(
+        stored["vols"],
+        json!({"Volume 02": [[0, "q", null]]}),
+        "{stored}"
+    );
+    assert!(
+        stored.get("live").is_none(),
+        "a stored copy carries no live block"
+    );
+    let mut stored = steady_queue_body(stored);
+    // When it was written is no part of the shape.
+    stored["at"] = json!(contract_support::EPOCH_S);
+    c.golden("series-queue-stored", &file_fixture(series_file, &stored));
+    // A listing of the series through the bridge shows no queue file, the stored copy
+    // included.
+    let r = export(
+        c,
+        &server,
+        "propfind-series-depth1-cloud",
+        listing(&dav_path(&["Contract Series"]), "1"),
+    )
+    .await;
+    assert_eq!(r.status, 207, "{}", r.text());
+    assert!(
+        !r.text().to_lowercase().contains("series-queue"),
+        "{}",
+        r.text()
     );
     // A marker is `released` only by a disconnect (§7 step 2); a shutdown writes
     // nothing (§9.2 step 5).
@@ -985,7 +1020,7 @@ async fn markers(c: &mut Contract, seed: &Seed) {
     assert_eq!(marker["state"], "released", "{marker}");
     c.golden(
         "marker-released",
-        &file_fixture(".mokuro-bunko.json", &marker),
+        &file_fixture(".mokuro-bunko.json", &steady_marker(marker)),
     );
     drop(store);
     server.stop().await;

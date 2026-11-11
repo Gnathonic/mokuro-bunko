@@ -1423,116 +1423,6 @@ fn a_cloned_state_folder_goes_standby_while_the_original_runs() {
     assert_eq!(now[0].1.boot_id, original[0].1.boot_id);
 }
 
-/// Sidecar names rule v1 in `done[]`: a decimal volume's primary is its own (rule 4),
-/// a layer's suffix matches in any case, and an all-digit id is a layer.
-#[test]
-fn done_entries_name_volumes_by_rule_v1() {
-    let t = T::with(
-        FakeBackend::drive_like(),
-        &[("S/Vol 1.cbz", b"zip"), ("S/Vol 1.5.cbz", b"zip")],
-        |_| {},
-    );
-    t.wait_steady();
-    for name in [
-        "S/Vol 1.5.mokuro",
-        "S/Vol 1.gcv.MOKURO",
-        "S/Vol 1.2024.mokuro",
-    ] {
-        t.publish(name, b"{}", deferred(ocr(), Mode::CreateNew));
-        t.idle();
-    }
-    let doc = serde_json::json!({"version": 1, "generated_at": "2026-10-12T10:00:01Z",
-        "pending_volumes": 0, "volumes": []});
-    assert!(t.s().publish_queue_doc(doc).unwrap());
-    t.idle();
-    let v: serde_json::Value =
-        serde_json::from_slice(&t.remote_bytes(".mokuro-queue.json").unwrap()).unwrap();
-    let done = v["done"].as_array().unwrap();
-    let entry = |volume: &str| {
-        done.iter()
-            .find(|d| d["volume"] == volume)
-            .unwrap_or_else(|| panic!("no done entry for {volume}: {done:?}"))
-    };
-    assert_eq!(entry("Vol 1.5")["ocr"], "S/Vol 1.5.mokuro");
-    let layers: Vec<&str> = entry("Vol 1")["layers"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|l| l["id"].as_str().unwrap())
-        .collect();
-    assert_eq!(layers, ["gcv", "2024"]);
-}
-
-fn queue_floor<const MS: u64>(c: &mut RemoteStoreConfig) {
-    c.queue_floor = Some(Duration::from_millis(MS));
-}
-
-/// The queue file under a floor of `MS` milliseconds. `false` when this machine took
-/// longer than the floor to get from the first write to the look at what waits: the
-/// changes were then not within the floor, and the run says nothing.
-fn queue_file_within_a_floor<const MS: u64>() -> bool {
-    let floor = Duration::from_millis(MS);
-    let t = T::with(
-        FakeBackend::drive_like(),
-        &[("Kingdom/Kingdom 12.cbz", b"zip")],
-        queue_floor::<MS>,
-    );
-    t.wait_steady();
-    t.publish(
-        "Kingdom/Kingdom 12.mokuro",
-        b"{}",
-        deferred(ocr(), Mode::CreateNew),
-    );
-    t.idle();
-    let doc = |n: u64| {
-        serde_json::json!({"version": 1, "generated_at": format!("2026-10-12T10:00:0{n}Z"),
-            "pending_volumes": n, "volumes": []})
-    };
-    // The floor runs from the first write, which is no earlier than this.
-    let first_write = Instant::now();
-    assert!(t.s().publish_queue_doc(doc(1)).unwrap());
-    t.idle();
-    let read = |t: &T| -> serde_json::Value {
-        serde_json::from_slice(&t.remote_bytes(".mokuro-queue.json").unwrap()).unwrap()
-    };
-    let v = read(&t);
-    assert_eq!(v["instance_id"], t.s().instance_id());
-    assert_eq!(v["done"][0]["volume"], "Kingdom 12");
-    assert_eq!(v["done"][0]["ocr"], "Kingdom/Kingdom 12.mokuro");
-    let uploads = t.fake.calls(FakeOp::Upload);
-    // Only `generated_at` differs: nothing is written.
-    let mut same = doc(1);
-    same["generated_at"] = "2026-10-12T11:00:00Z".into();
-    assert!(!t.s().publish_queue_doc(same).unwrap());
-    // A change within the floor waits for it; only the newest is written.
-    assert!(t.s().publish_queue_doc(doc(2)).unwrap());
-    assert!(t.s().publish_queue_doc(doc(3)).unwrap());
-    std::thread::sleep(floor / 4);
-    t.idle();
-    let waiting = t.fake.calls(FakeOp::Upload);
-    if first_write.elapsed() >= floor {
-        return false;
-    }
-    assert_eq!(waiting, uploads);
-    wait_until("the floor", || t.fake.calls(FakeOp::Upload) > uploads);
-    t.idle();
-    assert_eq!(t.fake.calls(FakeOp::Upload), uploads + 1);
-    assert_eq!(read(&t)["pending_volumes"], 3);
-    true
-}
-
-#[test]
-fn the_queue_file_is_written_on_change_within_its_floor_with_done_entries() {
-    // The first floor is enough on any machine that is not badly overloaded; a longer
-    // one is tried only when the machine was slower than the floor before it.
-    assert!(
-        queue_file_within_a_floor::<400>()
-            || queue_file_within_a_floor::<2_000>()
-            || queue_file_within_a_floor::<10_000>(),
-        "this machine was slower than every floor tried"
-    );
-}
-
 // ---- ownership and integrity hardening ---------------------------------------------
 
 /// Restart a store that stopped right after UPLOADING was persisted, with `meddle`
@@ -1648,11 +1538,31 @@ fn control_files_and_reserved_names_are_not_writable_through_the_shim() {
         denied(fs::write(t.abs(name), b"{}"));
         denied(fs::rename(t.abs("S/v.cbz"), t.abs(name)));
     }
+    // A series' queue file, in every spelling the fold joins, at any depth below the
+    // root (queue file v2 §6.6); Bunko's compiler is refused as well.
+    let compiler = WriteIntent::new(
+        Mode::Replace { base: None },
+        Origin::Compiler,
+        Durability::Deferred,
+    );
+    for name in [
+        "S/.mokuro-series-queue.json",
+        "S/.MOKURO-Series-Queue.JSON",
+        "S/.mokuro-series-queue\u{200B}.json",
+    ] {
+        let src = t.local("sq", b"{}");
+        denied(fs::publish(&src, t.abs(name), &dav).map(|_| ()));
+        denied(fs::publish(&src, t.abs(name), &compiler).map(|_| ()));
+        denied(fs::rename(&src, t.abs(name)));
+        denied(fs::write(t.abs(name), b"{}"));
+        denied(fs::rename(t.abs("S/v.cbz"), t.abs(name)));
+    }
     // The WebDAV driver's staged-upload and probe names.
     denied(fs::write(t.abs("S/.v.mokuro.bunko-7.tmp"), b"x"));
     denied(fs::create_dir(t.abs(".bunko-probe-Aa")));
     assert_eq!(t.fake.calls(FakeOp::Upload), 0);
-    // Only the status writer may publish the queue file.
+    // Only the status writer may publish the queue files; a series file at the root
+    // is no series file (the root rules are unchanged: any writer).
     let src = t.local("q", b"{}");
     let status = WriteIntent::new(
         Mode::Replace { base: None },
@@ -1660,8 +1570,12 @@ fn control_files_and_reserved_names_are_not_writable_through_the_shim() {
         Durability::Deferred,
     );
     fs::publish(&src, t.abs(".mokuro-queue.json"), &status).unwrap();
+    let src = t.local("sq-status", b"{}");
+    fs::publish(&src, t.abs("S/.mokuro-series-queue.json"), &status).unwrap();
+    let src = t.local("sq-root", b"{}");
+    fs::publish(&src, t.abs(".mokuro-series-queue.json"), &compiler).unwrap();
     t.idle();
-    assert_eq!(t.fake.calls(FakeOp::Upload), 1);
+    assert_eq!(t.fake.calls(FakeOp::Upload), 3);
 }
 
 #[cfg(unix)]

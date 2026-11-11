@@ -147,6 +147,7 @@ fn foreign(id: &str, epoch: u64, now_ms: i64) -> Marker {
         curated: false,
         took_over_from: None,
         per_user_files: vec![],
+        series_queue: None,
     }
 }
 

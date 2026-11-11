@@ -50,7 +50,6 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use bunko_core::sidecar_names;
 use bunko_store::{
     Durability, Mode, Origin, Published, Version, WatchEvent, conflict, unavailable,
     unavailable_for,
@@ -65,7 +64,6 @@ use crate::governor::{self, ApiClass};
 use crate::index::{IndexChange, ROOT_EID, RelPath};
 use crate::names::nfc;
 use crate::state::{ConflictRow, LedgerRow};
-use crate::status::DoneEntry;
 use crate::store::{Core, Ver};
 
 /// Decides whether Deferred ops may run (the lease fence, or a caller's gate).
@@ -432,14 +430,23 @@ impl Drop for Running<'_> {
     }
 }
 
-/// The governor class an op's calls run in (§5.11 priorities).
-fn class_of(o: &Origin) -> ApiClass {
-    match o {
+/// The governor class an op's calls run in (§5.11 priorities). Status files (each
+/// series' queue file) run in the background class, so a pass over hundreds of series
+/// never delays a heartbeat (queue file v2 §6.6).
+fn class_of(op: &Op) -> ApiClass {
+    match &op.origin {
         Origin::Dav { .. } => ApiClass::Interactive,
-        Origin::Status => ApiClass::Lease,
+        // The marker is the lease's own call, never an op.
+        Origin::Status => ApiClass::Background,
         Origin::Ocr { .. } => ApiClass::Ocr,
         Origin::Compiler | Origin::Upgrade | Origin::Thumbs | Origin::Admin => ApiClass::Background,
     }
+}
+
+/// A series' queue file (`<Series>/.mokuro-series-queue.json`, queue file v2): a Status
+/// write two segments deep (or deeper) whose name folds to the file's.
+pub(crate) fn is_series_queue_op(op: &Op) -> bool {
+    op.origin == Origin::Status && crate::names::is_series_queue_path(&op.dest)
 }
 
 fn parent_of(rel: &RelPath) -> RelPath {
@@ -680,6 +687,20 @@ impl<B: Backend> Core<B> {
     // ---- gate, failpoints, events -----------------------------------------------------
 
     /// Writes may reach the provider: the lease fence is open (when the lease runs).
+    /// A series' queue-file op ended: committed (`ok`) or not (its sink).
+    pub(crate) fn series_queue_outcome(&self, op: u64, ok: bool) {
+        if let Some(s) = &self.series_queue {
+            s.outcome(op, ok);
+        }
+    }
+
+    /// The provider pushed back on a series' queue-file op (its sink's budget).
+    pub(crate) fn series_queue_throttled(&self) {
+        if let Some(s) = &self.series_queue {
+            s.throttled();
+        }
+    }
+
     pub(crate) fn fence_open(&self) -> bool {
         !self.crashed.load(Ordering::Acquire)
             && (!self.lease_on || self.fence.get().is_some_and(|f| f.ok()))
@@ -826,8 +847,11 @@ impl<B: Backend> Core<B> {
     // ---- D22 ------------------------------------------------------------------------
 
     /// Every op this one must wait for has committed (D22): a Compiler `series.json`
-    /// waits for the non-Compiler Deferred ops in its series folder, `catalog.json`
-    /// for every `series.json`, the queue file for earlier OCR results.
+    /// waits for the Deferred ops in its series folder that are neither Compiler nor
+    /// Status ones, `catalog.json` for every `series.json`, a series' queue file for
+    /// the earlier OCR and Compiler ops in its folder (queue file v2 §6.6). The
+    /// `series.json` rule leaves Status ops out: the queue file waits for it, so the
+    /// two would otherwise wait for each other.
     fn deps_done(&self, op: &Op, ops: &BTreeMap<u64, Op>) -> bool {
         let others = || {
             ops.values().filter(move |o| {
@@ -842,13 +866,21 @@ impl<B: Backend> Core<B> {
                 let series = parent_of(&op.dest);
                 // §9.3: an unanswered submission for the series holds its compile.
                 !self.state.submission_unanswered(&op.dest.to_string())
-                    && !others().any(|o| o.origin != Origin::Compiler && under(&o.dest, &series))
+                    && !others().any(|o| {
+                        !matches!(o.origin, Origin::Compiler | Origin::Status)
+                            && under(&o.dest, &series)
+                    })
             }
             (Origin::Compiler, "catalog.json") if op.dest.segments().len() == 1 => {
                 !others().any(|o| last_name(&o.dest) == "series.json")
             }
-            (Origin::Status, ".mokuro-queue.json") => {
-                !others().any(|o| o.id < op.id && matches!(o.origin, Origin::Ocr { .. }))
+            (Origin::Status, _) if is_series_queue_op(op) => {
+                let series = parent_of(&op.dest);
+                !others().any(|o| {
+                    o.id < op.id
+                        && matches!(o.origin, Origin::Ocr { .. } | Origin::Compiler)
+                        && under(&o.dest, &series)
+                })
             }
             _ => true,
         }
@@ -913,8 +945,8 @@ impl<B: Backend> Core<B> {
                 governor::scoped_interactive(wait, self.run_sync_inner(op)).await
             }
             (_, Some(_)) => self.run_sync_inner(op).await,
-            (o, None) => {
-                let class = class_of(o);
+            (_, None) => {
+                let class = class_of(&op);
                 governor::scoped(class, self.run_sync_inner(op)).await
             }
         }
@@ -988,6 +1020,9 @@ impl<B: Backend> Core<B> {
     /// End an op that will not commit.
     pub(crate) fn finish(&self, op: &mut Op, state: OpState) {
         op.state = state;
+        if is_series_queue_op(op) {
+            self.series_queue_outcome(op.id, false);
+        }
         if op.durability == Durability::Deferred
             && let Ok(ch) = self.index.lock().clear_pending(&op.op_id())
         {
@@ -1052,7 +1087,14 @@ impl<B: Backend> Core<B> {
                 self.finish(op, OpState::Discarded);
                 Some(Step::Gave(io::Error::new(io::ErrorKind::StorageFull, e)))
             }
-            Class::Retry(after) => Some(self.retry(op, e.to_string(), after)),
+            Class::Retry(after) => {
+                if is_series_queue_op(op) && matches!(e, BErr::Throttled(_)) {
+                    // The provider pushed back on a queue file: its sink halves its
+                    // budget (queue file v2 §6.4).
+                    self.series_queue_throttled();
+                }
+                Some(self.retry(op, e.to_string(), after))
+            }
             Class::Permanent => Some(self.give_up(op, e.to_string())),
             Class::Conflict => self.on_conflict(op, e.to_string(), current).await,
             Class::Gone => self.on_conflict(op, format!("gone: {e}"), None).await,
@@ -1475,14 +1517,14 @@ impl<B: Backend> Core<B> {
             path: self.abs(&rel),
             is_dir: false,
         });
-        if matches!(op.origin, Origin::Ocr { .. }) {
-            self.record_done(&rel);
-        }
         // Last: whoever waits for the op to stop being live sees all of the above.
         op.state = OpState::Committed;
         op.result_pid = Some(node.pid.clone());
         op.result_cver = Some(node.cver.clone());
         let _ = self.save_op(op);
+        if is_series_queue_op(op) {
+            self.series_queue_outcome(op.id, true);
+        }
         self.fail_at("COMMITTED")?;
         Ok(Step::Done(Published {
             version: Some(Version::new(node.cver)),
@@ -1508,64 +1550,6 @@ impl<B: Backend> Core<B> {
         }
         op.state = OpState::Committed;
         let _ = self.save_op(op);
-    }
-
-    /// `done[]` of the cloud queue file: a committed OCR sidecar.
-    fn record_done(&self, rel: &RelPath) {
-        let segs = rel.segments();
-        let Some(file) = segs.last() else { return };
-        let Some((stem, _)) = sidecar_names::split_mokuro(file) else {
-            return;
-        };
-        let series = segs[..segs.len() - 1].join("/");
-        // Rule v1: the primary of `<stem>.cbz` when there is one (`Vol 1.5.mokuro`
-        // beside `Vol 1.5.cbz`), else `<Vol>.<layer>.mokuro` of a sibling archive.
-        let (volume, layer) = match sidecar_names::split_layer(file) {
-            Some((vol, layer, _)) if !self.has_archive(rel, stem) && self.has_archive(rel, vol) => {
-                (vol.to_string(), Some(layer.to_string()))
-            }
-            _ => (stem.to_string(), None),
-        };
-        let path = rel.to_string();
-        let mut done = self.done.lock();
-        let at_ms = now_ms();
-        let i = match done
-            .iter()
-            .position(|d| d.series == series && d.volume == volume)
-        {
-            Some(i) => i,
-            None => {
-                done.push(DoneEntry {
-                    series: series.clone(),
-                    volume: volume.clone(),
-                    at_ms,
-                    ocr: None,
-                    layers: Vec::new(),
-                });
-                done.len() - 1
-            }
-        };
-        let e = &mut done[i];
-        e.at_ms = at_ms;
-        match layer {
-            Some(id) => {
-                e.layers.retain(|l| l.id != id);
-                e.layers.push(crate::status::DoneLayer { id, path });
-            }
-            None => e.ocr = Some(path),
-        }
-        done.sort_by_key(|a| std::cmp::Reverse(a.at_ms));
-        done.truncate(crate::status::DONE_LIMIT);
-        if let Ok(j) = serde_json::to_string(&*done) {
-            let _ = self.state.meta_set("queue_done", &j);
-        }
-    }
-
-    /// `<vol>.cbz` is listed beside `rel` (only `.cbz` anchors sidecars, rule v1).
-    fn has_archive(&self, rel: &RelPath, vol: &str) -> bool {
-        parent_of(rel)
-            .join(format!("{vol}.cbz"))
-            .is_some_and(|p| self.index.lock().lookup(&p).is_some())
     }
 
     // ---- Mkdir --------------------------------------------------------------------
@@ -1978,10 +1962,9 @@ impl<B: Backend> Core<B> {
             };
             // Wait out a pause or an empty budget before taking the op lock, so a
             // Sync write (a bridge PUT) is never queued behind a governed wait.
-            let Some(origin) = self.ops.lock().get(&id).map(|o| o.origin.clone()) else {
+            let Some(class) = self.ops.lock().get(&id).map(class_of) else {
                 continue;
             };
-            let class = class_of(&origin);
             self.gov.ready(class, self.gov.limits().costs.upload).await;
             let _g = self.exec.lock().await;
             // Taken under the lock a newer write supersedes under (stage_deferred).
@@ -2082,13 +2065,6 @@ impl<B: Backend> Core<B> {
                     let _ = std::fs::remove_file(f.path());
                 }
             }
-        }
-        if let Some(d) = self
-            .state
-            .meta_get("queue_done")
-            .and_then(|j| serde_json::from_str::<Vec<DoneEntry>>(&j).ok())
-        {
-            *self.done.lock() = d;
         }
     }
 

@@ -1,6 +1,7 @@
 //! The mutation methods of [`RemoteStore`] (spec §3.4, §5.7): staging files,
-//! `publish`, moves, deletes, folders, `copy`, and the cloud queue-file writer
-//! (§9.1, D10). The ops themselves run in `outbox.rs`.
+//! `publish`, moves, deletes, folders, `copy`, and the series queue files' writes and
+//! deletes (queue file v2, for `series_queue.rs`). The ops themselves run in
+//! `outbox.rs`.
 
 use std::collections::BTreeMap;
 use std::io::{self, Read};
@@ -17,10 +18,12 @@ use bunko_store::{
 use crate::backend::Backend;
 use crate::file::StagingFile;
 use crate::index::RelPath;
-use crate::names::{fold, is_reserved_name};
+use crate::names::{
+    ROOT_QUEUE_FILE, SERIES_QUEUE_FILE, fold, is_reserved_name, is_series_queue_path,
+};
 use crate::outbox::{BARRIER, Op, OpKind, OpState};
 use crate::state::{ConflictRow, random_id};
-use crate::status::{MARKER_NAME, QUEUE_DOC_MAX_BYTES, cloud_queue_doc, queue_doc_changed};
+use crate::status::MARKER_NAME;
 use crate::store::{Core, RemoteStore};
 
 /// What a remove may remove.
@@ -31,8 +34,9 @@ pub(crate) enum Remove {
     Tree,
 }
 
-/// The queue file's name in the merged root.
-pub const QUEUE_FILE: &str = ".mokuro-queue.json";
+/// The root queue file's name: no Bunko writes it any more (queue file v2), and only
+/// the status writer may.
+pub const QUEUE_FILE: &str = ROOT_QUEUE_FILE;
 
 /// A Deferred write of the outbox at or under `rel` (a case merge's steps aside: they
 /// run in their group).
@@ -119,26 +123,60 @@ impl<B: Backend> Core<B> {
         Ok(op)
     }
 
-    /// Write the cloud queue file now: a coalesced, fenced Deferred Status op.
-    pub(crate) fn write_queue_doc(&self, doc: serde_json::Value) -> io::Result<()> {
-        let bytes = serde_json::to_vec(&doc).map_err(io::Error::other)?;
+    /// Stage a series' queue file (queue file v2 §6.5): `bytes` at
+    /// `<folder>/.mokuro-series-queue.json`, a coalesced, fenced Deferred Status op
+    /// (an older one still waiting for the same file is superseded). Blocking (file
+    /// I/O). Returns the op's id.
+    pub(crate) fn stage_series_queue(&self, folder: &str, bytes: &[u8]) -> io::Result<u64> {
+        let rel = RelPath::from_segments([folder, SERIES_QUEUE_FILE]).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "not a series folder name")
+        })?;
         let tmp = self
             .dir
             .join("staging")
-            .join(format!("queue-{}", random_id()));
-        std::fs::write(&tmp, &bytes)?;
-        let rel = RelPath::from_segments([QUEUE_FILE]).expect("a safe name");
+            .join(format!("series-queue-{}", random_id()));
+        std::fs::write(&tmp, bytes)?;
         let w = WriteIntent::new(
             Mode::Replace { base: None },
             Origin::Status,
             Durability::Deferred,
         );
-        let op = self.stage_put(&tmp, rel, &w)?;
-        self.stage_deferred(op)?;
-        let mut q = self.queue.lock();
-        q.last = Some(doc);
-        q.last_write = Some(std::time::Instant::now());
-        Ok(())
+        let op = match self.stage_put(&tmp, rel, &w) {
+            Ok(op) => op,
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(e);
+            }
+        };
+        Ok(self.stage_deferred(op)?.id)
+    }
+
+    /// Delete a status file Bunko keeps (a series' queue file, a stray spelling of
+    /// one, the root leftover): permanently when the version there is Bunko's own,
+    /// else to the provider trash (queue file v2 §6.3 P3). A Sync Status op, fenced;
+    /// nothing to do when the index has no such file.
+    pub(crate) async fn delete_status_file(self: &Arc<Self>, rel: &RelPath) -> io::Result<()> {
+        let entry = self.index.lock().lookup(rel);
+        let Some(e) = entry.filter(|e| !e.is_dir) else {
+            return Ok(());
+        };
+        let Some(pid) = e.winner_pid.clone() else {
+            // A write of ours still pending there: it decides on its own.
+            return Ok(());
+        };
+        let own = e.cver.as_ref().is_some_and(|c| self.state.is_own(&pid, c));
+        let kind = if own { OpKind::Delete } else { OpKind::Trash };
+        let mut op = Op::new(
+            self.next_seq(),
+            kind,
+            rel.clone(),
+            Origin::Status,
+            Durability::Sync,
+        );
+        op.target_pid = Some(pid);
+        op.state = OpState::Staged;
+        self.save_op(&op)?;
+        self.run_sync(op).await.map(|_| ())
     }
 }
 
@@ -150,11 +188,12 @@ impl<B: Backend> RemoteStore<B> {
 
     /// Who may change what (authorization of every mutation through the shim):
     /// nothing may create, move or remove a name Bunko reserves for its transient
-    /// files, or the lease marker (only the lease writes it, directly); the cloud
-    /// queue file is the [`Origin::Status`] writer's alone. `origin` is `None` for
-    /// mutations without an intent (rename, remove, folders, `open_with`). Names
-    /// compare folded, as a case-insensitive provider resolves them. Paths outside
-    /// the store root never get here (`rel` refuses them).
+    /// files, or the lease marker (only the lease writes it, directly); the root
+    /// queue file and every series' queue file (`<Series>/.mokuro-series-queue.json`,
+    /// at any depth below the root) are the [`Origin::Status`] writer's alone.
+    /// `origin` is `None` for mutations without an intent (rename, remove, folders,
+    /// `open_with`). Names compare folded, as a case-insensitive provider resolves
+    /// them. Paths outside the store root never get here (`rel` refuses them).
     pub(crate) fn check_target(
         &self,
         rel: &RelPath,
@@ -178,6 +217,12 @@ impl<B: Backend> RemoteStore<B> {
                     "the queue file is written by Bunko's status writer only",
                 ));
             }
+        }
+        if is_series_queue_path(rel) && origin != Some(&Origin::Status) {
+            return Err(denied(
+                p,
+                "a series' queue file is written by Bunko's status writer only",
+            ));
         }
         Ok(())
     }
@@ -817,60 +862,8 @@ impl<B: Backend> RemoteStore<B> {
         io::copy(&mut src, &mut dst)
     }
 
-    /// Publish the cloud copy of the queue file (§9.1, D10) built from the server's
-    /// `build_document` output: written only when it changed (apart from
-    /// `generated_at`), at most once per provider floor (a later change waits for
-    /// the floor), as a coalesced, fenced Deferred Status op. `true` when a write
-    /// was queued or scheduled.
-    pub fn publish_queue_doc(&self, server_doc: serde_json::Value) -> io::Result<bool> {
-        self.alive()?;
-        let doc = cloud_queue_doc(
-            &server_doc,
-            &self.core.instance_id,
-            &self.core.done.lock(),
-            QUEUE_DOC_MAX_BYTES,
-        );
-        let mut q = self.core.queue.lock();
-        let unchanged = q
-            .last
-            .as_ref()
-            .is_some_and(|prev| !queue_doc_changed(prev, &doc));
-        if unchanged {
-            q.pending = None;
-            return Ok(false);
-        }
-        let floor = self.core.queue_floor;
-        if let Some(t) = q.last_write
-            && t.elapsed() < floor
-        {
-            q.pending = Some(doc);
-            if !q.timer {
-                q.timer = true;
-                let wait = floor - t.elapsed();
-                let core = Arc::downgrade(&self.core);
-                self.handle().spawn(async move {
-                    tokio::time::sleep(wait).await;
-                    let Some(core) = core.upgrade() else { return };
-                    let doc = {
-                        let mut q = core.queue.lock();
-                        q.timer = false;
-                        q.pending.take()
-                    };
-                    if let Some(doc) = doc
-                        && let Err(e) = core.write_queue_doc(doc)
-                    {
-                        tracing::warn!("queue file: {e}");
-                    }
-                });
-            }
-            return Ok(true);
-        }
-        drop(q);
-        self.core.write_queue_doc(doc)?;
-        Ok(true)
-    }
-
-    /// The cloud queue file is written at most this often.
+    /// The series queue files' batch window W (queue file v2 §6.4; `queue_floor`
+    /// overrides the provider's).
     pub fn queue_floor(&self) -> Duration {
         self.core.queue_floor
     }

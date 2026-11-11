@@ -13,6 +13,12 @@
 //! **Settle rule** (§5.4): a job that is no longer owed stays in the file, shown
 //! running, while its series' metadata has a recompile pending (the hook
 //! [`SeriesQueueHttp::set_settled`] installs; settled by default).
+//!
+//! **The store's copy** (§6) is written by the connected store's sink
+//! (`bunko_remote::series_queue`); [`StoreQueueSource`] is where it reads the queue: the
+//! same snapshot as this sink (the plan priced at most once per [`RENDER_SECONDS`] for
+//! both), only once the scheduler's first walk of the library is over (a partial owed
+//! board would read as every other job finished).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -179,31 +185,46 @@ impl SeriesQueueHttp {
             .is_some_and(|(at, _)| at.elapsed().as_secs_f64() < RENDER_SECONDS)
     }
 
-    /// The current representation of series `fold`: the plan is priced (one question
-    /// to the scheduler) only when the last snapshot is [`RENDER_SECONDS`] old.
-    pub async fn current(&self, ocr: Option<&OcrControl>, fold: &str, folder: &str) -> Rendered {
-        if !self.fresh() {
-            let _guard = self.building.lock().await;
-            if !self.fresh() {
-                let snap = match ocr {
-                    Some(o) => o.ask(|s| s.series_queue_snapshot()).await,
-                    None => Some(Snapshot {
-                        now: wall_clock(),
-                        ..Default::default()
-                    }),
-                };
-                match snap {
-                    Some(snap) => self.refresh(snap),
-                    // The scheduler did not answer: serve what it last said.
-                    None => {
-                        if let Some((at, _)) = self.state.lock().snap.as_mut() {
-                            *at = Instant::now();
-                        }
-                    }
+    /// Bring the sink up to the scheduler when its last snapshot is
+    /// [`RENDER_SECONDS`] old (one question to the scheduler, which prices the plan).
+    async fn ensure_fresh(&self, ocr: Option<&OcrControl>) {
+        if self.fresh() {
+            return;
+        }
+        let _guard = self.building.lock().await;
+        if self.fresh() {
+            return;
+        }
+        let snap = match ocr {
+            Some(o) => o.ask(|s| s.series_queue_snapshot()).await,
+            None => Some(Snapshot {
+                now: wall_clock(),
+                ..Default::default()
+            }),
+        };
+        match snap {
+            Some(snap) => self.refresh(snap),
+            // The scheduler did not answer: serve what it last said.
+            None => {
+                if let Some((at, _)) = self.state.lock().snap.as_mut() {
+                    *at = Instant::now();
                 }
             }
         }
+    }
+
+    /// The current representation of series `fold`: the plan is priced (one question
+    /// to the scheduler) only when the last snapshot is [`RENDER_SECONDS`] old.
+    pub async fn current(&self, ocr: Option<&OcrControl>, fold: &str, folder: &str) -> Rendered {
+        self.ensure_fresh(ocr).await;
         self.render(fold, folder)
+    }
+
+    /// The scheduler's snapshot, at most [`RENDER_SECONDS`] old (shared with the
+    /// store's sink, [`StoreQueueSource`]). None before the first.
+    pub async fn snapshot(&self, ocr: &OcrControl) -> Option<Arc<Snapshot>> {
+        self.ensure_fresh(Some(ocr)).await;
+        self.state.lock().snap.as_ref().map(|(_, s)| s.clone())
     }
 
     /// What the sink last published of series `fold`. For tests and the admin.
@@ -216,5 +237,53 @@ impl SeriesQueueHttp {
         let mut st = self.state.lock();
         st.snap = None;
         st.bodies.clear();
+    }
+}
+
+/// Where a connected store's series-file sink reads the queue (§6): the HTTP sink's
+/// snapshot (shared, so the plan is priced once for both), once the scheduler has
+/// walked the whole library; and the library runtime's recompile check (§5.3).
+pub struct StoreQueueSource {
+    ocr: OcrControl,
+    library: std::sync::Weak<crate::library::LibraryRuntime>,
+    /// The scheduler finished its first walk (it stays so).
+    walked: std::sync::atomic::AtomicBool,
+}
+
+impl StoreQueueSource {
+    pub fn new(
+        ocr: OcrControl,
+        library: std::sync::Weak<crate::library::LibraryRuntime>,
+    ) -> StoreQueueSource {
+        StoreQueueSource {
+            ocr,
+            library,
+            walked: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+}
+
+impl bunko_remote::SeriesQueueSource for StoreQueueSource {
+    fn snapshot(&self) -> bunko_remote::SnapshotFuture<'_> {
+        Box::pin(async move {
+            use std::sync::atomic::Ordering;
+            if !self.walked.load(Ordering::Acquire) {
+                // Until the first walk ends the owed board is partial: a series missing
+                // from it is not a series that finished.
+                let walked = self.ocr.ask(|s| s.walks > 0).await?;
+                if !walked {
+                    return None;
+                }
+                self.walked.store(true, Ordering::Release);
+            }
+            let snap = self.ocr.series_queue_state().snapshot(&self.ocr).await?;
+            Some((*snap).clone())
+        })
+    }
+
+    fn regeneration_pending(&self, folder: &str) -> bool {
+        self.library
+            .upgrade()
+            .is_some_and(|l| l.series_regeneration_pending(folder))
     }
 }

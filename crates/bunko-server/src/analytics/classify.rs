@@ -384,6 +384,10 @@ fn classify_library_rel(i: &Input<'_>, c: &mut Class, get: bool, rel: &str) {
     if get {
         if rel == QUEUE_FILE {
             (c.category, c.detail) = (category::METADATA, "queue_poll");
+        } else if !parent.is_empty() && is_fixed_name(name, bunko_core::names::SERIES_QUEUE_FILE) {
+            // A series' queue file v2, read on the reader's series page.
+            (c.category, c.detail) = (category::METADATA, "queue_poll");
+            c.series = SeriesRef::of(parent);
         } else if is_archive(name) {
             let ranged = i.status == 206 || (i.accel && i.range);
             c.category = category::VOLUME;
@@ -597,6 +601,16 @@ mod tests {
             ("/mokuro-reader/Catalog.JSON", "metadata", "catalog_json"),
             (
                 "/mokuro-reader/.mokuro-queue.json",
+                "metadata",
+                "queue_poll",
+            ),
+            (
+                "/mokuro-reader/S/.mokuro-series-queue.json",
+                "metadata",
+                "queue_poll",
+            ),
+            (
+                "/mokuro-reader/S/.MOKURO-Series-Queue.json",
                 "metadata",
                 "queue_poll",
             ),

@@ -47,8 +47,12 @@ to the contract shows up as a fixture diff in the pull request that makes it.
 - The response body is `body` (JSON), `body_text` (XML or text, `\n` line endings) or
   absent. Only the headers the reader reads, plus `WWW-Authenticate`, `Retry-After`,
   `Vary` and the CORS headers, are kept.
-- Files Bunko writes into a library (the cloud queue copy, the lease marker,
-  `series.json`, `catalog.json`) use the same shape with `"request": {"file": "<path>"}`.
+- Files Bunko writes into a library (a series' stored queue file v2
+  `series-queue-stored.json`, the lease marker with its `series_queue` block,
+  `series.json`, `catalog.json`) use the same shape with `"request": {"file":
+  "<path>"}`. No root queue file is stored any more (the `queue-file-cloud*` fixtures
+  are retired); `propfind-series-depth1-cloud.json` is a series listed through a cloud
+  library's bridge while its stored queue file is there: the listing leaves it out.
   `series-queue-shapes.json` is one too: a made-up series' queue file v2 (with the
   `live` block of the HTTP copy) holding every job state, rendered by Bunko's renderer
   on the epoch sentinel.
@@ -78,6 +82,8 @@ Anything that changes from run to run is replaced by a value of the same JSON ty
 | Bunko version (`bunko_version`, `server_version`, and the top-level `version` of a `/login/api/me` body only) / machine name | `"0.0.0"` / `"contract-host"` |
 | a wait counted down (`Retry-After`, `Retry in Ns`) | rounded up to whole minutes |
 | a queue file v2 over HTTP (`series-queue-http*`) | every time in it (`at`, `clock_at`, `live.clock`, the jobs' times, `done`) moved by one offset that puts the clock's fit time on `946684800`; `rev` (time-based over HTTP) is `1` |
+| a stored queue file v2 (`series-queue-stored`) | the same, and `at` (when it was written, on the store's clock) is `946684800` too |
+| the marker's `series_queue` block | its `clock` moved by the offset that puts `clock_at` on `946684800` |
 | the lease claim's `about N min left` | `about <n> min left` |
 
 `version` is replaced in `/login/api/me` bodies alone: everywhere else (a `.mokuro`, the
