@@ -921,6 +921,7 @@ async function loadSettings() {
         document.getElementById('settings-queue-display').value = data.queue?.display || 'normal';
         // OCR
         document.getElementById('settings-ocr-interval').value = data.ocr?.poll_interval || 30;
+        showQueueOrder(data.ocr || {});
         renderOcrRuntimeStatus(data.ocr_runtime || {}, data.ocr || {});
     } catch (err) {
         showToast('Failed to load settings: ' + err.message, 'error');
@@ -1129,14 +1130,24 @@ async function saveCatalogSettings() {
     }
 }
 
-// The scan interval is all `PUT /settings/ocr` still carries; engines,
-// detector and patch budget moved into the generation rows below.
+// How the queue takes work (`ocr.queue_order`): the setting, and what it comes
+// to now (Automatic depends on the library's storage).
+function showQueueOrder(ocr) {
+    document.getElementById('settings-ocr-queue-order').value = ocr.queue_order || 'auto';
+    const now = ocr.queue_order_effective === 'volume' ? 'by volume' : 'by generation';
+    document.getElementById('settings-ocr-queue-order-now').textContent = 'The queue takes work ' + now + ' now.';
+}
+
+// The queue order and the scan interval are what `PUT /settings/ocr` carries;
+// engines, detector and patch budget moved into the generation rows above.
 async function saveOcrSettings() {
     try {
         const result = await apiPut('/settings/ocr', {
+            queue_order: document.getElementById('settings-ocr-queue-order').value,
             poll_interval: parseInt(document.getElementById('settings-ocr-interval').value, 10),
         });
-        showToast(liveApplyMessage(result, 'Scan interval saved'), result?.restart_required ? 'warning' : 'success');
+        if (result?.ocr) showQueueOrder(result.ocr);
+        showToast(liveApplyMessage(result, 'Queue settings saved'), result?.restart_required ? 'warning' : 'success');
     } catch (err) {
         showToast(err.message, 'error');
     }

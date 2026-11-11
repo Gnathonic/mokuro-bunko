@@ -145,6 +145,7 @@ impl Scale {
                 concurrency: 2,
                 autobench: true,
                 upgrade: Default::default(),
+                by_volume: false,
             },
         );
         let (_, local) = mpsc::unbounded_channel();
@@ -206,11 +207,16 @@ impl Scale {
         });
         let mut measured = 0;
         while measured < rows().len() {
-            self.settle(Duration::from_millis(50));
+            // A cloud library packs each sample on a helper thread first: on a loaded
+            // machine that takes longer than one settle.
+            let until = std::time::Instant::now() + Duration::from_secs(30);
             let mut bids = Vec::new();
-            while let Ok(op) = self.local.try_recv() {
-                if let Op::Bench(b) = op {
-                    bids.push(b.bid);
+            while bids.is_empty() && std::time::Instant::now() < until {
+                self.settle(Duration::from_millis(50));
+                while let Ok(op) = self.local.try_recv() {
+                    if let Op::Bench(b) = op {
+                        bids.push(b.bid);
+                    }
                 }
             }
             assert!(!bids.is_empty(), "this server's autobench runs");

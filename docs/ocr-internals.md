@@ -111,8 +111,8 @@ recipes differ and its family is in `ocr.upgrade.replace`, or when it is the
 primary's own recipe at a lower `ocr_engine.revision` than the engine's
 (absent = 1), listed or not. An outdated volume is either swapped directly
 (another layer holds the target recipe made from the current archive, and
-its seal proves Bunko wrote it) or gets an upgrade job queued behind every
-ordinary job. A volume with missing pages is skipped. A change nobody marked
+its seal proves Bunko wrote it) or gets an upgrade job queued at the primary
+generation's place (see Queue order). A volume with missing pages is skipped. A change nobody marked
 is not a reason to skip: the bare file is model output, replaced even if a
 person changed it. A file a reader marked EDITED (an `edited` block) is never
 replaced nor swapped in; when its recipe is outdated, the new OCR is written
@@ -138,9 +138,19 @@ not yet benchmarked or not offered on the machine, its engine's device is
 already busy with another lane, or earliest-finish scheduling leaves the job
 for a faster lane.
 
+Each row's jobs come in two groups: its **missing files** first, then its
+**upgrades**. An upgrade replaces OCR the volume already has: an outdated main
+`.mokuro` replaced by the primary's recipe, or a layer Bunko wrote at an older
+engine revision. A row's upgrades run before the next row's missing files, so
+each generation's upgrades run at that generation's place in the run order. A
+volume with no OCR still beats one with old OCR. A session on a row drains
+when a job of an earlier row appears, missing file or upgrade, unless that job
+is left for a faster lane or this machine gave it back.
+
 Within a row the queue is a **round-robin across series**: each series' first
 pending volume, then each series' second, and so on, so one long series
-cannot hold up the rest. Each row keeps a cursor on the series it served last
+cannot hold up the rest. Each group (a row's missing files, a row's upgrades) keeps its own cursor on
+the series it served last
 and continues from the next series in name order (the cursor is in memory
 only and starts over after a restart). Volumes within a series run in
 natural order: numbers compare as numbers (full-width digits included,
@@ -154,6 +164,41 @@ scheduler's own queue rather than sorting the library a second time. The
 scheduler keeps an in-memory index of what is owed: a full re-walk of the
 library every `poll_interval`, kept current in between by WebDAV
 arrival/removal hooks and the library watcher, and re-checked at every claim.
+
+### By volume
+
+With `ocr.queue_order: volume` (the default on a MEGA library) the same order
+is regrouped by volume: each volume's jobs stay together, in the row order
+above, and volumes come in the order of their first job. The lane that takes
+a volume's first job **owns** the volume: its other jobs are offered to that
+lane alone while its machine is connected, unpaused and able to run them (the
+row not refused, stopped or backed off there, the job not given back by it).
+A job the owner cannot run is open to every machine; the machine that takes
+it becomes the volume's next holder, and the rest of what the owner cannot
+run goes to that machine's lane alone (a third machine gets only what
+neither can run). When the owner lets the volume go, the next holder owns
+it. A volume nobody owns
+starts at its first remaining job; its later jobs wait while some connected
+machine can run that first one, so a machine lacking the first row's engine
+cannot start the volume halfway. Owned volumes come first in the queue, then
+volumes whose owner left (a disconnect, a pause, a restart), then the rest.
+
+An owner (or holder) lets its volume go when it has nothing of it left to
+run that no earlier holder takes, when its machine leaves, or after 10
+minutes without a claim of the volume while able to run one; time spent held (a storage hold, an update, a benchmark) or
+waiting for its own autobench does not count. The earliest-finish walk and
+the warm-session rule apply only to volumes nobody owns, and a lane that owns
+a volume with jobs left is not counted on for other work. The ETA plan keeps
+a volume's jobs on the lane that runs it.
+
+The point is the archive: one download per volume per machine. This server's
+own OCR on a cloud library keeps the volume's spooled archive pinned on the
+owner from its first job to its last; a processor is told `keep_archive` with
+each claim that more of the volume follows on it, and keeps its copy (see
+Remote processors). Switching to by volume while claims are in flight makes
+each claim's machine the holder of its volume, so the volume is not split. The cost is throughput: a session runs one row, so a
+machine loads models for every job of a volume, and it takes no volume ahead
+of the one it runs.
 
 ## The page pipeline
 
@@ -211,7 +256,10 @@ A processor opens one **session** per row and slot: it loads the models once
 and then reads volume after volume through them, so the pipeline never drains
 at a volume boundary. The library keeps at most two volumes submitted but
 unfinished per session. When an earlier row gains work, the session stops
-taking volumes, finishes what it accepted and closes. A settings change
+taking volumes, finishes what it accepted and closes. By volume a session
+takes another volume only when the lane's next job is of the same row, so
+most sessions run one volume: the lane then opens a session for the row of
+the volume's next job. A settings change
 stops only the sessions whose recipe changed, and their volumes go back
 unrecorded. When a session dies, the oldest unfinished volume is recorded as
 a failure and the rest go back untouched. (`ocr.sessions` is accepted for old
@@ -343,6 +391,34 @@ back to the queue with a reason class; **a single return never fails the
 volume**. `MOKURO_NGINX_ACCEL=1` without nginx in front turns every download
 into an empty answer; processors detect that and give those volumes back.
 
+**Kept archives.** When the library takes work by volume, a claim whose
+volume has more jobs for the same processor says `keep_archive`, and names
+the archive's strong ETag (the one a GET serves). After the claim, when its
+run completed (not after a failed, cancelled or released one), the processor
+keeps its copy, by archive path, size and ETag, at most one copy per session
+slot (the oldest goes first); the volume's next claim uses it when its size
+and ETag still match, and its `fetch ready` says `reused` (the library does
+not count it as a download). The copy is the archive as it was when the op
+was sent, so the claim is of that version: if the library's file has changed
+since (replaced outside WebDAV, so nothing cancelled the claim), the result is
+discarded when it comes back and the job goes back to the queue. Nothing is
+cancelled: a processor takes a cancel naming a claim for one of its whole
+session, and the session's other volumes would be blamed for its end. The
+library may wait hours for the volume's next job (a storage hold, a
+benchmark), so a copy has no short time limit: every remote op names the
+archives the library still runs on that processor (`kept_archives`, empty by
+generation), and a copy of any other archive is dropped then. A copy kept 6
+hours with no job of its volume goes on its own
+(a processor that got no further op). A kept copy also gives way to a new
+download that needs its room: a RAM copy when the machine is short of memory
+(not when only the RAM budget is full: the new archive then goes to disk, a
+local write being cheaper than the volume's next download); when the disk is
+short, a disk copy, or a RAM copy when the new archive may go to RAM; none
+when the processor's storage cannot be used at all. An archive larger than
+the whole RAM budget goes to disk and drops no RAM copy. Kept copies go when
+the connection ends, and again when the next one starts. A processor that
+does not know the field downloads every claim, as before.
+
 When a processor gives a volume back undelivered, the library judges it from
 its own file: a file that is gone or has changed size is simply offered
 again; after a `stalled` or `differs` return the library reads its own copy
@@ -388,7 +464,9 @@ includes what the walk has already given it, so this is list scheduling, not
 queue, while a lone volume (or the last few of a queue) goes to the machine
 that finishes it first. The asking lane keeps a volume it would finish within
 10% (at most 5 s) plus 2 s of the best other lane. The walk stops at the first
-volume given to the asking lane, which it takes.
+volume given to the asking lane, which it takes. By volume, the walk covers
+only volumes nobody owns: an owned volume's jobs stay with its lane, and a
+lane that owns a volume with jobs left is not a candidate for other work.
 
 Volumes the walk gave to another lane are left for it, with a deadline: the
 predicted start plus a 15-second grace. A prediction is not a promise: past

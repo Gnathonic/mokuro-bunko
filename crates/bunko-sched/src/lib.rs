@@ -24,6 +24,7 @@ pub mod plan;
 pub mod precision;
 pub mod py;
 pub mod pyjson;
+pub mod queue_window;
 pub mod rate;
 pub mod speed;
 pub mod throughput;

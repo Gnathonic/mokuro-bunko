@@ -378,6 +378,8 @@ mod tests {
             volume_uuid: None,
             size: None,
             etag: None,
+            keep_archive: false,
+            kept_archives: None,
         })
     }
 

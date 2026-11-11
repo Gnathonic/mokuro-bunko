@@ -141,10 +141,12 @@ pub async fn serve(options: ServeOptions) -> Result<ServeExit, ServeError> {
     let _lock = lock_storage(&storage)
         .map_err(|e| ServeError::Storage(format!("could not lock {}: {e}", storage.display())))?
         .ok_or_else(|| ServeError::StorageLocked(storage.clone()))?;
-    let spool = Arc::new(ArchiveSpool::new(
-        &storage,
-        options.config.processor.archive_memory_mb,
-    ));
+    // One kept archive per session slot: what a library taking work by volume asks to
+    // keep for each session's next job.
+    let spool = Arc::new(
+        ArchiveSpool::new(&storage, options.config.processor.archive_memory_mb)
+            .keeping(options.config.processor.max_sessions.max(1) as usize),
+    );
     spool.sweep();
     let _ = std::fs::remove_dir_all(work_dir(&options.config));
     let result = serve_loop(&options, spool).await;
@@ -560,6 +562,10 @@ async fn run_connection(
     let leaving = Arc::new(AtomicBool::new(false));
     let lost = CancellationToken::new();
     let (tx, mut events) = mpsc::unbounded_channel::<Event>();
+    let kept = spool.clone();
+    // A new registration: the library offers nothing it kept for (also a copy a late
+    // worker of the last connection put back after that connection let its copies go).
+    kept.clear_kept();
     let fetcher = match http_client(&client.tls(), options.timing.connect_timeout, false) {
         Ok(http) => ArchiveFetcher::new(
             http,
@@ -815,6 +821,7 @@ async fn run_connection(
                 Some(Ok(_)) => last_heard = Instant::now(),
             },
             _ = tick.tick() => {
+                kept.expire_idle_kept();
                 if last_heard.elapsed() > SOCKET_SILENCE {
                     break Ended::Closed(format!("the library sent nothing for {}s", SOCKET_SILENCE.as_secs()));
                 }
@@ -837,6 +844,8 @@ async fn run_connection(
     leaving.store(true, Ordering::SeqCst);
     let sessions = hub.session_count();
     hub.leave(LEAVE_WAIT).await;
+    // A new connection is a new registration: the library offers nothing it kept for.
+    kept.clear_kept();
     if sessions > 0 {
         tracing::info!(
             "{sessions} session(s) ended with the connection; the library returns their volumes"

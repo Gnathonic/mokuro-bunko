@@ -197,7 +197,7 @@ async fn socket(
     let user2 = username.clone();
     let pid2 = pid.clone();
     let check = ocr
-        .ask_within(SOCKET_PRECHECK_WAIT, move |s| match s.machines.get(&pid2) {
+        .ask_with_deadline(SOCKET_PRECHECK_WAIT, move |s| match s.machines.get(&pid2) {
             None => Precheck::Refused(404, "No such processor"),
             Some(m) if m.local || m.username.as_deref() != Some(user2.as_str()) => {
                 Precheck::Refused(403, "Not your processor")

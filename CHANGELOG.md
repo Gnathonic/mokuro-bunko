@@ -223,6 +223,27 @@
   fails to load, with an error naming that row, until it is renamed.
 
 ### Added
+- **OCR can take work volume by volume.** With `ocr.queue_order: volume` (Admin → OCR →
+  Queue order) each volume runs on one machine, its jobs back to back from one download
+  of its archive, and volumes start in the order their first job would come by
+  generation (with several machines or lanes, several volumes run at once, one per
+  lane). While that machine is connected and able to run the volume's next job, no other
+  machine is offered it; a job it cannot run (an engine it does not have) goes to
+  another machine, which downloads the archive itself and runs every other job of the
+  volume the first one cannot. This server's own OCR on a
+  cloud library keeps the spooled archive pinned for the whole volume, and a processor of
+  this release keeps its copy between the volume's jobs when the library asks it to
+  (older processors download it for each job). Only a job that finished keeps its copy,
+  and the copy goes once the library no longer runs the volume there (every job it
+  sends says which it does, none by generation), when the connection ends, or after 6
+  hours with no job of the volume; the result of a copy of an archive replaced outside
+  WebDAV since the job was sent is discarded, and the job goes back to the queue. A
+  volume waits for its machine through that machine's benchmark or hold. On a MEGA
+  library this is the default, because its transfer quota counts every download;
+  elsewhere the queue still runs generation by generation unless set. The cost is
+  throughput: a machine loads each generation's models again for every volume and takes
+  no volume ahead. The queue page, the reader's queue file and the ETAs follow the
+  order.
 - **Sidecars and the queue file name the OCR's parts with versions.** A sidecar Bunko
   writes now carries `ocr_engine.parts`, e.g. `[{"role": "recognizer", "name":
   "Hayai Nova", "version": "2.5"}, {"role": "detector", "name": "PP-OCR Manga",
@@ -479,6 +500,15 @@
   are test builds, never offered as an update.
 
 ### Changed
+- **A generation's upgrades run at that generation's place in the queue.** An upgrade
+  replaces OCR a volume already has: an older main `.mokuro`, or a layer Bunko wrote
+  at an older engine revision. Upgrades now run right after their generation's missing
+  files and before the next generation's, so the primary's upgrades no longer wait
+  behind every job of every layer, and an outdated layer no longer takes turns with
+  the layer's missing files. A volume with no OCR still comes before one with old OCR.
+  With many old main files and upgrades on, every layer now waits for the primary's
+  upgrade pass, and a session on a layer drains when upgrade jobs appear, as it does
+  for the primary's missing files.
 - **PP-OCR manga v0.3.** The line detector and the CTC recognizer every engine reads
   with are now [PP-OCRv6 manga v0.3](https://huggingface.co/Kellenok/PP-OCRv6_manga):
   cleaner line boundaries, fewer boxes on artwork, and a dictionary that covers all of
@@ -719,6 +749,25 @@
   new `--cors yes|no|ask` option (default `ask`) answers the question ahead. A "no", a
   Ctrl-D at the question, or a config file that cannot be saved also leaves the tunnel
   running.
+- **A cloud archive fetched for this server's own OCR is used even when its session
+  starts to drain meanwhile.** The claim went back to the queue unrun, and the archive
+  was fetched again later. A draining session finishes what it accepted, and a claim
+  whose archive is being fetched is one of them.
+- **The OCR queue file lists the next 100 jobs, soonest first.** It listed the next
+  100 waiting volumes with every job each still owed, so a volume near the front
+  brought along jobs planned days later. It now lists every running job, the jobs about
+  to start and the 100 waiting jobs that finish soonest (to the nearest five minutes,
+  so small re-pricings do not reorder the file), grouped by volume, and each volume
+  carries only those jobs. A listed volume still shows the jobs no connected machine
+  can run, as held. A job left out is still owed, and the volume's manifest lists every
+  one. A manifest whose OCR queue does not answer within a second now lists the jobs
+  the volume owed when the queue last published its state, with no finishing time,
+  instead of saying nothing is pending, which a reader took as "done". A volume the
+  queue has not taken in yet (it arrived since, or on a cloud library its archive is
+  still being read) is 503 with `Retry-After` until it has. While one machine of
+  several takes no new work (its benchmark, a pause, its downloads held), the plan
+  gives it no waiting job, so the file no longer reorders itself every few minutes;
+  a job only that machine can run is shown held.
 - **Windows: no console window flashes while the app runs.** The app
   (`mokuro-bunko.exe`) and the server and processor it starts have no console, so
   every console program they ran was given a window of its own: `nvidia-smi`, which
@@ -994,6 +1043,15 @@
   ever managed it, with different contents. A claim now writes into the marker file
   that is there, as it always did on providers with unique names, and the Bunko that
   holds the library moves any second, stale marker file to the provider's trash.
+- **Long names no longer break the queue page's list.** A long series name took the
+  whole row, so the volume name beside it stood one character wide and the generation
+  label broke into single letters, one row filling the screen; on a phone the page
+  scrolled sideways. Names on the queue page are now cut in the middle, so both ends
+  stay readable: the series number at the start and the volume number at the end
+  (`S012 A Very Long Series… Volume 05`). This applies on every card, in the list
+  and on deck. The series name gives way first, the generation label stays whole, and
+  the full names show on hover. Failed and skipped rows no longer push a phone's page
+  sideways either.
 
 ### Known limits
 - **Merging duplicate folders on Google Drive can trash files Bunko cannot see.**
