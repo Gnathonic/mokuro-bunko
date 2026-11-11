@@ -3,11 +3,10 @@
 //! CC BY-NC-SA 4.0; the inference code they are published with is Apache-2.0, and what
 //! is here follows that code's pre- and post-processing.
 //!
-//! Both were trained on whole text blocks and read them better than single lines. On
-//! 1,000 boxes of JMangaBench_Read, with the models' own packages: read as blocks,
-//! charspot got 93.5% of the boxes exactly right and nar-small 92.0%; fed the lines a
-//! line detector found in the same boxes, 86.0% and 87.4%. So they are
-//! [`BlockReader`]s, and the pipeline hands them blocks:
+//! Both were trained on whole text blocks and read them better than single lines (on a
+//! 1,000-box sample of JMangaBench_Read, read as blocks charspot got 93.5% of the boxes
+//! exactly right, fed the lines a line detector found in the same boxes 86.0%). So they
+//! are [`BlockReader`]s, and the pipeline hands them blocks:
 //!
 //! * with a line detector, each block of the first layout, once; the text is then
 //!   shared out to the block's lines, by where charspot's characters are and for
@@ -22,7 +21,17 @@
 //! * charspot finds every character in the crop, classifies it and puts the characters
 //!   in reading order, all inside its graph: a call returns the characters with their
 //!   boxes ([`CharRead`]). Furigana is left out by the model.
-//! * nar-small writes the whole text in one pass, at most [`NAR_SLOTS`] characters.
+//! * nar-small writes the whole text in one pass, at most [`NAR_SLOTS`] - 1 characters
+//!   (the model of the repo's `r16` branch; the first release had 65 slots). Its graph
+//!   holds no weights: they come from the author's `model.safetensors`, handed to ONNX
+//!   Runtime from memory ([`bunko_ocr::runtime::Model::load_with`]).
+//!
+//! On the whole of JMangaBench_Read v1.3.3 (7,789 boxes; Composite = 1 - NED averaged
+//! over printed and non-printed boxes, then the share of boxes exactly right): the
+//! benchmark's own crops read as they are, charspot 97.17 / 92.37% and nar-small r16
+//! 98.12 / 93.86%; through this pipeline, each crop on a page with a 32 px border,
+//! 93.72 / 85.95% and 95.84 / 90.58% with the ppocr-manga detector's blocks, and
+//! 95.08 / 87.98% and 96.73 / 92.05% with animetext-blocks (MODELS.md §8).
 //!
 //! The crop is scaled to fit a grid (aspect kept, Pillow's bicubic), put in the grid's
 //! top-left corner and the rest filled with the median colour of the scaled crop's
@@ -31,7 +40,8 @@
 use std::path::Path;
 
 use bunko_layout::difflib::SequenceMatcher;
-use bunko_ocr::runtime::{Model, RuntimeOptions, TensorBuf};
+use bunko_ocr::models::NAR_WEIGHTS_LOCATION;
+use bunko_ocr::runtime::{ExternalFile, Model, RuntimeOptions, TensorBuf};
 use bunko_vlm::crop::paddle_quad_crop;
 use bunko_vlm::resample::{Filter, resize};
 use bunko_vlm::{
@@ -52,7 +62,7 @@ const CHARSPOT_CLASSES: usize = 6818;
 /// positions (the last may be the end mark).
 pub const NAR_PATCH: usize = 14;
 pub const NAR_BUDGET: usize = 324;
-pub const NAR_SLOTS: usize = 65;
+pub const NAR_SLOTS: usize = 161;
 /// The normalisation, digit for digit as the model's package writes it.
 const NAR_MEAN: [f32; 3] = [0.481_454_66, 0.457_827_5, 0.408_210_73];
 #[allow(clippy::excessive_precision)]
@@ -347,9 +357,21 @@ fn nar_input(crop: &Rgb) -> NarInput {
 }
 
 impl NarSmall {
-    pub fn load(model: &Path, vocabulary: &Path, opts: &RuntimeOptions) -> Result<Self, VlmError> {
+    /// `model` is the weightless graph, `weights` the author's `model.safetensors` (any
+    /// name, any folder: it reaches ONNX Runtime from memory).
+    pub fn load(
+        model: &Path,
+        weights: &Path,
+        vocabulary: &Path,
+        opts: &RuntimeOptions,
+    ) -> Result<Self, VlmError> {
         let characters = load_characters(vocabulary)?;
-        let model = Model::load(model, opts).map_err(|e| VlmError::Runtime(e.to_string()))?;
+        let external = [ExternalFile {
+            location: NAR_WEIGHTS_LOCATION.into(),
+            path: weights.to_path_buf(),
+        }];
+        let model = Model::load_with(model, &external, opts)
+            .map_err(|e| VlmError::Runtime(e.to_string()))?;
         Ok(Self { model, characters })
     }
 
@@ -357,6 +379,22 @@ impl NarSmall {
     pub fn read(&self, crop: &Rgb) -> Result<String, VlmError> {
         if empty(crop) {
             return Ok(String::new());
+        }
+        let ids = self.ids(crop)?;
+        // The end mark is the id after the last character; the text stops there.
+        let end = self.characters.len() as i64;
+        Ok(ids
+            .iter()
+            .take_while(|&&i| i != end)
+            .filter_map(|&i| usize::try_from(i).ok().and_then(|i| self.characters.get(i)))
+            .map(String::as_str)
+            .collect())
+    }
+
+    /// The model's output for one crop: an id per output slot.
+    pub fn ids(&self, crop: &Rgb) -> Result<Vec<i64>, VlmError> {
+        if empty(crop) {
+            return Ok(Vec::new());
         }
         let input = nar_input(crop);
         let feat = 3 * NAR_PATCH * NAR_PATCH;
@@ -383,14 +421,13 @@ impl NarSmall {
                 ));
             }
         };
-        // The end mark is the id after the last character; the text stops there.
-        let end = self.characters.len() as i64;
-        Ok(ids
-            .iter()
-            .take_while(|&&i| i != end)
-            .filter_map(|&i| usize::try_from(i).ok().and_then(|i| self.characters.get(i)))
-            .map(String::as_str)
-            .collect())
+        if ids.len() != NAR_SLOTS {
+            return Err(VlmError::Runtime(format!(
+                "nar-small returned {} ids, not {NAR_SLOTS}: a graph of another revision",
+                ids.len()
+            )));
+        }
+        Ok(ids)
     }
 }
 
@@ -650,11 +687,13 @@ pub struct TextboxRecognizer {
 }
 
 impl TextboxRecognizer {
-    /// `engine` is `charspot-small` or `nar-small`. `source` is the pinned
-    /// `(repo, revision)` the files came from, when they are the pinned files.
+    /// `engine` is `charspot-small` or `nar-small`; `weights` is the weights file of a
+    /// graph that holds none (nar-small's). `source` is the pinned `(repo, revision)`
+    /// the files came from, when they are the pinned files.
     pub fn load(
         engine: &str,
         model: &Path,
+        weights: Option<&Path>,
         vocabulary: &Path,
         opts: &RuntimeOptions,
         source: Option<(&'static str, &'static str)>,
@@ -666,7 +705,14 @@ impl TextboxRecognizer {
                 "muscgab/manga-ocr-charspot-small",
             ),
             "nar-small" => (
-                Reader::Nar(NarSmall::load(model, vocabulary, opts)?),
+                Reader::Nar(NarSmall::load(
+                    model,
+                    weights.ok_or_else(|| {
+                        VlmError::Config("nar-small needs its weights file".into())
+                    })?,
+                    vocabulary,
+                    opts,
+                )?),
                 "nar-small",
                 "muscgab/manga-ocr-nar-small",
             ),
@@ -907,6 +953,65 @@ mod tests {
         assert!((fx / fy - 1.0).abs() < 0.02, "{fx} {fy}");
         assert!(300.0 / fx <= canvas.width as f32 + 0.5);
         assert!(600.0 / fy <= canvas.height as f32 + 0.5);
+    }
+
+    /// The r16 graph with the author's weights gives the ids the author's PyTorch code
+    /// gives (`tools/textbox_export/check_parity.py` writes them), crop for crop,
+    /// through this module's own preprocessing:
+    ///
+    /// ```text
+    /// MOKURO_NAR_PARITY_CROPS=<crops> MOKURO_NAR_PARITY_EXPECTED=<expected.jsonl> \
+    /// MOKURO_NAR_GRAPH=<graph.onnx> MOKURO_NAR_WEIGHTS=<model.safetensors> \
+    /// MOKURO_NAR_VOCAB=<nar_vocabulary_6817.json> \
+    ///   cargo test -p bunko-engines --features nc-models --release --lib -- --ignored nar_parity
+    /// ```
+    #[test]
+    #[ignore = "needs the model files and crops (env vars)"]
+    fn nar_parity_with_the_authors_code() {
+        let var = |k: &str| {
+            std::path::PathBuf::from(
+                std::env::var_os(k).unwrap_or_else(|| panic!("{k} is not set")),
+            )
+        };
+        let opts = RuntimeOptions {
+            intra_threads: 8,
+            ..Default::default()
+        };
+        let nar = NarSmall::load(
+            &var("MOKURO_NAR_GRAPH"),
+            &var("MOKURO_NAR_WEIGHTS"),
+            &var("MOKURO_NAR_VOCAB"),
+            &opts,
+        )
+        .unwrap();
+        let crops = var("MOKURO_NAR_PARITY_CROPS");
+        let expected = std::fs::read_to_string(var("MOKURO_NAR_PARITY_EXPECTED")).unwrap();
+        let (mut same, mut differ) = (0, Vec::new());
+        for line in expected.lines().filter(|l| !l.trim().is_empty()) {
+            let row: serde_json::Value = serde_json::from_str(line).unwrap();
+            let file = row["file"].as_str().unwrap();
+            let want: Vec<i64> = row["ids"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_i64().unwrap())
+                .collect();
+            let img = image::open(crops.join(file)).unwrap().to_rgb8();
+            let crop = Rgb {
+                width: img.width() as usize,
+                height: img.height() as usize,
+                data: img.into_raw(),
+            };
+            let got = nar.ids(&crop).unwrap();
+            assert_eq!(got.len(), NAR_SLOTS);
+            if got == want && nar.read(&crop).unwrap() == row["text"].as_str().unwrap() {
+                same += 1;
+            } else {
+                differ.push(file.to_string());
+            }
+        }
+        assert!(same > 0, "no crops");
+        assert!(differ.is_empty(), "{same} identical; differ: {differ:?}");
     }
 
     #[test]

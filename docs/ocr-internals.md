@@ -575,7 +575,8 @@ as the `torch-models-v1` release assets with a manifest of sha256 hashes and
 the source model revisions; the recognizers' host files are in the `models-v1`
 release. The PP-OCR files, and the opt-in models (`ctd-lines`, `charspot-small`,
 `nar-small`), are fetched from their authors' repositories at a pinned revision
-and checked against the hashes compiled into the program. A full build downloads what it needs into
+and checked against the hashes compiled into the program; `nar-small`'s ONNX graph,
+which holds no weights, comes from this project's `textbox-graphs-v1` release. A full build downloads what it needs into
 `<storage>/models/`, verifies it and unpacks the packages there (see
 [configuration](configuration.md#ocr-models) and
 [`rust-port/TORCH-BACKEND.md`](rust-port/TORCH-BACKEND.md)). Every source

@@ -288,8 +288,9 @@ ocr:
   #                when a row uses them; not in a build made without them):
   #                - charspot-small: manga-ocr-charspot-small (weights CC
   #                                BY-NC-SA 4.0, non-commercial); CPU, fast
-  #                - nar-small:    manga-ocr-nar-small (weights CC BY-NC-SA
-  #                                4.0, non-commercial); CPU
+  #                - nar-small:    manga-ocr-nar-small r16 (weights CC
+  #                                BY-NC-SA 4.0, non-commercial); CPU; the
+  #                                most accurate on JMangaBench_Read
   #                The first three engines also read scanned NOVEL pages.
   #                The 0.5 engine `mokuro` was removed. A row that still names
   #                it is kept but retired: it never runs, loses `primary` and

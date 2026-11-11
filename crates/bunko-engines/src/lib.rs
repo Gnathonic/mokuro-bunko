@@ -736,9 +736,16 @@ impl EnginePipeline {
             .all(|f| f.verified)
             .then(|| models::textbox_source(engine))
             .flatten();
-        let rec =
-            textbox::TextboxRecognizer::load(engine, &files[0].path, &files[1].path, &opts, source)
-                .map_err(|e| format!("could not load {engine}: {e}"))?;
+        // The graph, the vocabulary, then the weights of a graph that holds none.
+        let rec = textbox::TextboxRecognizer::load(
+            engine,
+            &files[0].path,
+            files.get(2).map(|f| f.path.as_path()),
+            &files[1].path,
+            &opts,
+            source,
+        )
+        .map_err(|e| format!("could not load {engine}: {e}"))?;
         let rec = Arc::new(rec);
         loaded.push((rec.info().engine, Arc::downgrade(&rec)));
         Ok(rec)

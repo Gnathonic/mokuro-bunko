@@ -99,7 +99,7 @@ file is mirrored (§2.2). The licence class decides which builds know a model at
 | `ctd-lines` detector | the `comictextdetector.pt.onnx` asset of `zyddnys/manga-image-translator` release `beta-0.2.1` (the detector's authors' ONNX export); the same bytes at `mayocream/comic-text-detector-onnx` @ `a5d67ec772adef819ef5b0e7aa701fcf4c8bf74a` | 94,669,756 B | GPL-3.0 | `gpl-models` |
 | `animetext-blocks` detector | `deepghs/AnimeText_yolo` @ `a180c191bfdb9f0e31b57e7de567e7b6bac50f84`, `yolo12x_animetext/model.onnx`; fetched from our `upstream-models-v1` release (§2.2) | 236,662,175 B | GPL-3.0 | `gpl-models` |
 | `charspot-small` engine | `muscgab/manga-ocr-charspot-small` @ `72ca29202673880ca9c67b1c02c107535be4472b` | `model.onnx` 43,992,111 B, `vocab.json` | CC BY-NC-SA 4.0 (code Apache-2.0) | `nc-models` |
-| `nar-small` engine | `muscgab/manga-ocr-nar-small` @ `81ff4f3313263d1da349946a9dd20d14e0fb0e66` | `onnx/mangaocr_nar_small_fp32.onnx` 213,095,336 B, `nar_vocabulary_6817.json` | CC BY-NC-SA 4.0 (code Apache-2.0) | `nc-models` |
+| `nar-small` engine (the `r16` model) | `muscgab/manga-ocr-nar-small` @ `8cc14c152ccb21da3aa88fa51a92766537c12da2` (branch `r16`); the graph from our `textbox-graphs-v1` release (§2.3) | `model.safetensors` 217,035,140 B (sha256 `bc7418e2…20a3`), `nar_vocabulary_6817.json`; our `nar-small_r16_graph.onnx` 714,861 B | CC BY-NC-SA 4.0 (code Apache-2.0; our graph Apache-2.0) | `nc-models` |
 
 What each licence means for us:
 
@@ -118,6 +118,9 @@ What each licence means for us:
   share alike. We do not rehost the weights. The inference code they are published with
   is Apache-2.0 and `crates/bunko-engines/src/textbox.rs` follows its pre- and
   post-processing. Their cards name AnimeText-OCR (CC BY-NC-SA 4.0) as real training data.
+  nar-small's `r16` model is published as PyTorch weights only; the ONNX graph Bunko runs
+  it with is ours, made from the author's Apache-2.0 model code, and holds no weights
+  (§2.3).
 - A build made with `xtask dist --permissive-models` has none of the rows of the last
   four lines and none of the code behind them.
 
@@ -147,7 +150,61 @@ mirror fetched the file from it and read a volume. The tag starts no release bui
 
 Checked 2026-11-09 against the model cards and licence files at those revisions. The
 Rust host of the two recognizers was compared with their own Python packages on 200
-text boxes: identical text for both, and character boxes within 0.001 px.
+text boxes: identical text for both, and character boxes within 0.001 px (nar-small's
+first release; for `r16` see §2.3).
+
+### 2.3 The `textbox-graphs-v1` release: graphs without weights
+
+nar-small's author publishes the `r16` model (161 output slots, at most 160 characters;
+the first release had 65) as `model.safetensors` with PyTorch code, and no ONNX file.
+`tools/textbox_export/export_nar.py` makes one that contains **no trained weights**:
+
+- it runs the author's own `model.py` at the pinned commit (Apache-2.0), with the RMSNorm
+  eps values of the commit's `config.json` (`reparam.norm_eps`), and traces it with the
+  author's `prepare()` step inside the graph, so every value derived from the weights is
+  computed at run time;
+- it exports without constant folding and without merging initializers of equal value
+  (the exporter would fold the three untrained, all-ones `cond.{1,2,3}.s3` into
+  `cond.0.s3`), then turns each of the 181 initializers into an ONNX external-data entry:
+  location `model.safetensors`, offset 8 + header length + the tensor's start. The file's
+  other 4 tensors (`inject`, `loop_emb`, `occ.*`) are not read by the code;
+- it refuses to write the graph unless every initializer maps onto one safetensors
+  tensor of the same type and shape, the inputs and output are `P [324, 588]`, `V [324]`
+  float32, `R`, `C [324]`, `H`, `W [1]` int32 → `ids [161]` int64, and an export of the
+  same network with every parameter replaced by random numbers gives the same bytes:
+  nothing in the graph depends on the trained values. What it holds besides the
+  network is 358 KB of rotary position tables computed from the code.
+
+The output is byte-reproducible: `nar-small_r16_graph.onnx`, 714,861 B, sha256
+`d630455db967a243ca70e887db5a96866bbd6e052e56f27297495aa136159948` (two runs, export
+environment of `tools/onnx_export/pyproject.toml`: torch 2.14.0, onnx 1.23.1).
+`check_parity.py` then runs it on ONNX Runtime (CPU) with the weights handed over from
+memory, against the author's PyTorch code in fp32 on the first 200 JMangaBench_Read
+crops: identical ids on 200/200. Bunko's own preprocessing and runtime give the same
+ids on the same 200 (the ignored test `textbox::tests::nar_parity_with_the_authors_code`).
+
+Bunko fetches the graph from our pre-release `textbox-graphs-v1`
+(`bunko_ocr::models::TEXTBOX_RELEASE`) and the weights and vocabulary from the author's
+repository at the pin, each checked against its sha256. ONNX Runtime gets the weights
+from memory under the name the graph gives them
+(`bunko_ocr::runtime::Model::load_with`), so the file may sit under any name or folder
+(the store keeps it as `nar-small/r16_model.safetensors`; an override folder or
+`MOKURO_MODELS_MIRROR` may hold it as `nar-small_r16_model.safetensors`). The first
+release's 213 MB ONNX file is no file of the manifest any more, so a store prune
+removes it, and `nar-small` output is at engine revision 2.
+
+The release's assets: the graph, `NOTICE.md` (source, commit, the weights' sha256 and
+size, "contains no trained weights", both licences) and `nar-small_r16_LICENSE` (the
+author's Apache-2.0 text), all written by `export_nar.py`. Publishing, as for §2.2:
+
+```sh
+cd <the folder export_nar.py wrote>
+gh release create textbox-graphs-v1 --repo Gnathonic/mokuro-bunko \
+   --title "Text-box recognizer graphs v1" --notes-file NOTICE.md \
+   --prerelease --latest=false nar-small_r16_graph.onnx NOTICE.md nar-small_r16_LICENSE
+```
+
+A changed graph is a new asset name or a new release, never a replaced asset.
 
 ## 3. The pipeline (`tools/onnx_export/`)
 
@@ -397,3 +454,54 @@ The steps, for the next export:
    (`gh release download models-v1 -p 'hayai-nova_*' -D /tmp/check && sha256sum …`).
 5. A later re-export with a pin or tool change is a **new** release (`models-v2`), never a
    re-upload under the same tag: sidecars record the export id.
+
+## 8. Accuracy on JMangaBench (2026-11-11)
+
+What the engine choices of 0.8 rest on. **JMangaBench_Read is the primary measure;
+JMangaBench_Hard only breaks ties.** Neither benchmark's data nor our harness is in this
+repository: the scripts read the benchmarks from their own clones.
+
+**Method.**
+
+- **Read**: `muscgab/JMangaBench_Read` v1.3.3, the whole main set (7,789 boxes; crops from
+  the Hugging Face dataset at `ff10b200`, labels and `eval/score.py` from the GitHub repo
+  at `e8f2b89`), scored with the benchmark's own scorer. **Composite** is 1 − NED,
+  averaged over the printed and the non-printed boxes; **EM** is the share of boxes read
+  exactly. The scorer reproduces the published scores from the benchmark's own
+  prediction files exactly.
+- **Hard**: `muscgab/JMangaBench_Hard` (3,015 boxes, its own scorer), secondary.
+- **Tight crop**: the recognizer reads the benchmark's box as it is, the way the
+  leaderboard is made. **Pipeline**: each box becomes a page with a 32 px border of its
+  own colour and goes through Bunko's whole page pipeline (`ocr_volume`, the detector
+  finds the text again). The border alone costs 0.8 to 1.8 points even when the box is
+  read as it is, so compare numbers within a column, not across.
+- Differences come with a paired bootstrap 95% interval over boxes. Speeds were taken
+  on a shared, loaded machine and are not reported.
+
+**Read (primary) and Hard (secondary), Composite / EM %:**
+
+| engine | licence | Read, tight crop | Read, pipeline, `ppocr-manga` detector | Read, pipeline, `animetext-blocks` | Hard, tight / pipeline |
+|---|---|---|---|---|---|
+| hayai-nova v2.5 (default, patch budget 512) | Apache-2.0 | 96.60 / 88.16 | 94.58 / 86.15 | — | 88.46 / 78.06 |
+| paddle-manga v3 | Apache-2.0 | 93.47 / 84.77 (64-token cap) | 94.37 / 86.39 | — | not run |
+| ppocr-manga v0.3, its own read alone | Apache-2.0 | — | 94.51 / 87.69 | — | — / 75.88 |
+| charspot-small | CC BY-NC-SA 4.0 | 97.17 / 92.37 | 93.72 / 85.95 | 95.08 / 87.98 | 89.80 / 75.89 |
+| nar-small, first release | CC BY-NC-SA 4.0 | 97.28 / 91.36 | 94.84 / 88.27 | 96.02 / 90.08 | 89.94 / 75.29 |
+| **nar-small `r16`** (0.8) | CC BY-NC-SA 4.0 | 98.12 / 93.86 | **95.84 / 90.58** | **96.73 / 92.05** | 93.91 / 81.03 |
+
+- `r16` against the first release, pipeline: +0.99 on the `ppocr-manga` detector (95%
+  interval +0.77 to +1.25), +0.71 on `animetext-blocks` (+0.49 to +0.91). It is the same
+  architecture with more output slots, on the same CPU path at the same cost, and it is
+  ahead of the default pipeline too. So `nar-small` reads with `r16` (§2.3).
+- hayai-nova's patch budget: 256 gives +0.18 on Read (+0.02 to +0.38) and no exact-match
+  gain, 384 changes nothing; Hard does not move and sound effects get slightly worse.
+  The default stays 512.
+- No permissively licensed model we tried beats hayai-nova on Read: PaddleOCR-VL manga
+  v6 scores 96.14 on tight crops against hayai-nova's 96.60; hayai v2.6 was rejected
+  before.
+- On Read, PP-OCR's read alone ties the default pipeline on Composite (94.51 against
+  94.58) and beats it on EM (87.69 against 86.15); taking, box by box, the better of the
+  two would score 96.10 / 91.36. Choosing between them per box is open work; hayai-nova
+  stays the default (it is ahead on Hard and on sound effects, the tie-breakers).
+- The sound-effect set beside Read (380 boxes, 1 − NED, tight crops): nar-small `r16`
+  94.92, nar-small 92.56, charspot-small 91.93, hayai-nova 91.12.

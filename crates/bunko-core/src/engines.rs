@@ -187,9 +187,9 @@ pub const ENGINES: &[EngineSpec] = &[
     },
     EngineSpec {
         id: "nar-small",
-        label: "manga-ocr-nar-small (muscgab)",
+        label: "manga-ocr-nar-small r16 (muscgab)",
         name: "NAR Small",
-        version: "",
+        version: "r16",
         recognizer: "muscgab/manga-ocr-nar-small",
         license: "CC-BY-NC-SA-4.0",
         class: LicenseClass::NonCommercial,

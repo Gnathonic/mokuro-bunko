@@ -26,6 +26,15 @@
 //! pattern back on changes nothing (6.57 pages/s either way on 8 cores).
 //! `ep::CPU::default()` disables the arena, so Windows registers no CPU EP at all.
 //!
+//! ## External weights
+//!
+//! A graph whose weights live in a file of their own (ONNX external data) names that
+//! file by a location relative to the graph. [`Model::load_with`] hands such files to
+//! ONNX Runtime from memory instead ([`ExternalFile`]): the weights may then sit under
+//! any name, in any folder, behind a link (ONNX Runtime refuses external data that
+//! resolves outside the graph's folder). ONNX Runtime copies what it needs while it
+//! builds the session; the buffer is dropped right after.
+//!
 //! The library never creates the ORT environment (`ort::init()`); the binary does,
 //! so its logging and global options apply.
 
@@ -33,8 +42,9 @@ mod devices;
 
 pub use devices::{DeviceInfo, device_catalog, ep_compiled};
 
+use std::borrow::Cow;
 use std::ffi::CString;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::ptr::{self, NonNull};
 use std::str::FromStr;
 
@@ -180,6 +190,16 @@ impl Default for RuntimeOptions {
     }
 }
 
+/// A file of external data a graph reads: the graph names it `location`, its bytes are
+/// read from `path` (see "External weights" in the module docs).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalFile {
+    /// The `location` the graph's external-data entries give.
+    pub location: String,
+    /// Where the bytes are.
+    pub path: PathBuf,
+}
+
 /// A tensor's elements, by type.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Elements {
@@ -254,7 +274,12 @@ impl std::fmt::Debug for Model {
     }
 }
 
-fn build_session(path: &Path, opts: &RuntimeOptions, target: ExecutionTarget) -> Result<Session> {
+fn build_session(
+    path: &Path,
+    external: &[ExternalFile],
+    opts: &RuntimeOptions,
+    target: ExecutionTarget,
+) -> Result<Session> {
     let threads = opts.intra_threads;
     let mut builder = Session::builder()?
         .with_optimization_level(GraphOptimizationLevel::All)?
@@ -284,16 +309,31 @@ fn build_session(path: &Path, opts: &RuntimeOptions, target: ExecutionTarget) ->
                 .build()
                 .error_on_failure()])?;
     }
+    for f in external {
+        let bytes = std::fs::read(&f.path).map_err(|e| Error::io(&f.path, e))?;
+        builder =
+            builder.with_external_initializer_file_in_memory(&f.location, Cow::Owned(bytes))?;
+    }
     Ok(builder.commit_from_file(path)?)
 }
 
 impl Model {
     /// Load `path` on the first target of `opts.targets` that works; CPU otherwise.
     pub fn load(path: &Path, opts: &RuntimeOptions) -> Result<Self> {
+        Self::load_with(path, &[], opts)
+    }
+
+    /// [`Model::load`] for a graph whose external data comes from `external` (any
+    /// name or folder) rather than from files beside the graph.
+    pub fn load_with(
+        path: &Path,
+        external: &[ExternalFile],
+        opts: &RuntimeOptions,
+    ) -> Result<Self> {
         let mut reasons: Vec<String> = Vec::new();
         let mut chosen: Option<(ExecutionTarget, Session)> = None;
         for &target in &opts.targets {
-            match build_session(path, opts, target) {
+            match build_session(path, external, opts, target) {
                 Ok(s) => {
                     chosen = Some((target, s));
                     break;
@@ -308,7 +348,7 @@ impl Model {
             Some(c) => c,
             None => (
                 ExecutionTarget::Cpu,
-                build_session(path, opts, ExecutionTarget::Cpu)?,
+                build_session(path, external, opts, ExecutionTarget::Cpu)?,
             ),
         };
         let fallback_reason = (!reasons.is_empty()).then(|| reasons.join("; "));
@@ -323,7 +363,7 @@ impl Model {
         let mut sessions = vec![first];
         if !concurrent {
             for _ in 1..opts.copies.max(1) {
-                sessions.push(build_session(path, opts, target)?);
+                sessions.push(build_session(path, external, opts, target)?);
             }
         }
         let locks = (!concurrent).then(|| sessions.iter().map(|_| Mutex::new(())).collect());
@@ -527,6 +567,140 @@ mod tests {
         let json = serde_json::to_value(&devices[0]).unwrap();
         assert_eq!(json["provider"], "cpu");
         assert!(ep_compiled().contains(&"cpu"));
+    }
+
+    /// A protobuf field: `(number, wire type)` then the payload.
+    fn field(out: &mut Vec<u8>, number: u64, payload: Field<'_>) {
+        fn varint(out: &mut Vec<u8>, mut v: u64) {
+            while v >= 0x80 {
+                out.push((v as u8) | 0x80);
+                v >>= 7;
+            }
+            out.push(v as u8);
+        }
+        match payload {
+            Field::Int(v) => {
+                varint(out, number << 3);
+                varint(out, v);
+            }
+            Field::Bytes(b) => {
+                varint(out, (number << 3) | 2);
+                varint(out, b.len() as u64);
+                out.extend_from_slice(b);
+            }
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum Field<'a> {
+        Int(u64),
+        Bytes(&'a [u8]),
+    }
+
+    /// A protobuf message of `fields`, in order.
+    fn message(fields: &[(u64, Field<'_>)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for &(n, f) in fields {
+            field(&mut out, n, f);
+        }
+        out
+    }
+
+    /// `y = x + w`, `x`, `w` and `y` float32 [4], `w` an external initializer at
+    /// `location`, bytes 8..24.
+    fn add_graph(location: &str) -> Vec<u8> {
+        use Field::{Bytes, Int};
+        let value_info = |name: &str| {
+            let dim = message(&[(1, Int(4))]);
+            let shape = message(&[(1, Bytes(&dim))]);
+            let tensor = message(&[(1, Int(1)), (2, Bytes(&shape))]);
+            let ty = message(&[(1, Bytes(&tensor))]);
+            message(&[(1, Bytes(name.as_bytes())), (2, Bytes(&ty))])
+        };
+        let entry =
+            |k: &str, v: &str| message(&[(1, Bytes(k.as_bytes())), (2, Bytes(v.as_bytes()))]);
+        let (loc, off, len) = (
+            entry("location", location),
+            entry("offset", "8"),
+            entry("length", "16"),
+        );
+        let w = message(&[
+            (1, Int(4)),
+            (2, Int(1)),
+            (8, Bytes(b"w")),
+            (13, Bytes(&loc)),
+            (13, Bytes(&off)),
+            (13, Bytes(&len)),
+            (14, Int(1)),
+        ]);
+        let node = message(&[
+            (1, Bytes(b"x")),
+            (1, Bytes(b"w")),
+            (2, Bytes(b"y")),
+            (4, Bytes(b"Add")),
+        ]);
+        let (x, y) = (value_info("x"), value_info("y"));
+        let graph = message(&[
+            (1, Bytes(&node)),
+            (2, Bytes(b"g")),
+            (5, Bytes(&w)),
+            (11, Bytes(&x)),
+            (12, Bytes(&y)),
+        ]);
+        let opset = message(&[(2, Int(17))]);
+        message(&[(1, Int(8)), (7, Bytes(&graph)), (8, Bytes(&opset))])
+    }
+
+    /// The external weights may sit under another name, in another folder, behind a
+    /// link: they reach ONNX Runtime from memory.
+    #[test]
+    fn external_weights_load_from_any_name_or_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let graph_dir = tmp.path().join("graph");
+        let other = tmp.path().join("elsewhere");
+        std::fs::create_dir_all(&graph_dir).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        let graph = graph_dir.join("add.onnx");
+        std::fs::write(&graph, add_graph("model.safetensors")).unwrap();
+        let mut bytes = vec![0xAAu8; 8];
+        for v in [1.0f32, 2.0, 3.0, 4.0] {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        let weights = other.join("r16_model.safetensors");
+        std::fs::write(&weights, &bytes).unwrap();
+        let opts = RuntimeOptions {
+            intra_threads: 1,
+            ..Default::default()
+        };
+        let run = |m: &Model| {
+            let out = m
+                .run_named(vec![("x", TensorBuf::f32(&[4], vec![10.0; 4]))], &["y"])
+                .unwrap();
+            out[0].as_f32().unwrap().to_vec()
+        };
+        let external = |path: &Path| {
+            [ExternalFile {
+                location: "model.safetensors".into(),
+                path: path.to_path_buf(),
+            }]
+        };
+        let m = Model::load_with(&graph, &external(&weights), &opts).unwrap();
+        assert_eq!(run(&m), [11.0, 12.0, 13.0, 14.0]);
+        // Nothing named model.safetensors beside the graph: a plain load has no weights.
+        assert!(Model::load(&graph, &opts).is_err());
+        // A link to the weights in another folder (ONNX Runtime refuses such a link as
+        // a file beside the graph).
+        #[cfg(unix)]
+        {
+            let link = graph_dir.join("weights-link");
+            std::os::unix::fs::symlink(&weights, &link).unwrap();
+            let m = Model::load_with(&graph, &external(&link), &opts).unwrap();
+            assert_eq!(run(&m), [11.0, 12.0, 13.0, 14.0]);
+        }
+        // A missing weights file is an error that names it.
+        let gone = other.join("gone.safetensors");
+        let e = Model::load_with(&graph, &external(&gone), &opts).unwrap_err();
+        assert!(e.to_string().contains("gone.safetensors"), "{e}");
     }
 
     #[test]
