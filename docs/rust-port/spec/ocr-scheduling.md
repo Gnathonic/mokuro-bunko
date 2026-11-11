@@ -305,6 +305,15 @@ whatever the outcome (`watcher.py:2830-2833`); in memory only.
 
 `_generation_rank()` = `{row.id: index}` over enabled rows (`watcher.py:1425-1427`).
 
+> **Rust:** the queue orders by group, not by row. `Scheduler::order_rank` ranks
+> enabled row i's missing files `row.id` at 2i and its upgrades
+> `row.id + "\u{1}upgrade"` at 2i+1; `Scheduler::job_key` puts the primary's
+> upgrade (swap) job and a layer Bunko wrote at an older engine revision
+> (`OwedVolume.outdated`) in the upgrade group. Each group has its own positions
+> and its own `last_served` cursor. A session on row i drains for a job ranked
+> before 2i that the machine would take, unless that job is left for a faster
+> lane or the machine gave it back.
+
 `_ocr_candidates(exclude, reset_stale_failures)` (`watcher.py:1592-1623`) =
 eligible − exclude → `order_jobs(..., last_served=copy)`. `_upcoming_ocr_jobs` =
 `_ocr_candidates(exclude=inflight ∪ attempted)` — the single source for claims

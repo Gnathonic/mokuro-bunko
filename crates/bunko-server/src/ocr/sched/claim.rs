@@ -44,8 +44,10 @@ impl From<&PageSuffixes> for Suffixes {
 /// The most page-suffix reads asked of a helper at a time (remote store).
 pub const SUFFIX_BATCH: usize = 8;
 
-/// The pseudo row id upgrade jobs are ordered under: after every real row.
-pub const UPGRADE_ORDER_KEY: &str = "\u{10FFFF}upgrade";
+/// Appended to a row id to name that row's upgrade jobs in the queue order: they are a
+/// group of their own, ranked right after the row's missing files. Row ids are
+/// `[A-Za-z0-9_-]`, so the name never collides with a real row.
+pub const UPGRADE_CLASS: &str = "\u{1}upgrade";
 
 /// What phase B decided about the earliest-finish walk.
 #[derive(Default, Debug)]
@@ -220,17 +222,44 @@ pub fn precision_pick_needed(
 impl Scheduler {
     // --- candidates -----------------------------------------------------------------------
 
-    /// `(series, volume, generation id)` as `order_jobs` reads it.
-    pub fn job_key(job: &Job) -> JobKey {
+    /// The job replaces OCR the volume already has rather than filling a gap: the
+    /// primary's upgrade (generate, then swap), or a layer that is Bunko's own output at
+    /// an older engine revision.
+    pub fn is_upgrade(&self, job: &Job) -> bool {
+        job.upgrade
+            || self
+                .owed
+                .volumes
+                .get(&*job.rel)
+                .is_some_and(|v| v.outdated.contains(&job.gid))
+    }
+
+    /// `(series, volume, order group)` as `order_jobs` reads it. A row's upgrade jobs
+    /// are a group of their own (own positions, own series cursor), ranked right after
+    /// the row's missing files by [`Self::order_rank`].
+    pub fn job_key(&self, job: &Job) -> JobKey {
+        let class = if self.is_upgrade(job) {
+            UPGRADE_CLASS
+        } else {
+            ""
+        };
         JobKey {
             series: job.series().to_string(),
             volume: job.volume().to_string(),
-            generation_id: if job.upgrade {
-                UPGRADE_ORDER_KEY.to_string()
-            } else {
-                job.gid.to_string()
-            },
+            generation_id: format!("{}{class}", job.gid),
         }
+    }
+
+    /// The rank of every order group: enabled row i's missing files 2i, its upgrades
+    /// 2i+1. Each generation's upgrades run at its place in the run order, after its
+    /// missing files and before the next generation's.
+    pub fn order_rank(&self) -> HashMap<String, usize> {
+        let mut rank = HashMap::new();
+        for (i, r) in self.enabled_rows().iter().enumerate() {
+            rank.insert(r.id.clone(), 2 * i);
+            rank.insert(format!("{}{UPGRADE_CLASS}", r.id), 2 * i + 1);
+        }
+        rank
     }
 
     pub fn failure_key_of(&self, job: &Job, row: &Generation) -> String {
@@ -296,9 +325,12 @@ impl Scheduler {
             }
             self.save_failures();
         }
-        let mut rank = self.rank();
-        rank.insert(UPGRADE_ORDER_KEY.to_string(), rank.len());
-        order_jobs(jobs, &rank, Self::job_key, &self.last_served)
+        order_jobs(
+            jobs,
+            &self.order_rank(),
+            |j| self.job_key(j),
+            &self.last_served,
+        )
     }
 
     /// A job is no longer owed (taken, finished, or found done at claim).
@@ -308,6 +340,7 @@ impl Scheduler {
                 vol.upgrade = false;
             } else {
                 vol.rows.retain(|g| *g != job.gid);
+                vol.outdated.retain(|g| *g != job.gid);
             }
             if vol.rows.is_empty() && !vol.upgrade && vol.skipped.is_empty() {
                 self.owed.volumes.remove(&*job.rel);
@@ -971,23 +1004,31 @@ impl Scheduler {
         };
         let eft = self.eft_left(&lane, &proposed);
         // Phase C.
-        let rank = self.rank();
-        let rank_of = |j: &Job| {
-            if j.upgrade {
-                rank.len()
-            } else {
-                rank.get(&*j.gid).copied().unwrap_or(rank.len())
-            }
-        };
+        // A session on row i (rank 2i) drains for any job ranked before it that this
+        // machine would take: an earlier row's missing files or upgrades. Its own row's
+        // upgrades rank after it and never do.
+        let rank = self.order_rank();
         let mut preempt = false;
         if let Some(g) = gid {
             let mine = rank.get(g).copied().unwrap_or(rank.len());
-            preempt = proposed.iter().any(|j| {
-                rank_of(j) < mine
+            let ranks: Vec<usize> = proposed
+                .iter()
+                .map(|j| {
+                    rank.get(&self.job_key(j).generation_id)
+                        .copied()
+                        .unwrap_or(rank.len())
+                })
+                .collect();
+            preempt = proposed.iter().zip(ranks).any(|(j, r)| {
+                r < mine
                     && !self.stopped.contains(&(j.gid.to_string(), mname.clone()))
                     && !backed_off.contains(&*j.gid)
                     && !unmeasured.contains(&*j.gid)
                     && offered.get(&*j.gid) == Some(&true)
+                    // Not a job left to a faster lane or one this machine gave back:
+                    // the session would drain, reopen on its own row and drain again.
+                    && !eft.skip.contains(j)
+                    && !self.returned_by.get(j).is_some_and(|by| by.contains(&pid))
             });
         }
         let mut ordered = proposed.clone();
@@ -1085,7 +1126,7 @@ impl Scheduler {
         if let Some(l) = self.lanes.iter_mut().find(|l| l.id == lane.id) {
             l.waiting_for_faster = false;
         }
-        let key = Self::job_key(job);
+        let key = self.job_key(job);
         self.last_served.insert(key.generation_id, key.series);
         self.claims.insert(
             job.clone(),

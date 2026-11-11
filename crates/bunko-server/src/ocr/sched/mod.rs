@@ -980,7 +980,7 @@ impl Scheduler {
             let volumes: HashSet<&str> = jobs.iter().map(|j| &*j.rel).collect();
             let order: Vec<String> = self.enabled_rows().iter().map(|r| r.name.clone()).collect();
             self.log(format!(
-                "Found {} missing OCR sidecar(s) across {} CBZ file(s) (generations, in run order: {}; within a generation series take turns)",
+                "Found {} missing OCR sidecar(s) across {} CBZ file(s) (generations, in run order: {}; each generation's upgrades after its missing files; within each, series take turns)",
                 jobs.len(),
                 volumes.len(),
                 order.join(", ")

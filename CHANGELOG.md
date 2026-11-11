@@ -479,6 +479,15 @@
   are test builds, never offered as an update.
 
 ### Changed
+- **A generation's upgrades run at that generation's place in the queue.** An upgrade
+  replaces OCR a volume already has: an older main `.mokuro`, or a layer Bunko wrote
+  at an older engine revision. Upgrades now run right after their generation's missing
+  files and before the next generation's, so the primary's upgrades no longer wait
+  behind every job of every layer, and an outdated layer no longer takes turns with
+  the layer's missing files. A volume with no OCR still comes before one with old OCR.
+  With many old main files and upgrades on, every layer now waits for the primary's
+  upgrade pass, and a session on a layer drains when upgrade jobs appear, as it does
+  for the primary's missing files.
 - **PP-OCR manga v0.3.** The line detector and the CTC recognizer every engine reads
   with are now [PP-OCRv6 manga v0.3](https://huggingface.co/Kellenok/PP-OCRv6_manga):
   cleaner line boundaries, fewer boxes on artwork, and a dictionary that covers all of

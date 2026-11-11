@@ -111,8 +111,8 @@ recipes differ and its family is in `ocr.upgrade.replace`, or when it is the
 primary's own recipe at a lower `ocr_engine.revision` than the engine's
 (absent = 1), listed or not. An outdated volume is either swapped directly
 (another layer holds the target recipe made from the current archive, and
-its seal proves Bunko wrote it) or gets an upgrade job queued behind every
-ordinary job. A volume with missing pages is skipped. A change nobody marked
+its seal proves Bunko wrote it) or gets an upgrade job queued at the primary
+generation's place (see Queue order). A volume with missing pages is skipped. A change nobody marked
 is not a reason to skip: the bare file is model output, replaced even if a
 person changed it. A file a reader marked EDITED (an `edited` block) is never
 replaced nor swapped in; when its recipe is outdated, the new OCR is written
@@ -138,9 +138,19 @@ not yet benchmarked or not offered on the machine, its engine's device is
 already busy with another lane, or earliest-finish scheduling leaves the job
 for a faster lane.
 
+Each row's jobs come in two groups: its **missing files** first, then its
+**upgrades**. An upgrade replaces OCR the volume already has: an outdated main
+`.mokuro` replaced by the primary's recipe, or a layer Bunko wrote at an older
+engine revision. A row's upgrades run before the next row's missing files, so
+each generation's upgrades run at that generation's place in the run order. A
+volume with no OCR still beats one with old OCR. A session on a row drains
+when a job of an earlier row appears, missing file or upgrade, unless that job
+is left for a faster lane or this machine gave it back.
+
 Within a row the queue is a **round-robin across series**: each series' first
 pending volume, then each series' second, and so on, so one long series
-cannot hold up the rest. Each row keeps a cursor on the series it served last
+cannot hold up the rest. Each group (a row's missing files, a row's upgrades) keeps its own cursor on
+the series it served last
 and continues from the next series in name order (the cursor is in memory
 only and starts over after a restart). Volumes within a series run in
 natural order: numbers compare as numbers (full-width digits included,

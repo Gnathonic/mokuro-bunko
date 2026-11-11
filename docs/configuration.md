@@ -1110,8 +1110,9 @@ current primary generation:
 - If another layer already holds the primary's recipe made from the current
   archive, and its seal (`ocr_engine.seal`) proves Bunko wrote it, its bytes
   become the new primary at once. Otherwise the volume gets an upgrade job,
-  queued behind every ordinary job (a volume with no OCR always beats one with
-  old OCR) and runnable on any machine.
+  queued at the primary generation's place: after its missing files and
+  before the next generation's (a volume with no OCR still beats one with old
+  OCR). It is runnable on any machine.
 - The new file **replaces** the old primary outright, in one atomic rename;
   no copy of the old file is kept and there is no undo (on a cloud library
   the old file goes to the provider's trash, or its version history where it
