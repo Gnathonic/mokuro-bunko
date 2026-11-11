@@ -1,13 +1,16 @@
-//! The `cloud` suite: Bunko and one cloud (cloudsim or rclone), no reader, every party
-//! its own process. One library, one server holding its lease, then in order: cold
-//! start, adoption, the outbox under faults, OCR results leaving through the outbox,
-//! the lease handed to a second server, and a provider that is full.
+//! The `cloud` suite: Bunko and one cloud (cloudsim, rclone or a library folder on this
+//! disk), no reader, every party its own process. One library, one server holding its
+//! lease, then in order: cold start, adoption, the outbox under faults, OCR results
+//! leaving through the outbox, a reader writing and renaming in a folder library, the
+//! lease handed to a second server, a provider that is full, and a folder library
+//! taken away and brought back.
 
 use super::super::genlib;
 use super::super::http;
 use super::super::server::{Backend, CloudLogin, SeedUser, Server, ServerOptions};
 use super::cloudsim::Cloudsim;
 use super::fakeproc::{FakeOptions, FakeProcessor};
+use super::folder::Folder;
 use super::rclone::{self, Rclone};
 use super::results::{Outcome, Report, Scenario};
 use super::{Paths, Provider};
@@ -83,6 +86,7 @@ fn wait_for<T>(
 enum CloudSide {
     Sim(Cloudsim),
     Rclone(Rclone),
+    Folder(Folder),
 }
 
 struct Rig<'a> {
@@ -99,7 +103,22 @@ impl Rig<'_> {
     fn sim(&self) -> Option<&Cloudsim> {
         match &self.cloud {
             CloudSide::Sim(s) => Some(s),
-            CloudSide::Rclone(_) => None,
+            CloudSide::Rclone(_) | CloudSide::Folder(_) => None,
+        }
+    }
+
+    fn folder(&self) -> Option<&Folder> {
+        match &self.cloud {
+            CloudSide::Folder(f) => Some(f),
+            CloudSide::Sim(_) | CloudSide::Rclone(_) => None,
+        }
+    }
+
+    /// Why a scenario needs knobs this cloud has none of.
+    fn no_knobs(&self, what: &str) -> String {
+        match &self.cloud {
+            CloudSide::Folder(_) => format!("a folder has no {what}"),
+            _ => format!("{} has no {what}", self.p.name()),
         }
     }
 
@@ -111,6 +130,7 @@ impl Rig<'_> {
                 let path = r.root.join(cloud_path(rel));
                 Ok(std::fs::read(path).ok().map(|b| sha256_hex(&b)))
             }
+            CloudSide::Folder(f) => Ok(f.bytes(rel).map(|b| sha256_hex(&b))),
         }
     }
 
@@ -129,6 +149,7 @@ impl Rig<'_> {
                 Ok((r.status == 200).then_some(r.body))
             }
             CloudSide::Rclone(r) => Ok(std::fs::read(r.root.join(cloud_path(rel))).ok()),
+            CloudSide::Folder(f) => Ok(f.bytes(rel)),
         }
     }
 
@@ -136,6 +157,7 @@ impl Rig<'_> {
         match &self.cloud {
             CloudSide::Sim(s) => s.login(self.p, ACCOUNT),
             CloudSide::Rclone(r) => Ok(rclone_login(r)),
+            CloudSide::Folder(f) => Ok(f.login()),
         }
     }
 
@@ -258,21 +280,25 @@ pub fn rclone_login(r: &Rclone) -> CloudLogin {
         account_id: format!("{}@{url}", r.user),
         credential: json!({"webdav_password": r.password}),
         webdav: Some((url, r.user.clone())),
+        path: None,
     }
 }
 
 type Step = fn(&mut Rig) -> Result<Option<String>>;
 
 /// `(name, step)`: a step answers `Ok(None)` (passed), `Ok(Some(why))` (skipped) or
-/// `Err` (failed). Order matters: the handover replaces server A with B, and the
-/// quota hold stops uploads for minutes.
-const SCENARIOS: [(&str, Step); 6] = [
+/// `Err` (failed). Order matters: the handover replaces server A with B, the quota
+/// hold stops uploads for minutes, and `unplug` takes the whole library away.
+const SCENARIOS: [(&str, Step); 9] = [
     ("cold-start", cold_start),
     ("adoption", adoption),
     ("outbox-faults", outbox_faults),
     ("ocr-results", ocr_results),
+    ("reader-writes", reader_writes),
+    ("reader-rename", reader_rename),
     ("lease-handover", lease_handover),
     ("quota-pause", quota_pause),
+    ("unplug", unplug),
 ];
 
 pub fn run(paths: &Paths, p: Provider, work: &Path, grep: Option<&str>, report: &mut Report) {
@@ -355,7 +381,22 @@ fn setup<'a>(paths: &'a Paths, p: Provider, work: &Path) -> Result<Rig<'a>> {
             "volumes": [],
         }))?,
     ));
-    let cloud = if p == Provider::Rclone {
+    let cloud = if p == Provider::Folder {
+        let f = Folder::create(work)?;
+        f.seed(&files)?;
+        // The reader-rename scenario's own series: a volume with its OCR.
+        f.seed(&[
+            (
+                format!("{RENAME_FROM}/Vol 1.cbz"),
+                genlib::cbz_bytes("rig rename Vol 1")?,
+            ),
+            (
+                format!("{RENAME_FROM}/Vol 1.mokuro"),
+                genlib::mokuro_doc(RENAME_FROM, "Vol 1", RENAME_DOC),
+            ),
+        ])?;
+        CloudSide::Folder(f)
+    } else if p == Provider::Rclone {
         let bin = rclone::binary(paths.rclone_bin.as_deref(), &paths.tools)?;
         // Bunko sends no Origin; the allowed one is for the preflight check, which the
         // browser suites rely on (the reader's own WebDAV client sends Authorization).
@@ -459,7 +500,7 @@ fn adoption(rig: &mut Rig) -> Result<Option<String>> {
 /// shows both faults fired.
 fn outbox_faults(rig: &mut Rig) -> Result<Option<String>> {
     let Some(sim) = rig.sim() else {
-        return Ok(Some("rclone has no fault knobs".into()));
+        return Ok(Some(rig.no_knobs("fault knobs")));
     };
     sim.clear_log()?;
     match rig.p {
@@ -486,7 +527,7 @@ fn outbox_faults(rig: &mut Rig) -> Result<Option<String>> {
 /// of the other scenarios.
 fn quota_pause(rig: &mut Rig) -> Result<Option<String>> {
     let Some(sim) = rig.sim() else {
-        return Ok(Some("rclone has no quota knob".into()));
+        return Ok(Some(rig.no_knobs("quota knob")));
     };
     match rig.p {
         // Vol 3 may hold the fake processor's result by now: a create or a replace.
@@ -628,5 +669,308 @@ fn lease_handover(rig: &mut Rig) -> Result<Option<String>> {
     rig.wait_cloud(&rel, &body, Duration::from_secs(60))?;
     // B is the library's server from here on.
     rig.a = Some(b);
+    Ok(None)
+}
+
+/// The reader-rename scenario's series, seeded in a folder library with its OCR, and
+/// the name the reader renames it to.
+const RENAME_FROM: &str = "Rig Rename";
+const RENAME_TO: &str = "Rig Renamed";
+/// Its sidecar's volume id number: no other rig volume's.
+const RENAME_DOC: usize = 71;
+/// The reader-writes scenario's series, written by the "reader" in a folder library.
+const WRITES_SERIES: &str = "Reader Writes";
+/// How long a write in progress is watched: past a few of Bunko's polls (2 s each)
+/// and its watcher's quiet wait (2 s).
+const MID_WRITE: Duration = Duration::from_secs(6);
+/// How soon a finished reader write must show (plan: within 10 s).
+const PICKUP: Duration = Duration::from_secs(10);
+
+/// The catalog's volume count for `series` (0 when it lists no such series).
+fn volume_count(server: &Server, series: &str) -> Result<u64> {
+    let v = http::get(server.addr, "/catalog/api/library")?.json()?;
+    Ok(v["series"]
+        .as_array()
+        .and_then(|rows| rows.iter().find(|s| s["name"] == series))
+        .and_then(|s| s["volume_count"].as_u64())
+        .unwrap_or(0))
+}
+
+/// Every series the catalog lists, `(name, volume count)`, sorted.
+fn catalog_rows(server: &Server) -> Result<Vec<(String, u64)>> {
+    let v = http::get(server.addr, "/catalog/api/library")?.json()?;
+    let mut rows: Vec<(String, u64)> = v["series"]
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .map(|s| {
+                    (
+                        s["name"].as_str().unwrap_or_default().to_string(),
+                        s["volume_count"].as_u64().unwrap_or(0),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    rows.sort();
+    Ok(rows)
+}
+
+/// What the bridge serves the reader account at `rel`: the bytes, or `None` when it
+/// answers anything but 200.
+fn served(server: &Server, rel: &str) -> Result<Option<Vec<u8>>> {
+    let r = http::request(
+        server.addr,
+        "GET",
+        &dav_path(rel),
+        &[("Authorization", &Server::basic(READER))],
+        &[],
+    )?;
+    Ok((r.status == 200).then_some(r.body))
+}
+
+/// Bunko's OCR queue as its admin sees it (`/queue/api/status`).
+fn queue_status(server: &Server) -> Result<Value> {
+    let r = http::request(
+        server.addr,
+        "GET",
+        "/queue/api/status",
+        &[("Authorization", &server.auth)],
+        &[],
+    )?;
+    if r.status != 200 {
+        bail!("the queue status answered {}", r.status);
+    }
+    r.json()
+}
+
+/// The volumes of `series` the queue runs, waits on or has failed.
+fn jobs_of(status: &Value, series: &str) -> Vec<String> {
+    let mut jobs: Vec<&Value> = Vec::new();
+    for list in [&status["pending"], &status["failed"]] {
+        jobs.extend(list.as_array().into_iter().flatten());
+    }
+    for m in status["machines"].as_array().into_iter().flatten() {
+        for list in [&m["jobs"], &m["next"]] {
+            jobs.extend(list.as_array().into_iter().flatten());
+        }
+    }
+    jobs.into_iter()
+        .filter(|j| j["series"] == series)
+        .map(|j| j["volume"].as_str().unwrap_or_default().to_string())
+        .collect()
+}
+
+/// Wait until Bunko has finished `n` library walks that started after this call (a
+/// testing build counts them in `/queue/api/status`'s `walks`).
+fn walks_after(server: &Server, n: u64) -> Result<()> {
+    let start = queue_status(server)?["walks"]
+        .as_u64()
+        .context("/queue/api/status names no walks: the rig needs a testing build")?;
+    wait_for(
+        Duration::from_secs(60),
+        &format!("Bunko never walked the library {n} more times"),
+        || {
+            let walks = queue_status(server)?["walks"].as_u64().unwrap_or(0);
+            Ok((walks > start + n).then_some(()))
+        },
+    )
+}
+
+/// A reader writes into a folder library the way Chromium's File System Access does
+/// (an empty or old file, the new bytes in `<name>.crswap` until the write closes).
+/// A new volume shows only after the swap, and within 10 s of it; a replaced sidecar
+/// is served with its old bytes until the swap, and with the new ones within 10 s.
+fn reader_writes(rig: &mut Rig) -> Result<Option<String>> {
+    let Some(folder) = rig.folder() else {
+        return Ok(Some(
+            "a reader writes to the library's disk only on a folder".into(),
+        ));
+    };
+    let a = rig.server()?;
+    let cbz_rel = format!("{WRITES_SERIES}/Vol 1.cbz");
+    let cbz = genlib::cbz_bytes("rig reader-writes Vol 1")?;
+    folder.swap_write(&cbz_rel, &cbz, || {
+        let until = Instant::now() + MID_WRITE;
+        while Instant::now() < until {
+            let n = volume_count(a, WRITES_SERIES)?;
+            if n != 0 {
+                bail!("{cbz_rel} was listed ({n} volumes) while the reader was still writing it");
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        Ok(())
+    })?;
+    wait_for(
+        PICKUP,
+        &format!("{cbz_rel} never showed after the reader's write closed"),
+        || Ok((volume_count(a, WRITES_SERIES)? == 1).then_some(())),
+    )?;
+    let got = served(a, &cbz_rel)?;
+    if got.as_deref() != Some(&cbz[..]) {
+        bail!(
+            "the bridge serves {cbz_rel} as {:?} bytes, want the reader's {}",
+            got.map(|b| b.len()),
+            cbz.len()
+        );
+    }
+
+    // A sidecar the reader writes, then replaces.
+    let doc_rel = format!("{WRITES_SERIES}/Vol 1.mokuro");
+    let first = genlib::mokuro_doc(WRITES_SERIES, "Vol 1", 72);
+    folder.swap_write(&doc_rel, &first, || Ok(()))?;
+    wait_for(
+        PICKUP,
+        &format!("{doc_rel} was never served after the reader wrote it"),
+        || Ok((served(a, &doc_rel)?.as_deref() == Some(&first[..])).then_some(())),
+    )?;
+    let mut edited: Value = serde_json::from_slice(&first)?;
+    edited["rig_revision"] = json!(2);
+    let second = serde_json::to_vec(&edited)?;
+    folder.swap_write(&doc_rel, &second, || {
+        let until = Instant::now() + MID_WRITE;
+        while Instant::now() < until {
+            let now = served(a, &doc_rel)?;
+            if now.as_deref() != Some(&first[..]) {
+                bail!(
+                    "while the reader replaced {doc_rel}, the bridge served {:?} bytes, \
+                     not the old {}",
+                    now.map(|b| b.len()),
+                    first.len()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        Ok(())
+    })?;
+    wait_for(
+        PICKUP,
+        &format!("{doc_rel} was not served with the reader's new bytes"),
+        || Ok((served(a, &doc_rel)?.as_deref() == Some(&second[..])).then_some(())),
+    )?;
+    Ok(None)
+}
+
+/// The reader renames a series in a folder library as its Local Folder does: per file,
+/// a copy (a swap write) then a delete of the source, the archive before its sidecar.
+/// The catalog moves the volume, and two walks later nothing is queued for it (its
+/// OCR came with it), and no numbered sidecar was made.
+fn reader_rename(rig: &mut Rig) -> Result<Option<String>> {
+    let Some(folder) = rig.folder() else {
+        return Ok(Some(
+            "a reader renames on the library's disk only on a folder".into(),
+        ));
+    };
+    let a = rig.server()?;
+    wait_for(
+        Duration::from_secs(60),
+        &format!("the catalog never listed {RENAME_FROM}"),
+        || Ok((volume_count(a, RENAME_FROM)? == 1).then_some(())),
+    )?;
+    let sidecar = folder
+        .bytes(&format!("{RENAME_FROM}/Vol 1.mokuro"))
+        .context("the seeded sidecar is gone")?;
+    for name in ["Vol 1.cbz", "Vol 1.mokuro"] {
+        let from = format!("{RENAME_FROM}/{name}");
+        let bytes = folder
+            .bytes(&from)
+            .with_context(|| format!("{from} is gone"))?;
+        folder.swap_write(&format!("{RENAME_TO}/{name}"), &bytes, || Ok(()))?;
+        std::fs::remove_file(folder.path(&from))?;
+    }
+    // The reader prunes the emptied folder.
+    std::fs::remove_dir(folder.path(RENAME_FROM))?;
+    wait_for(
+        Duration::from_secs(30),
+        &format!("the catalog never moved the volume to {RENAME_TO}"),
+        || {
+            Ok(
+                (volume_count(a, RENAME_TO)? == 1 && volume_count(a, RENAME_FROM)? == 0)
+                    .then_some(()),
+            )
+        },
+    )?;
+    walks_after(a, 2)?;
+    let status = queue_status(a)?;
+    for series in [RENAME_TO, RENAME_FROM] {
+        let jobs = jobs_of(&status, series);
+        if !jobs.is_empty() {
+            bail!("after the rename the queue holds {jobs:?} of {series}: its OCR came along");
+        }
+    }
+    let moved = folder.volume_files()?;
+    let want = [
+        format!("{RENAME_TO}/Vol 1.cbz"),
+        format!("{RENAME_TO}/Vol 1.mokuro"),
+    ];
+    let of_series: Vec<&String> = moved
+        .iter()
+        .filter(|r| {
+            r.starts_with(&format!("{RENAME_TO}/")) || r.starts_with(&format!("{RENAME_FROM}/"))
+        })
+        .collect();
+    if of_series != want.iter().collect::<Vec<_>>() {
+        bail!("after the rename the folder holds {of_series:?}, want {want:?}");
+    }
+    if folder.bytes(&want[1]).as_deref() != Some(&sidecar[..]) {
+        bail!("{} is not the sidecar the reader moved", want[1]);
+    }
+    Ok(None)
+}
+
+/// The library folder goes away (its parent renamed, as an unplugged drive or a share
+/// gone): the store goes offline and removes nothing. Back again: the lease is held,
+/// the catalog and the library's volumes are as they were.
+fn unplug(rig: &mut Rig) -> Result<Option<String>> {
+    let Some(folder) = rig.folder() else {
+        return Ok(Some("only a folder library can be unplugged".into()));
+    };
+    let a = rig.server()?;
+    let parent = folder
+        .root
+        .parent()
+        .context("the folder's parent")?
+        .to_path_buf();
+    let away = parent.with_file_name("folder-away");
+    let rows = catalog_rows(a)?;
+    let files = folder.volume_files()?;
+    std::fs::rename(&parent, &away)?;
+    let offline = wait_for(
+        Duration::from_secs(60),
+        "the store never went offline without its folder",
+        || {
+            let st = a.storage()?;
+            Ok((st["health"]["state"] == "offline" || st["engine"] == "offline").then_some(()))
+        },
+    );
+    let mid = offline.and_then(|()| {
+        // A few more polls of an absent folder remove nothing.
+        std::thread::sleep(Duration::from_secs(5));
+        let now = catalog_rows(a)?;
+        if now != rows {
+            bail!("with the folder away the catalog changed: {now:?}, was {rows:?}");
+        }
+        Ok(())
+    });
+    // Always put it back, so a failure leaves the work folder whole for a look.
+    std::fs::rename(&away, &parent)?;
+    mid?;
+    wait_for(
+        Duration::from_secs(120),
+        "the store never came back online holding the lease",
+        || {
+            let st = a.storage()?;
+            Ok((st["health"]["state"] == "online" && st["lease"]["state"] == "held").then_some(()))
+        },
+    )?;
+    walks_after(a, 1)?;
+    let now = catalog_rows(a)?;
+    if now != rows {
+        bail!("after the folder came back the catalog is {now:?}, was {rows:?}");
+    }
+    let back = folder.volume_files()?;
+    if back != files {
+        bail!("after the folder came back it holds {back:?}, was {files:?}");
+    }
     Ok(None)
 }
