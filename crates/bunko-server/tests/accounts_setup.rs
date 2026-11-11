@@ -982,7 +982,6 @@ async fn the_folder_step_takes_a_full_path() {
 /// and the credentials keep its stub; a missing folder offers "Create it?", which makes
 /// it.
 #[tokio::test]
-#[ignore = "needs the folder driver (chunk A): on the API skeleton the Check fails with Unsupported"]
 async fn a_folder_library_connects_through_setup() {
     let env = Env::new();
     let folder = env.dir.path().join("Manga");
@@ -1031,7 +1030,6 @@ async fn a_folder_library_connects_through_setup() {
 
 /// "Create it?" through setup: a folder whose parent exists is made, one level only.
 #[tokio::test]
-#[ignore = "needs the folder driver (chunk A): on the API skeleton the Check fails with Unsupported"]
 async fn setup_creates_a_missing_library_folder() {
     let env = Env::new();
     let folder = env.dir.path().join("New Manga");
