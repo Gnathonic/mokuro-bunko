@@ -232,6 +232,36 @@ pub trait LibraryStore: Send + Sync + 'static {
     fn claiming(&self) -> Option<Claiming> {
         None
     }
+    /// Someone uses this library now ([`Activity`]): a remote store whose provider is
+    /// polled for changes polls at its active cadence until five minutes after the
+    /// last such note (0.8 design §5.3). Called on request paths, so it must stay
+    /// cheap (no locks). Default: ignored (a local store has a filesystem watcher).
+    fn note_activity(&self, _why: Activity) {}
+}
+
+/// What makes a library active for the poll cadence (0.8 design §5.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Activity {
+    /// A WebDAV request through Bunko (the bridge).
+    Bridge,
+    /// OCR work in flight on the library.
+    Ocr,
+    /// A change in the library that was not Bunko's own write: a reader writing
+    /// straight to the provider.
+    Reader,
+}
+
+impl Activity {
+    pub const ALL: [Activity; 3] = [Activity::Bridge, Activity::Ocr, Activity::Reader];
+
+    /// The name status reports use.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Activity::Bridge => "bridge",
+            Activity::Ocr => "ocr",
+            Activity::Reader => "reader",
+        }
+    }
 }
 
 /// A store-level failure that has no `io::ErrorKind` of its own, carried inside an

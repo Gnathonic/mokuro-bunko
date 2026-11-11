@@ -67,10 +67,10 @@
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use bunko_store::{WatchEvent, WatchSink};
+use bunko_store::{Activity, WatchEvent, WatchSink};
 use parking_lot::Mutex;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use tokio::runtime::Handle;
@@ -88,6 +88,8 @@ const BACKOFF_MIN: Duration = Duration::from_secs(1);
 const BACKOFF_MAX: Duration = Duration::from_secs(60);
 /// The pause for a `Throttled` without `Retry-After`.
 const THROTTLE_DEFAULT: Duration = Duration::from_secs(30);
+/// How long the active poll cadence outlives the last [`Activity`] (§5.3).
+pub const ACTIVE_FOR: Duration = Duration::from_secs(300);
 /// The shortest wait between steady cycles.
 const MIN_WAIT: Duration = Duration::from_secs(1);
 /// Subtrees larger than this are never compared for a path-id move.
@@ -193,6 +195,8 @@ pub struct FeedConfig {
     pub poll_active: Duration,
     /// Poll interval otherwise (push providers wait this long per long-poll).
     pub poll_idle: Duration,
+    /// How long after the last [`Activity`] the active interval holds (§5.3: 5 min).
+    pub active_for: Duration,
     /// `quiet_s` (§5.4): the recently-removed window and the tombstone grace floor.
     pub quiet: Duration,
     /// D19: the share of indexed nodes whose removal makes the engine suspect. Only
@@ -222,6 +226,7 @@ impl FeedConfig {
             create_if_missing: false,
             poll_active: Duration::from_secs(60),
             poll_idle: Duration::from_secs(300),
+            active_for: ACTIVE_FOR,
             quiet: Duration::from_secs(120),
             suspect_ratio: 0.20,
             suspect_window: Duration::from_secs(600),
@@ -315,6 +320,72 @@ impl Clock {
 
 fn ms(d: Duration) -> i64 {
     d.as_millis().min(i64::MAX as u128) as i64
+}
+
+// ---- the poll cadence (§5.3) ----------------------------------------------------
+
+/// The cadence signals the handle and the engine share: per [`Activity`], when it was
+/// last noted. Lock-free, as the bridge notes one on every request.
+struct Signals {
+    /// The [`Clock`] ms of each activity's last note; `i64::MIN`: never.
+    last: [AtomicI64; 3],
+    /// [`FeedHandle::set_active`]: active whatever the signals say.
+    pinned: AtomicBool,
+    /// How long a note keeps the feed active.
+    active_for: i64,
+}
+
+fn slot(why: Activity) -> usize {
+    match why {
+        Activity::Bridge => 0,
+        Activity::Ocr => 1,
+        Activity::Reader => 2,
+    }
+}
+
+impl Signals {
+    fn new(active_for: Duration) -> Signals {
+        Signals {
+            last: std::array::from_fn(|_| AtomicI64::new(i64::MIN)),
+            pinned: AtomicBool::new(false),
+            active_for: ms(active_for),
+        }
+    }
+
+    /// The activities noted within `active_for` of `now`.
+    fn current(&self, now: i64) -> Vec<Activity> {
+        Activity::ALL
+            .into_iter()
+            .filter(|a| {
+                let t = self.last[slot(*a)].load(Ordering::Relaxed);
+                t != i64::MIN && now.saturating_sub(t) < self.active_for
+            })
+            .collect()
+    }
+
+    fn active(&self, now: i64) -> bool {
+        self.pinned.load(Ordering::Relaxed) || !self.current(now).is_empty()
+    }
+
+    /// Note `why` at `now`; true when the feed was idle until now.
+    fn note(&self, why: Activity, now: i64) -> bool {
+        let idle = !self.active(now);
+        self.last[slot(why)].fetch_max(now, Ordering::Relaxed);
+        idle
+    }
+}
+
+/// The feed's poll cadence as status reports show it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PollCadence {
+    /// The provider pushes its changes (MEGA): there is no poll interval.
+    pub push: bool,
+    /// The interval between polls now (push: the long-poll's length).
+    pub every: Duration,
+    /// The active interval is in force.
+    pub active: bool,
+    /// What made it active (empty while idle, or when only set active by hand).
+    pub because: Vec<Activity>,
 }
 
 // ---- name rules -----------------------------------------------------------------
@@ -473,7 +544,7 @@ struct Core<B: Backend> {
     on_json: Option<ForeignJsonFn>,
     clock: Clock,
     state_tx: watch::Sender<EngineState>,
-    active: Arc<AtomicBool>,
+    signals: Arc<Signals>,
     /// The commit window ([`Feed::with_commit_gate`]): a STEADY page applies under
     /// its exclusive side.
     commit_gate: Arc<RwLock<()>>,
@@ -580,7 +651,8 @@ impl<B: Backend> Core<B> {
     }
 
     /// Ingest one upserted node: index it, queue its hooks, collect its visible
-    /// changes into `out` (own echoes of known nodes show nothing).
+    /// changes into `out` (own echoes of known nodes show nothing). True when it
+    /// changed the library and was not Bunko's own write (a foreign change).
     fn apply_upsert(
         &self,
         idx: &Index,
@@ -588,7 +660,7 @@ impl<B: Backend> Core<B> {
         n: &RNode,
         generation: u64,
         out: &mut Vec<IndexChange>,
-    ) -> rusqlite::Result<()> {
+    ) -> rusqlite::Result<bool> {
         let pre_node = idx.node(&n.pid);
         let pre = placed_path(idx, &n.pid);
         let echo = self
@@ -597,7 +669,7 @@ impl<B: Backend> Core<B> {
         let changes = idx.upsert(tx, n, generation, self.caps.mtime_granularity_ns)?;
         let c: &Connection = tx;
         if echo && pre_node.is_some() {
-            return Ok(());
+            return Ok(false);
         }
         let post = placed_path(idx, &n.pid);
         if echo {
@@ -609,8 +681,9 @@ impl<B: Backend> Core<B> {
                 enqueue(c, "series_check", &p.to_string(), &n.pid, &n.cver, false)?;
             }
             out.extend(changes);
-            return Ok(());
+            return Ok(false);
         }
+        let foreign = !changes.is_empty();
         match (&pre, &post) {
             (Some(a), Some(b)) if a != b && idx.lookup(a).is_none() => {
                 self.queue_move(idx, c, a, b, n.is_dir, &n.pid, &n.cver)?;
@@ -655,7 +728,7 @@ impl<B: Backend> Core<B> {
             enqueue(c, "json", &b.to_string(), &n.pid, &n.cver, false)?;
         }
         out.extend(changes);
-        Ok(())
+        Ok(foreign)
     }
 
     /// Plan the removal of `pids` (known ones only): group them by removed subtree,
@@ -1035,14 +1108,14 @@ impl<B: Backend> Feed<B> {
                 backend,
                 caps,
                 index,
-                cfg,
                 sinks: Arc::new(Sinks::default()),
                 hooks: None,
                 fstate: Arc::new(NoFeedState),
                 on_json: None,
                 clock: Clock::now(),
                 state_tx,
-                active: Arc::new(AtomicBool::new(false)),
+                signals: Arc::new(Signals::new(cfg.active_for)),
+                cfg,
                 commit_gate: Arc::new(RwLock::new(())),
             },
         }
@@ -1097,7 +1170,9 @@ impl<B: Backend> Feed<B> {
             root: self.core.cfg.root.clone(),
             quiet: self.core.cfg.quiet,
             clock: self.core.clock,
-            active: self.core.active.clone(),
+            signals: self.core.signals.clone(),
+            push: self.core.caps.push,
+            poll: (self.core.cfg.poll_active, self.core.cfg.poll_idle),
             join: None,
         };
         let engine = Engine {
@@ -1143,7 +1218,11 @@ pub struct FeedHandle {
     root: PathBuf,
     quiet: Duration,
     clock: Clock,
-    active: Arc<AtomicBool>,
+    signals: Arc<Signals>,
+    /// The provider pushes (MEGA): activity changes no cadence.
+    push: bool,
+    /// `(active, idle)` poll intervals.
+    poll: (Duration, Duration),
     join: Option<JoinHandle<()>>,
 }
 
@@ -1178,10 +1257,47 @@ impl FeedHandle {
             .map(|_| ())
     }
 
-    /// The active/idle cadence hint; turning active polls at once.
+    /// Hold the active cadence regardless of [`Activity`] (`false` hands it back to
+    /// the signals); turning active polls at once.
     pub fn set_active(&self, on: bool) {
-        if self.active.swap(on, Ordering::Relaxed) != on && on {
+        let was = self.signals.active(self.clock.now_ms());
+        self.signals.pinned.store(on, Ordering::Relaxed);
+        if on && !was && !self.push {
             let _ = self.ctl.send(Ctl::Wake);
+        }
+    }
+
+    /// `why` keeps the library busy (§5.3): a polled feed polls at the active interval
+    /// until [`FeedConfig::active_for`] after the last note, and the note that turns it
+    /// active polls at once. Lock-free (the bridge notes every request). A push feed
+    /// (MEGA) is told of changes anyway and ignores it.
+    pub fn note_activity(&self, why: Activity) {
+        if self.push {
+            return;
+        }
+        if self.signals.note(why, self.clock.now_ms()) {
+            let _ = self.ctl.send(Ctl::Wake);
+        }
+    }
+
+    /// The poll cadence now.
+    pub fn cadence(&self) -> PollCadence {
+        let now = self.clock.now_ms();
+        let (active, idle) = self.poll;
+        if self.push {
+            return PollCadence {
+                push: true,
+                every: idle,
+                active: false,
+                because: Vec::new(),
+            };
+        }
+        let on = self.signals.active(now);
+        PollCadence {
+            push: false,
+            every: if on { active } else { idle },
+            active: on,
+            because: self.signals.current(now),
         }
     }
 
@@ -1419,7 +1535,7 @@ impl<B: Backend> Engine<B> {
     }
 
     fn poll_interval(&self) -> Duration {
-        if self.core.active.load(Ordering::Relaxed) {
+        if !self.core.caps.push && self.core.signals.active(self.core.clock.now_ms()) {
             self.core.cfg.poll_active
         } else {
             self.core.cfg.poll_idle
@@ -1981,6 +2097,9 @@ impl<B: Backend> Engine<B> {
         // (a duplicate to merge), or one the user moved there. LOCATE_ROOTS takes it
         // in, as it would have at startup.
         let mut root_found = false;
+        // A change that was not Bunko's own write: a reader writing to the provider
+        // directly, which keeps the poll cadence active (§5.3).
+        let mut foreign = false;
         let (stashed, counted) = {
             let core = &self.core;
             let idx = core.index.lock();
@@ -2027,7 +2146,7 @@ impl<B: Backend> Engine<B> {
                             root_found = true;
                         }
                         self.stash.remove(&n.pid);
-                        core.apply_upsert(&idx, &tx, n, generation, &mut out)?;
+                        foreign |= core.apply_upsert(&idx, &tx, n, generation, &mut out)?;
                     }
                 }
             }
@@ -2048,6 +2167,7 @@ impl<B: Backend> Engine<B> {
                 }
             }
             let dels = core.plan_deletes(&idx, &deletes, &out, core.caps.path_ids);
+            foreign |= dels.iter().any(|d| !d.echo && !dels[d.top].echo);
             let count = Core::<B>::removal_count(&dels);
             let total = idx.node_count();
             // A root change holds everything that came with it (on path-id providers
@@ -2069,6 +2189,10 @@ impl<B: Backend> Engine<B> {
         };
         drop(gate);
         self.cursor = Some(next);
+        if foreign {
+            let now = self.core.clock.now_ms();
+            self.core.signals.note(Activity::Reader, now);
+        }
         if counted > 0 {
             self.window.push_back((now, counted));
         }

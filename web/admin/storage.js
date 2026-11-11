@@ -54,6 +54,17 @@ function stHealth(st) {
     }
 }
 
+// How often the feed asks the provider for changes, and why (0.8 §5.3).
+const POLL_BECAUSE = { ocr: 'OCR running', bridge: 'reader requests through Bunko', reader: 'reader changes in the cloud' };
+function stPoll(p) {
+    if (!p) return '';
+    if (p.push) return ' (the provider pushes its changes)';
+    const s = p.every_s;
+    const every = s >= 60 && s % 60 === 0 ? (s / 60) + ' min' : s + ' s';
+    const why = (p.because || []).map((b) => POLL_BECAUSE[b]).filter(Boolean);
+    return ' · checks every ' + every + ' (' + (why.length ? why.join(', ') : p.active ? 'active' : 'idle') + ')';
+}
+
 function startStoragePolling() {
     stopStoragePolling();
     const tick = async () => {
@@ -86,7 +97,7 @@ async function loadStorage() {
     stText('st-pairing', stPairing(st.pairing) + (st.pairing_change ? ' — configured ' + stPairing(st.pairing_change.configured) + ', connected ' + stPairing(st.pairing_change.connected) : ''));
     stText('st-health', stHealth(st));
     const sync = st.sync;
-    stText('st-sync', st.engine === 'steady' ? 'Up to date' : st.engine === 'full-sync' && sync
+    stText('st-sync', st.engine === 'steady' ? 'Up to date' + stPoll(st.poll) : st.engine === 'full-sync' && sync
         ? 'First sync: ' + (sync.total ? sync.done + ' of ' + sync.total : sync.done + ' listed') : st.engine || '-');
     stEl('st-store-row').hidden = !st.store_id;
     stText('st-store', st.store_id);

@@ -114,6 +114,8 @@ fn poll_intervals(lib: &LibraryConfig) -> (Duration, Duration) {
 pub trait CloudStore: Send + Sync {
     fn health(&self) -> Health;
     fn engine_state(&self) -> EngineState;
+    /// The change feed's poll cadence now (§5.3).
+    fn poll_cadence(&self) -> bunko_remote::PollCadence;
     fn cache_stats(&self) -> CacheStats;
     /// Block (a content-kind call: never from inside an async task) until the change
     /// feed is steady; false on timeout.
@@ -164,6 +166,9 @@ impl<B: Backend> CloudStore for RemoteStore<B> {
     }
     fn engine_state(&self) -> EngineState {
         RemoteStore::engine_state(self)
+    }
+    fn poll_cadence(&self) -> bunko_remote::PollCadence {
+        RemoteStore::poll_cadence(self)
     }
     fn cache_stats(&self) -> CacheStats {
         RemoteStore::cache_stats(self)
@@ -402,6 +407,7 @@ impl StoreHandle {
                 "spool_bytes": c.spool_bytes,
             })
         });
+        let poll = self.store.as_ref().map(|s| poll_json(&s.poll_cadence()));
         let outbox = self.store.as_ref().map(|s| outbox_json(&s.outbox()));
         let conflicts: Vec<Value> = self
             .store
@@ -479,6 +485,7 @@ impl StoreHandle {
             "health": health_json(&health),
             "engine": engine,
             "sync": progress,
+            "poll": poll,
             "synced_at": synced_at.map(unix_s),
             "cache": cache,
             "outbox": outbox,
@@ -702,6 +709,17 @@ pub fn health_json(h: &Health) -> Value {
         Health::Suspect => json!({"state": "suspect"}),
         Health::LeaseHeld { by } => json!({"state": "lease-held", "by": by}),
     }
+}
+
+/// How often the change feed asks the provider for changes, and why (§5.3):
+/// `{push, every_s, active, because: ["bridge" | "ocr" | "reader"]}`.
+fn poll_json(c: &bunko_remote::PollCadence) -> Value {
+    json!({
+        "push": c.push,
+        "every_s": c.every.as_secs(),
+        "active": c.active,
+        "because": c.because.iter().map(|a| a.as_str()).collect::<Vec<_>>(),
+    })
 }
 
 fn engine_json(e: &EngineState) -> (String, Value) {

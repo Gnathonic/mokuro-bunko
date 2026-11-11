@@ -1206,6 +1206,11 @@ impl<B: Backend> RemoteStore<B> {
         self.core.feed.state()
     }
 
+    /// The change feed's poll cadence now (§5.3).
+    pub fn poll_cadence(&self) -> crate::feed::PollCadence {
+        self.core.feed.cadence()
+    }
+
     /// Wait (blocking: a content-kind call) until the feed is steady; `false` on
     /// timeout.
     pub fn wait_steady(&self, timeout: Duration) -> bool {
@@ -1874,5 +1879,11 @@ impl<B: Backend> LibraryStore for RemoteStore<B> {
             .into_iter()
             .next()
             .map(|v| v.name)
+    }
+
+    /// The change feed's poll cadence (§5.3): a bridge request, OCR work or a
+    /// reader's direct write keeps it at the active interval for five minutes.
+    fn note_activity(&self, why: bunko_store::Activity) {
+        self.core.feed.note_activity(why);
     }
 }
