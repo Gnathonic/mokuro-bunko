@@ -337,6 +337,12 @@ async fn listings_hide_internal_names_swap_files_and_links() {
     // An overwrite in progress: the old bytes are still the file.
     lib.put("S/kept.cbz", b"old bytes");
     lib.put("S/kept.cbz.crswap", b"new");
+    // The same while an earlier swap file was left behind: Chromium numbers the next.
+    lib.put("S/again.cbz", b"");
+    lib.put("S/again.cbz.crswap", b"stale");
+    lib.put("S/again.cbz.1.crswap", b"half");
+    lib.put("S/other.cbz", b"");
+    lib.put("S/other.cbz.2.crswap", b"half");
     // An empty file without a swap file is a file.
     lib.put("S/empty.txt", b"");
     let b = lib.open().await;
@@ -354,6 +360,9 @@ async fn listings_hide_internal_names_swap_files_and_links() {
     for hidden in [
         "S/new.cbz",
         "S/new.cbz.crswap",
+        "S/other.cbz",
+        "S/again.cbz",
+        "S/again.cbz.1.crswap",
         "lost+found",
         ".mokuro-bunko-trash",
     ] {
@@ -1085,6 +1094,127 @@ async fn trashed_files_are_invisible_to_readers_and_recoverable() {
     for f in &fresh {
         assert!(f.exists(), "{f:?}");
     }
+}
+
+/// Every file below the trash folder whose name ends with `suffix`, with its bytes.
+fn trashed(lib: &Lib, suffix: &str) -> Vec<Vec<u8>> {
+    let trash = lib.root.join(".mokuro-bunko-trash");
+    if !trash.exists() {
+        return Vec::new();
+    }
+    walk(&trash)
+        .into_iter()
+        .filter(|p| p.is_file() && p.to_string_lossy().ends_with(suffix))
+        .map(|p| std::fs::read(p).unwrap())
+        .collect()
+}
+
+/// The engine deletes permanently only a version it judged Bunko's own; a reader that
+/// put its own bytes there between that judgment and the delete keeps them, in the
+/// trash. A file Bunko never wrote is the engine's call alone, as before.
+#[tokio::test]
+async fn a_permanent_delete_never_takes_a_readers_version() {
+    let lib = Lib::new();
+    lib.mkdir("S");
+    let b = lib.open().await;
+    let own = upload_new(&lib, &b, "S", "Vol 1.mokuro", b"bunko's ocr")
+        .await
+        .unwrap();
+    let judged = b.stat(&own.pid).await.unwrap().unwrap();
+    assert_eq!(judged.cver, own.cver);
+    // The reader saves its edit over it (Chrome renames its swap file into place).
+    lib.put("S/Vol 1.mokuro.crswap", b"the reader's edited ocr");
+    std::fs::rename(lib.abs("S/Vol 1.mokuro.crswap"), lib.abs("S/Vol 1.mokuro")).unwrap();
+    b.delete_permanent(&own.pid).await.unwrap();
+    assert_eq!(b.stat(&own.pid).await.unwrap(), None);
+    assert_eq!(
+        trashed(&lib, "Vol 1.mokuro.bunko-trashed"),
+        [b"the reader's edited ocr".to_vec()]
+    );
+    // Bunko's own version goes for good.
+    let own = upload_new(&lib, &b, "S", "Vol 2.mokuro", b"ocr two")
+        .await
+        .unwrap();
+    b.delete_permanent(&own.pid).await.unwrap();
+    assert!(!lib.abs("S/Vol 2.mokuro").exists());
+    assert!(trashed(&lib, "Vol 2.mokuro.bunko-trashed").is_empty());
+    // A file Bunko never wrote: no memo of it, the engine's judgment stands.
+    lib.put("S/cover.webp", b"img");
+    b.delete_permanent("S/cover.webp").await.unwrap();
+    assert!(!lib.abs("S/cover.webp").exists());
+}
+
+/// A replace copies its bytes first, then renames them over the file: a reader that
+/// wrote the file during the copy keeps its bytes, and the outbox gets the conflict.
+#[tokio::test]
+async fn a_replace_never_lands_on_a_write_made_during_its_copy() {
+    let lib = Lib::new();
+    lib.put("S/series.json", b"{\"v\":0}");
+    let b = lib.open().await;
+    let base = b.stat("S/series.json").await.unwrap().unwrap();
+    let theirs = lib.abs("S/series.json");
+    b.before_next_replace_rename(move || {
+        std::fs::write(&theirs, b"{\"v\":\"the reader's\"}").unwrap();
+    });
+    assert_eq!(
+        replace(&lib, &b, "S/series.json", b"{\"v\":1}").await,
+        Err(BErr::PreconditionFailed)
+    );
+    assert_eq!(
+        std::fs::read(lib.abs("S/series.json")).unwrap(),
+        b"{\"v\":\"the reader's\"}"
+    );
+    assert!(lib.temps().is_empty(), "{:?}", lib.temps());
+    // An `if_cver` that is not the file's version any more is refused up front.
+    let (path, sha256) = lib.stage(b"{\"v\":2}");
+    let r = b
+        .upload(
+            UploadTarget::Replace {
+                pid: "S/series.json",
+                if_cver: Some(&base.cver),
+            },
+            UploadSource::File {
+                path: &path,
+                size: 7,
+                sha256,
+            },
+            &mut op(),
+        )
+        .await;
+    assert_eq!(r, Err(BErr::PreconditionFailed));
+    // Undisturbed, the replace lands.
+    let now = replace(&lib, &b, "S/series.json", b"{\"v\":3}")
+        .await
+        .unwrap();
+    assert_ne!(now.cver, base.cver);
+    assert_eq!(
+        std::fs::read(lib.abs("S/series.json")).unwrap(),
+        b"{\"v\":3}"
+    );
+}
+
+/// A folder's trash renames its files in place, then moves the folder: when the move
+/// fails, the files get their names back, so readers do not see the folder emptied
+/// with nothing in the trash.
+#[tokio::test]
+async fn a_folder_trash_that_fails_leaves_the_folder_as_it_was() {
+    let lib = Lib::new();
+    lib.put("S/Vol 1.cbz", b"one");
+    lib.put("S/sub/Vol 2.cbz", b"two");
+    // Something not a folder where the trash goes: the batch cannot be made.
+    lib.put(".mokuro-bunko-trash", b"not a folder");
+    let b = lib.open().await;
+    assert!(b.trash("S", None).await.is_err());
+    assert_eq!(
+        pids(&b).await,
+        ["S", "S/Vol 1.cbz", "S/sub", "S/sub/Vol 2.cbz"]
+    );
+    assert_eq!(std::fs::read(lib.abs("S/sub/Vol 2.cbz")).unwrap(), b"two");
+    let left: Vec<_> = walk(&lib.abs("S"))
+        .into_iter()
+        .filter(|p| p.to_string_lossy().ends_with(".bunko-trashed"))
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
 }
 
 // ---- 12. coarse modification times ------------------------------------------------------

@@ -79,6 +79,17 @@ impl Memo {
         .flatten()
     }
 
+    /// Bunko wrote some version of `pid` (`None`: the memo cannot say).
+    pub(crate) fn wrote_any(&self, pid: &str) -> Option<bool> {
+        self.with("read", |c| {
+            c.query_row(
+                "SELECT EXISTS (SELECT 1 FROM memo WHERE pid = ?1)",
+                params![pid],
+                |r| r.get(0),
+            )
+        })
+    }
+
     pub(crate) fn put(&self, pid: &str, cver: &str, sha256_hex: &str) {
         self.with("write", |c| {
             c.execute(

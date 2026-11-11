@@ -146,6 +146,8 @@ impl std::fmt::Debug for FolderBackend {
 struct Knobs {
     granularity_ns: std::sync::atomic::AtomicI64,
     stop_case_rename: std::sync::atomic::AtomicBool,
+    /// Runs once in the next replace, after its copy and before its rename.
+    before_replace: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 struct Inner {
@@ -275,6 +277,24 @@ pub(crate) fn hidden_name(name: &str, at_root: bool) -> bool {
     crate::names::is_reserved_name(name)
         || name.to_ascii_lowercase().ends_with(".crswap")
         || (at_root && ROOT_SYSTEM.iter().any(|s| s.eq_ignore_ascii_case(name)))
+}
+
+/// `candidate` is a Chromium swap file of `name`: `<name>.crswap`, or
+/// `<name>.<n>.crswap` when that one was taken (a write left one behind).
+fn is_swap_of(candidate: &str, name: &str) -> bool {
+    let Some(rest) = candidate
+        .strip_prefix(name)
+        .and_then(|r| r.strip_prefix('.'))
+    else {
+        return false;
+    };
+    let lower = rest.to_ascii_lowercase();
+    let Some(n) = lower.strip_suffix("crswap") else {
+        return false;
+    };
+    n.is_empty()
+        || n.strip_suffix('.')
+            .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// One path segment the driver can address: a single normal component.
@@ -647,9 +667,12 @@ impl Inner {
             }
         }
         if m.is_file() && m.len() == 0 {
-            let mut swap = abs.into_os_string();
-            swap.push(".crswap");
-            if std::fs::symlink_metadata(&swap).is_ok() {
+            let (dir, name) = (abs.parent().unwrap_or(&self.root), split_pid(pid).1);
+            let swapping = std::fs::read_dir(dir).is_ok_and(|rd| {
+                rd.flatten()
+                    .any(|e| e.file_name().to_str().is_some_and(|n| is_swap_of(n, name)))
+            });
+            if swapping {
                 return Ok(None);
             }
         }
@@ -714,7 +737,7 @@ impl Inner {
             if m.file_type().is_symlink() {
                 continue;
             }
-            if m.is_file() && m.len() == 0 && all.contains(&format!("{name}.crswap")) {
+            if m.is_file() && m.len() == 0 && all.iter().any(|n| is_swap_of(n, &name)) {
                 continue; // a reader write in progress
             }
             out.push(node_of(
@@ -1009,6 +1032,7 @@ impl Inner {
     fn upload_replace(
         &self,
         pid: &str,
+        if_cver: Option<&str>,
         src: &Path,
         size: u64,
         sha256: [u8; 32],
@@ -1017,6 +1041,10 @@ impl Inner {
             Some(m) if m.is_file() => m,
             _ => return Err(BErr::NotFound),
         };
+        let old_version = version_of(&old);
+        if if_cver.is_some_and(|want| want != old_version) {
+            return Err(BErr::PreconditionFailed);
+        }
         let abs = self.abs_or_missing(pid)?;
         let parent_abs = abs.parent().map(Path::to_path_buf).ok_or(BErr::NotFound)?;
         let tmp = Self::temp_in(&parent_abs);
@@ -1025,6 +1053,18 @@ impl Inner {
             let cver = std::fs::symlink_metadata(&tmp)
                 .map(|m| version_of(&m))
                 .map_err(|e| io_err(&e, Act::Create, pid))?;
+            #[cfg(feature = "testing")]
+            if let Some(f) = self.knobs.before_replace.lock().take() {
+                f();
+            }
+            // Nothing is compare-and-swap here, but the copy took a while: a reader
+            // that wrote the file meanwhile keeps its bytes (the outbox sees the
+            // conflict), and the window left is this stat to the rename.
+            match std::fs::symlink_metadata(&abs) {
+                Ok(now) if now.is_file() && version_of(&now) == old_version => {}
+                Ok(_) => return Err(BErr::PreconditionFailed),
+                Err(e) => return Err(io_err(&e, Act::Read, pid)),
+            }
             self.memo.put(pid, &cver, &hex::encode(sha256));
             if let Err(e) = std::fs::rename(&tmp, &abs) {
                 self.memo.forget(pid, &cver);
@@ -1320,6 +1360,15 @@ impl Inner {
         if m.is_dir() {
             return Err(BErr::Unsupported);
         }
+        // The engine judged the version it saw Bunko's own; a reader may have put its
+        // own bytes there since. Bunko wrote this pid before but not this version: it
+        // is someone else's, and goes to the trash instead (D16).
+        if self.memo.wrote_any(pid) == Some(true) && self.memo.get(pid, &version_of(&m)).is_none() {
+            tracing::info!(
+                "folder: {pid} changed since it was judged Bunko's: trashed, not deleted"
+            );
+            return self.trash(pid, None);
+        }
         let abs = self.abs_or_missing(pid)?;
         std::fs::remove_file(&abs).map_err(|e| io_err(&e, Act::Delete, pid))?;
         self.forget_dirs();
@@ -1583,6 +1632,12 @@ impl FolderBackend {
             .knobs
             .stop_case_rename
             .store(true, Ordering::Release);
+    }
+
+    /// Tests: `f` runs inside the next replace, after the bytes are copied and before
+    /// they are renamed into place (where a reader's write would land).
+    pub fn before_next_replace_rename(&self, f: impl FnOnce() + Send + 'static) {
+        *self.inner.knobs.before_replace.lock() = Some(Box::new(f));
     }
 }
 
@@ -1951,10 +2006,13 @@ impl Backend for FolderBackend {
                 })
                 .await
             }
-            UploadTarget::Replace { pid, .. } => {
+            UploadTarget::Replace { pid, if_cver } => {
                 let pid = pid.to_string();
-                self.run(limit, move |i| i.upload_replace(&pid, &path, size, sha256))
-                    .await
+                let if_cver = if_cver.map(str::to_string);
+                self.run(limit, move |i| {
+                    i.upload_replace(&pid, if_cver.as_deref(), &path, size, sha256)
+                })
+                .await
             }
         }
     }
@@ -2109,6 +2167,23 @@ mod tests {
         }
         for n in ["Vol 1.cbz", "ガ", "...a", "Why!"] {
             assert!(windows_name_ok(n), "{n:?}");
+        }
+    }
+
+    #[test]
+    fn swap_files_of_a_name() {
+        for swap in ["a.cbz.crswap", "a.cbz.1.crswap", "a.cbz.12.CRSWAP"] {
+            assert!(is_swap_of(swap, "a.cbz"), "{swap}");
+        }
+        for other in [
+            "a.cbz",
+            "a.cbz.x.crswap",
+            "a.cbz..crswap",
+            "a.cbzz.crswap",
+            "b.cbz.crswap",
+            "a.cbz.crswap.tmp",
+        ] {
+            assert!(!is_swap_of(other, "a.cbz"), "{other}");
         }
     }
 

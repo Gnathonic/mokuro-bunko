@@ -89,22 +89,38 @@ fn trash_dir(root: &Path) -> Result<PathBuf, BErr> {
 }
 
 /// Rename the file `abs` in place to `<name>.bunko-trashed` (unless it already ends
-/// so); a name already taken there gets a token before the suffix.
-fn suffix_in_place(abs: &Path, token: &str, rel: &str) -> Result<(), BErr> {
+/// so); a name already taken there gets a token before the suffix. Returns the new
+/// path when it renamed.
+fn suffix_in_place(abs: &Path, token: &str, rel: &str) -> Result<Option<PathBuf>, BErr> {
     let Some(name) = abs.file_name().and_then(|n| n.to_str()) else {
-        return Ok(());
+        return Ok(None);
     };
     if name.to_ascii_lowercase().ends_with(TRASHED_SUFFIX) {
-        return Ok(());
+        return Ok(None);
     }
     let first = abs.with_file_name(format!("{name}{TRASHED_SUFFIX}"));
     match super::rename_new(abs, &first, false) {
-        Ok(()) => Ok(()),
+        Ok(()) => Ok(Some(first)),
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             let other = abs.with_file_name(format!("{name}~{token}{TRASHED_SUFFIX}"));
-            super::rename_new(abs, &other, false).map_err(|e| io_err(&e, Act::Rename, rel))
+            super::rename_new(abs, &other, false).map_err(|e| io_err(&e, Act::Rename, rel))?;
+            Ok(Some(other))
         }
         Err(e) => Err(io_err(&e, Act::Rename, rel)),
+    }
+}
+
+/// A folder's trash stopped before the folder moved: give the files renamed in place
+/// their names back, so the folder is as it was and not emptied in readers' eyes (an
+/// outbox retry renames them again). Best effort; what cannot go back stays suffixed.
+fn undo_suffixes(done: &[(PathBuf, PathBuf)]) {
+    for (orig, now) in done.iter().rev() {
+        if let Err(e) = super::rename_new(now, orig, false) {
+            tracing::warn!(
+                "folder: {} keeps its trash name after a failed trash: {e}",
+                now.display()
+            );
+        }
     }
 }
 
@@ -142,10 +158,18 @@ pub(crate) fn trash(
     for seg in pid.split('/') {
         dest.push(seg);
     }
+    let mut done = Vec::new();
     if is_dir {
         let files = files_below(abs).map_err(|e| io_err(&e, Act::Read, pid))?;
         for f in files {
-            suffix_in_place(&f, token, pid)?;
+            match suffix_in_place(&f, token, pid) {
+                Ok(Some(now)) => done.push((f, now)),
+                Ok(None) => {}
+                Err(e) => {
+                    undo_suffixes(&done);
+                    return Err(e);
+                }
+            }
         }
     } else {
         let name = dest
@@ -154,10 +178,15 @@ pub(crate) fn trash(
             .unwrap_or_default();
         dest.set_file_name(format!("{name}{TRASHED_SUFFIX}"));
     }
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| io_err(&e, Act::Create, FOLDER_TRASH_DIR))?;
+    let moved = dest
+        .parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .map_err(|e| io_err(&e, Act::Create, FOLDER_TRASH_DIR))
+        .and_then(|()| std::fs::rename(abs, &dest).map_err(|e| io_err(&e, Act::Rename, pid)));
+    if let Err(e) = moved {
+        undo_suffixes(&done);
+        return Err(e);
     }
-    std::fs::rename(abs, &dest).map_err(|e| io_err(&e, Act::Rename, pid))?;
     if let Some(parent) = abs.parent() {
         fsops::fsync_dir(parent);
     }
