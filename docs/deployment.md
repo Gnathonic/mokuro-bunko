@@ -187,6 +187,20 @@ place, the same run fetches missing models:
 - `MOKURO_OCR_AUTO_INSTALL=false`: never by itself; the missing backend is a
   problem with an Install button instead.
 
+The Vulkan pack (with `ocr.backend: auto`, any GPU on Linux x64; AMD and Intel
+GPUs on Windows) is optional: its runtimes are only more candidates for the
+machine's benchmark, and the libtorch pack serves without it. A machine whose
+libtorch pack is in place therefore never waits for it. It is fetched in the
+background after the libtorch pack's install, or at the start when only it is
+missing, and while it downloads a processor stays available and the server's
+own OCR keeps running. A fetch that fails is a warning (the optional pack is
+not installed, OCR runs without it) with a Retry button, and is recorded in
+`<backends>/.optional-pack.json`. The next automatic fetch waits 5, 15 and 60
+minutes, then a day; a release that has published nothing for it waits a day
+at once. Reconnects and restarts do not fetch it again sooner, and neither does
+another release (it starts afresh). A fetch that succeeds makes a processor
+register again once, so its new runtimes join the benchmark.
+
 While the install runs, and after a failed one with no pack in place, the
 machine does no OCR at all, ppocr-manga included; other processors keep
 working. Only with `MOKURO_OCR_AUTO_INSTALL=false` does it run without the

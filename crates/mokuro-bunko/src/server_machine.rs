@@ -522,6 +522,14 @@ mod full {
                 json!({"state": "install", "variant": variant, "text": reason})
             }
             install_ocr::Need::Satisfied(why) => json!({"state": "ok", "text": why}),
+            // The backend serves; the optional pack shows beside it, not as missing.
+            install_ocr::Need::Extra {
+                variant,
+                reason,
+                have,
+            } => {
+                json!({"state": "ok", "text": have, "extra": {"variant": variant, "text": reason}})
+            }
         };
         // What the enabled generations need here, engine by engine: the same plan as
         // `models list` / `models download`. The compiled packages need the libtorch

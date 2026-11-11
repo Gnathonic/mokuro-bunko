@@ -658,6 +658,20 @@
 - **Dependency updates**: zip 9, rcgen 0.14, windows 0.62, windows-sys 0.61.
 
 ### Fixed
+- **A processor whose OCR backend works takes work while the optional Vulkan pack is
+  missing.** With `ocr.backend: auto` and a GPU, a missing Vulkan pack counted as a
+  missing OCR backend, although its runtimes are only more benchmark candidates beside
+  the libtorch pack. A processor started the install again at every registration and
+  said it was installing, so the library gave it no work. When the Vulkan pack could not
+  be downloaded (its release was not published), the install ended without it, the
+  processor registered again, and the cycle repeated without end. The Vulkan pack is now
+  fetched on its own after the libtorch pack, and the machine stays available while it
+  downloads. A failed fetch is a warning with a Retry button, and the machine waits
+  5, 15 and 60 minutes and then a day before it tries again; a release with nothing
+  published waits a day at once. The wait is kept in the backends directory, so a
+  reconnect or a restart does not fetch it again sooner. The server's own OCR no longer
+  waits for the Vulkan pack either. A Vulkan pack installed on its own also no longer
+  replaces a backend variant picked by hand.
 - **Windows: no console window flashes while the app runs.** The app
   (`mokuro-bunko.exe`) and the server and processor it starts have no console, so
   every console program they ran was given a window of its own: `nvidia-smi`, which
