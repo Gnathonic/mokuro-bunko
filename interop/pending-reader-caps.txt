@@ -4,3 +4,7 @@
 # results JSON reports the skip with its capability. A Bunko change that needs a newer
 # reader than interop/reader.ref lists the capability here until reader.ref is bumped.
 # I3 is done only when this file lists nothing.
+# Queue file v2 (docs/design/queue-file-v2.md): the reader reads one series' queue file
+# on its series page, no root queue file. Until interop/reader.ref pins a reader with
+# it (reader branch feat/queue-file-v2), its specs are skipped on the pinned reader.
+series-queue-v2

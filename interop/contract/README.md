@@ -57,7 +57,8 @@ to the contract shows up as a fixture diff in the pull request that makes it.
   `live` block of the HTTP copy) holding every job state, rendered by Bunko's renderer
   on the epoch sentinel.
 - Reader records carry `expect` instead of a response: `status` (a list), `body_fields`
-  (dot paths that must exist and be non-null, e.g. `permissions.canWriteProgress`),
+  (dot paths that must exist and be non-null, e.g. `permissions.canWriteProgress`;
+  a `*` step stands for every key or element and needs at least one, e.g. `vols.*.0.0`),
   `nullable_fields` (dot paths that must exist, null allowed), `body_values` (`{path:
   value}`, exact), `headers` (names that must be present, and exposed to the reader's
   page) and `header_prefixes` (`{name: prefix}`, used by the legacy records). The replay

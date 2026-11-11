@@ -1,0 +1,36 @@
+{
+  "expect": {
+    "body_fields": [
+      "v",
+      "instance_id",
+      "rev",
+      "at",
+      "clock_at",
+      "rows.0.kind",
+      "rows.0.id",
+      "vols.*.0.0",
+      "vols.*.0.1",
+      "done",
+      "live.held_rows",
+      "live.clock",
+      "live.clock_at",
+      "live.batch_s"
+    ],
+    "headers": [
+      "etag"
+    ],
+    "nullable_fields": [
+      "vols.*.0.2",
+      "live.held"
+    ],
+    "status": [
+      200
+    ]
+  },
+  "request": {
+    "auth": "basic:reader",
+    "headers": {},
+    "method": "GET",
+    "path": "/mokuro-reader/Contract%20Series/.mokuro-series-queue.json"
+  }
+}
