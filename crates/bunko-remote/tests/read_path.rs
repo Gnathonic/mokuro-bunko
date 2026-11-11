@@ -813,6 +813,100 @@ fn a_whole_file_stream_without_spool_room_reads_ahead_at_once() {
     assert_eq!(t.store.cache_stats().spools, 0);
 }
 
+/// A broken download resumed by Range from the middle to the end (the processor's
+/// Range + If-Range) reads ahead from its first read, within the span: no whole-file
+/// download (that would start from offset 0) and no run of single blocks first.
+#[test]
+fn a_resumed_stream_to_the_end_reads_ahead_at_once() {
+    let (zip, _) = archive(6, 2 << 20, 29);
+    let size = zip.len() as u64;
+    let t = start(FakeBackend::drive_like(), &[("S/v.cbz", &zip)], |_| {});
+    let p = t.abs("S/v.cbz");
+    t.fake().reset_calls();
+    let at = (3 << 20) + 7;
+    let got = stream(&p, at, size - at);
+    assert!(got == zip[at as usize..]);
+    let log = t.fake().read_log();
+    // 512 KiB, 1, 2, 4, 4 MiB, and the zip tail.
+    assert!(log.len() <= 6, "{log:?}");
+    let fetched = ranged_bytes(&log, size);
+    assert!(
+        fetched <= size - at + 2 * BLOCK,
+        "{fetched} bytes in {log:?}"
+    );
+    assert!(log.iter().all(|r| r.range.unwrap().0 >= at - at % BLOCK));
+    assert_eq!(t.store.cache_stats().spools, 0, "no download");
+}
+
+/// Two whole-file streams of one archive at once share one download.
+#[test]
+fn two_whole_file_streams_share_one_download() {
+    let (zip, _) = archive(3, 2 << 20, 30);
+    let size = zip.len() as u64;
+    let t = start(FakeBackend::drive_like(), &[("S/v.cbz", &zip)], |_| {});
+    let p = t.abs("S/v.cbz");
+    t.fake().set_latency(Duration::from_millis(100));
+    t.fake().reset_calls();
+    let go = Arc::new(Barrier::new(2));
+    let readers: Vec<_> = (0..2)
+        .map(|_| {
+            let (p, go) = (p.clone(), go.clone());
+            std::thread::spawn(move || {
+                go.wait();
+                stream(&p, 0, size)
+            })
+        })
+        .collect();
+    for r in readers {
+        assert!(r.join().unwrap() == zip);
+    }
+    let log = t.fake().read_log();
+    assert_eq!(log.len(), 1, "{log:?}");
+    assert_eq!(log[0].range, None);
+}
+
+/// Without pinned reads a download's bytes reach readers only once all of it is
+/// fetched and re-checked: started on the first read, it would hold a GET's headers
+/// that long (a processor gives up on silent headers, and its retry waits on the same
+/// download). A whole-file stream there reads ahead from its first read and starts the
+/// download where an undeclared reader does, so its first bytes do not wait for it. A
+/// file replaced behind the index still fails the first read (the GET's 503).
+#[test]
+fn a_whole_file_stream_on_an_unpinned_provider_reads_ahead_before_it_downloads() {
+    let (zip, _) = archive(3, 2 << 20, 31);
+    let size = zip.len() as u64;
+    let t = start(FakeBackend::webdav_plain(), &[("S/v.cbz", &zip)], |_| {});
+    let p = t.abs("S/v.cbz");
+    t.fake().reset_calls();
+    assert!(stream(&p, 0, size) == zip);
+    let log = t.fake().read_log();
+    assert!(
+        log[0].range.is_some(),
+        "the first bytes are ranged: {log:?}"
+    );
+    let whole = log.iter().filter(|r| r.range.is_none()).count();
+    assert!(whole <= 1, "{log:?}");
+    // 512 KiB, 1, 2, 4 MiB, not sixteen single blocks.
+    assert!(log.len() - whole <= 5, "{log:?}");
+
+    let (other, _) = archive(3, 2 << 20, 32);
+    let p2 = t.abs("S/w.cbz");
+    t.reader_replace("S/w.cbz", &zip);
+    t.fake().reader_put(&format!("{FOLDER}/S/w.cbz"), &other);
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let e = rt.block_on(async move {
+        use futures_util::StreamExt;
+        let f = bunko_store::afs::File::open(&p2).await.unwrap();
+        let mut s = f.into_stream(0, size);
+        s.next().await.unwrap().unwrap_err()
+    });
+    assert_eq!(berr(&e), Some(&BErr::PreconditionFailed), "{e:?}");
+}
+
 /// `fs::read` declares the whole file too: one download.
 #[test]
 fn fs_read_of_an_archive_is_one_download() {

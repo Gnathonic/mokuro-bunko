@@ -16,7 +16,9 @@
 //!   straight through ([`RemoteFile::will_read`]: an HTTP GET body, a copy) is proven
 //!   sequential from its first read when that span is the whole file or at least
 //!   [`SEQ_BYTES`] long: on a slow provider, sixteen one-block reads before the
-//!   download starts cost seconds per file.
+//!   download starts cost seconds per file. (Without pinned reads a whole-file span
+//!   reads ahead and starts the download where an undeclared reader does: that
+//!   download's bytes reach readers only once all of it is checked.)
 //! - [`PendingFile`]: the staged bytes of a pending Deferred write.
 //! - [`StagingFile`]: the local staging file `open_with` hands out.
 //!
@@ -167,8 +169,19 @@ impl<B: Backend> ArchiveFile<B> {
     /// The read run has proven sequential: contiguous reads, enough of them, over a
     /// large enough span; or it is the run the caller declared.
     fn sequential(&self) -> bool {
-        self.declared_end().is_some()
-            || (self.run_reads >= SEQ_READS && self.pos - self.run_start >= SEQ_BYTES)
+        self.declared_end().is_some() || self.proven_by_reads()
+    }
+
+    /// Contiguous reads, enough of them, over a large enough span.
+    fn proven_by_reads(&self) -> bool {
+        self.run_reads >= SEQ_READS && self.pos - self.run_start >= SEQ_BYTES
+    }
+
+    /// A spool of this file hands readers its bytes as they arrive: only a pinned read
+    /// does. An unpinned download's bytes are the indexed version only once the
+    /// re-stat after the whole download passes, so its readers wait for all of it.
+    fn spool_is_progressive(&self) -> bool {
+        self.store.core.caps.pinned_read && self.v.pin.is_some()
     }
 
     /// The end of the declared span, while the current run is the one declared: it
@@ -230,9 +243,15 @@ impl<B: Backend> ArchiveFile<B> {
         }
         // A download of the whole file only for a proven whole-file reader. A declared
         // span is one only when it runs to the end: a long Range from offset 0 reads
-        // ahead within itself instead.
+        // ahead within itself instead. Without pinned reads, a download started on
+        // the first read would hold a GET's headers until all of it is fetched and
+        // re-checked (a processor gives up on silent headers sooner than on a silent
+        // body, and its retry would wait on the same download): there the declared
+        // run reads ahead and starts the download where an undeclared one does.
         let whole_file_run = match self.declared_end() {
-            Some(end) => end == self.v.size,
+            Some(end) => {
+                end == self.v.size && (self.spool_is_progressive() || self.proven_by_reads())
+            }
             None => self.sequential(),
         };
         if self.spool.is_none() && !self.spool_start_tried && self.run_start == 0 && whole_file_run
@@ -424,7 +443,9 @@ impl<B: Backend> RemoteFile for ArchiveFile<B> {
 
     /// A span that is the whole file, or at least [`SEQ_BYTES`], is a proven
     /// sequential run from its first read: the whole file starts (or joins) the spool
-    /// at once, any other such span reads ahead at once, never past its end. A
+    /// at once when the provider reads pinned versions (else it reads ahead and starts
+    /// it as an undeclared reader does), any other such span reads ahead at once,
+    /// never past its end. A
     /// shorter span (one page by Range) changes nothing: it fetches just its blocks.
     fn will_read(&mut self, start: u64, len: u64) {
         let size = self.v.size;
