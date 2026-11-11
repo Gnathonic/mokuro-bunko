@@ -672,6 +672,34 @@
   reconnect or a restart does not fetch it again sooner. The server's own OCR no longer
   waits for the Vulkan pack either. A Vulkan pack installed on its own also no longer
   replaces a backend variant picked by hand.
+- **A library with a large OCR queue answers a processor's registration at once.** A
+  processor that has not benchmarked a row takes none of that row's volumes, yet each of
+  its claims looked every one of them up in the library, with several folder listings
+  each (index reads on a cloud library). With 10,000 jobs queued, such a claim took
+  1.5 s on a local disk and 6 s on a cloud library, and it ran again after every change
+  to the queue. The queue page, the reader's queue file and a reader's question about a
+  volume also read each processor's profile from disk once per queued job and machine,
+  about 0.6 s per build at 10,000 jobs. The OCR scheduler answers registrations and all
+  of these one at a time, so it fell behind: a registration waited past the
+  processor's 30 s timeout, the processor registered again, and the queue page took
+  from seconds to over 30 s. A claim now passes over the volumes of a row whose
+  benchmark it has asked for, and a queue estimate reads each machine's profile once
+  per row. At 10,000 jobs a processor's arrival now costs the scheduler 20 to 60 ms
+  instead of 1.5 to 6 s, and a queue page build 40 to 170 ms instead of 0.2 to 0.9 s
+  (`crates/bunko-server/tests/ocr_scale.rs` measures it).
+- **A processor that reconnects carries on with its benchmarks.** When a processor's
+  link dropped, its queued benchmarks failed, and on its return every one was asked for
+  again: each packed a new sample from the library (provider reads on a cloud library,
+  each on a helper thread of its own) and logged "Benchmarking ... before it runs there"
+  for every row. A processor back within 10 minutes with the same host and catalog now
+  picks its line up where it was, and the benchmark it was running is sent again with
+  the sample already packed. One back with another catalog, or later, is measured
+  afresh, and one back while it still installs its backend waits until it is available.
+- **A processor waits 90 s for the library to answer its registration and open its
+  socket** (30 s before). The library's OCR scheduler answers both, so a busy library
+  can take longer, and a processor that gave up registered again, which only added to
+  the scheduler's queue. 90 s stays under the 100 s a Cloudflare tunnel holds a request
+  open.
 - **Windows: no console window flashes while the app runs.** The app
   (`mokuro-bunko.exe`) and the server and processor it starts have no console, so
   every console program they ran was given a window of its own: `nvidia-smi`, which

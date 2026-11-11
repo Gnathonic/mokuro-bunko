@@ -44,7 +44,7 @@ use super::profiles::Profiles;
 use super::types::{Job, LibraryFacts, PathLocks};
 
 pub use availability::availability_of;
-pub use bench::{BenchRequest, BenchState, cpu_label, physical_cores};
+pub use bench::{BENCH_PARK_SECONDS, BenchRequest, BenchState, Parked, cpu_label, physical_cores};
 pub use claim::{SUFFIX_BATCH, catalog_can_run, supported_for};
 pub use registry::{
     FailedLogin, Machine, PublicNames, RegisterInput, RegisterOutcome, SocketRefusal, TransferStats,

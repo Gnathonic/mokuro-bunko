@@ -527,3 +527,52 @@ async fn a_dropped_socket_ends_everything_silently_and_registers_again() {
         .unwrap()
         .unwrap();
 }
+
+/// The library answers a registration from its OCR scheduler, which works one message at
+/// a time; with a large queue it once took longer than the 30 s the processor waited.
+/// The processor then gave up, registered again and so queued yet another registration
+/// behind the first. A reply that comes after a minute still registers it.
+#[tokio::test(start_paused = true)]
+async fn a_registration_the_library_answers_after_a_minute_still_registers() {
+    async fn slow_register() -> Response {
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        axum::Json(json!({
+            "protocol": 3, "processor_id": "p1", "socket": "/_processor/p1/socket",
+            "results": "/_processor/p1/results/{sid}/{claim}", "archives": "/mokuro-reader/",
+            "version": env!("CARGO_PKG_VERSION"),
+        }))
+        .into_response()
+    }
+    let app = Router::new()
+        .route(
+            "/login/api/token",
+            post(|| async { axum::Json(json!({"token": "t", "token_type": "Bearer"})) }),
+        )
+        .route("/_processor/register", post(slow_register));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let client = bunko_processor::client::LibraryClient::new(
+        &LibrarySettings {
+            url,
+            username: "gpu".into(),
+            password: "pw".into(),
+            tls_verify: TlsVerify::Yes,
+        },
+        "tower",
+    )
+    .unwrap();
+    let request = RegisterRequest {
+        protocol: 3,
+        name: Some("tower".into()),
+        public_name: None,
+        host: Default::default(),
+        catalog: Default::default(),
+        max_sessions: 1,
+        availability: None,
+    };
+    let started = tokio::time::Instant::now();
+    let reply = client.register(&request).await.expect("registered");
+    assert_eq!(reply.processor_id, "p1");
+    assert!(started.elapsed() >= Duration::from_secs(60));
+}

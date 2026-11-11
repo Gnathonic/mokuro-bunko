@@ -2,7 +2,8 @@
 //! connected machines, holds, the raw queue-page status, the reader queue file's
 //! content and one volume's outlook (spec ocr-scheduling §15.3, §19–§20, §23–§25).
 
-use std::collections::HashSet;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use bunko_core::generations::Generation;
@@ -19,6 +20,9 @@ pub type RawStatus = Map<String, Value>;
 
 /// `QUEUE_REPORT_LIMIT`: waiting volumes the queue file lists.
 pub const QUEUE_REPORT_LIMIT: usize = 100;
+
+/// One volume's plan entries by row id, borrowed from the plan.
+type RowEntries<'a> = indexmap::IndexMap<&'a str, &'a Map<String, Value>>;
 
 /// A row's precision hold: `"No connected machine can run <mode>"`.
 pub fn hold_reason(mode: &str) -> String {
@@ -319,15 +323,18 @@ impl Scheduler {
         pending: &[Map<String, Value>],
         running: &[Map<String, Value>],
     ) -> Vec<Map<String, Value>> {
-        let running_keys: HashSet<String> = running
-            .iter()
-            .map(|j| format!("{:?}", job_identity(j)))
-            .collect();
-        pending
-            .iter()
-            .filter(|e| !running_keys.contains(&format!("{:?}", job_identity(e))))
-            .cloned()
-            .collect()
+        // A few volumes per lane run: they are compared as values, not by a text key
+        // made for each of a large queue's thousands of entries.
+        static NULL: Value = Value::Null;
+        let running_keys: Vec<(Value, Value, Value)> = running.iter().map(job_identity).collect();
+        let runs = |e: &Map<String, Value>| {
+            running_keys.iter().any(|(s, v, g)| {
+                e.get("series").unwrap_or(&NULL) == s
+                    && e.get("volume").unwrap_or(&NULL) == v
+                    && e.get("generation_id").unwrap_or(&NULL) == g
+            })
+        };
+        pending.iter().filter(|e| !runs(e)).cloned().collect()
     }
 
     /// `_lane_machines()`: one entry per lane, by hardware name.
@@ -347,10 +354,29 @@ impl Scheduler {
     ) -> QueuePlan {
         let pricing = self.pricing();
         let lane_machines = self.lane_machines();
+        // Asked per item and lane, answered per row and machine: a refusal reads the
+        // machine's profile from disk, and a large queue is tens of thousands of asks.
+        let refusals: RefCell<HashMap<String, HashMap<String, Option<String>>>> =
+            RefCell::default();
         let refusal = |g: &str, machine: &str| -> Option<String> {
-            let row = self.settings.rows.iter().find(|r| r.id == g)?;
-            let m = self.machine_by_name(machine)?;
-            self.refusal(&m.pid, row)
+            if let Some(known) = refusals.borrow().get(g).and_then(|m| m.get(machine)) {
+                return known.clone();
+            }
+            let found = self
+                .settings
+                .rows
+                .iter()
+                .find(|r| r.id == g)
+                .and_then(|row| {
+                    let m = self.machine_by_name(machine)?;
+                    self.refusal(&m.pid, row)
+                });
+            refusals
+                .borrow_mut()
+                .entry(g.to_string())
+                .or_default()
+                .insert(machine.to_string(), found.clone());
+            found
         };
         let hold = |g: &str| -> Option<String> {
             let row = self.settings.rows.iter().find(|r| r.id == g)?;
@@ -508,9 +534,10 @@ impl Scheduler {
             "current_jobs".into(),
             Value::Array(plan.running.iter().cloned().map(Value::Object).collect()),
         );
+        // Moved, not copied: a large queue's list is thousands of entries.
         raw.insert(
             "pending_ocr".into(),
-            Value::Array(plan.pending.iter().cloned().map(Value::Object).collect()),
+            Value::Array(plan.pending.into_iter().map(Value::Object).collect()),
         );
         raw.insert("queue_done_at".into(), json!(plan.done_at));
         raw.insert(
@@ -619,12 +646,11 @@ impl Scheduler {
         let pending = self.pending_jobs();
         let items = Self::plan_items(&pending, &running);
         let plan = self.queue_plan(&running, &items, None);
-        let mut order: Vec<(String, String)> = Vec::new();
-        let mut jobs: std::collections::HashMap<
-            (String, String),
-            indexmap::IndexMap<String, Map<String, Value>>,
-        > = Default::default();
-        let mut running_now: HashSet<(String, String, String)> = HashSet::new();
+        // Every entry is indexed by reference: a large queue holds thousands, and the
+        // file lists the running volumes and the first waiting ones only.
+        let mut order: Vec<(&str, &str)> = Vec::new();
+        let mut jobs: HashMap<(&str, &str), RowEntries<'_>> = HashMap::new();
+        let mut running_now: HashSet<(&str, &str, &str)> = HashSet::new();
         for (entry, is_running) in plan
             .running
             .iter()
@@ -638,24 +664,21 @@ impl Scheduler {
             ) else {
                 continue;
             };
-            let key = (s.to_string(), v.to_string());
-            if !jobs.contains_key(&key) {
-                order.push(key.clone());
-                jobs.insert(key.clone(), Default::default());
-            }
+            let key = (s, v);
             if is_running {
-                running_now.insert((s.to_string(), v.to_string(), g.to_string()));
+                running_now.insert((s, v, g));
             }
-            jobs.get_mut(&key)
-                .expect("inserted above")
-                .entry(g.to_string())
-                .or_insert_with(|| entry.clone());
+            jobs.entry(key)
+                .or_insert_with(|| {
+                    order.push(key);
+                    RowEntries::default()
+                })
+                .entry(g)
+                .or_insert(entry);
         }
         let rank = self.rank();
-        let running_volumes: HashSet<(String, String)> = running_now
-            .iter()
-            .map(|(s, v, _)| (s.clone(), v.clone()))
-            .collect();
+        let running_volumes: HashSet<(&str, &str)> =
+            running_now.iter().map(|(s, v, _)| (*s, *v)).collect();
         let pending_volumes = order
             .iter()
             .filter(|k| !running_volumes.contains(*k))
@@ -663,7 +686,7 @@ impl Scheduler {
         let mut waiting_listed = 0;
         let mut volumes = Vec::new();
         for (series, volume) in order {
-            let key = (series.clone(), volume.clone());
+            let key = (series, volume);
             if !running_volumes.contains(&key) {
                 if waiting_listed >= QUEUE_REPORT_LIMIT {
                     continue;
@@ -683,7 +706,7 @@ impl Scheduler {
                 }
             }
             for g in listed.keys() {
-                if !rows.iter().any(|r| r.id == *g)
+                if !rows.iter().any(|r| r.id == **g)
                     && let Some(r) = self.settings.rows.iter().find(|r| r.id == *g)
                 {
                     rows.push(r.clone());
@@ -692,9 +715,8 @@ impl Scheduler {
             rows.sort_by_key(|r| (!r.primary, rank.get(&r.id).copied().unwrap_or(rank.len())));
             let mut out = Vec::new();
             for row in rows {
-                let priced = listed.get(&row.id);
-                let is_running =
-                    running_now.contains(&(series.clone(), volume.clone(), row.id.clone()));
+                let priced = listed.get(row.id.as_str());
+                let is_running = running_now.contains(&(series, volume, row.id.as_str()));
                 let state = if is_running {
                     "running"
                 } else if priced.is_none()
