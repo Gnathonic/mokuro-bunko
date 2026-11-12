@@ -33,7 +33,15 @@
 //! ONNX Runtime from memory instead ([`ExternalFile`]): the weights may then sit under
 //! any name, in any folder, behind a link (ONNX Runtime refuses external data that
 //! resolves outside the graph's folder). ONNX Runtime copies what it needs while it
-//! builds the session; the buffer is dropped right after.
+//! builds the session, so the file is memory-mapped rather than read: the pages ONNX
+//! Runtime copies from are the page cache's, and the process never holds a second
+//! private copy of the weights. The map is dropped as soon as the session exists
+//! (before `load_with` returns), so the file can be replaced or deleted afterwards,
+//! Windows included. nar-small (217 MB of weights), eight 1,000-page volumes, mean RSS
+//! once loaded, read into memory → mapped: 792 → 584 MiB on the `ppocr-manga`
+//! detector, 898 → 792 on `animetext-blocks`; high-water mark 878 → 792 and
+//! 1253 → 1203 (on `ppocr-manga` it is reached during the load and includes the mapped
+//! file's pages, which are the page cache's); same output, same RSS while reading.
 //!
 //! The library never creates the ORT environment (`ort::init()`); the binary does,
 //! so its logging and global options apply.
@@ -280,6 +288,12 @@ fn build_session(
     opts: &RuntimeOptions,
     target: ExecutionTarget,
 ) -> Result<Session> {
+    // See "External weights" in the module docs. Declared before the builder, which
+    // holds pointers into them, so they are dropped after it.
+    let maps = external
+        .iter()
+        .map(|f| map_file(&f.path))
+        .collect::<Result<Vec<_>>>()?;
     let threads = opts.intra_threads;
     let mut builder = Session::builder()?
         .with_optimization_level(GraphOptimizationLevel::All)?
@@ -309,12 +323,41 @@ fn build_session(
                 .build()
                 .error_on_failure()])?;
     }
-    for f in external {
-        let bytes = std::fs::read(&f.path).map_err(|e| Error::io(&f.path, e))?;
+    for (f, map) in external.iter().zip(&maps) {
+        // SAFETY: `ort` asks for a `'static` buffer only because the builder keeps it;
+        // ONNX Runtime reads it while it builds the session below and copies what it
+        // keeps (the session holds no pointer into it). The builder, and every error
+        // that could carry it, is gone before `maps` is dropped (end of this function).
+        let bytes: &'static [u8] = unsafe { std::slice::from_raw_parts(map.as_ptr(), map.len()) };
         builder =
-            builder.with_external_initializer_file_in_memory(&f.location, Cow::Owned(bytes))?;
+            builder.with_external_initializer_file_in_memory(&f.location, Cow::Borrowed(bytes))?;
     }
-    Ok(builder.commit_from_file(path)?)
+    let session = builder.commit_from_file(path);
+    drop(builder);
+    drop(maps);
+    session.map_err(|e| {
+        if external.is_empty() {
+            return e.into();
+        }
+        // ONNX Runtime's message names the tensor, not the file (a short file, say).
+        let files: Vec<String> = external
+            .iter()
+            .map(|f| format!("{} from {}", f.location, f.path.display()))
+            .collect();
+        Error::Invalid(format!(
+            "onnx runtime: {e} (external data: {})",
+            files.join(", ")
+        ))
+    })
+}
+
+/// `path` mapped read-only. A file truncated while mapped would fault on access; the
+/// store replaces model files by renaming a new file into place, which leaves this
+/// map's file untouched, and the map lives only while a session is being built.
+fn map_file(path: &Path) -> Result<memmap2::Mmap> {
+    let file = std::fs::File::open(path).map_err(|e| Error::io(path, e))?;
+    // SAFETY: see above: the file is not written to in place while it is mapped.
+    unsafe { memmap2::Mmap::map(&file) }.map_err(|e| Error::io(path, e))
 }
 
 impl Model {
@@ -701,6 +744,22 @@ mod tests {
         let gone = other.join("gone.safetensors");
         let e = Model::load_with(&graph, &external(&gone), &opts).unwrap_err();
         assert!(e.to_string().contains("gone.safetensors"), "{e}");
+        // A file too short for the graph's offsets is refused, not read past its end;
+        // an empty one (which maps to nothing) too.
+        for len in [20, 0] {
+            let short = other.join(format!("short{len}.safetensors"));
+            std::fs::write(&short, &bytes[..len]).unwrap();
+            let e = Model::load_with(&graph, &external(&short), &opts).unwrap_err();
+            let e = e.to_string();
+            assert!(
+                e.contains("out of bounds") && e.contains(&format!("short{len}")),
+                "{e}"
+            );
+        }
+        // The map is gone once the model is loaded: the weights can be replaced.
+        let m = Model::load_with(&graph, &external(&weights), &opts).unwrap();
+        std::fs::remove_file(&weights).unwrap();
+        assert_eq!(run(&m), [11.0, 12.0, 13.0, 14.0]);
     }
 
     #[test]
