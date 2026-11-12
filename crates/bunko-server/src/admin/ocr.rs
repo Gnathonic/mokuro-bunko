@@ -125,6 +125,11 @@ pub trait OcrAdmin: Send + Sync + 'static {
     /// to push into" and the caller answers `restart_required: <changed>`.
     fn apply(&self, config: &Config) -> Option<Value>;
 
+    /// Called from a blocking thread after OCR on this machine was turned off (through
+    /// [`Self::apply`]): wait, bounded, until it has stopped (its sessions ended, its
+    /// engine freed, its scratch swept), so that its files may go.
+    fn wait_local_stopped(&self) {}
+
     /// Forget benchmarks and processor profiles of rows that no longer exist.
     fn prune(&self, known_ids: &[String]) {
         let _ = known_ids;

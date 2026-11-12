@@ -712,6 +712,49 @@
 - **Dependency updates**: zip 9, rcgen 0.14, windows 0.62, windows-sys 0.61.
 
 ### Fixed
+- **Turning this server's OCR off stops it at once.** With OCR on this machine turned
+  off mid-queue (This server, the OCR settings or the setup wizard), the server went on
+  claiming volumes for its own OCR for minutes: the setting retired only its idle slots,
+  the busy one stayed and its session never drained, so it kept fetching archives from a
+  cloud library, reading them, weighing itself when placing volumes ("this server would
+  take ~Ns") and showing as a machine. It now stops in the same step: the volumes it was
+  reading are cancelled and go back to the queue unrecorded, where a connected processor
+  (or this server, turned on again) takes them; nothing it was running is installed (a
+  finished result already being moved into place still is); its OCR engine shuts down
+  and frees its memory; and what its sessions left in `.processing` is removed. It is no
+  machine of the queue page, the admin panel or the placement any more, and nothing
+  starts it again while it is off (an OCR backend install that ends included). Turned on
+  again, it starts without a restart. A restart for another OCR backend sweeps the old
+  sessions' leftovers the same way. A cloud archive fetched for this server's OCR after
+  its claim went back no longer returns another processor's claim of that volume to the
+  queue (that processor's result was then thrown away as late). A benchmark of this
+  server cut short by turning it off now says "OCR on this machine was turned off"
+  instead of "local disconnected". Turning it off, or stopping the server, no longer
+  logs each volume it was reading as a failure (a WARN "volume failed: the OCR pipeline
+  stopped before this volume did" and an ERROR "the pipeline failed"): a stop is an
+  INFO "cancelled" line, and a pipeline that really breaks is still an error. A server
+  stopped right after turning it off waits for its OCR engine to shut down, as it does
+  otherwise, instead of exiting with it half torn down.
+- **Removing this machine's OCR backend stops its OCR first.** This server's Remove
+  deleted the backend packs and left OCR on this machine on: it went on reading volumes
+  from the libraries still loaded in memory, and only a restart stopped it. Remove now
+  turns OCR on this machine off first, as its toggle does (saved, so nothing installs a
+  pack again until it is turned on), waits for it to stop, and then removes the packs;
+  the panel says so before and after (and how many volumes went back to the queue), and
+  shows the toggle off. Remove is refused while an install or the optional Vulkan
+  pack's fetch runs, before anything changes. A pack is never left half deleted: it is
+  renamed out of the packs first and deleted after, and what a deletion could not
+  finish goes at the next start. On Windows a pack this server has loaded cannot be
+  deleted while it runs: it is removed when the server next starts, before anything
+  loads it (unless OCR on this machine was turned on again meanwhile). On Linux and
+  macOS a loaded pack goes at once, and OCR started again later restarts the server
+  rather than run on what is left of it.
+- **A processor that drops off leaves no uploaded result behind.** A processor that
+  disconnected (or whose account was disabled or deleted) after uploading a result but
+  before saying the volume was done left that result in `.processing` for good: the
+  volume went back to the queue, and nothing ever removed the file. Its uploads now go
+  with it, as they do when its session ends (a result already being installed stays
+  until the install is done).
 - **hayai-nova reads at patch budgets 256 and 384 on libtorch and ncnn.** The settings
   offer both, but only the WebGPU runtime read at them: the libtorch packs refused to
   load (`hayai-nova packages are compiled for patch budget 512, not 256`), ncnn refused

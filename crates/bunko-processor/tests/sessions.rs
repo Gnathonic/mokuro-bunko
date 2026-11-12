@@ -149,6 +149,53 @@ async fn volumes_run_in_order_and_close_exits_cleanly() {
     link.shutdown().await;
 }
 
+/// A session stopped on purpose (cancelled, or the processor leaving: OCR on this
+/// machine turned off, the server stopping) whose runner reports the cut-short volume
+/// as a pipeline failure is still a stop: it ends with the quiet exit of an abandoned
+/// session, not as a failed session (`exit 1`, logged ERROR "the pipeline failed").
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stop_reported_as_a_pipeline_failure_is_still_a_stop() {
+    let dir = tempfile::tempdir().unwrap();
+    let results = dir.path().join("results");
+    let a = write_volume(dir.path(), "a.cbz", 20);
+    let (mut link, _fake) = start(
+        FakeConfig {
+            page_delay: Duration::from_millis(30),
+            fatal_on_cancel: true,
+            ..Default::default()
+        },
+        &results,
+    );
+    send(&link, open("s1")).await;
+    send(&link, volume_op("s1", "v1", &a)).await;
+    loop {
+        if let Event::Page { .. } = next_event(&mut link.events, 5).await {
+            break;
+        }
+    }
+    send(
+        &link,
+        Op::Cancel {
+            sid: Some("s1".into()),
+            claim: Some("v1".into()),
+            bid: None,
+        },
+    )
+    .await;
+    let events = until_exit(&mut link.events, "s1", 5).await;
+    assert!(
+        matches!(
+            events.last(),
+            Some(Event::Exit {
+                returncode: None,
+                ..
+            })
+        ),
+        "{events:#?}"
+    );
+    link.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cancel_abandons_the_session_and_says_only_exit() {
     let dir = tempfile::tempdir().unwrap();

@@ -49,6 +49,24 @@ pub fn run(args: ServeArgs, config: Config, config_path: PathBuf) -> anyhow::Res
     if let Some(rt) = &background.0 {
         bunko_server::rt::set_background(rt.handle().clone());
     }
+    // Before anything loads an OCR backend pack (the update probe below, OCR): finish
+    // a removal asked for while a pack was loaded (crate::pack_removal).
+    #[cfg(feature = "ocr")]
+    {
+        let mut library = config.clone();
+        if let Some(b) = &args.ocr {
+            library.ocr.backend = b.clone();
+        }
+        let local_on = library.processes_locally(true);
+        let target = crate::ocr_target::OcrTarget {
+            role: crate::ocr_target::Role::Library,
+            storage: config.storage.base_path.clone(),
+            processor_config: None,
+            library: Some(library),
+            reason: String::new(),
+        };
+        crate::pack_removal::at_start(&target.backends_dir(), local_on);
+    }
     let flavor = crate::update_flavor();
     // An automatic update the previous run made: check the new release's OCR backend
     // (a rollback restarts into the previous release and does not return).
