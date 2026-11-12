@@ -45,7 +45,14 @@
 //! Retries back off exponentially with jitter (`Retry-After` honoured); attempts
 //! count only while the feed is steady. FAILED is for permanent errors only
 //! (invalid name, too large, unsupported, fatal): the op keeps its bytes and records
-//! a `failed-op` conflict.
+//! a `failed-op` conflict. An op whose staged bytes are gone can never be sent: a
+//! Status file's is dropped (its writer writes it again), any other is a `lost-write`
+//! conflict.
+//!
+//! **Startup** (§5.10) applies the state table to the persisted ops. Writes of the
+//! root `.mokuro-queue.json` (a 0.8 pre-release's status writer; queue file v2 writes
+//! none) are dropped whatever their state, with the conflicts they left: none is ever
+//! sent, and the lease holder's series-file sink deletes the file itself.
 
 use std::collections::BTreeMap;
 use std::io::{self, Read};
@@ -451,6 +458,15 @@ fn class_of(op: &Op) -> ApiClass {
 /// write two segments deep (or deeper) whose name folds to the file's.
 pub(crate) fn is_series_queue_op(op: &Op) -> bool {
     op.origin == Origin::Status && crate::names::is_series_queue_path(&op.dest)
+}
+
+/// A write of the root `.mokuro-queue.json` (in any spelling the fold joins): a 0.8
+/// pre-release's status writer made them; queue file v2 makes none (§3).
+fn is_root_queue_put(op: &Op) -> bool {
+    op.kind == OpKind::Put
+        && op.origin == Origin::Status
+        && matches!(op.dest.segments(), [name]
+            if bunko_core::names::is_fixed_name(name, crate::names::ROOT_QUEUE_FILE))
 }
 
 fn parent_of(rel: &RelPath) -> RelPath {
@@ -915,18 +931,34 @@ impl<B: Backend> Core<B> {
 
     /// After STAGED: coalesce older Compiler/Status ops for the same destination,
     /// mark the index (read-after-write) and emit the event (D21).
+    ///
+    /// Two writers may stage one file at once. Only older ops (a lower `seq`) are
+    /// superseded, and whether this op was itself superseded meanwhile (a newer write
+    /// of the file took it out of the map between `stage_put` and here) is decided
+    /// under the same lock: it is then left superseded, never saved again. Saved again,
+    /// it came back without its bytes, and failed at UPLOADING for good ("the staged
+    /// bytes cannot be read", attempts 0).
     pub(crate) fn stage_deferred(&self, mut op: Op) -> io::Result<Op> {
         if op.coalesces() {
             // Taken out of the map under the lock the worker takes an op under: an
             // op is either superseded here or sent, never both (its bytes go with
             // it).
-            let older: Vec<Op> = {
+            let (older, saved) = {
                 let mut ops = self.ops.lock();
+                if !ops.contains_key(&op.id) {
+                    tracing::debug!(
+                        op = op.id,
+                        dest = %op.dest,
+                        "a newer write of the file superseded this one"
+                    );
+                    op.state = OpState::Superseded;
+                    return Ok(op);
+                }
                 let running = self.running.load(Ordering::Acquire);
                 let ids: Vec<u64> = ops
                     .values()
                     .filter(|o| {
-                        o.id != op.id
+                        o.id < op.id
                             && o.id != running
                             && o.coalesces()
                             && o.dest == op.dest
@@ -934,17 +966,27 @@ impl<B: Backend> Core<B> {
                     })
                     .map(|o| o.id)
                     .collect();
-                ids.iter().filter_map(|id| ops.remove(id)).collect()
+                let older: Vec<Op> = ids.iter().filter_map(|id| ops.remove(id)).collect();
+                // A base on the replaced op means the base that op had.
+                let inherited = older
+                    .iter()
+                    .find(|old| op.base() == Some(&format!("pending:{}", old.id)))
+                    .map(|old| old.mode.clone());
+                let mut saved = Ok(());
+                if let Some(mode) = inherited
+                    && let Some(cur) = ops.get_mut(&op.id)
+                {
+                    op.mode = mode.clone();
+                    cur.mode = mode;
+                    saved = self.persist_op(cur);
+                }
+                (older, saved)
             };
             for mut old in older {
-                // A base on the replaced op means the base that op had.
-                if op.base() == Some(&format!("pending:{}", old.id)) {
-                    op.mode = old.mode.clone();
-                }
                 old.state = OpState::Superseded;
                 self.drop_op(&old, false);
             }
-            self.save_op(&op)?;
+            saved?;
         }
         let change = self
             .index
@@ -1450,10 +1492,11 @@ impl<B: Backend> Core<B> {
     }
 
     /// The op's staged file, its bytes still the ones hashed at STAGED (a writer that
-    /// kept its handle open, a truncated or tampered outbox file fail the op).
+    /// kept its handle open, a truncated or tampered outbox file fail the op). An op
+    /// without them can never be sent: see [`Self::bytes_lost`].
     async fn staged_bytes(&self, op: &mut Op) -> Result<(PathBuf, Digests), Step> {
         let Some(staged) = self.staged_path(op) else {
-            return Err(self.give_up(op, "the op has no staged bytes".into()));
+            return Err(self.bytes_lost(op, "the op has no staged bytes".into(), true));
         };
         let digest = {
             let p = staged.clone();
@@ -1464,11 +1507,55 @@ impl<B: Backend> Core<B> {
         };
         match digest {
             Ok(d) if d.size == op.size && Some(d.sha256) == op.sha256 => Ok((staged, d)),
-            Ok(_) => {
-                Err(self.give_up(op, "the staged bytes changed after they were staged".into()))
+            Ok(_) => Err(self.bytes_lost(
+                op,
+                "the staged bytes changed after they were staged".into(),
+                false,
+            )),
+            Err(e) => {
+                // Gone only when there is no such file: one that cannot be read for
+                // another reason (permissions, an I/O error, too many open files) may
+                // still hold the bytes, and is kept with them.
+                let gone = e.kind() == io::ErrorKind::NotFound;
+                Err(self.bytes_lost(op, format!("the staged bytes cannot be read: {e}"), gone))
             }
-            Err(e) => Err(self.give_up(op, format!("the staged bytes cannot be read: {e}"))),
         }
+    }
+
+    /// The op's staged bytes are not the ones it staged (`gone`: there is no such
+    /// file), so it can never be sent. A Status file is dropped: its writer stages it
+    /// again (the series-file sink hears the op failed and marks its series again, and
+    /// no Bunko writes the root queue file any more), so a FAILED op would only stand
+    /// in the outbox for good. Anything else is reported: without bytes, as a
+    /// `lost-write` conflict naming its path (the op ends CONFLICT, as an op whose
+    /// destination went does); with other bytes, or a file that is there but cannot be
+    /// read, FAILED with a `failed-op` conflict, keeping it for the Disconnect export.
+    fn bytes_lost(&self, op: &mut Op, why: String, gone: bool) -> Step {
+        if op.origin == Origin::Status {
+            tracing::info!(
+                op = op.id,
+                dest = %op.dest,
+                "outbox: a status file's write is dropped (written again when due): {why}"
+            );
+            op.last_error = Some(why.clone());
+            self.finish(op, OpState::Discarded);
+            return Step::Gave(io::Error::other(why));
+        }
+        if !gone {
+            return self.give_up(op, why);
+        }
+        tracing::warn!(op = op.id, dest = %op.dest, "outbox: a write is lost: {why}");
+        op.last_error = Some(why.clone());
+        if op.durability == Durability::Deferred {
+            self.state.conflict_add(
+                ConflictRow::LostWrite,
+                &op.dest.to_string(),
+                op.target_pid.as_deref(),
+                &format!("lost before it was uploaded: {why}"),
+            );
+        }
+        self.finish(op, OpState::Conflict);
+        Step::Gave(io::Error::other(why))
     }
 
     /// The Status fast path (queue file v2 §6.6). A Status replace whose destination
@@ -2162,7 +2249,33 @@ impl<B: Backend> Core<B> {
     pub(crate) fn replay(&self) {
         let ops = self.load_ops();
         let mut keep = std::collections::HashSet::new();
+        let root_queue = ops.iter().filter(|o| is_root_queue_put(o)).count();
+        if root_queue > 0 {
+            // What the pre-release's writes left for the admin: FAILED ops' `failed-op`
+            // rows, an op that gave up on a foreign version's `lost-write` row. Resolved
+            // before the ops go, so a start cut short in between finds an op still
+            // there next time and resolves them then (the other way round, the rows
+            // would stand for good with no op left to say why).
+            let resolved = self.state.conflicts_resolve_at(
+                &[ConflictRow::FailedOp, ConflictRow::LostWrite],
+                crate::names::ROOT_QUEUE_FILE,
+            );
+            tracing::info!(
+                ops = root_queue,
+                conflicts = resolved,
+                "outbox: the root queue file's writes are dropped (queue file v2 writes none)"
+            );
+        }
         for mut op in ops {
+            if is_root_queue_put(&op) {
+                // A pre-release's root queue file (queue file v2 §3): never sent. A
+                // live one's marker goes too, so the sink's leftover rule, which waits
+                // for a pending write of the file, deletes it.
+                let _ = self.index.lock().clear_pending(&op.op_id());
+                op.state = OpState::Superseded;
+                self.drop_op(&op, false);
+                continue;
+            }
             let sync = op.durability == Durability::Sync;
             match op.state {
                 OpState::Prepared => self.drop_op(&op, false),
@@ -2236,5 +2349,56 @@ impl<B: Backend> Core<B> {
             .open(&dst)?
             .sync_all()?;
         Ok((name, size, h.finalize().into()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Only a Status write of the root queue file is a pre-release's (dropped at
+    /// startup): not a deletion of it (the series-file sink's leftover rule), not
+    /// another origin's op, not the name in a series folder.
+    #[test]
+    fn a_root_queue_write_is_a_status_put_at_the_root() {
+        let op = |kind, dest: &str, origin| {
+            Op::new(
+                1,
+                kind,
+                RelPath::parse(dest).unwrap(),
+                origin,
+                Durability::Deferred,
+            )
+        };
+        assert!(is_root_queue_put(&op(
+            OpKind::Put,
+            ".mokuro-queue.json",
+            Origin::Status
+        )));
+        assert!(is_root_queue_put(&op(
+            OpKind::Put,
+            ".MOKURO-Queue.json",
+            Origin::Status
+        )));
+        assert!(!is_root_queue_put(&op(
+            OpKind::Delete,
+            ".mokuro-queue.json",
+            Origin::Status
+        )));
+        assert!(!is_root_queue_put(&op(
+            OpKind::Put,
+            ".mokuro-queue.json",
+            Origin::Admin
+        )));
+        assert!(!is_root_queue_put(&op(
+            OpKind::Put,
+            "S/.mokuro-queue.json",
+            Origin::Status
+        )));
+        assert!(!is_root_queue_put(&op(
+            OpKind::Put,
+            ".mokuro-series-queue.json",
+            Origin::Status
+        )));
     }
 }

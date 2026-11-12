@@ -286,4 +286,9 @@ impl bunko_remote::SeriesQueueSource for StoreQueueSource {
             .upgrade()
             .is_some_and(|l| l.series_regeneration_pending(folder))
     }
+
+    /// The storage status's `waiting_for_first_walk`.
+    fn waiting_for(&self) -> Option<&'static str> {
+        (!self.walked.load(std::sync::atomic::Ordering::Acquire)).then_some("first_walk")
+    }
 }

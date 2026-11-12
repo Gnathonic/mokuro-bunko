@@ -103,7 +103,7 @@ In v2, nothing.
 | Same name, virtual, at `/mokuro-reader/<Series>/.mokuro-series-queue.json` | Bunko HTTP (a local library and the WebDAV bridge of a cloud library). Rendered from memory and never listed. | — | v2 readers connected to a Bunko over WebDAV |
 | `.mokuro-bunko.json` (marker) | Root | The lease heartbeat | Gains a `series_queue` block. `queue` becomes `null`. |
 | `/mokuro-reader/.mokuro-queue.json` v1 | Bunko HTTP only, virtual and frozen | — | Released readers |
-| Stored root `.mokuro-queue.json` | **Not written any more.** A leftover from a 0.8 pre-release is deleted once, on lease claim. | — | — |
+| Stored root `.mokuro-queue.json` | **Not written any more.** A leftover from a 0.8 pre-release is deleted once, on lease claim. The pre-release's writes of it still in the outbox are dropped at startup, whatever their state. | — | — |
 
 ### Why this name
 
@@ -414,7 +414,7 @@ A duplicate-folder merge trashes the loser's copy, because the file can be regen
   - It is debounced 30 s (60 s after an unhold, so the plan settles).
   - At most one early heartbeat per 120 s.
 - **On becoming holder** (claim or takeover):
-  - delete the root `.mokuro-queue.json` (P3, once);
+  - delete the root `.mokuro-queue.json` (P3, once). Its pre-release writes are gone by then: the outbox drops them at startup, with the `failed-op` and `lost-write` conflicts they left, so none is sent and none holds the file as pending;
   - mark every series with owed jobs P0 (foreign `instance_id`);
   - delete series files found in series that owe nothing (P3).
 - **A holder that loses the lease:** its fence closes within ttl/2. Any file it landed carries the wrong `instance_id` and is overwritten by the new holder.
@@ -426,6 +426,7 @@ The lease records `offset = server_now − local_now` at each `marker_set()` (`s
 ### 6.10 Configuration
 
 - `status_files` (default `true`; today it is parsed and never read) switches the store sink on or off. Off means no series files are written to the store; HTTP still serves them.
+- The admin storage status shows the store sink as `series_queue`: its `state`, the files it wrote, the writes staged and waiting, and when the last window's burst ran. `waiting_for_first_walk` means the scheduler has not finished its first walk of the library. Until then the sink asks once a second and writes nothing.
 - `queue_floor` overrides W.
 - No new keys.
 
