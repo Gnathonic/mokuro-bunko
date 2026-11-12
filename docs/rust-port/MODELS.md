@@ -494,7 +494,8 @@ repository: the scripts read the benchmarks from their own clones.
   architecture with more output slots, on the same CPU path at the same cost, and it is
   ahead of the default pipeline too. So `nar-small` reads with `r16` (§2.3).
 - hayai-nova's patch budget: 256 gives +0.18 on Read (+0.02 to +0.38) and no exact-match
-  gain, 384 changes nothing; Hard does not move and sound effects get slightly worse.
+  gain; 384 scored 94.72 against 94.58 (+0.14, no interval computed); Hard does not
+  move and sound effects get slightly worse.
   The default stays 512.
 - No permissively licensed model we tried beats hayai-nova on Read: PaddleOCR-VL manga
   v6 scores 96.14 on tight crops against hayai-nova's 96.60; hayai v2.6 was rejected

@@ -476,10 +476,11 @@ fn slice(t: &[char], a: usize, b: usize) -> String {
 /// lose (printed widths, brackets, dashes, characters it skipped) and takes over when
 /// it runs away. A recognizer without a decoder does none of that, and patching the
 /// CTC read into its text brings some of the CTC's own mistakes along. The gain is
-/// small: on 1,000 JMangaBench_Read boxes read through the whole pipeline, boxes read
-/// exactly went from 87.4% to 87.5% for manga-ocr-charspot-small and from 88.0% to
-/// 89.0% for manga-ocr-nar-small. A line the CTC read nothing in is engine-only, and
-/// judged like any other.
+/// small: on a sample of 1,000 JMangaBench_Read boxes read through the whole pipeline,
+/// boxes read exactly went from 87.4% to 87.5% for manga-ocr-charspot-small and from
+/// 88.0% to 89.0% for the first release of manga-ocr-nar-small (the model before
+/// `r16`; not measured again for `r16`). A line the CTC read nothing in is engine-only,
+/// and judged like any other.
 pub fn reconcile_verbatim(vlm: &str, ctc: &str) -> Reconciled {
     let text: String = vlm.chars().filter(|c| !is_space(*c)).collect();
     let ctc_text = py::strip(ctc).to_string();
