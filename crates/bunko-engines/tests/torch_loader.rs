@@ -224,3 +224,104 @@ fn real_pack_ignores_conflicting_libtorch() {
     );
     assert!(out.status.success() && text.contains("1 passed"), "{text}");
 }
+
+/// hayai-nova's self-test goldens read through `p` on `device` at patch budget `budget`:
+/// (what was read, the goldens' texts). The goldens are libtorch fp32 on the CPU at
+/// patch budget 512 (`vulkan_check golden`).
+fn read_goldens(
+    p: &bunko_engines::EnginePipeline,
+    device: &str,
+    budget: u32,
+) -> Result<(Vec<String>, Vec<String>), String> {
+    use base64::Engine as _;
+    let golden = p
+        .store()
+        .ensure_vulkan_golden("hayai-nova")
+        .map_err(|e| e.to_string())?;
+    let g = bunko_engines::vulkan::Golden::load(&golden)?;
+    let crops: Vec<bunko_vlm::CropSet> = g
+        .crops
+        .iter()
+        .map(|c| {
+            let b = base64::engine::general_purpose::STANDARD
+                .decode(&c.rgb)
+                .unwrap();
+            bunko_vlm::CropSet::one(
+                bunko_vlm::Rgb::from_raw(c.width as usize, c.height as usize, b).unwrap(),
+            )
+        })
+        .collect();
+    let rec = p.recognizer_for("hayai-nova", bunko_vlm::Precision::Fp32, device, budget)?;
+    let got = rec.read(&crops, None).map_err(|e| e.to_string())?;
+    Ok((got, g.crops.iter().map(|c| c.text.clone()).collect()))
+}
+
+/// 512 reads the goldens exactly; 384 and 256 (offered in the settings) load into the
+/// same 512-patch graphs and read every crop.
+fn budgets_read(p: &bunko_engines::EnginePipeline, device: &str) {
+    let (got, want) = read_goldens(p, device, 512).unwrap();
+    assert_eq!(got, want, "512 reads the goldens");
+    eprintln!("512: {}/{} crops read the goldens", want.len(), want.len());
+    for budget in [384, 256] {
+        let (got, want) = read_goldens(p, device, budget).unwrap();
+        assert_eq!(got.len(), want.len());
+        let empty = got.iter().filter(|t| t.is_empty()).count();
+        let same = got.iter().zip(&want).filter(|(a, b)| a == b).count();
+        eprintln!(
+            "{budget}: {same}/{} crops as at 512, {empty} empty",
+            want.len()
+        );
+        for (a, b) in got.iter().zip(&want).filter(|(a, b)| a != b) {
+            eprintln!("  {budget}: {a:?} (512: {b:?})");
+        }
+        assert!(
+            empty * 10 <= want.len(),
+            "{budget}: {empty} crops read nothing"
+        );
+    }
+}
+
+/// hayai-nova on a real libtorch pack at the settings' patch budgets. Run with
+/// `MOKURO_TORCH_PACK=<pack> MOKURO_MODELS_ROOT=<models dir> [MOKURO_TEST_DEVICE=gpu:0]
+/// cargo test -p bunko-engines --test torch_loader -- --ignored --exact
+/// real_pack_reads_hayai_nova_at_every_patch_budget --nocapture` (the models download
+/// into the directory when they are not there).
+#[test]
+#[ignore = "needs a real backend pack in MOKURO_TORCH_PACK and a models directory"]
+fn real_pack_reads_hayai_nova_at_every_patch_budget() {
+    let (Some(_), Some(models)) = (
+        std::env::var_os("MOKURO_TORCH_PACK"),
+        std::env::var_os("MOKURO_MODELS_ROOT"),
+    ) else {
+        eprintln!("skipping: MOKURO_TORCH_PACK or MOKURO_MODELS_ROOT is not set");
+        return;
+    };
+    let device = std::env::var("MOKURO_TEST_DEVICE").unwrap_or_else(|_| "cpu".into());
+    let p = bunko_engines::EnginePipeline::new(bunko_engines::EngineConfig::new(
+        PathBuf::from(models),
+        bunko_engines::Backend::Auto,
+    ));
+    budgets_read(&p, &device);
+}
+
+/// The same on a Vulkan pack's runtime (`MOKURO_TEST_RUNTIME`, default ncnn). Run with
+/// `MOKURO_VULKAN_PACK=<pack> MOKURO_MODELS_ROOT=<models dir> MOKURO_BACKENDS_DIR=<scratch>
+/// [MOKURO_TEST_DEVICE=gpu:0] cargo test -p bunko-engines --test torch_loader -- --ignored
+/// --exact vulkan_pack_reads_hayai_nova_at_every_patch_budget --nocapture`.
+#[test]
+#[ignore = "needs a real Vulkan pack in MOKURO_VULKAN_PACK and a models directory"]
+fn vulkan_pack_reads_hayai_nova_at_every_patch_budget() {
+    let (Some(_), Some(models)) = (
+        std::env::var_os("MOKURO_VULKAN_PACK"),
+        std::env::var_os("MOKURO_MODELS_ROOT"),
+    ) else {
+        eprintln!("skipping: MOKURO_VULKAN_PACK or MOKURO_MODELS_ROOT is not set");
+        return;
+    };
+    let device = std::env::var("MOKURO_TEST_DEVICE").unwrap_or_else(|_| "gpu:0".into());
+    let mut cfg =
+        bunko_engines::EngineConfig::new(PathBuf::from(models), bunko_engines::Backend::Vulkan);
+    cfg.vulkan_backends =
+        vec![std::env::var("MOKURO_TEST_RUNTIME").unwrap_or_else(|_| "ncnn".into())];
+    budgets_read(&bunko_engines::EnginePipeline::new(cfg), &device);
+}

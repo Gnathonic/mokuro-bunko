@@ -124,7 +124,8 @@ pub const FLAG_FP16_STORAGE: u32 = 2;
 pub const CHECK_GEMM: u32 = 1;
 pub const CHECK_ATTN: u32 = 2;
 pub const CHECK_ARGMAX: u32 = 4;
-/// hayai-nova's patch budget the graphs are written for.
+/// hayai-nova's largest patch budget (the graphs' trained one); any budget up to it reads
+/// ([`hayai::check_budget`]): each crop runs the vision graph at its own patch count.
 pub const HAYAI_BUDGET: usize = 512;
 
 const ERR_VRAM: c_int = 4;
@@ -278,6 +279,8 @@ pub struct HayaiFiles<'a> {
 
 pub struct NcnnHayai {
     handle: Mutex<Handle>,
+    /// The crops' patch budget (at most [`HAYAI_BUDGET`]).
+    budget: usize,
     pos_grid: Vec<f32>,
     grid: usize,
     pos_dim: usize,
@@ -298,13 +301,16 @@ impl Drop for NcnnHayai {
 }
 
 impl NcnnHayai {
-    /// On ncnn Vulkan device `device` (an index from [`devices`]).
+    /// On ncnn Vulkan device `device` (an index from [`devices`]), reading crops at
+    /// patch budget `budget`.
     pub fn load(
         files: &HayaiFiles<'_>,
         device: usize,
         flags: u32,
+        budget: usize,
         info: RecognizerInfo,
     ) -> Result<Self, NcnnError> {
+        hayai::check_budget(budget, HAYAI_BUDGET).map_err(NcnnError::Load)?;
         let pos = Npy::load(files.pos_table).map_err(|e| NcnnError::Load(e.to_string()))?;
         let (np, pos_dim) = match pos.shape[..] {
             [a, b] => (a, b),
@@ -337,6 +343,7 @@ impl NcnnHayai {
             }
             Ok(Self {
                 handle: Mutex::new(Handle(h.cast())),
+                budget,
                 pos_grid,
                 grid,
                 pos_dim,
@@ -385,7 +392,7 @@ impl NcnnHayai {
         let inv255 = (1.0f64 / 255.0) as f32;
         let (mut hp, mut wp, mut pvs, mut poss) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         for crop in crops {
-            let (th, tw) = hayai::size_for_budget(crop.height, crop.width, HAYAI_BUDGET);
+            let (th, tw) = hayai::size_for_budget(crop.height, crop.width, self.budget);
             let img = resize(crop, tw, th, Filter::Bilinear);
             let (h, w) = (th / hayai::PATCH, tw / hayai::PATCH);
             let mut pv = vec![0f32; h * w * hayai::PATCH_DIM];

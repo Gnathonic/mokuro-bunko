@@ -33,6 +33,9 @@ use crate::torch::loader::{Loaded, Pack};
 
 /// `pack.json` `variant` of the Vulkan pack.
 pub const VARIANT: &str = "vulkan";
+/// hayai-nova's patch budget in the self-test goldens (`vulkan_check golden` reads them
+/// at it).
+pub const GOLDEN_BUDGET: u32 = 512;
 /// Use this pack directory instead of searching the backends directories.
 pub const PACK_ENV: &str = "MOKURO_VULKAN_PACK";
 /// The verdict cache and crash markers, in the first backends directory.
@@ -727,36 +730,71 @@ pub fn select(
             );
             format!("{}: {reason}", c.runtime)
         };
+        // The goldens are read at GOLDEN_BUDGET: a recognizer for another patch budget is
+        // self-tested by a load at that budget first (the verdict is the runtime's on this
+        // device, whatever the budget).
+        let golden_opts = opts
+            .patch_budget
+            .filter(|&b| b != GOLDEN_BUDGET)
+            .map(|_| LoadOptions {
+                patch_budget: Some(GOLDEN_BUDGET),
+                ..opts.clone()
+            });
+        let pass = |g: &Golden| {
+            store.record(
+                &c.key,
+                Verdict {
+                    pass: true,
+                    reason: format!("self-test passed ({} crops)", g.crops.len()),
+                    runtime: c.runtime.clone(),
+                    engine: engine.to_string(),
+                    device: device.name.clone(),
+                    at: now(),
+                },
+            );
+        };
+        if cached.is_none()
+            && let (Some(g), Some(gopts)) = (golden, &golden_opts)
+        {
+            store.mark(&c.key, c, engine, &device.name, "self-testing");
+            let checked = loader
+                .load(&c.runtime, engine, pack_device, dir, gopts)
+                .map_err(|e| format!("could not load: {e}"))
+                .and_then(|r| g.check(r.as_ref()));
+            if let Err(e) = checked {
+                store.unmark(&c.key);
+                why.push(fail(e));
+                continue;
+            }
+            pass(g);
+        }
         store.mark(&c.key, c, engine, &device.name, "loading");
         let reader = match loader.load(&c.runtime, engine, pack_device, dir, opts) {
             Ok(r) => r,
             Err(e) => {
                 store.unmark(&c.key);
-                why.push(fail(format!("could not load: {e}")));
+                // A pack from before 0.8.0 reads hayai-nova at patch budget 512 only: the
+                // pack is to update, the runtime is fine on this device (no verdict).
+                if crate::torch::is_pack_budget_refusal(&e) {
+                    why.push(format!("{}: could not load: {e}", c.runtime));
+                } else {
+                    why.push(fail(format!("could not load: {e}")));
+                }
                 continue;
             }
         };
         if cached.is_none() {
             match golden {
-                Some(g) => {
+                Some(g) if golden_opts.is_none() => {
                     store.mark(&c.key, c, engine, &device.name, "self-testing");
                     if let Err(e) = g.check(reader.as_ref()) {
                         store.unmark(&c.key);
                         why.push(fail(e));
                         continue;
                     }
-                    store.record(
-                        &c.key,
-                        Verdict {
-                            pass: true,
-                            reason: format!("self-test passed ({} crops)", g.crops.len()),
-                            runtime: c.runtime.clone(),
-                            engine: engine.to_string(),
-                            device: device.name.clone(),
-                            at: now(),
-                        },
-                    );
+                    pass(g);
                 }
+                Some(_) => {} // self-tested above, at GOLDEN_BUDGET
                 None => warn!(
                     "{engine} on {} with {}: no self-test file, not verified",
                     device.name, c.runtime
@@ -1329,7 +1367,11 @@ mod tests {
         text: String,
         load_err: Option<String>,
         read_err_after: Option<usize>,
+        /// A pack from before 0.8.0: hayai-nova at patch budget 512 only (its text).
+        budget_512_only: bool,
         loads: AtomicUsize,
+        /// The patch budget of every load.
+        budgets: Mutex<Vec<Option<u32>>>,
         reads: Arc<AtomicUsize>,
     }
 
@@ -1339,7 +1381,9 @@ mod tests {
                 text: text.into(),
                 load_err: None,
                 read_err_after: None,
+                budget_512_only: false,
                 loads: AtomicUsize::new(0),
+                budgets: Mutex::new(Vec::new()),
                 reads: Arc::new(AtomicUsize::new(0)),
             })
         }
@@ -1387,8 +1431,14 @@ mod tests {
             );
             let f = &self.0.iter().find(|(n, _)| *n == runtime).unwrap().1;
             f.loads.fetch_add(1, Ordering::SeqCst);
+            f.budgets.lock().unwrap().push(opts.patch_budget);
             if let Some(e) = &f.load_err {
                 return Err(e.clone());
+            }
+            if let Some(b) = opts.patch_budget.filter(|&b| f.budget_512_only && b != 512) {
+                return Err(format!(
+                    "hayai-nova's ncnn graphs read patch budget 512, not {b}"
+                ));
             }
             Ok(Box::new(FakeReader {
                 text: f.text.clone(),
@@ -1533,6 +1583,90 @@ mod tests {
         };
         assert!(err[0].contains("files are not here"), "{err:?}");
         assert!(store.verdict("other").is_none());
+    }
+
+    fn pick_at(
+        fakes: &Fakes,
+        store: &VerdictStore,
+        c: &[Candidate],
+        g: Option<&Golden>,
+        budget: u32,
+    ) -> Result<Selected, Vec<String>> {
+        let opts = LoadOptions {
+            patch_budget: Some(budget),
+            ..Default::default()
+        };
+        select(
+            fakes,
+            store,
+            c,
+            &[],
+            "hayai-nova",
+            &dev(),
+            "gpu:0",
+            &opts,
+            g,
+            None,
+        )
+    }
+
+    /// The goldens are read at 512: a recognizer for another budget self-tests a load at
+    /// 512 once, then reads with its own; the verdict serves every budget.
+    #[test]
+    fn another_patch_budget_self_tests_at_the_goldens_budget() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = VerdictStore::new(tmp.path().join(STATE_FILE));
+        let ncnn = Fake::new("こんにちは");
+        let fakes = Fakes(vec![("ncnn", ncnn.clone()), ("webgpu", Fake::new("x"))]);
+        let c = cands(tmp.path());
+        let g = golden("こんにちは");
+        let s = pick_at(&fakes, &store, &c, Some(&g), 256).unwrap();
+        assert_eq!(s.runtime, "ncnn");
+        assert_eq!(
+            *ncnn.budgets.lock().unwrap(),
+            vec![Some(GOLDEN_BUDGET), Some(256)]
+        );
+        assert_eq!(ncnn.reads.load(Ordering::SeqCst), 1, "self-tested once");
+        assert!(store.verdict(&c[0].key).unwrap().pass);
+        // Then 384, and 512 itself: one load each, no second self-test.
+        pick_at(&fakes, &store, &c, Some(&g), 384).unwrap();
+        pick_at(&fakes, &store, &c, Some(&g), 512).unwrap();
+        assert_eq!(
+            *ncnn.budgets.lock().unwrap(),
+            vec![Some(512), Some(256), Some(384), Some(512)]
+        );
+        assert_eq!(ncnn.reads.load(Ordering::SeqCst), 1);
+    }
+
+    /// A pack from before 0.8.0 refuses budgets other than 512: a reason, never a verdict
+    /// against the runtime (it still reads 512 on this device).
+    #[test]
+    fn an_old_packs_budget_refusal_is_no_verdict() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = VerdictStore::new(tmp.path().join(STATE_FILE));
+        let old = |text: &str| {
+            Arc::new(Fake {
+                budget_512_only: true,
+                ..Arc::into_inner(Fake::new(text)).unwrap()
+            })
+        };
+        let (ncnn, wg) = (old("right"), old("right"));
+        let fakes = Fakes(vec![("ncnn", ncnn.clone()), ("webgpu", wg)]);
+        let c = cands(tmp.path());
+        let g = golden("right");
+        let err = match pick_at(&fakes, &store, &c, Some(&g), 256) {
+            Ok(_) => panic!("an old pack reads 512 only"),
+            Err(e) => e,
+        };
+        assert!(
+            err[0].starts_with("ncnn: could not load: hayai-nova's ncnn graphs read patch budget"),
+            "{err:?}"
+        );
+        assert!(crate::torch::is_pack_budget_refusal(&err.join("; ")));
+        // The self-test at 512 passed; the refusal recorded nothing against the runtime.
+        assert!(store.verdict(&c[0].key).unwrap().pass);
+        let s = pick_at(&fakes, &store, &c, Some(&g), 512).unwrap();
+        assert_eq!(s.runtime, "ncnn");
     }
 
     #[test]
