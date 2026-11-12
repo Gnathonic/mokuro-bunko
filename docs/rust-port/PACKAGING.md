@@ -794,8 +794,12 @@ bunko-torch, bunko-vlm, bunko-vulkan and bunko-ncnn, with what `torch_specs.rs`,
 is no part of a pack's cdylib (its code, page decoding included, runs in the host); it
 counts as a pack input for its model manifests: `torch_models.json`, which `xtask
 torch-pack` reads, and `vulkan_models.json`, which bunko-vulkan's tests check. 0.7.4 to
-0.8.0 build the same packs (the packs of 0.7.1 to 0.7.3 lack 0.7.4's fix for a libtorch
-recognizer's leaked weights, so 0.8 refuses them). When a change to those is one an older
+0.8.0 build packs that read the same (the packs of 0.7.1 to 0.7.3 lack 0.7.4's fix for a
+libtorch recognizer's leaked weights, so 0.8 refuses them). 0.8.0's packs also read
+hayai-nova at patch budgets below 512; an older pack refuses them, and the host turns that
+refusal into "update the OCR backend pack" (`install-ocr --force`) instead of a CPU
+fallback. A feature an older pack lacks is not a reason to move the floor while what it
+does read stays the same. When a change to those is one an older
 pack lacks, `OLDEST_PACK_RELEASE` moves to the release being made. bunko-torch's test
 `pack_inputs` fingerprints those files and fails on any change until it is decided
 either way (move the floor, or record the new fingerprint). A pack without

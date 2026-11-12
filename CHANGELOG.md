@@ -755,6 +755,17 @@
   volume went back to the queue, and nothing ever removed the file. Its uploads now go
   with it, as they do when its session ends (a result already being installed stays
   until the install is done).
+- **hayai-nova reads at patch budgets 256 and 384 on libtorch and ncnn.** The settings
+  offer both, but only the WebGPU runtime read at them: the libtorch packs refused to
+  load (`hayai-nova packages are compiled for patch budget 512, not 256`), ncnn refused
+  the same way, and the session's CPU fallback then failed with the same pack. Each
+  crop is now resized for the row's budget and read in the graphs' 512 patches, the
+  rest masked, as a small crop already was. At 512 the text is unchanged. The Vulkan
+  self-test reads its goldens at 512 whatever the row's budget, and one verdict serves
+  every budget. A backend pack from before this release still reads 512 only: at 256
+  or 384 the session stops with `update the OCR backend pack` (`mokuro-bunko
+  install-ocr --force`) instead of trying the CPU, and the refusal is no verdict against
+  the Vulkan runtime on that card.
 - **A library folder never takes a volume Mokuro Reader is still writing.** The
   reader's Local Folder writes the way Chromium does: an empty file first, then the
   bytes into `<name>.crswap` beside it, renamed over the empty file at the end. Bunko

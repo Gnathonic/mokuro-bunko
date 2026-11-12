@@ -1128,7 +1128,7 @@ ocr:
 | `enabled` | `true` | A disabled row queues nothing and writes nothing. Its name stays reserved. |
 | `engine` | — (required) | One of the [engines](#ocr-engines). |
 | `detector` | `ppocr-manga` | The [text detector](#ocr-detectors) of every engine but `ppocr-manga`: `ppocr-manga`, `ctd-lines`, or (for the engines that read blocks) `animetext-blocks`. Ignored (and stored as `null`) for the `ppocr-manga` engine, which brings its own. |
-| `patch_budget` | `512` | `256`, `384` or `512`: the resolution `hayai-nova` reads each line at. Reaches no other engine. |
+| `patch_budget` | `512` | `256`, `384` or `512`: the resolution `hayai-nova` reads each line at, on every backend (libtorch, ncnn, WebGPU, the CPU). A backend pack from before 0.8.0 reads 512 only; at another budget its session stops with "update the OCR backend pack" (`mokuro-bunko install-ocr --force`). Reaches no other engine. |
 | `precision` | `auto-accuracy` | The row's [precision mode](#precision-modes), the same on every machine: `auto-accuracy`, `auto-balanced`, `auto-speed`, or `fp32` / `bf16` / `fp16` only. `ppocr-manga` fixes its own and ignores it. |
 | `pools` | `{}` (derive) | Where each stage of this row runs and how wide. See [Pools](#pools-stages-and-devices). |
 

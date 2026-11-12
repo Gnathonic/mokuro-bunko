@@ -122,6 +122,19 @@ pub fn size_for_budget(h: usize, w: usize, budget: usize) -> (usize, usize) {
     (scaled(lo, h), scaled(lo, w))
 }
 
+/// Whether graphs written for `graphs` patches per crop read at patch budget `budget`:
+/// any budget from 1 to `graphs`. A crop resized for a smaller budget fills fewer of the
+/// graphs' patches and the rest are masked padding, as for any crop that is small
+/// already; a larger budget does not fit the graphs.
+pub fn check_budget(budget: usize, graphs: usize) -> Result<(), String> {
+    if budget == 0 || budget > graphs {
+        return Err(format!(
+            "hayai-nova's graphs read patch budgets 1 to {graphs}, not {budget}"
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -137,5 +150,25 @@ mod tests {
         assert_eq!(size_for_budget(3, 3, 512).0 % 16, 0);
         let (a, b) = size_for_budget(64, 64, 256);
         assert_eq!((a, b), (256, 256));
+    }
+
+    /// The settings' budgets fit the 512-patch graphs; nothing above them, nor zero.
+    #[test]
+    fn budgets_up_to_the_graphs_read() {
+        for b in [1, 256, 384, 512] {
+            assert_eq!(check_budget(b, 512), Ok(()), "{b}");
+        }
+        for b in [0, 513, 1024] {
+            let e = check_budget(b, 512).unwrap_err();
+            assert_eq!(
+                e,
+                format!("hayai-nova's graphs read patch budgets 1 to 512, not {b}")
+            );
+        }
+        // A smaller budget is a smaller resize: never more patches than it allows.
+        for b in [256, 384] {
+            let (h, w) = size_for_budget(716, 64, b);
+            assert!((h / PATCH) * (w / PATCH) <= b);
+        }
     }
 }
