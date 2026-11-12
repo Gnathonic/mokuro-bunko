@@ -732,7 +732,8 @@
   never be sent. A status file's write is dropped, because Bunko writes the file again
   when it is due. Any other write, such as an OCR result or a compiled file, is
   reported as a `lost-write` conflict that names its path. A write whose bytes changed
-  after staging still fails and keeps its bytes for the export.
+  after staging, or are there but cannot be read (permissions, an I/O error), still
+  fails and keeps its bytes for a retry or the export.
 - **The series queue files wait quietly for the OCR queue.** Until the scheduler's
   first walk of the library was over (an hour on a large cloud library), the store's
   series-file sink asked it for the queue about a hundred times a second. It now asks

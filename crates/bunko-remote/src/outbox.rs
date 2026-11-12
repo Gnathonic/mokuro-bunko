@@ -1513,19 +1513,23 @@ impl<B: Backend> Core<B> {
                 false,
             )),
             Err(e) => {
-                Err(self.bytes_lost(op, format!("the staged bytes cannot be read: {e}"), true))
+                // Gone only when there is no such file: one that cannot be read for
+                // another reason (permissions, an I/O error, too many open files) may
+                // still hold the bytes, and is kept with them.
+                let gone = e.kind() == io::ErrorKind::NotFound;
+                Err(self.bytes_lost(op, format!("the staged bytes cannot be read: {e}"), gone))
             }
         }
     }
 
-    /// The op's staged bytes are not the ones it staged (`gone`: there are none to
-    /// read), so it can never be sent. A Status file is dropped: its writer stages it
+    /// The op's staged bytes are not the ones it staged (`gone`: there is no such
+    /// file), so it can never be sent. A Status file is dropped: its writer stages it
     /// again (the series-file sink hears the op failed and marks its series again, and
     /// no Bunko writes the root queue file any more), so a FAILED op would only stand
     /// in the outbox for good. Anything else is reported: without bytes, as a
     /// `lost-write` conflict naming its path (the op ends CONFLICT, as an op whose
-    /// destination went does); with other bytes, FAILED with a `failed-op` conflict,
-    /// keeping them for the Disconnect export.
+    /// destination went does); with other bytes, or a file that is there but cannot be
+    /// read, FAILED with a `failed-op` conflict, keeping it for the Disconnect export.
     fn bytes_lost(&self, op: &mut Op, why: String, gone: bool) -> Step {
         if op.origin == Origin::Status {
             tracing::info!(
@@ -2245,13 +2249,28 @@ impl<B: Backend> Core<B> {
     pub(crate) fn replay(&self) {
         let ops = self.load_ops();
         let mut keep = std::collections::HashSet::new();
-        let mut root_queue = 0usize;
+        let root_queue = ops.iter().filter(|o| is_root_queue_put(o)).count();
+        if root_queue > 0 {
+            // What the pre-release's writes left for the admin: FAILED ops' `failed-op`
+            // rows, an op that gave up on a foreign version's `lost-write` row. Resolved
+            // before the ops go, so a start cut short in between finds an op still
+            // there next time and resolves them then (the other way round, the rows
+            // would stand for good with no op left to say why).
+            let resolved = self.state.conflicts_resolve_at(
+                &[ConflictRow::FailedOp, ConflictRow::LostWrite],
+                crate::names::ROOT_QUEUE_FILE,
+            );
+            tracing::info!(
+                ops = root_queue,
+                conflicts = resolved,
+                "outbox: the root queue file's writes are dropped (queue file v2 writes none)"
+            );
+        }
         for mut op in ops {
             if is_root_queue_put(&op) {
                 // A pre-release's root queue file (queue file v2 §3): never sent. A
                 // live one's marker goes too, so the sink's leftover rule, which waits
                 // for a pending write of the file, deletes it.
-                root_queue += 1;
                 let _ = self.index.lock().clear_pending(&op.op_id());
                 op.state = OpState::Superseded;
                 self.drop_op(&op, false);
@@ -2288,19 +2307,6 @@ impl<B: Backend> Core<B> {
                     self.ops.lock().insert(op.id, op);
                 }
             }
-        }
-        if root_queue > 0 {
-            // What they left for the admin: FAILED ops' `failed-op` rows, an op that
-            // gave up on a foreign version's `lost-write` row.
-            let resolved = self.state.conflicts_resolve_at(
-                &[ConflictRow::FailedOp, ConflictRow::LostWrite],
-                crate::names::ROOT_QUEUE_FILE,
-            );
-            tracing::info!(
-                ops = root_queue,
-                conflicts = resolved,
-                "outbox: the root queue file's writes are dropped (queue file v2 writes none)"
-            );
         }
         // Unreferenced outbox files.
         if let Ok(rd) = std::fs::read_dir(self.outbox_dir()) {

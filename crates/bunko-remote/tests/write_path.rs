@@ -1974,3 +1974,58 @@ fn an_op_whose_staged_bytes_are_gone_is_dropped_or_reported_lost_by_origin() {
     assert!(!fs::exists(t.abs("S/S 1.mokuro")));
     assert!(!fs::exists(t.abs(&status)));
 }
+
+/// Regression: staged bytes that are there but cannot be read (a permission, an I/O
+/// error, too many open files) were taken for gone. An OCR result, a compiled file or a
+/// reader's write then ended CONFLICT and its bytes were deleted, so a passing error
+/// cost the write for good. Only a staged file that does not exist is a lost write; one
+/// that cannot be read fails the op, which keeps it for a retry or the export.
+#[cfg(unix)]
+#[test]
+fn staged_bytes_that_cannot_be_read_are_kept() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = T::new(FakeBackend::drive_like(), &[("S/S 1.cbz", b"zip")]);
+    t.wait_steady();
+    t.gate(false);
+    let p = t.publish(
+        "S/S 1.mokuro",
+        b"{\"ocr\":1}",
+        deferred(ocr(), Mode::CreateNew),
+    );
+    let staged = t
+        .tmp
+        .path()
+        .join("cloud/s/outbox")
+        .join(p.op.unwrap().0.to_string());
+    std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::File::open(&staged).is_ok() {
+        // Root reads any file: nothing to test here.
+        return;
+    }
+    t.gate(true);
+    t.idle();
+    std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let ob = t.s().outbox();
+    let op = ob
+        .iter()
+        .find(|o| o.dest == "S/S 1.mokuro")
+        .expect("the op stays");
+    assert_eq!(op.state, "FAILED", "{ob:?}");
+    assert_eq!(
+        std::fs::read(&staged).unwrap(),
+        b"{\"ocr\":1}",
+        "its bytes are kept"
+    );
+    let conflicts = t.s().conflicts();
+    assert!(
+        conflicts
+            .iter()
+            .any(|(kind, path, _)| kind == "failed-op" && path == "S/S 1.mokuro"),
+        "{conflicts:?}"
+    );
+    assert!(
+        conflicts.iter().all(|(kind, _, _)| kind != "lost-write"),
+        "{conflicts:?}"
+    );
+    assert_eq!(t.fake.calls(FakeOp::Upload), 0);
+}
