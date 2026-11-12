@@ -943,3 +943,203 @@ fn a_rewritten_file_stays_own_through_feed_polls_on_every_provider() {
         assert_eq!(n, 2, "{name}: one write per change");
     }
 }
+
+// ---- the upgrade from the root queue file, and a source with no answer yet ---------
+
+/// The root queue file a 0.8 pre-release wrote.
+const ROOT: &str = ".mokuro-queue.json";
+
+/// What a pre-release's lost root-file writes left in the outbox, as a trial library
+/// had them: FAILED at UPLOADING with attempts 0 ("the staged bytes cannot be read"),
+/// their bytes gone, a `failed-op` conflict each.
+fn seed_failed_root_writes(t: &T, ids: &[u64], file_pid: &str, root_pid: &str) {
+    let db = rusqlite::Connection::open(t.tmp.path().join("cloud/s/state.sqlite")).unwrap();
+    let why = "the staged bytes cannot be read: No such file or directory (os error 2)";
+    for id in ids {
+        db.execute(
+            "INSERT INTO outbox(op_id, seq, kind, dest, mode, origin, durability, target_pid, \
+             parent_pid, name, staged, sha256, size, state, attempts, next_at, last_error, \
+             created_at) VALUES(?1, ?2, 'put', ?3, 'replace', 'status', 'deferred', ?4, ?5, \
+             ?3, ?1, ?6, 20, 'FAILED', 0, 0, ?7, ?8)",
+            rusqlite::params![
+                id.to_string(),
+                *id as i64,
+                ROOT,
+                file_pid,
+                root_pid,
+                "0".repeat(64),
+                why,
+                (wall() * 1000.0) as i64
+            ],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO conflict(kind, path, pid, detail, first_seen) \
+             VALUES('failed-op', ?1, ?2, ?3, ?4)",
+            rusqlite::params![ROOT, file_pid, why, (wall() * 1000.0) as i64],
+        )
+        .unwrap();
+    }
+}
+
+/// The first start after a 0.8 pre-release that wrote the root `.mokuro-queue.json`:
+/// none of that file's writes is left in the outbox (one on its way is never sent, the
+/// lost ones no longer show as failed, their conflicts go), the lease holder deletes
+/// the file (its own version, for good), and the series files appear.
+#[test]
+fn an_upgrade_drops_the_root_queue_files_writes_and_deletes_it() {
+    // A file of that name in a series folder is not the leftover: a reader's.
+    let readers = br#"{"mine":true}"#;
+    let mut t = T::new(
+        FakeBackend::drive_like(),
+        &[
+            ("Alpha/Alpha 1.cbz", b"zip"),
+            ("Alpha/.mokuro-queue.json", readers),
+        ],
+        lease_quick,
+    );
+    t.holder();
+    let theirs = t.fake.node_at(&format!("{FOLDER}/Alpha/{ROOT}")).unwrap();
+    let replace = || Mode::Replace { base: None };
+    // The pre-release's root file: its status writer's own version.
+    put(
+        &t,
+        ROOT,
+        br#"{"version":1,"n":1}"#,
+        Origin::Status,
+        replace(),
+    );
+    t.idle();
+    let v1 = t.fake.node_at(&format!("{FOLDER}/{ROOT}")).unwrap();
+    let root = t.fake.node_at(FOLDER).unwrap();
+    // One more on its way when it stopped: staged, held.
+    t.s().set_lease_gate(Arc::new(|| false));
+    put(
+        &t,
+        ROOT,
+        br#"{"version":1,"n":2}"#,
+        Origin::Status,
+        replace(),
+    );
+    wait_until("the write held", || {
+        t.s()
+            .outbox()
+            .iter()
+            .any(|o| o.dest == ROOT && o.state == "HELD")
+    });
+    t.stop();
+    seed_failed_root_writes(&t, &[9001, 9002], &v1.pid, &root.pid);
+    t.start();
+    let ob = t.s().outbox();
+    assert!(ob.iter().all(|o| o.dest != ROOT), "{ob:?}");
+    assert!(t.s().conflicts().is_empty(), "{:?}", t.s().conflicts());
+    t.holder();
+    t.src
+        .set(|s| put_series(s, "Alpha", vec![("Alpha 1", queued(None))]));
+    t.connect();
+    wait_until("the root file gone and Alpha's file", || {
+        t.fake.node_at(&format!("{FOLDER}/{ROOT}")).is_none() && t.file("Alpha").is_some()
+    });
+    t.idle();
+    assert!(
+        t.fake.deleted_log().contains(&v1.pid),
+        "deleted {:?}, trashed {:?}",
+        t.fake.deleted_log(),
+        t.fake.trashed_log()
+    );
+    let root_uploads = t.fake.upload_log().iter().filter(|n| *n == ROOT).count();
+    assert_eq!(root_uploads, 1, "the held write was sent");
+    assert!(t.s().outbox().iter().all(|o| o.dest != ROOT));
+    assert!(t.s().conflicts().is_empty(), "{:?}", t.s().conflicts());
+    let now = t.fake.node_at(&format!("{FOLDER}/Alpha/{ROOT}")).unwrap();
+    assert_eq!(now.pid, theirs.pid);
+    assert_eq!(t.fake.content(&now.pid).unwrap(), readers);
+    assert!(!t.fake.trashed_log().contains(&theirs.pid));
+}
+
+/// A queue source with no answer yet (the server's, until its first walk of the
+/// library is over: an hour on a large cloud library).
+#[derive(Default)]
+struct Silent {
+    asks: std::sync::atomic::AtomicUsize,
+}
+
+impl SeriesQueueSource for Silent {
+    fn snapshot(&self) -> SnapshotFuture<'_> {
+        self.asks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Box::pin(async { None })
+    }
+
+    fn regeneration_pending(&self, _folder: &str) -> bool {
+        false
+    }
+
+    fn waiting_for(&self) -> Option<&'static str> {
+        Some("first_walk")
+    }
+}
+
+/// Regression: a source with no answer was asked again every 10 ms (the sink looked
+/// again at once when it had never looked), so the scheduler was asked about a
+/// hundred times a second for as long as its first walk ran.
+#[test]
+fn a_source_with_no_answer_yet_is_asked_about_once_a_second() {
+    let t = T::new(
+        FakeBackend::drive_like(),
+        &[("Alpha/Alpha 1.cbz", b"zip")],
+        no_tune,
+    );
+    let silent = Arc::new(Silent::default());
+    t.s().set_series_queue_source(silent.clone());
+    let asks = || silent.asks.load(std::sync::atomic::Ordering::Relaxed);
+    wait_until("the first question", || asks() > 0);
+    let n = asks();
+    std::thread::sleep(Duration::from_secs(3));
+    let asked = asks() - n;
+    assert!(asked <= 6, "asked {asked} times in 3 s");
+    assert_eq!(t.uploads(), 0);
+}
+
+/// The sink's status says why no series file is written yet, then what it wrote.
+#[test]
+fn the_sink_status_says_why_nothing_is_written_yet() {
+    let t = T::new(
+        FakeBackend::drive_like(),
+        &[("Alpha/Alpha 1.cbz", b"zip")],
+        no_tune,
+    );
+    let sink = t.s().series_queue().unwrap().clone();
+    let state = || sink.status_json()["state"].as_str().unwrap().to_string();
+    assert_eq!(state(), "no_source");
+    let st = sink.status_json();
+    assert_eq!(
+        st,
+        json!({"state": "no_source", "files": 0, "staged": 0, "backlog": 0,
+               "last_flush_at": null})
+    );
+    // The server's queue, before its first walk of the library is over.
+    t.s().set_series_queue_source(Arc::new(Silent::default()));
+    wait_until("waiting for the first walk", || {
+        state() == "waiting_for_first_walk"
+    });
+    assert_eq!(t.uploads(), 0);
+    // The queue answers: Alpha's file is written.
+    t.src
+        .set(|s| put_series(s, "Alpha", vec![("Alpha 1", queued(None))]));
+    let start = wall();
+    t.connect();
+    wait_until("Alpha's file", || t.file("Alpha").is_some());
+    t.idle();
+    wait_until("idle", || state() == "idle");
+    let st = sink.status_json();
+    assert_eq!(st["files"], 1, "{st}");
+    assert_eq!(st["staged"], 0, "{st}");
+    assert_eq!(st["backlog"], 0, "{st}");
+    let at = st["last_flush_at"].as_f64().unwrap();
+    assert!(at >= start - 1.0 && at <= wall() + 1.0, "{st}");
+    // The writes held (the lease lost, say): fenced.
+    t.s().set_lease_gate(Arc::new(|| false));
+    wait_until("fenced", || state() == "fenced");
+    t.s().set_lease_gate(Arc::new(|| true));
+    wait_until("idle again", || state() == "idle");
+}

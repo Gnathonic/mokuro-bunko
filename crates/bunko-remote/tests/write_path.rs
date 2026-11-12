@@ -1871,3 +1871,161 @@ fn a_status_write_never_overwrites_another_spelling_in_place() {
         Some(&b"{\"old\":true}"[..])
     );
 }
+
+// ---- staged bytes (a trial library's FAILED root queue writes) --------------------
+
+/// Regression: two writers staged one file at once (a 0.8 pre-release's root queue
+/// file: its floor timer and its 2 s loop). The newer write's coalescing superseded the
+/// older one between the older one's two staging steps (its row and bytes went), and
+/// the older one then saved itself again: an op without bytes, run at once, FAILED at
+/// UPLOADING ("the staged bytes cannot be read") with attempts 0, for good. The older
+/// one also superseded the newer one, so neither reached the provider.
+#[test]
+fn a_write_superseded_while_it_was_staged_stays_superseded() {
+    for (rel, origin) in [
+        (format!("S/{QUEUE_FILE}"), Origin::Status),
+        ("S/series.json".to_string(), Origin::Compiler),
+    ] {
+        let t = T::new(FakeBackend::drive_like(), &[("S/S 1.cbz", b"zip")]);
+        t.wait_steady();
+        t.gate(false);
+        let w = deferred(origin.clone(), Mode::Replace { base: None });
+        let dest = t.abs(&rel);
+        let older = t
+            .s()
+            .stage_half(&t.local("older", b"{\"v\":1}"), &dest, &w)
+            .unwrap();
+        let newer = t
+            .s()
+            .stage_half(&t.local("newer", b"{\"v\":2}"), &dest, &w)
+            .unwrap();
+        t.s().stage_rest(newer).unwrap();
+        t.s().stage_rest(older).unwrap();
+        t.gate(true);
+        t.idle();
+        let left: Vec<_> = t
+            .s()
+            .outbox()
+            .into_iter()
+            .filter(|o| !matches!(o.state, "COMMITTED" | "CONFIRMED"))
+            .collect();
+        assert!(left.is_empty(), "{origin:?}: {left:?}");
+        assert!(t.s().conflicts().is_empty(), "{:?}", t.s().conflicts());
+        assert_eq!(
+            t.remote_bytes(&rel).as_deref(),
+            Some(&b"{\"v\":2}"[..]),
+            "{origin:?}: the newer write lands"
+        );
+        assert_eq!(fs::read(t.abs(&rel)).unwrap(), b"{\"v\":2}");
+    }
+}
+
+/// An op whose staged bytes are gone can never be sent. A Status file is dropped (its
+/// writer stages it again); any other write is a lost write, reported with its path as
+/// a `lost-write` conflict. None sits FAILED with attempts 0 for good.
+#[test]
+fn an_op_whose_staged_bytes_are_gone_is_dropped_or_reported_lost_by_origin() {
+    let t = T::new(FakeBackend::drive_like(), &[("S/S 1.cbz", b"zip")]);
+    t.wait_steady();
+    t.gate(false);
+    let replace = Mode::Replace { base: None };
+    let status = format!("S/{QUEUE_FILE}");
+    let ops = [
+        t.publish(
+            &status,
+            b"{\"v\":2}",
+            deferred(Origin::Status, replace.clone()),
+        ),
+        t.publish(
+            "S/S 1.mokuro",
+            b"{\"ocr\":1}",
+            deferred(ocr(), Mode::CreateNew),
+        ),
+        t.publish("catalog.json", b"{}", deferred(Origin::Compiler, replace)),
+    ];
+    let outbox = t.tmp.path().join("cloud/s/outbox");
+    for p in &ops {
+        std::fs::remove_file(outbox.join(p.op.unwrap().0.to_string())).unwrap();
+    }
+    t.gate(true);
+    t.idle();
+    let ob = t.s().outbox();
+    assert!(ob.iter().all(|o| o.state != "FAILED"), "{ob:?}");
+    assert!(
+        ob.iter().all(|o| o.dest != status),
+        "the status file is dropped: {ob:?}"
+    );
+    let conflicts = t.s().conflicts();
+    assert!(
+        conflicts.iter().all(|(kind, _, _)| kind == "lost-write"),
+        "{conflicts:?}"
+    );
+    let mut lost: Vec<&str> = conflicts.iter().map(|(_, p, _)| p.as_str()).collect();
+    lost.sort_unstable();
+    assert_eq!(lost, ["S/S 1.mokuro", "catalog.json"], "{conflicts:?}");
+    assert!(
+        conflicts
+            .iter()
+            .all(|(_, _, detail)| detail.contains("staged bytes")),
+        "{conflicts:?}"
+    );
+    // Nothing reached the provider, and the library no longer shows the lost files.
+    assert_eq!(t.fake.calls(FakeOp::Upload), 0);
+    assert!(!fs::exists(t.abs("S/S 1.mokuro")));
+    assert!(!fs::exists(t.abs(&status)));
+}
+
+/// Regression: staged bytes that are there but cannot be read (a permission, an I/O
+/// error, too many open files) were taken for gone. An OCR result, a compiled file or a
+/// reader's write then ended CONFLICT and its bytes were deleted, so a passing error
+/// cost the write for good. Only a staged file that does not exist is a lost write; one
+/// that cannot be read fails the op, which keeps it for a retry or the export.
+#[cfg(unix)]
+#[test]
+fn staged_bytes_that_cannot_be_read_are_kept() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = T::new(FakeBackend::drive_like(), &[("S/S 1.cbz", b"zip")]);
+    t.wait_steady();
+    t.gate(false);
+    let p = t.publish(
+        "S/S 1.mokuro",
+        b"{\"ocr\":1}",
+        deferred(ocr(), Mode::CreateNew),
+    );
+    let staged = t
+        .tmp
+        .path()
+        .join("cloud/s/outbox")
+        .join(p.op.unwrap().0.to_string());
+    std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::File::open(&staged).is_ok() {
+        // Root reads any file: nothing to test here.
+        return;
+    }
+    t.gate(true);
+    t.idle();
+    std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let ob = t.s().outbox();
+    let op = ob
+        .iter()
+        .find(|o| o.dest == "S/S 1.mokuro")
+        .expect("the op stays");
+    assert_eq!(op.state, "FAILED", "{ob:?}");
+    assert_eq!(
+        std::fs::read(&staged).unwrap(),
+        b"{\"ocr\":1}",
+        "its bytes are kept"
+    );
+    let conflicts = t.s().conflicts();
+    assert!(
+        conflicts
+            .iter()
+            .any(|(kind, path, _)| kind == "failed-op" && path == "S/S 1.mokuro"),
+        "{conflicts:?}"
+    );
+    assert!(
+        conflicts.iter().all(|(kind, _, _)| kind != "lost-write"),
+        "{conflicts:?}"
+    );
+    assert_eq!(t.fake.calls(FakeOp::Upload), 0);
+}

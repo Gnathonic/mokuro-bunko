@@ -632,6 +632,7 @@ fn the_storage_block_of_a_cloud_store() {
         "submissions",
         "lease",
         "quota",
+        "series_queue",
         "problems",
         "connect",
         "configured",
@@ -639,6 +640,11 @@ fn the_storage_block_of_a_cloud_store() {
     ] {
         assert!(v.get(k).is_some(), "{k} missing from {v}");
     }
+    // The series queue files' sink: no queue to write from here (no OCR scheduler).
+    assert_eq!(v["series_queue"]["state"], "no_source", "{v}");
+    assert_eq!(v["series_queue"]["files"], 0);
+    assert_eq!(v["series_queue"]["backlog"], 0);
+    assert_eq!(v["series_queue"]["last_flush_at"], Value::Null);
     assert_eq!(v["health"]["state"], "online");
     assert_eq!(v["engine"], "steady");
     assert!(v["synced_at"].as_f64().unwrap() > 0.0);
