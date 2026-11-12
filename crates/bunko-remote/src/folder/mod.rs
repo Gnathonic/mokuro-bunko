@@ -1831,6 +1831,8 @@ impl Backend for FolderBackend {
             chunk_multiple: 1,
             path_ids: true,
             duplicate_names: false,
+            // `<mtime_ns>-<size>`.
+            content_versions: false,
         }
     }
 

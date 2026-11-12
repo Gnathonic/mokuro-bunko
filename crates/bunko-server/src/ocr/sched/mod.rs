@@ -829,6 +829,9 @@ impl Scheduler {
             Exec::Threads(tx) => Some(tx.clone()),
             Exec::Inline => None,
         };
+        // After the walk, the facts of sidecars that are gone or changed go (now and then,
+        // and only from a settled index: an unsettled one may not list them yet).
+        let prune = self.deps.upgrade.clone().filter(|_| self.store_settled());
         self.run_background(Box::new(move || {
             let index = super::owed::walk_in_parts(
                 &library,
@@ -845,6 +848,10 @@ impl Scheduler {
                     }
                 },
             );
+            if let Some(up) = prune {
+                up.sidecar_facts()
+                    .prune_every(super::sidecar_facts::PRUNE_EVERY);
+            }
             Msg::Walked { epoch, index }
         }));
     }

@@ -1174,6 +1174,8 @@ impl Backend for GDriveBackend {
             chunk_multiple: CHUNK_MULTIPLE,
             path_ids: false,
             duplicate_names: true,
+            // `md5Checksum`: the bytes' own hash.
+            content_versions: true,
         }
     }
 

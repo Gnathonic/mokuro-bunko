@@ -1299,6 +1299,7 @@ mod tests {
             chunk_multiple: 1,
             path_ids: false,
             duplicate_names: true,
+            content_versions: true,
         };
         assert_eq!(pacing(&base), (Duration::from_secs(120), 30));
         let onedrive = BackendCaps {

@@ -401,6 +401,8 @@ fn caps_from(p: &Probe, disable_cas: bool) -> BackendCaps {
         chunk_multiple: 1,
         path_ids: true,
         duplicate_names: false,
+        // An ETag (often the host's mtime and size), or `<lastmod ms>-<size>`.
+        content_versions: false,
     }
 }
 

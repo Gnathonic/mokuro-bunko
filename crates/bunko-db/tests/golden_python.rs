@@ -39,6 +39,7 @@ fn is_v7_row(row: &Value) -> bool {
         .is_some_and(|t| t.starts_with("series_folder_"))
         || row[1].as_str() == Some("idx_volume_uploads_uploader_nocase")
         || row[1].as_str() == Some("idx_volume_identities_uuid")
+        || row[2].as_str() == Some("sidecar_facts")
 }
 
 /// [`all_schema_rows`] without the version 7 tables: what Python 0.5.3 compares.
@@ -144,10 +145,10 @@ fn version_of(path: &Path) -> i64 {
         .unwrap()
 }
 
-/// Version 7 (0.8) adds the series folder owners, the NOCASE uploader index and the
-/// volume uuid index, after everything 0.5.3 has. A new database is adopted at once (it
-/// tracks no volume); a Python one that tracks volumes waits for the server's adoption,
-/// and opening it again changes nothing.
+/// Version 7 (0.8) adds the series folder owners, the NOCASE uploader index, the volume
+/// uuid index and the OCR census's sidecar facts, after everything 0.5.3 has. A new
+/// database is adopted at once (it tracks no volume); a Python one that tracks volumes
+/// waits for the server's adoption, and opening it again changes nothing.
 #[test]
 fn series_folder_owner_tables() {
     let names = |path: &Path| -> Vec<String> {
@@ -165,6 +166,9 @@ fn series_folder_owner_tables() {
         "series_folder_adoption",
         "idx_volume_uploads_uploader_nocase",
         "idx_volume_identities_uuid",
+        "sidecar_facts",
+        "sqlite_autoindex_sidecar_facts_1",
+        "idx_sidecar_facts_version",
     ];
     let dir = tempfile::tempdir().unwrap();
     let fresh = dir.path().join("mokuro.db");

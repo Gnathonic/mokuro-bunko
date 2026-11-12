@@ -1629,6 +1629,7 @@ impl<B: Backend> LibraryStore for RemoteStore<B> {
             atomic_replace: self.core.caps.atomic_replace,
             server_copy: self.core.caps.server_copy,
             trash_on_delete: true,
+            content_versions: self.core.caps.content_versions,
         }
     }
 

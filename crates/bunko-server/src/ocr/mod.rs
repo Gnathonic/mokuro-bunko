@@ -8,6 +8,7 @@
 //! * [`owed`] — what the library is owed; [`collect`] — installing a result;
 //!   [`upgrade`] — generation upgrades; [`profiles`] — `processors/*.json`;
 //!   [`busy`] — the volumes OCR work touches now (the case merge waits for them);
+//!   [`sidecar_facts`] — what each sidecar says, read once per version of the file;
 //!   [`orphans`] — sweeping the `<stem>_<n>.mokuro` files older collectors wrote;
 //!   [`provenance`] — keeping a sealed block through an older reader's rewrite.
 //! * [`api`] — `/_processor/*` (protocol v3); [`queue_api`] + [`shape`] — `/queue`;
@@ -30,6 +31,7 @@ pub mod queue_file;
 pub mod sched;
 pub mod series_queue;
 pub mod shape;
+pub mod sidecar_facts;
 pub mod types;
 pub mod upgrade;
 

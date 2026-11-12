@@ -1146,6 +1146,8 @@ impl Backend for OneDriveBackend {
             chunk_multiple: FRAGMENT_MULTIPLE,
             path_ids: false,
             duplicate_names: false,
+            // `cTag`: the item's content tag, new with every content change.
+            content_versions: true,
         }
     }
 
