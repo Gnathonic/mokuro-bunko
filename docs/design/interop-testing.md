@@ -680,7 +680,12 @@ out a debounce and decide at its end whether to write.
   `steady`, `online` and `held` with no `suspect` sample, its marker beats in C (the
   marker is written into `roots()[0]`, so that is the canonical root; the admin API
   has no roots list), the reader trusts it again, and Bunko serves the library, C's
-  series and the nested one. S9's reader-alone part lives in `direct` and its restart
+  series and the nested one. Its "every file written since Bunko started" leaves out a
+  version a replace sent to the trash on its own while a file of its name in C is at
+  least as new (`replacedBelow`): until it sees the marker the reader still writes
+  into C (a `series.json` it compiles after its merge, in the second Bunko starts),
+  Bunko replaces that file, and MEGA, with no atomic replace, sends the reader's node
+  to the Rubbish Bin with its stamp. S9's reader-alone part lives in `direct` and its restart
   here: the `direct` suite runs no Bunko.
 - What they caught (each fixed test-first, its rig run failing before): Bunko never
   saw a `mokuro-reader` folder made while it ran (it located roots only at startup),

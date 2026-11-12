@@ -293,6 +293,23 @@ export function asSeeded(made) {
 }
 
 /**
+ * A version a replace sent to the trash, as `allowed` for `writesOutside`: a file sent
+ * to the trash on its own whose name a live file below `canonical` carries, written no
+ * earlier. MEGA has no atomic replace: a rewrite is a new node, and the old one goes to
+ * the rubbish bin with its own stamp. A reader's write into `canonical` that Bunko then
+ * replaced is no write outside it. A write that did land outside still counts: its
+ * folder went to the trash with it (not the file on its own), or the newest version is
+ * live outside `canonical`.
+ */
+export function replacedBelow(rows, canonical) {
+    const live = rows.filter((l) => !l.folder && !l.trashed && under(rows, l.id, canonical));
+    return (r) =>
+        !r.folder &&
+        r.explicitly_trashed &&
+        live.some((l) => l.name === r.name && Date.parse(l.modified) >= Date.parse(r.modified));
+}
+
+/**
  * Every file written (or made) at or after `since` (ms) lies below `canonical`, or is
  * one of `allowed(row)`: answers the rows that do not. Trashed files count too: a write
  * into a merged-away root (its pre-merge id kept as a write root) lands in the trash
