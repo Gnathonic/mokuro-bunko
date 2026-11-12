@@ -9,6 +9,13 @@
 //! cache is smaller than the library's sidecars here, as it is on a large library
 //! (`cache_mb` against GBs of sidecars), so the reads are counted from the
 //! `FakeBackend`'s read log. On a local library they are counted by the census's cache.
+//!
+//! What the census keeps is a hint, never a proof. A version that names no content (a
+//! local file's size and mtime; a WebDAV host's or a connected folder's mtime and size)
+//! can hide a rewrite at the same size within one tick of the clock, and two such files
+//! can share one: a step that deletes, replaces or promotes a file decides on its bytes
+//! read again under its lock, and keeps what it read; facts are found under another
+//! path only on a store whose version names the bytes (Drive, OneDrive, MEGA).
 
 // Fixtures are written and checked with std::fs on purpose.
 #![allow(clippy::disallowed_methods)]
@@ -21,12 +28,14 @@ use std::time::Duration;
 
 use bunko_core::config::UpgradeConfig;
 use bunko_core::generations::{Generation, default_generation};
-use bunko_db::Database;
+use bunko_db::{Database, SidecarFactsKey};
 use bunko_remote::fake::FakeBackend;
 use bunko_remote::{RemoteStore, RemoteStoreConfig};
+use bunko_server::ocr::collect::{CollectRequest, Outcome};
 use bunko_server::ocr::owed::{KnownPages, OwedVolume, UpgradeProbe, walk};
-use bunko_server::ocr::types::LibraryFacts;
-use bunko_server::ocr::upgrade::Upgrade;
+use bunko_server::ocr::sidecar_facts::SidecarFacts;
+use bunko_server::ocr::types::{Job, LibraryFacts};
+use bunko_server::ocr::upgrade::{Upgrade, Verdict};
 use bunko_store::{LibraryStore, MountGuard};
 use tempfile::TempDir;
 
@@ -66,14 +75,48 @@ fn pages() -> String {
 
 /// Bunko's own hayai-nova output at `revision` (sealed, as an OCR install leaves it).
 fn hayai(revision: u32, generation: &str, title: &str) -> Vec<u8> {
+    hayai_of(
+        revision,
+        generation,
+        title,
+        &["001.jpg", "002.jpg", "003.jpg"],
+    )
+}
+
+/// [`hayai`] whose pages name `images`.
+fn hayai_of(revision: u32, generation: &str, title: &str, images: &[&str]) -> Vec<u8> {
+    let pages = images
+        .iter()
+        .map(|i| format!(r#"{{"img_path":"{i}","blocks":[]}}"#))
+        .collect::<Vec<_>>()
+        .join(",");
     let text = format!(
-        r#"{{"version":"0.2.5","title":"{title}","volume":"V","ocr_engine":{{"id":"hayai-nova","detector":"ppocr-manga","patch_budget":512,"revision":{revision},"generation":"{generation}"}},"pages":[{}]}}"#,
-        pages()
+        r#"{{"version":"0.2.5","title":"{title}","volume":"V","ocr_engine":{{"id":"hayai-nova","detector":"ppocr-manga","patch_budget":512,"revision":{revision},"generation":"{generation}"}},"pages":[{pages}]}}"#,
     );
     let mut v = bunko_layout::json::Value::parse(&text).unwrap();
     bunko_layout::seal::seal(&mut v)
         .expect("an ocr_engine block to seal")
         .into_bytes()
+}
+
+/// The old main as 0.7.0-beta.3's upgrade kept it beside the new one: a stamped layer.
+fn kept_by_beta() -> Vec<u8> {
+    format!(
+        r#"{{"version":"0.2.1","title":"S","volume":"V","pages":[{}],"ocr_engine":{{"id":"mokuro","generation":"mokuro","generator":"mokuro-bunko 0.7.0-beta.3","upgraded_from_primary":true}}}}"#,
+        pages()
+    )
+    .into_bytes()
+}
+
+/// A reader's correction of the volume, marked edited, padded to `len` bytes (the size
+/// of the file it rewrites).
+fn readers_edit(len: usize) -> Vec<u8> {
+    let text = format!(
+        r#"{{"edited":{{}},"title":"S","volume":"V","pages":[{}]}}"#,
+        pages()
+    );
+    assert!(text.len() <= len, "{} > {len}", text.len());
+    format!("{{{}{}", " ".repeat(len - text.len()), &text[1..]).into_bytes()
 }
 
 /// A sidecar mokuro made (no `ocr_engine` block): `mokuro-legacy`.
@@ -370,7 +413,13 @@ impl Cloud {
         let mut out = Vec::new();
         for series in ["A", "B", "C"] {
             for vol in ["Vol 1", "Vol 2", "Vol 3", "vol 2"] {
-                for suffix in [".cbz", ".mokuro", ".fast.mokuro", ".notes.mokuro"] {
+                for suffix in [
+                    ".cbz",
+                    ".mokuro",
+                    ".fast.mokuro",
+                    ".notes.mokuro",
+                    ".mokuro.mokuro",
+                ] {
                     let rel = format!("{series}/{vol}{suffix}");
                     if let Some(n) = self.fake.node_at(&format!("{FOLDER}/{rel}")) {
                         out.push((rel, n.pid));
@@ -643,18 +692,46 @@ fn a_swapped_main_is_judged_at_its_new_version() {
 
 // ---- a local folder as the cloud store ---------------------------------------------
 
+type FolderStore = Arc<RemoteStore<bunko_remote::folder::FolderBackend>>;
+
+/// The local folder `disk` connected as the cloud store of the library at `root` (its
+/// state under `tmp`), mounted.
+fn open_folder(tmp: &Path, disk: &Path, root: &Path) -> (FolderStore, MountGuard) {
+    use bunko_remote::folder::{FolderBackend, FolderConfig};
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let backend = rt
+        .block_on(FolderBackend::connect(FolderConfig {
+            path: disk.to_path_buf(),
+            root_name: FOLDER.into(),
+            state_dir: tmp.join("cloud/s"),
+            watch: false,
+        }))
+        .unwrap();
+    drop(rt);
+    let mut cfg = RemoteStoreConfig::new(root.to_path_buf(), tmp.join("cloud/s"), FOLDER);
+    cfg.poll_active = Duration::from_secs(3600);
+    cfg.poll_idle = Duration::from_secs(3600);
+    cfg.lease = false;
+    let store = RemoteStore::open_shared(cfg, Arc::new(backend)).unwrap();
+    assert!(store.wait_steady(WAIT), "{:?}", store.engine_state());
+    let mount = bunko_store::mount(store.clone() as Arc<dyn LibraryStore>);
+    (store, mount)
+}
+
 /// A local folder connected as the cloud store (`FolderBackend`), whose content version is
 /// no file's identity: the file's mtime and size, as a WebDAV host's is without an ETag.
 /// Every file here has one mtime (a library copied or unpacked with its timestamps), so a
-/// current and an outdated layer of one size share a version: the store's effective mtime
-/// (salted by the file's id) keeps one file's facts from ever being another's. Each walk
-/// decides as a census that never saw the library; settings and a restart read nothing; a
-/// file rewritten at its size is read once; a series folder renamed (new ids: the facts
-/// are not found by version on a store of path ids) is judged on what is there.
+/// current and an outdated layer of one size share a version: one file's facts are never
+/// another's (never found under another path on this store, whatever else keeps their
+/// keys apart). Each walk decides as a census that never saw the library; settings and a
+/// restart read nothing; a file rewritten at its size is read once; a series folder
+/// renamed (new ids) is judged on what is there.
 #[test]
 fn a_folder_store_with_weak_versions_judges_each_file_on_its_own_bytes() {
-    use bunko_remote::folder::{FolderBackend, FolderConfig};
-    type Store = Arc<RemoteStore<FolderBackend>>;
+    type Store = FolderStore;
     let tmp = TempDir::new().unwrap();
     let disk = tmp.path().join("library-folder");
     let at = std::time::SystemTime::now() - Duration::from_secs(3600);
@@ -672,29 +749,7 @@ fn a_folder_store_with_weak_versions_judges_each_file_on_its_own_bytes() {
     let len = |rel: &str| files.iter().find(|(r, _)| r == rel).unwrap().1.len();
     assert_eq!(len("A/Vol 1.fast.mokuro"), len("B/Vol 2.fast.mokuro"));
     let root = tmp.path().join("cloud/s/library");
-    let open = || -> (Store, MountGuard) {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let backend = rt
-            .block_on(FolderBackend::connect(FolderConfig {
-                path: disk.clone(),
-                root_name: FOLDER.into(),
-                state_dir: tmp.path().join("cloud/s"),
-                watch: false,
-            }))
-            .unwrap();
-        drop(rt);
-        let mut cfg = RemoteStoreConfig::new(root.clone(), tmp.path().join("cloud/s"), FOLDER);
-        cfg.poll_active = Duration::from_secs(3600);
-        cfg.poll_idle = Duration::from_secs(3600);
-        cfg.lease = false;
-        let store = RemoteStore::open_shared(cfg, Arc::new(backend)).unwrap();
-        assert!(store.wait_steady(WAIT), "{:?}", store.engine_state());
-        let mount = bunko_store::mount(store.clone() as Arc<dyn LibraryStore>);
-        (store, mount)
-    };
+    let open = || open_folder(tmp.path(), &disk, &root);
     // The store lists what the folder holds: `rel` there (or gone) at the size on disk.
     let sync = |store: &Store, rel: &str, there: bool| {
         let deadline = std::time::Instant::now() + WAIT;
@@ -734,6 +789,14 @@ fn a_folder_store_with_weak_versions_judges_each_file_on_its_own_bytes() {
     up.configure(&upgrade_config(), &rows());
     assert_eq!(decide(&root, &up), first);
     assert_eq!(up.sidecar_facts().reads(), read, "nothing read again");
+
+    // The two layers' keys met (here the store's effective mtime, salted by the file's
+    // id, keeps them apart; a row planted at one's very key under another path stands
+    // for a store where nothing does): the layer is read, and judged on its own bytes.
+    plant_collision(&db, "A/Vol 1.fast.mokuro", "B/Vol 2.fast.mokuro");
+    let up = census(&root, Some(db.clone()));
+    assert_eq!(decide(&root, &up), first, "never the other file's facts");
+    assert_eq!(up.sidecar_facts().reads(), 1, "the layer, once");
 
     // A restart.
     drop(up);
@@ -795,6 +858,55 @@ fn a_folder_store_with_weak_versions_judges_each_file_on_its_own_bytes() {
         .map(|k| k.sidecar_path)
         .collect();
     assert!(kept.iter().all(|p| !p.starts_with("A/")), "{kept:?}");
+}
+
+/// On a store whose version is the file's mtime and size (a connected local folder; a
+/// WebDAV host's ETag is often the same), a file written a moment ago may be written
+/// again within one tick of the clock at its size, keeping its version: its facts are
+/// used, never kept, until it is older than that (`sidecar_facts::RACY`), as on a local
+/// disk. A reader's rewrite meanwhile is read, never hidden behind the first bytes'
+/// facts (say, a layer the reader edited taken for Bunko's own older output, owed again
+/// every walk).
+#[test]
+fn a_file_just_written_to_a_store_of_weak_versions_is_not_kept() {
+    let tmp = TempDir::new().unwrap();
+    let disk = tmp.path().join("library-folder");
+    let rel = "A/Vol 1.fast.mokuro";
+    let on_disk = disk.join(rel);
+    std::fs::create_dir_all(on_disk.parent().unwrap()).unwrap();
+    std::fs::write(&on_disk, hayai(current() - 1, "fast", "S")).unwrap();
+    let root = tmp.path().join("cloud/s/library");
+    let (store, _mount) = open_folder(tmp.path(), &disk, &root);
+    let path = root.join(rel);
+    let version = || bunko_store::fs::metadata(&path).unwrap().version().cloned();
+    let written = version();
+    assert!(written.is_some(), "the folder store gives a version");
+    let db = Arc::new(Database::open(tmp.path().join("mokuro.db")).unwrap());
+    let up = census(&root, Some(db.clone()));
+    let facts = up.sidecar_facts();
+    facts.get(&path).unwrap();
+    facts.get(&path).unwrap();
+    assert_eq!(facts.reads(), 2, "read each time while it is new");
+    assert_eq!(db.get_sidecar_facts(rel).unwrap(), None, "never kept");
+
+    // An hour old (a new version on this store): kept.
+    let f = std::fs::File::options().write(true).open(&on_disk).unwrap();
+    f.set_modified(std::time::SystemTime::now() - Duration::from_secs(3600))
+        .unwrap();
+    let deadline = std::time::Instant::now() + WAIT;
+    while version() == written {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the store sees the new mtime"
+        );
+        store.feed().poll_now();
+        assert!(store.wait_steady(WAIT));
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    facts.get(&path).unwrap();
+    facts.get(&path).unwrap();
+    assert_eq!(facts.reads(), 3, "then kept");
+    assert!(db.get_sidecar_facts(rel).unwrap().is_some());
 }
 
 // ---- a local library ---------------------------------------------------------------
@@ -885,4 +997,398 @@ fn a_local_walk_reads_each_sidecar_once_per_version() {
         after.contains(&"A/Vol 1.fast.mokuro".to_string()),
         "{after:?}"
     );
+}
+
+// ---- the facts are a hint ----------------------------------------------------------
+
+/// `bytes` written at `path`, last modified `ago` seconds ago.
+fn write_aged(path: &Path, bytes: &[u8], ago: u64) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, bytes).unwrap();
+    let f = std::fs::File::options().write(true).open(path).unwrap();
+    f.set_modified(std::time::SystemTime::now() - Duration::from_secs(ago))
+        .unwrap();
+}
+
+/// `bytes` written over the file at `path`, at its size, its mtime set back to what it
+/// was: the same version on a local disk (and wherever the version is the file's mtime
+/// and size), as a rewrite within one tick of the clock leaves it.
+fn rewrite_at_its_version(path: &Path, bytes: &[u8]) {
+    let before = std::fs::metadata(path).unwrap();
+    assert_eq!(
+        before.len(),
+        bytes.len() as u64,
+        "a rewrite at the same size"
+    );
+    let mtime = before.modified().unwrap();
+    std::fs::write(path, bytes).unwrap();
+    let f = std::fs::File::options().write(true).open(path).unwrap();
+    f.set_modified(mtime).unwrap();
+    let after = std::fs::metadata(path).unwrap();
+    assert_eq!(
+        (after.len(), after.modified().unwrap()),
+        (before.len(), mtime)
+    );
+}
+
+/// The facts the census keeps of `rel`, if any.
+fn facts_kept(db: &Database, rel: &str) -> Option<SidecarFacts> {
+    let row = db.get_sidecar_facts(rel).unwrap()?;
+    let stored: serde_json::Value = serde_json::from_str(&row.facts).unwrap();
+    Some(serde_json::from_value(stored["facts"].clone()).unwrap())
+}
+
+/// Two files whose versions met: `victim`'s very key under another path, with `donor`'s
+/// facts, and `victim`'s own row gone.
+fn plant_collision(db: &Database, victim: &str, donor: &str) {
+    let own = db.get_sidecar_facts(victim).unwrap().unwrap();
+    let donor = db.get_sidecar_facts(donor).unwrap().unwrap();
+    assert_ne!(own.facts, donor.facts);
+    db.record_sidecar_facts(&bunko_db::SidecarFacts {
+        key: SidecarFactsKey {
+            sidecar_path: "Z/elsewhere.fast.mokuro".into(),
+            ..own.key.clone()
+        },
+        facts: donor.facts,
+    })
+    .unwrap();
+    db.forget_sidecar_facts(&[own.key]).unwrap();
+}
+
+/// A local library of [`library`] (written an hour ago) and its census over a database,
+/// after a first walk: every sidecar's facts kept.
+struct Local {
+    tmp: TempDir,
+    lib: PathBuf,
+    db: Arc<Database>,
+    up: Arc<Upgrade>,
+}
+
+fn local() -> Local {
+    let tmp = TempDir::new().unwrap();
+    let lib = tmp.path().join("library");
+    for (rel, bytes) in library() {
+        write_aged(&lib.join(rel), &bytes, 3600);
+    }
+    let db = Arc::new(Database::open(tmp.path().join("mokuro.db")).unwrap());
+    let up = census(&lib, Some(db.clone()));
+    let first = decide(&lib, &up);
+    assert_eq!(first.owed, expected());
+    assert_eq!(first.ready, ["B/Vol 1.cbz"]);
+    Local { tmp, lib, db, up }
+}
+
+impl Local {
+    /// An upgrade job's result for `rel` (the primary's current output) handed to the
+    /// collector, as a processor's arrives.
+    fn collect_upgrade(&self, rel: &str) -> Outcome {
+        self.collect(Job::upgrade(rel, "g-1"), 0)
+    }
+
+    /// The `fast` row's result for `rel` (its current output) handed to the collector.
+    fn collect_fast(&self, rel: &str) -> Outcome {
+        self.collect(Job::new(rel, "g-2"), 1)
+    }
+
+    fn collect(&self, job: Job, row: usize) -> Outcome {
+        let dir = self.tmp.path().join(".processing/s-1/c-1");
+        std::fs::create_dir_all(&dir).unwrap();
+        let result = dir.join("result.mokuro");
+        let row = rows()[row].clone();
+        let generation = if row.primary { "hayai-nova" } else { "fast" };
+        std::fs::write(&result, hayai(current(), generation, "S")).unwrap();
+        let req = CollectRequest {
+            job,
+            rows: rows(),
+            row,
+            library: self.lib.clone(),
+            inbox: self.tmp.path().join("inbox"),
+            result,
+            expected_sha256: None,
+            stamp: None,
+            machine: "local".into(),
+            account: None,
+            runner_build: None,
+            pages: Some(3),
+            failed_pages: Some(0),
+            generator: "mokuro-bunko test".into(),
+            db: Some(self.db.clone()),
+            facts: Arc::new(NoMetadata),
+            locks: Arc::new(bunko_library::service::NoPathLocks),
+            sid: "s-1".into(),
+            claim: "c-1".into(),
+            congestion: None,
+            upgrade: Some(self.up.clone()),
+        };
+        bunko_server::ocr::collect::run(req).outcome
+    }
+}
+
+/// A layer the census found kept by an earlier beta's upgrade (its facts say so), which
+/// a reader then rewrote at its size within one tick of the clock (the same version, so
+/// the facts kept are the old bytes'): the clean-up reads it again under its lock and
+/// keeps it, and the facts kept are those read. The beta's layer again (a new version)
+/// goes.
+#[test]
+fn a_kept_layer_rewritten_at_its_version_is_not_deleted() {
+    let t = local();
+    let cbz = t.lib.join("A/Vol 1.cbz");
+    let layer = t.lib.join("A/Vol 1.mokuro.mokuro");
+    let kept = kept_by_beta();
+    write_aged(&layer, &kept, 3600);
+    let before = t.up.sidecar_facts().get(&layer).unwrap();
+    assert!(
+        before
+            .object
+            .as_ref()
+            .and_then(|o| o.block.as_ref())
+            .is_some_and(|b| b.upgraded_from_primary),
+        "kept: {before:?}"
+    );
+    let edit = readers_edit(kept.len());
+    rewrite_at_its_version(&layer, &edit);
+    // The census judges the volume again (its main is the upgraded output) and sweeps.
+    t.up.configure(&upgrade_config(), &rows());
+    t.up.judge(&cbz, "A/Vol 1.cbz");
+    assert_eq!(
+        std::fs::read(&layer).ok(),
+        Some(edit.clone()),
+        "the reader's file stays"
+    );
+    assert_eq!(
+        facts_kept(&t.db, "A/Vol 1.mokuro.mokuro"),
+        Some(SidecarFacts::of(&edit)),
+        "its facts are those read under the lock"
+    );
+
+    write_aged(&layer, &kept, 1800);
+    t.up.configure(&upgrade_config(), &rows());
+    t.up.judge(&cbz, "A/Vol 1.cbz");
+    assert!(!layer.exists(), "the beta's layer goes");
+}
+
+/// The same on cloud stores: the reader's new bytes, with the facts of the beta's layer
+/// kept at their version (as a version that names no content leaves them, a WebDAV
+/// host's mtime and size). The clean-up reads the provider's bytes again and keeps it.
+#[test]
+fn a_cloud_layer_whose_kept_facts_are_stale_is_not_deleted() {
+    for (name, fake) in [
+        ("webdav", FakeBackend::webdav_plain()),
+        ("drive", FakeBackend::drive_like()),
+    ] {
+        let t = Cloud::start(fake);
+        let rel = "A/Vol 1.mokuro.mokuro";
+        let layer = t.root.join(rel);
+        t.put(rel, &kept_by_beta());
+        t.sync();
+        t.up().sidecar_facts().get(&layer).unwrap();
+        let stale = t.db().get_sidecar_facts(rel).unwrap().unwrap().facts;
+        let edit = readers_edit(kept_by_beta().len());
+        t.put(rel, &edit);
+        t.sync();
+        t.up().sidecar_facts().get(&layer).unwrap();
+        let mut row = t.db().get_sidecar_facts(rel).unwrap().unwrap();
+        row.facts = stale;
+        t.db().record_sidecar_facts(&row).unwrap();
+        assert!(
+            facts_kept(t.db(), rel)
+                .and_then(|f| f.object)
+                .and_then(|o| o.block)
+                .is_some_and(|b| b.upgraded_from_primary),
+            "{name}: the stale facts are kept"
+        );
+
+        t.up().configure(&upgrade_config(), &rows());
+        t.up().judge(&t.root.join("A/Vol 1.cbz"), "A/Vol 1.cbz");
+        assert!(
+            bunko_store::fs::metadata(&layer).is_ok(),
+            "{name}: the reader's file stays"
+        );
+        let node = t.fake.node_at(&format!("{FOLDER}/{rel}")).unwrap();
+        assert_eq!(t.fake.content(&node.pid), Some(edit.clone()), "{name}");
+        assert_eq!(
+            facts_kept(t.db(), rel),
+            Some(SidecarFacts::of(&edit)),
+            "{name}: its facts are those read under the lock"
+        );
+    }
+}
+
+/// A main sidecar the census judged outdated (its facts: mokuro's, a matching layer ready
+/// beside it), which a reader then marked edited at its size within one tick of the
+/// clock (the same version: the facts kept are the old bytes'). The direct replace reads
+/// it again under its lock and refuses; the facts kept are those read, and the next
+/// census judges it EDITED.
+#[test]
+fn a_direct_replace_never_replaces_a_main_edited_at_its_version() {
+    let t = local();
+    let (cbz, bare) = (t.lib.join("B/Vol 1.cbz"), t.lib.join("B/Vol 1.mokuro"));
+    let layer = t.lib.join("B/Vol 1.fast.mokuro");
+    let edit = readers_edit(legacy().len());
+    rewrite_at_its_version(&bare, &edit);
+    let err = t.up.direct_replace(&cbz, &layer).unwrap_err();
+    assert!(err.contains("edited"), "{err}");
+    assert_eq!(std::fs::read(&bare).unwrap(), edit, "the edit stays");
+    assert!(layer.exists());
+    assert_eq!(
+        facts_kept(&t.db, "B/Vol 1.mokuro"),
+        Some(SidecarFacts::of(&edit))
+    );
+    assert_eq!(t.up.judge(&cbz, "B/Vol 1.cbz").1, Verdict::Edited);
+}
+
+/// The same main, owed an upgrade job: the job's result swapped in by hand is refused.
+#[test]
+fn a_generated_swap_never_replaces_a_main_edited_at_its_version() {
+    let t = local();
+    let (cbz, bare) = (t.lib.join("B/Vol 3.cbz"), t.lib.join("B/Vol 3.mokuro"));
+    let edit = readers_edit(legacy().len());
+    rewrite_at_its_version(&bare, &edit);
+    let staged = t.tmp.path().join("staged.mokuro");
+    std::fs::write(&staged, hayai(current(), "hayai-nova", "S")).unwrap();
+    let err = t.up.swap(&cbz, &staged, "generated").unwrap_err();
+    assert!(err.contains("edited"), "{err}");
+    assert_eq!(std::fs::read(&bare).unwrap(), edit, "the edit stays");
+    assert_eq!(
+        facts_kept(&t.db, "B/Vol 3.mokuro"),
+        Some(SidecarFacts::of(&edit))
+    );
+    assert_eq!(t.up.judge(&cbz, "B/Vol 3.cbz").1, Verdict::Edited);
+}
+
+/// The job's result handed to the collector, as a processor's arrives: it goes beside
+/// the main marked edited (as for any EDITED main), never over it.
+#[test]
+fn an_upgrade_result_goes_beside_a_main_edited_at_its_version() {
+    let t = local();
+    let (cbz, bare) = (t.lib.join("B/Vol 3.cbz"), t.lib.join("B/Vol 3.mokuro"));
+    let edit = readers_edit(legacy().len());
+    rewrite_at_its_version(&bare, &edit);
+    let outcome = t.collect_upgrade("B/Vol 3.cbz");
+    let Outcome::Installed(beside) = &outcome else {
+        panic!("{outcome:?}");
+    };
+    assert_ne!(beside, &bare, "{outcome:?}");
+    assert_eq!(beside.parent(), bare.parent());
+    assert!(beside.exists());
+    assert_eq!(std::fs::read(&bare).unwrap(), edit, "the edit stays");
+    assert_eq!(
+        facts_kept(&t.db, "B/Vol 3.mokuro"),
+        Some(SidecarFacts::of(&edit))
+    );
+    assert_eq!(t.up.judge(&cbz, "B/Vol 3.cbz").1, Verdict::Edited);
+}
+
+/// A layer the census found ready (its facts: sealed, the primary's recipe, this
+/// archive's pages), rewritten at its version for pages that are not this archive's: the
+/// promotion decides on the bytes it would install and refuses; the facts kept are those
+/// read, and the next census owes an upgrade job instead.
+#[test]
+fn a_layer_rewritten_at_its_version_for_other_pages_is_not_promoted() {
+    let t = local();
+    let (cbz, bare) = (t.lib.join("B/Vol 1.cbz"), t.lib.join("B/Vol 1.mokuro"));
+    let layer = t.lib.join("B/Vol 1.fast.mokuro");
+    let other = hayai_of(current(), "fast", "S", &["001.jpg", "002.jpg", "004.jpg"]);
+    rewrite_at_its_version(&layer, &other);
+    let err = t.up.direct_replace(&cbz, &layer).unwrap_err();
+    assert!(err.contains("not proven"), "{err}");
+    assert_eq!(std::fs::read(&bare).unwrap(), legacy(), "the main stays");
+    assert_eq!(std::fs::read(&layer).unwrap(), other);
+    assert_eq!(
+        facts_kept(&t.db, "B/Vol 1.fast.mokuro"),
+        Some(SidecarFacts::of(&other))
+    );
+    assert_eq!(t.up.judge(&cbz, "B/Vol 1.cbz").1, Verdict::NeedsOcr);
+}
+
+/// A layer the census owes again (its facts: Bunko's own older output), which a reader
+/// then rewrote at its size within one tick of the clock: the collector reads it, keeps
+/// it and discards the result, and what is there is judged again on its bytes. The next
+/// walk owes nothing for it, as a census that never saw the library decides (not the
+/// same OCR again every walk, each result discarded).
+#[test]
+fn a_layer_rewritten_at_its_version_is_not_owed_again_after_its_result_is_kept_out() {
+    let t = local();
+    let layer = t.lib.join("B/Vol 2.fast.mokuro");
+    let edit = readers_edit(hayai(current() - 1, "fast", "S").len());
+    rewrite_at_its_version(&layer, &edit);
+    let stale = decide(&t.lib, &t.up);
+    assert_eq!(stale.owed, expected(), "the old bytes' facts: owed again");
+    let outcome = t.collect_fast("B/Vol 2.cbz");
+    assert!(matches!(outcome, Outcome::Superseded(_)), "{outcome:?}");
+    assert_eq!(
+        std::fs::read(&layer).unwrap(),
+        edit,
+        "the reader's layer stays"
+    );
+    assert_eq!(
+        facts_kept(&t.db, "B/Vol 2.fast.mokuro"),
+        Some(SidecarFacts::of(&edit))
+    );
+    let now = decide(&t.lib, &t.up);
+    assert!(!now.owed.contains_key("B/Vol 2.cbz"), "{now:?}");
+    assert_eq!(now, fresh(&t.lib));
+}
+
+/// On a store that knows a file by its path, whose version is no content version (WebDAV,
+/// a connected local folder: an mtime and a size, or an ETag made of them), two files can
+/// share a version: one's facts are never taken for the other's. A row of another path
+/// planted at one file's very key stands for two files whose versions met: after a
+/// restart that file is read, once, and judged on its own bytes.
+#[test]
+fn two_files_at_one_version_never_share_facts_on_a_store_of_paths() {
+    for (name, fake) in [
+        ("webdav", FakeBackend::webdav_plain()),
+        ("folder", FakeBackend::folder_like()),
+    ] {
+        let mut t = Cloud::start(fake);
+        let (first, _, _) = t.walk();
+        assert_eq!(first.owed, expected(), "{name}");
+        plant_collision(t.db(), "A/Vol 1.fast.mokuro", "B/Vol 2.fast.mokuro");
+        t.stop();
+        t.open();
+        let (now, reads, _) = t.walk();
+        assert_eq!(now, first, "{name}: judged on its own bytes");
+        assert_eq!(
+            reads,
+            BTreeMap::from([("A/Vol 1.fast.mokuro".to_string(), 1)]),
+            "{name}"
+        );
+    }
+}
+
+/// A file renamed or moved keeps its version on a store whose version names its bytes
+/// (Drive, OneDrive, MEGA): a series folder renamed reads nothing again. On a store of
+/// paths (WebDAV, a connected local folder) the moved sidecars are read once each under
+/// their new names. Every walk decides as a census that never saw the library does.
+#[test]
+fn a_moved_file_keeps_its_facts_only_where_its_version_names_its_bytes() {
+    for (name, fake, by_version) in [
+        ("drive", FakeBackend::drive_like(), true),
+        ("onedrive", FakeBackend::onedrive_like(), true),
+        ("mega", FakeBackend::mega_like(), true),
+        ("webdav", FakeBackend::webdav_plain(), false),
+        ("folder", FakeBackend::folder_like(), false),
+    ] {
+        let t = Cloud::start(fake);
+        let (first, _, _) = t.walk();
+        assert_eq!(first, fresh(&t.root), "{name}");
+        t.fake
+            .reader_rename(&format!("{FOLDER}/A"), &format!("{FOLDER}/C"));
+        t.sync();
+        let (now, reads, _) = t.walk();
+        let f = fresh(&t.root);
+        assert_eq!((&now.owed, &now.ready), (&f.owed, &f.ready), "{name}");
+        eprintln!("{name}: after the series folder moved: {reads:?}");
+        if by_version {
+            assert!(reads.is_empty(), "{name}: {reads:?}");
+        } else {
+            assert!(
+                !reads.is_empty()
+                    && twice(&reads).is_empty()
+                    && reads.keys().all(|r| r.starts_with("C/")),
+                "{name}: {reads:?}"
+            );
+        }
+    }
 }

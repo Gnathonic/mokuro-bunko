@@ -17,12 +17,22 @@
 //! own) is read again, once. The facts are stored only when the file still is the
 //! version read after the read (a read racing a write is used once and not kept), never
 //! for an I/O error (the network), and never for a cloud file the store gives no
-//! version. A cloud file renamed or moved keeps its version, and its new name finds the
-//! facts by it where the store keeps the file's id through a rename (Drive, OneDrive,
-//! MEGA: its effective mtime is salted by that id); on a store that knows a file by its
-//! path (WebDAV, a connected local folder), as on a local disk, whose size and mtime tie
-//! nothing together across paths, a new name is read once. Rows of files that are gone
-//! or changed are pruned (never while the library folder itself is missing).
+//! version.
+//!
+//! A version names a file's bytes only on a store whose versions are content versions
+//! ([`bunko_store::Caps::content_versions`]: Drive's `md5Checksum`, OneDrive's `cTag`,
+//! MEGA's node handle). There a file renamed or moved keeps its version, and its new
+//! name finds the facts by it. Elsewhere the version is the file's mtime and size, or a
+//! host's ETag made of the same (WebDAV, a connected local folder), and a local file has
+//! none: two files can share one, so another path's facts are never taken (a new name
+//! is read once), and a rewrite at the same size within one tick of the clock keeps it,
+//! so a file written less than [`RACY`] ago is used, never kept (git's racy files).
+//!
+//! The facts are a hint, never a proof: every step that deletes, replaces or promotes a
+//! file reads the bytes it acts on again, under the file's write lock, and decides on
+//! those ([`SidecarFactsCache::fresh`]), keeping what it read in place of what was kept.
+//! Rows of files that are gone or changed are pruned (never while the library folder
+//! itself is missing).
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -262,15 +272,16 @@ impl SidecarFacts {
 
 impl SidecarFactsCache {
     /// The library-relative name `path`'s file has now, when it was renamed in case only:
-    /// its folder lists another spelling of the name at exactly the version `key` (a
-    /// cloud file's version stays with it; never a local one, which has none).
+    /// its folder lists another spelling of the name at exactly the version `key`, on a
+    /// store whose version names the bytes and stays with its file (never where another
+    /// file at that mtime and size could take the name, nor a local one, which has none).
     fn renamed_in_case(
         &self,
         path: &Path,
         key: &SidecarFactsKey,
         listings: &mut HashMap<PathBuf, Vec<String>>,
     ) -> Option<String> {
-        if key.version.is_empty() {
+        if key.version.is_empty() || !content_versions(path) {
             return None;
         }
         let folder = path.parent()?;
@@ -308,12 +319,14 @@ impl FileVersion {
         }
     }
 
-    /// Too new to tell from its next version: a file with no content version whose
-    /// mtime is less than [`RACY`] ago (or ahead of the clock) may be written again
-    /// within one tick of its file system's clock, at the same size, and nothing would
-    /// tell the two apart (git's racy files). Its facts are used, not kept.
-    fn racy(&self) -> bool {
-        if self.version.is_some() {
+    /// Too new to tell from its next version: a file at `path` whose version is no
+    /// content version ([`content_versions`]: none at all on a local disk; the mtime and
+    /// size on WebDAV or a connected local folder) whose mtime is less than [`RACY`] ago
+    /// (or ahead of the clock) may be written again within one tick of its clock, at the
+    /// same size, and nothing would tell the two apart (git's racy files). Its facts are
+    /// used, not kept.
+    fn racy(&self, path: &Path) -> bool {
+        if self.version.is_some() && content_versions(path) {
             return false;
         }
         let now = SystemTime::now()
@@ -351,8 +364,34 @@ struct Stored {
 }
 
 /// How old a file without a content version must be for its facts to be kept: more than
-/// the coarsest file system clock (FAT's 2 s).
+/// the coarsest file system clock (FAT's 2 s; a WebDAV host's `getlastmodified` has 1 s).
 pub const RACY: Duration = Duration::from_secs(3);
+
+/// The store of `path` gives content versions ([`bunko_store::Caps::content_versions`]):
+/// one version is one content, wherever the file is. Never on a local library.
+fn content_versions(path: &Path) -> bool {
+    bunko_store::store_for(path).is_some_and(|s| s.caps().content_versions)
+}
+
+/// The bytes of the sidecar at `path` at the version `meta` names: on a cloud store
+/// read pinned to it (a version since replaced is an error), else as the file is now.
+fn read_at(path: &Path, meta: &Meta) -> std::io::Result<Vec<u8>> {
+    let gz = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.to_ascii_lowercase().ends_with(".gz"));
+    let remote = bunko_store::store_for(path).filter(|s| s.caps().remote);
+    match (remote, meta.version()) {
+        (Some(store), Some(version)) if !gz => {
+            let pinned = store.local_path(path, Some(version))?;
+            bunko_library::sidecar::read_capped(
+                pinned.path(),
+                bunko_library::sidecar::MAX_SIDECAR_BYTES,
+            )
+        }
+        _ => bunko_library::sidecar::read_sidecar_bytes(path),
+    }
+}
 
 /// How often a walk may prune the rows of files that are gone or changed.
 pub const PRUNE_EVERY: Duration = Duration::from_secs(600);
@@ -393,27 +432,89 @@ impl SidecarFactsCache {
 
     /// The facts of the file at `path`, whose metadata (taken now) is `meta`: those kept
     /// for exactly that version, else read now (and kept, when the file still is that
-    /// version after the read and is not [racy](FileVersion::racy)).
+    /// version after the read and is not [racy](FileVersion::racy)). A hint: what
+    /// deletes, replaces or promotes a file decides on [`Self::fresh`].
     pub fn get_at(&self, path: &Path, meta: &Meta) -> Arc<SidecarFacts> {
         let at = FileVersion::of(meta);
         if let Some(hit) = self.cached(path, &at) {
             return hit;
         }
         self.reads.fetch_add(1, Ordering::Relaxed);
-        let (facts, lasting) = match bunko_library::sidecar::read_sidecar_bytes(path) {
-            Ok(bytes) => (SidecarFacts::of(&bytes), true),
-            // Over the cap: a fact of this version (its declared size), never parsed.
-            Err(e) if e.kind() == std::io::ErrorKind::FileTooLarge => {
-                (SidecarFacts::default(), true)
+        self.facts_of_read(
+            path,
+            meta,
+            bunko_library::sidecar::read_sidecar_bytes(path).map(|b| SidecarFacts::of(&b)),
+        )
+    }
+
+    /// The facts of one read of the file at `path` at the version `meta` names, kept
+    /// as [`Self::keep_read`] keeps them: over the cap, a fact of the version (its
+    /// declared size, never parsed); another error (the network, a file gone
+    /// meanwhile) teaches nothing of the version, and its unreadable facts are not kept.
+    fn facts_of_read(
+        &self,
+        path: &Path,
+        meta: &Meta,
+        read: std::io::Result<SidecarFacts>,
+    ) -> Arc<SidecarFacts> {
+        match read {
+            Ok(facts) => {
+                let facts = Arc::new(facts);
+                self.keep_read(path, meta, &facts);
+                facts
             }
-            // The network, a file gone meanwhile: nothing learned of the version.
-            Err(_) => (SidecarFacts::default(), false),
-        };
-        let facts = Arc::new(facts);
-        if lasting && !at.racy() && FileVersion::now(path).as_ref() == Some(&at) {
-            self.remember(path, &at, &facts);
+            Err(e) if e.kind() == std::io::ErrorKind::FileTooLarge => {
+                let facts = Arc::new(SidecarFacts::default());
+                self.keep_read(path, meta, &facts);
+                facts
+            }
+            Err(_) => Arc::new(SidecarFacts::default()),
         }
-        facts
+    }
+
+    /// The facts of the file at `path` read now, whatever is kept: what a step that
+    /// deletes, replaces or promotes the file decides on, under the file's write lock.
+    /// They are kept in place of what was (a version that names no content can hide a
+    /// rewrite, and the facts kept for it are the old bytes'). Unreadable facts when the
+    /// file cannot be read; `None` when it is no file.
+    pub fn fresh(&self, path: &Path) -> Option<Arc<SidecarFacts>> {
+        let meta = fs::metadata(path).ok().filter(|m| m.is_file())?;
+        Some(self.fresh_at(path, &meta))
+    }
+
+    /// [`Self::fresh`] of the file whose metadata (taken now) is `meta`: read at that
+    /// version (a cloud file's read pinned to it).
+    pub fn fresh_at(&self, path: &Path, meta: &Meta) -> Arc<SidecarFacts> {
+        self.reads.fetch_add(1, Ordering::Relaxed);
+        self.facts_of_read(
+            path,
+            meta,
+            read_at(path, meta).map(|b| SidecarFacts::of(&b)),
+        )
+    }
+
+    /// The bytes of the file at `path` at the version `meta` (taken now) names (a cloud
+    /// file's read pinned to it), with their facts, kept as [`Self::fresh`] keeps them:
+    /// what a promotion installs, exactly the bytes it decided on.
+    pub fn read_now(
+        &self,
+        path: &Path,
+        meta: &Meta,
+    ) -> std::io::Result<(Vec<u8>, Arc<SidecarFacts>)> {
+        self.reads.fetch_add(1, Ordering::Relaxed);
+        let bytes = read_at(path, meta)?;
+        let facts = Arc::new(SidecarFacts::of(&bytes));
+        self.keep_read(path, meta, &facts);
+        Ok((bytes, facts))
+    }
+
+    /// Keep `facts`, read off the file at `path` at the version `meta` names, when the
+    /// file still is that version after the read and is not [racy](FileVersion::racy).
+    fn keep_read(&self, path: &Path, meta: &Meta, facts: &Arc<SidecarFacts>) {
+        let at = FileVersion::of(meta);
+        if !at.racy(path) && FileVersion::now(path).as_ref() == Some(&at) {
+            self.remember(path, &at, facts);
+        }
     }
 
     /// A cloud file with no content version: nothing pins what was read.
@@ -444,8 +545,13 @@ impl SidecarFactsCache {
         {
             return stored(row);
         }
-        // The same version under another name: the file renamed (a cloud store's
-        // version stays with its file); its facts are kept under this name too.
+        // The same version under another name: the file renamed, on a store whose
+        // version names the bytes and stays with its file; its facts are kept under this
+        // name too. Never elsewhere: an mtime and a size (or an ETag made of them) are
+        // no file's identity, and two files can share them.
+        if !content_versions(path) {
+            return None;
+        }
         let row = db
             .sidecar_facts_of_version(&want.version, want.size, want.mtime_ns)
             .ok()

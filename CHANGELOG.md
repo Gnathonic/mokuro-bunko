@@ -722,20 +722,26 @@
   cloud library each read is a provider download, and a large library has more sidecar
   bytes than the store's small-file cache (`cache_mb`) holds: a library of thousands of
   sidecars downloaded them all again, for an hour or more, after every start and every
-  settings change. What the census needs of a sidecar (its recipe
-  block, revision, pages and seal) is now read once per version of the file and kept in
-  `mokuro.db` (`sidecar_facts`): a settings change and a restart read no unchanged
-  sidecar again, and its decisions are exactly those of a census reading every file.
-  A sidecar the reader replaces (in place, or MEGA's delete-then-upload) is read once at
-  its new version; a file renamed or moved on Google Drive, OneDrive or MEGA (a case
-  rename, a series folder renamed) keeps its version and is not read again (on WebDAV
-  and a connected local folder, which know a file by its path, it is read once under its
-  new name); a local file is pinned by its size and mtime
-  (one written within the last 3 seconds is read again until it is older, so two writes
-  within one tick of the file system's clock are never taken for one). The facts of
+  settings change. What the census needs of a sidecar (its recipe block, revision, pages
+  and seal) is now read once per version of the file and kept in `mokuro.db`
+  (`sidecar_facts`): a settings change and a restart read no unchanged sidecar again,
+  and the walk owes what a census reading every file owes. A sidecar the reader
+  replaces (in place, or MEGA's delete-then-upload) is read once at its new version. A
+  file renamed or moved on Google Drive, OneDrive or MEGA (a case rename, a series
+  folder renamed) keeps its version, which names its bytes there, and is not read again.
+  On WebDAV and a connected local folder the version is the file's mtime and size (or an
+  ETag the host makes of them), which two files can share: a renamed file is read once
+  under its new name, never judged by another file's facts. There, as on a local disk,
+  a file written within the last 3 seconds is read again until it is older, so two
+  writes within one tick of the clock are never taken for one. What is kept is only a
+  hint: removing a layer an earlier beta kept, replacing an outdated main sidecar and
+  promoting a layer to the main read the file again under its write lock and decide on
+  those bytes, and keep what they read. A main a reader marked edited since is never
+  replaced (an upgrade job's result goes beside it), a layer is promoted only when its
+  pages are the archive's, and a kept layer a reader marked edited stays. The facts of
   files that are gone or changed are pruned after a walk, never while the library folder
-  itself is missing (a disk or share not mounted yet). Layers no generation writes
-  are no longer read for the earlier beta's clean-up unless their name is one it gave.
+  itself is missing (a disk or share not mounted yet). Layers no generation writes are
+  no longer read for the earlier beta's clean-up unless their name is one it gave.
 - **A cloud library upgraded from a 0.8 pre-release lets go of its root queue file.**
   The pre-release wrote `.mokuro-queue.json` at the library root, and its writes of
   that file stayed in the outbox across the upgrade. One still on its way was sent

@@ -137,6 +137,14 @@ pub struct BackendCaps {
     /// One folder can hold two items of one name (Drive, MEGA): duplicate folders
     /// and files exist, and the reader's dedup merges them.
     pub duplicate_names: bool,
+    /// A file's `cver` names its bytes wherever the file is: two files listed at one
+    /// `cver` hold the same bytes, every new content gets a new one, and a rename or a
+    /// move keeps it (Drive's `md5Checksum`, OneDrive's `cTag`, MEGA's node handle).
+    /// Not a `cver` made of a file's mtime and size (a connected local folder, WebDAV
+    /// without an ETag), nor a WebDAV ETag (many hosts make theirs of the same): two
+    /// files can share one, and a rewrite at the same size within one tick of the
+    /// clock keeps it.
+    pub content_versions: bool,
 }
 
 /// Where an upload goes.

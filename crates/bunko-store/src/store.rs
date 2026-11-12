@@ -18,6 +18,13 @@ pub struct Caps {
     pub atomic_replace: bool,
     pub server_copy: bool,
     pub trash_on_delete: bool,
+    /// A file's content version ([`Meta::version`]) names its bytes wherever the file
+    /// is: two files at one version hold the same bytes, every new content gets a new
+    /// one, and a rename or a move keeps it (Drive, OneDrive, MEGA). False where the
+    /// version is the file's mtime and size or a host's ETag (WebDAV, a connected local
+    /// folder: two files can share one, and a same-size rewrite within one tick of the
+    /// clock keeps it), and on a local library (no version at all).
+    pub content_versions: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

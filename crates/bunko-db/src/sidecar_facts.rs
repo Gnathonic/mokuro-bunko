@@ -53,8 +53,10 @@ impl Database {
     }
 
     /// A row read at exactly this content version, under any path: the same file under
-    /// another name (a cloud store's version stays with its file through a rename).
-    /// Never for a local file (`version` empty: nothing ties two paths' bytes together).
+    /// another name. The caller asks only where the store's version names a file's
+    /// bytes and stays with the file through a rename (Drive, OneDrive, MEGA), never
+    /// where it is an mtime and a size that two files can share. Never for a local file
+    /// (`version` empty: nothing ties two paths' bytes together).
     pub fn sidecar_facts_of_version(
         &self,
         version: &str,

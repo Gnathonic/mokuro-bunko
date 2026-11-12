@@ -502,7 +502,14 @@ fn install(req: &CollectRequest) -> Outcome {
         .and_then(super::upgrade::engine_of);
         let (mode, durability) = match reconcile_existing(&plain, &gz, result_facts.as_ref()) {
             Existing::Absent => (Mode::CreateNew, Durability::Deferred),
-            Existing::Keep => return Outcome::Superseded(SUPERSEDED.into()),
+            Existing::Keep => {
+                // The census owed this result for what it judged at `plain`; what is
+                // there is judged again, on its bytes.
+                if let Some(up) = &req.upgrade {
+                    up.refresh_sidecar(&plain);
+                }
+                return Outcome::Superseded(SUPERSEDED.into());
+            }
             Existing::Replace(base) => (Mode::Replace { base }, Durability::Sync),
         };
         let dest = plain;
