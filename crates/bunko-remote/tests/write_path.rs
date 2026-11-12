@@ -1494,116 +1494,6 @@ fn a_cloned_state_folder_goes_standby_while_the_original_runs() {
     assert_eq!(now[0].1.boot_id, original[0].1.boot_id);
 }
 
-/// Sidecar names rule v1 in `done[]`: a decimal volume's primary is its own (rule 4),
-/// a layer's suffix matches in any case, and an all-digit id is a layer.
-#[test]
-fn done_entries_name_volumes_by_rule_v1() {
-    let t = T::with(
-        FakeBackend::drive_like(),
-        &[("S/Vol 1.cbz", b"zip"), ("S/Vol 1.5.cbz", b"zip")],
-        |_| {},
-    );
-    t.wait_steady();
-    for name in [
-        "S/Vol 1.5.mokuro",
-        "S/Vol 1.gcv.MOKURO",
-        "S/Vol 1.2024.mokuro",
-    ] {
-        t.publish(name, b"{}", deferred(ocr(), Mode::CreateNew));
-        t.idle();
-    }
-    let doc = serde_json::json!({"version": 1, "generated_at": "2026-10-12T10:00:01Z",
-        "pending_volumes": 0, "volumes": []});
-    assert!(t.s().publish_queue_doc(doc).unwrap());
-    t.idle();
-    let v: serde_json::Value =
-        serde_json::from_slice(&t.remote_bytes(".mokuro-queue.json").unwrap()).unwrap();
-    let done = v["done"].as_array().unwrap();
-    let entry = |volume: &str| {
-        done.iter()
-            .find(|d| d["volume"] == volume)
-            .unwrap_or_else(|| panic!("no done entry for {volume}: {done:?}"))
-    };
-    assert_eq!(entry("Vol 1.5")["ocr"], "S/Vol 1.5.mokuro");
-    let layers: Vec<&str> = entry("Vol 1")["layers"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|l| l["id"].as_str().unwrap())
-        .collect();
-    assert_eq!(layers, ["gcv", "2024"]);
-}
-
-fn queue_floor<const MS: u64>(c: &mut RemoteStoreConfig) {
-    c.queue_floor = Some(Duration::from_millis(MS));
-}
-
-/// The queue file under a floor of `MS` milliseconds. `false` when this machine took
-/// longer than the floor to get from the first write to the look at what waits: the
-/// changes were then not within the floor, and the run says nothing.
-fn queue_file_within_a_floor<const MS: u64>() -> bool {
-    let floor = Duration::from_millis(MS);
-    let t = T::with(
-        FakeBackend::drive_like(),
-        &[("Kingdom/Kingdom 12.cbz", b"zip")],
-        queue_floor::<MS>,
-    );
-    t.wait_steady();
-    t.publish(
-        "Kingdom/Kingdom 12.mokuro",
-        b"{}",
-        deferred(ocr(), Mode::CreateNew),
-    );
-    t.idle();
-    let doc = |n: u64| {
-        serde_json::json!({"version": 1, "generated_at": format!("2026-10-12T10:00:0{n}Z"),
-            "pending_volumes": n, "volumes": []})
-    };
-    // The floor runs from the first write, which is no earlier than this.
-    let first_write = Instant::now();
-    assert!(t.s().publish_queue_doc(doc(1)).unwrap());
-    t.idle();
-    let read = |t: &T| -> serde_json::Value {
-        serde_json::from_slice(&t.remote_bytes(".mokuro-queue.json").unwrap()).unwrap()
-    };
-    let v = read(&t);
-    assert_eq!(v["instance_id"], t.s().instance_id());
-    assert_eq!(v["done"][0]["volume"], "Kingdom 12");
-    assert_eq!(v["done"][0]["ocr"], "Kingdom/Kingdom 12.mokuro");
-    let uploads = t.fake.calls(FakeOp::Upload);
-    // Only `generated_at` differs: nothing is written.
-    let mut same = doc(1);
-    same["generated_at"] = "2026-10-12T11:00:00Z".into();
-    assert!(!t.s().publish_queue_doc(same).unwrap());
-    // A change within the floor waits for it; only the newest is written.
-    assert!(t.s().publish_queue_doc(doc(2)).unwrap());
-    assert!(t.s().publish_queue_doc(doc(3)).unwrap());
-    std::thread::sleep(floor / 4);
-    t.idle();
-    let waiting = t.fake.calls(FakeOp::Upload);
-    if first_write.elapsed() >= floor {
-        return false;
-    }
-    assert_eq!(waiting, uploads);
-    wait_until("the floor", || t.fake.calls(FakeOp::Upload) > uploads);
-    t.idle();
-    assert_eq!(t.fake.calls(FakeOp::Upload), uploads + 1);
-    assert_eq!(read(&t)["pending_volumes"], 3);
-    true
-}
-
-#[test]
-fn the_queue_file_is_written_on_change_within_its_floor_with_done_entries() {
-    // The first floor is enough on any machine that is not badly overloaded; a longer
-    // one is tried only when the machine was slower than the floor before it.
-    assert!(
-        queue_file_within_a_floor::<400>()
-            || queue_file_within_a_floor::<2_000>()
-            || queue_file_within_a_floor::<10_000>(),
-        "this machine was slower than every floor tried"
-    );
-}
-
 // ---- ownership and integrity hardening ---------------------------------------------
 
 /// Restart a store that stopped right after UPLOADING was persisted, with `meddle`
@@ -1719,11 +1609,31 @@ fn control_files_and_reserved_names_are_not_writable_through_the_shim() {
         denied(fs::write(t.abs(name), b"{}"));
         denied(fs::rename(t.abs("S/v.cbz"), t.abs(name)));
     }
+    // A series' queue file, in every spelling the fold joins, at any depth below the
+    // root (queue file v2 §6.6); Bunko's compiler is refused as well.
+    let compiler = WriteIntent::new(
+        Mode::Replace { base: None },
+        Origin::Compiler,
+        Durability::Deferred,
+    );
+    for name in [
+        "S/.mokuro-series-queue.json",
+        "S/.MOKURO-Series-Queue.JSON",
+        "S/.mokuro-series-queue\u{200B}.json",
+    ] {
+        let src = t.local("sq", b"{}");
+        denied(fs::publish(&src, t.abs(name), &dav).map(|_| ()));
+        denied(fs::publish(&src, t.abs(name), &compiler).map(|_| ()));
+        denied(fs::rename(&src, t.abs(name)));
+        denied(fs::write(t.abs(name), b"{}"));
+        denied(fs::rename(t.abs("S/v.cbz"), t.abs(name)));
+    }
     // The WebDAV driver's staged-upload and probe names.
     denied(fs::write(t.abs("S/.v.mokuro.bunko-7.tmp"), b"x"));
     denied(fs::create_dir(t.abs(".bunko-probe-Aa")));
     assert_eq!(t.fake.calls(FakeOp::Upload), 0);
-    // Only the status writer may publish the queue file.
+    // Only the status writer may publish the queue files; a series file at the root
+    // is no series file (the root rules are unchanged: any writer).
     let src = t.local("q", b"{}");
     let status = WriteIntent::new(
         Mode::Replace { base: None },
@@ -1731,8 +1641,12 @@ fn control_files_and_reserved_names_are_not_writable_through_the_shim() {
         Durability::Deferred,
     );
     fs::publish(&src, t.abs(".mokuro-queue.json"), &status).unwrap();
+    let src = t.local("sq-status", b"{}");
+    fs::publish(&src, t.abs("S/.mokuro-series-queue.json"), &status).unwrap();
+    let src = t.local("sq-root", b"{}");
+    fs::publish(&src, t.abs(".mokuro-series-queue.json"), &compiler).unwrap();
     t.idle();
-    assert_eq!(t.fake.calls(FakeOp::Upload), 1);
+    assert_eq!(t.fake.calls(FakeOp::Upload), 3);
 }
 
 #[cfg(unix)]
@@ -1832,4 +1746,128 @@ fn a_queued_write_never_lands_in_a_replacement_folder() {
     assert_eq!(t.fake.calls(FakeOp::Upload), 0);
     assert_eq!(t.s().outbox()[0].state, "CONFLICT");
     assert!(t.fake.node_at(&format!("{FOLDER}/S/v.mokuro")).is_none());
+}
+
+// ---- The Status fast path (queue file v2 §6.6) ----------------------------------
+
+const QUEUE_FILE: &str = ".mokuro-series-queue.json";
+
+fn status() -> WriteIntent {
+    deferred(Origin::Status, Mode::Replace { base: None })
+}
+
+/// What one Status write of `bytes` to `rel` cost: governed calls in the api log,
+/// and the provider's `find_named`, `stat` and upload calls.
+fn status_write(t: &T, rel: &str, bytes: &[u8]) -> (u64, usize, usize, usize) {
+    t.idle();
+    let calls = t.s().api_stats().total_hour().calls;
+    t.fake.reset_calls();
+    t.publish(rel, bytes, status());
+    t.idle();
+    assert_eq!(t.remote_bytes(rel).as_deref(), Some(bytes), "{rel}");
+    (
+        t.s().api_stats().total_hour().calls - calls,
+        t.fake.calls(FakeOp::FindNamed),
+        t.fake.calls(FakeOp::Stat),
+        t.fake.calls(FakeOp::Upload),
+    )
+}
+
+#[test]
+fn a_drive_status_write_is_one_call_and_a_missing_file_falls_back_to_a_create() {
+    let t = T::new(FakeBackend::drive_like(), &[("S/S 1.cbz", b"zip")]);
+    t.wait_steady();
+    let rel = format!("S/{QUEUE_FILE}");
+    // The first write creates the file: the parent is asked for the name first.
+    assert_eq!(status_write(&t, &rel, b"{\"rev\":1}"), (2, 1, 0, 1));
+    let pid = t.fake.node_at(&format!("{FOLDER}/{rel}")).unwrap().pid;
+    // A file the index holds is overwritten by id: one call in the governor's log.
+    assert_eq!(status_write(&t, &rel, b"{\"rev\":2}"), (1, 0, 0, 1));
+    assert_eq!(t.fake.node_at(&format!("{FOLDER}/{rel}")).unwrap().pid, pid);
+    t.sync_feed();
+    assert!(
+        fs::metadata(t.abs(&rel)).unwrap().own(),
+        "the fast write is in the ledger"
+    );
+    assert_eq!(status_write(&t, &rel, b"{\"rev\":3}"), (1, 0, 0, 1));
+    // Deleted behind the feed's back: the overwrite's 404 falls back to the full path,
+    // which creates the file again.
+    t.fake.reader_delete_pid(&pid);
+    assert_eq!(status_write(&t, &rel, b"{\"rev\":4}"), (3, 1, 0, 2));
+    let pid2 = t.fake.node_at(&format!("{FOLDER}/{rel}")).unwrap().pid;
+    assert_ne!(pid2, pid);
+    // Trashed: the same.
+    t.fake.reader_trash_pid(&pid2);
+    assert_eq!(status_write(&t, &rel, b"{\"rev\":5}"), (3, 1, 0, 2));
+    assert_eq!(t.remote_named("S", QUEUE_FILE).len(), 1);
+    // And the new file is the one the next write overwrites.
+    assert_eq!(status_write(&t, &rel, b"{\"rev\":6}"), (1, 0, 0, 1));
+    assert!(
+        t.s()
+            .outbox()
+            .iter()
+            .all(|o| o.state == "CONFIRMED" || o.state == "COMMITTED"),
+        "{:?}",
+        t.s().outbox()
+    );
+}
+
+#[test]
+fn a_webdav_status_write_makes_no_stat() {
+    for fake in [FakeBackend::webdav_cas(), FakeBackend::webdav_plain()] {
+        let t = T::new(fake, &[("S/S 1.cbz", b"zip")]);
+        t.wait_steady();
+        let rel = format!("S/{QUEUE_FILE}");
+        assert_eq!(status_write(&t, &rel, b"{\"rev\":1}"), (2, 1, 0, 1));
+        assert_eq!(status_write(&t, &rel, b"{\"rev\":2}"), (1, 0, 0, 1));
+        assert_eq!(status_write(&t, &rel, b"{\"rev\":3}"), (1, 0, 0, 1));
+    }
+}
+
+#[test]
+fn a_status_write_over_a_changed_file_takes_the_full_path() {
+    let t = T::new(FakeBackend::webdav_cas(), &[("S/S 1.cbz", b"zip")]);
+    t.wait_steady();
+    let rel = format!("S/{QUEUE_FILE}");
+    status_write(&t, &rel, b"{\"rev\":1}");
+    // Someone else's bytes, which the feed has not brought yet: If-Match fails, the
+    // full path finds the file and overwrites it (a Status file is Bunko's).
+    t.fake
+        .reader_put(&format!("{FOLDER}/{rel}"), b"{\"theirs\":true}");
+    assert_eq!(status_write(&t, &rel, b"{\"rev\":2}"), (3, 1, 0, 2));
+    assert_eq!(status_write(&t, &rel, b"{\"rev\":3}"), (1, 0, 0, 1));
+}
+
+#[test]
+fn a_mega_status_write_leaves_one_node() {
+    let t = T::new(FakeBackend::mega_like(), &[("S/S 1.cbz", b"zip")]);
+    t.wait_steady();
+    let rel = format!("S/{QUEUE_FILE}");
+    status_write(&t, &rel, b"{\"rev\":1}");
+    // A replace is a new node; the old one goes (MEGA has no write by id).
+    let (_, find, _, up) = status_write(&t, &rel, b"{\"rev\":2}");
+    assert_eq!((find, up), (0, 1));
+    status_write(&t, &rel, b"{\"rev\":3}");
+    assert_eq!(t.remote_named("S", QUEUE_FILE).len(), 1);
+}
+
+#[test]
+fn a_status_write_never_overwrites_another_spelling_in_place() {
+    let t = T::new(
+        FakeBackend::drive_like(),
+        &[
+            ("S/S 1.cbz", b"zip"),
+            ("S/.Mokuro-Series-Queue.json", b"{\"old\":true}"),
+        ],
+    );
+    t.wait_steady();
+    let rel = format!("S/{QUEUE_FILE}");
+    // Another spelling of the name is never the file the write overwrites: the
+    // folder is asked for the exact name, which is created.
+    let (_, find, _, up) = status_write(&t, &rel, b"{\"rev\":1}");
+    assert_eq!((find, up), (1, 1));
+    assert_eq!(
+        t.remote_bytes("S/.Mokuro-Series-Queue.json").as_deref(),
+        Some(&b"{\"old\":true}"[..])
+    );
 }

@@ -785,7 +785,7 @@
   after the last of: a WebDAV request through Bunko, OCR work in flight on the library
   (a held queue does not count: only a running claim), or a change in the cloud that
   was not Bunko's own write (a reader writing directly; another install's lease
-  marker and queue file do not count). The first of them polls at
+  marker and queue files do not count). The first of them polls at
   once. `storage.library.poll.active_s` and `idle_s` still set the intervals. MEGA
   pushes its changes and is unaffected. The admin Storage panel and `mokuro-bunko
   library status` show the current interval and why (`Polling: every 30 s (OCR

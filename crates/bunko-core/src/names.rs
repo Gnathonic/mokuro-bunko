@@ -20,6 +20,11 @@ use unicode_normalization::UnicodeNormalization;
 use crate::casefold_table::CASEFOLD;
 use crate::ignorable_table::DEFAULT_IGNORABLE;
 
+/// The OCR queue file v2 in each series folder (`docs/design/queue-file-v2.md`): Bunko
+/// generates it, serves it over HTTP from memory and (as the lease holder) writes it to
+/// a connected store. Recognised in every spelling the fold joins ([`is_fixed_name`]).
+pub const SERIES_QUEUE_FILE: &str = ".mokuro-series-queue.json";
+
 /// Is `c` a Default_Ignorable_Code_Point (UCD 15.0.0, [`DEFAULT_IGNORABLE`])?
 pub fn is_default_ignorable(c: char) -> bool {
     let cp = c as u32;

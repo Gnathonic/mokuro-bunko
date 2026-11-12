@@ -16,7 +16,8 @@
 //! adoption ingests the library's facts there. [`merge`] merges case variants into
 //! the oldest spelling, and same-named duplicate folders as Mokuro Reader does (§5.9).
 //! [`status`]
-//! holds the marker lease (`.mokuro-bunko.json`) and the cloud queue document. Default
+//! holds the marker lease (`.mokuro-bunko.json`); [`series_queue`] writes each series'
+//! OCR queue file and fills the marker's queue block (queue file v2). Default
 //! features add the providers' drivers (`webdav::WebDavBackend`,
 //! `gdrive::GDriveBackend`, `onedrive::OneDriveBackend`, `mega::MegaBackend`,
 //! `folder::FolderBackend`) and [`auth`], which signs in to the OAuth providers and
@@ -43,6 +44,7 @@ pub mod names;
 #[cfg(feature = "onedrive")]
 pub mod onedrive;
 pub mod outbox;
+pub mod series_queue;
 pub mod state;
 pub mod status;
 pub mod store;
@@ -64,5 +66,6 @@ pub use feed::{
 };
 pub use governor::{ApiClass, ApiStats, ClassStats, Governed, Governor, Limits};
 pub use merge::{CaseMergePolicy, MergeChoice, MergeRecord, ResolveChoice};
+pub use series_queue::{SeriesQueueSource, SeriesQueueTiming, SnapshotFuture};
 pub use state::Conflict;
 pub use store::{RemoteStore, RemoteStoreConfig, berr_to_io, on_store_runtime};

@@ -134,7 +134,7 @@ storage:
 | `quiet_s` | integer | `120` | Seconds a removed file counts as recently removed (a reader replacing a file deletes it first). |
 | `poll.active_s`, `poll.idle_s` | integer | provider default | How often the cloud folder is checked for changes, while busy and while idle. A library folder is watched, so changes usually show within seconds; these are its fallback (60 s and 300 s), for network shares and Docker Desktop, where the watcher sees nothing. |
 | `drive_background_units_per_min` | integer | `20000` | Google Drive API quota units per minute for background work. |
-| `status_files` | boolean | `true` | Write the OCR queue and server status files into the cloud folder for readers. |
+| `status_files` | boolean | `true` | Write each series' OCR queue file (`<Series>/.mokuro-series-queue.json`) into the cloud folder, and the queue's hold and work clock into the lease marker, for readers that read the cloud directly. Off: neither is written; Bunko's WebDAV still serves the queue files. |
 | `dedup` | boolean | `true` | Google Drive and MEGA: merge folders that have the same name in the same place (two `mokuro-reader` folders, two copies of a series folder) the way Mokuro Reader does, and tell readers so they leave it to Bunko. On Google Drive a copy that looks empty to Bunko can still hold files added through the Drive website (Bunko, like Mokuro Reader, sees only the files made through Mokuro Reader's Google project); the merge moves that copy to Drive's trash with them, for 30 days, as Mokuro Reader's merge does. After a merge `volume-data.json`, `goals.json` and `positions.json` can stay as two copies until a reader reading the cloud folder directly writes them again; of two copies of any other file (folders and Bunko's own status files excepted, which are kept as both) the strictly newer stays and the other goes to the trash (on a tie, or when a time is unknown, the copy in the folder that is kept stays). |
 | `progress_user` | string | — | When readers are served too: the Bunko user who owns the cloud folder's per-account files: the progress files, the reading history and the OCR corrections (`<Vol>.edit.mokuro`) Mokuro Reader keeps there. A reader that reads the cloud folder directly shares them with that account. With nobody chosen they belong to no one and nobody sees the corrections (the Storage tab counts them). Choosing another account moves no file: it gets the cloud folder's corrections as they are, the previous account's corrections kept on this server (`users/<u>/edits`) are not brought into the cloud folder, and correction files without an owner are looked for only when Bunko starts. |
 | `google_project` | string | `release` | Which Mokuro Reader's Google project Bunko signs in with, so it sees that reader's Drive files: `release` (reader.mokuro.app) or `beta`. `MOKURO_GOOGLE_PROJECT`. Becomes `custom` by itself when `oauth.google` is set; `custom` without it is refused. |
@@ -649,6 +649,22 @@ a second, and an ETA is republished only when it moves by a minute or
 more, so ETA jitter alone does not change the ETag; a running job's
 `progress` does, as pages complete. With the 100-job cap, the file does
 not grow with the queue.
+
+#### OCR queue file per series
+
+Newer readers read the queue one series at a time:
+`GET /mokuro-reader/<series>/.mokuro-series-queue.json` lists every job that
+series owes (running ones with their start and predicted finish, waiting ones
+with a position on a shared work clock, untimed ones with none) and the
+volumes that finished in the last day. It is built from memory, with the same
+read rules, `ETag`/304 and 405 on writes as the file above, and a `live`
+block with the hold and the clock. On a cloud library the Bunko that holds
+the library's lease also writes it into each series folder that owes OCR
+(and the hold and clock into the lease marker), so a reader connected
+straight to the cloud sees the queue too. It is rewritten only when a job is
+added, starts or finishes, or an estimate moves by more than a quarter of the
+time left, in batches paced for each provider (`status_files: false` turns
+the cloud copies off).
 
 A `.cbz` written over WebDAV (PUT, or MOVE/COPY into place) joins the OCR
 queue as the request completes, instead of at the next poll. A PUT that

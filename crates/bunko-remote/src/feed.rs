@@ -80,7 +80,7 @@ use tokio::time::Instant;
 
 use crate::backend::{BErr, Backend, BackendCaps, ChangeItem, ChangePage, Cursor, Pid, RNode};
 use crate::index::{Index, IndexChange, ROOT_EID, RelPath};
-use crate::names::{CONTROL_FILES, nfc};
+use crate::names::{CONTROL_FILES, is_series_queue_path, nfc};
 
 /// Consecutive failures before the engine reports [`EngineState::Offline`].
 const OFFLINE_AFTER: u32 = 3;
@@ -399,10 +399,12 @@ fn last_seg(rel: &RelPath) -> &str {
     rel.segments().last().map_or("", String::as_str)
 }
 
-/// One of Bunko's control files at the library root (the lease marker, the queue
-/// file): another install's heartbeat or queue update is not a reader's activity.
+/// One of Bunko's control files: the lease marker and the leftover queue file at the
+/// library root, or a series' queue file (queue file v2): another install's heartbeat
+/// or queue update is not a reader's activity.
 fn is_control_file(rel: &RelPath) -> bool {
-    rel.segments().len() == 1 && CONTROL_FILES.contains(&last_seg(rel))
+    (rel.segments().len() == 1 && CONTROL_FILES.contains(&last_seg(rel)))
+        || is_series_queue_path(rel)
 }
 
 /// A change a reader made (§5.3 poll cadence): anything but a control file.

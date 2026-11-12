@@ -317,6 +317,30 @@ impl Services {
             })
         };
         let _ = late_ocr.set(ocr.clone());
+        {
+            // The queue file v2 over HTTP: a finished job leaves its series' file once
+            // the series' metadata has no recompile pending (§5.4); a connected store's
+            // instance id is the one its files carry.
+            let lib = Arc::downgrade(&library);
+            ocr.series_queue_state()
+                .set_settled(Arc::new(move |folder: &str| {
+                    lib.upgrade()
+                        .is_none_or(|l| !l.series_regeneration_pending(folder))
+                }));
+            if let Some(id) = storage.as_ref().and_then(|s| s.instance_id()) {
+                ocr.series_queue_state().set_instance_id(&id);
+            }
+            // The store's copy: the lease holder writes each series' file (§6), from
+            // the same queue.
+            if let Some(s) = &storage {
+                s.set_series_queue_source(Arc::new(
+                    crate::ocr::series_queue::StoreQueueSource::new(
+                        ocr.clone(),
+                        Arc::downgrade(&library),
+                    ),
+                ));
+            }
+        }
         dav_hooks.add_listener(Arc::new(ocr.clone()));
         let analytics = crate::analytics::Analytics::open(crate::analytics::AnalyticsDeps {
             core: core.clone(),
@@ -374,13 +398,19 @@ impl Services {
 /// ancestors' and its descendants'), as a DAV write does for its own changes; a
 /// `Rescan` drops them all (spec §10). The progress user's per-user tree is in no
 /// shared listing (each caller's own is appended per request), so its changes drop
-/// nothing, as its DAV writes do not.
+/// nothing, as its DAV writes do not; nor do a series' OCR queue file's (queue file
+/// v2), which no listing shows and the lease holder rewrites as jobs start and end.
 fn watch_listings(dav: &bunko_dav::Dav, library: &Path) -> Option<bunko_store::WatchGuard> {
     let store = bunko_store::store_for(library)?;
     let (dav, root) = (dav.clone(), library.to_path_buf());
     let sink: bunko_store::WatchSink = Arc::new(move |ev: bunko_store::WatchEvent| {
         match ev.path().and_then(|p| crate::ocr::types::rel_of(&root, p)) {
             Some(rel) if bunko_core::reader_tree::is_per_user_rel(&rel) => {}
+            Some(rel)
+                if rel.split('/').count() >= 2
+                    && rel.rsplit('/').next().is_some_and(|n| {
+                        bunko_core::names::is_fixed_name(n, bunko_core::names::SERIES_QUEUE_FILE)
+                    }) => {}
             Some(rel) => dav.invalidate_listing(&[format!("/{}/{rel}", auth::paths::READER_ROOT)]),
             None => dav.propfind_cache().invalidate(),
         }
@@ -1000,7 +1030,6 @@ pub fn start_library_services(
         }
         let covers = thumbs.spawn_remote(library_dir, stop.child_token());
         ocr.start(stop.child_token());
-        publish_cloud_queue(ocr, storage.clone(), stop.child_token());
         // A metadata pass before first adoption would compile series whose series.json
         // is not read yet (each waits for its submission and is compiled again when it
         // is answered): adoption compiles every series it ingests, the startup pass
@@ -1056,43 +1085,6 @@ impl CorrectionSweeper {
         let sweep = crate::library::adopt_unowned_corrections(&self.db, &self.overlays, adopt);
         self.control.set_unowned_corrections(sweep.unowned);
     }
-}
-
-/// How often the cloud copy of the queue file is offered to the store (which writes it
-/// only on change, at most once per provider floor).
-pub const CLOUD_QUEUE_EVERY: Duration = Duration::from_secs(2);
-
-/// Keep the cloud library's `.mokuro-queue.json` current (§9.1): the scheduler's queue
-/// document, as the reader's WebDAV copy is built, until `stop`.
-fn publish_cloud_queue(
-    ocr: crate::ocr::OcrControl,
-    storage: Arc<crate::storage::StoreHandle>,
-    stop: CancellationToken,
-) {
-    if !storage.connected() {
-        return;
-    }
-    tokio::spawn(async move {
-        loop {
-            if let Some(((held, volumes, pending), now)) =
-                ocr.ask(|s| (s.queue_document(), s.now())).await
-            {
-                let doc = serde_json::Value::Object(crate::ocr::queue_file::build_document(
-                    held, volumes, pending, now,
-                ));
-                let st = storage.clone();
-                match tokio::task::spawn_blocking(move || st.publish_queue_doc(doc)).await {
-                    Ok(Err(e)) => tracing::debug!("[STORAGE] queue file not published: {e}"),
-                    Err(e) => tracing::warn!("[STORAGE] queue file task: {e}"),
-                    Ok(Ok(_)) => {}
-                }
-            }
-            tokio::select! {
-                _ = stop.cancelled() => return,
-                _ = tokio::time::sleep(CLOUD_QUEUE_EVERY) => {}
-            }
-        }
-    });
 }
 
 /// Build every module router and the WebDAV fallback for these services. Modules are

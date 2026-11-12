@@ -1,0 +1,98 @@
+{
+  "body": {
+    "v": 2,
+    "instance_id": "<id-1>",
+    "rev": 2,
+    "at": 946684920,
+    "clock_at": 946684800,
+    "series": "Example Saga",
+    "rows": [
+      {
+        "kind": "ocr",
+        "id": "hayai-nova",
+        "parts": [
+          {
+            "role": "recognizer",
+            "name": "Hayai Nova",
+            "version": "2.5"
+          },
+          {
+            "role": "detector",
+            "name": "PP-OCR Manga",
+            "version": "0.3"
+          }
+        ]
+      },
+      {
+        "kind": "layer",
+        "id": "paddle",
+        "parts": [
+          {
+            "role": "recognizer",
+            "name": "PaddleOCR-VL",
+            "version": "0.3"
+          }
+        ]
+      }
+    ],
+    "vols": {
+      "Example Saga 02": [
+        [
+          0,
+          "r",
+          946684680,
+          946685400
+        ]
+      ],
+      "Example Saga 03": [
+        [
+          0,
+          "q",
+          946686600
+        ],
+        [
+          1,
+          "q",
+          946693800
+        ]
+      ],
+      "Example Saga 04": [
+        [
+          0,
+          "c"
+        ]
+      ],
+      "Example Saga 05": [
+        [
+          0,
+          "q",
+          null
+        ]
+      ]
+    },
+    "done": {
+      "Example Saga 01": 946684920
+    },
+    "live": {
+      "held": null,
+      "held_rows": [
+        "paddle"
+      ],
+      "clock": [
+        [
+          946684800,
+          946684800
+        ],
+        [
+          946771200,
+          946771200
+        ]
+      ],
+      "clock_at": 946684800,
+      "batch_s": 5
+    }
+  },
+  "request": {
+    "file": "Example Saga/.mokuro-series-queue.json"
+  }
+}

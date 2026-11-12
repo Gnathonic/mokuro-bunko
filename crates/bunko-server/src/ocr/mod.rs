@@ -11,7 +11,8 @@
 //!   [`orphans`] — sweeping the `<stem>_<n>.mokuro` files older collectors wrote;
 //!   [`provenance`] — keeping a sealed block through an older reader's rewrite.
 //! * [`api`] — `/_processor/*` (protocol v3); [`queue_api`] + [`shape`] — `/queue`;
-//!   [`queue_file`] — `/mokuro-reader/.mokuro-queue.json`; [`admin`] — `OcrAdmin`.
+//!   [`queue_file`] — `/mokuro-reader/.mokuro-queue.json` (and, through it, each
+//!   series' queue file v2, [`series_queue`]); [`admin`] — `OcrAdmin`.
 
 pub mod actor;
 pub mod admin;
@@ -27,6 +28,7 @@ pub mod pyjson;
 pub mod queue_api;
 pub mod queue_file;
 pub mod sched;
+pub mod series_queue;
 pub mod shape;
 pub mod types;
 pub mod upgrade;

@@ -952,6 +952,34 @@ impl Inner {
         };
         Ok(self.node(&f))
     }
+
+    /// The Status fast path (queue file v2 §6.6): one media PATCH by id, without the
+    /// `files.get` preflight and the same-content check of [`Inner::upload`]. Every
+    /// PATCH is a new revision, which Drive prunes (`keepRevisionForever=false`). Drive
+    /// lets a trashed file be written: the answer says so, and the caller checks.
+    async fn overwrite(
+        &self,
+        pid: &str,
+        if_cver: Option<&str>,
+        src: UploadSource<'_>,
+        op: &mut OpCtx,
+    ) -> Result<RNode, BErr> {
+        let UploadSource::File { path, size, .. } = src;
+        // A version to check needs the preflight; a large file goes up resumably.
+        if if_cver.is_some() || size > SIMPLE_UPLOAD_MAX || op.resume.is_some() {
+            return self
+                .upload(UploadTarget::Replace { pid, if_cver }, src, op)
+                .await;
+        }
+        let path_ = format!("/upload/drive/v3/files/{}", seg(pid));
+        let f = self
+            .multipart(Method::PATCH, &path_, json!({}), path, units::UPDATE)
+            .await?;
+        if f.is_dir() {
+            return Err(BErr::NotFound);
+        }
+        Ok(self.node(&f))
+    }
 }
 
 /// After the last byte, re-stat the file: a different `headRevisionId` means the bytes
@@ -1376,6 +1404,16 @@ impl Backend for GDriveBackend {
         op: &mut OpCtx,
     ) -> Result<RNode, BErr> {
         self.0.upload(to, src, op).await
+    }
+
+    async fn overwrite(
+        &self,
+        pid: &str,
+        if_cver: Option<&str>,
+        src: UploadSource<'_>,
+        op: &mut OpCtx,
+    ) -> Result<RNode, BErr> {
+        self.0.overwrite(pid, if_cver, src, op).await
     }
 
     async fn mkdir(&self, parent: &str, name: &str, _op: &OpCtx) -> Result<RNode, BErr> {

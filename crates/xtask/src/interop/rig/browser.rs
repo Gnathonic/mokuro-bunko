@@ -191,7 +191,7 @@ struct Running {
     server: Option<Arc<Mutex<Server>>>,
     /// Held only to keep it serving until the suite ends.
     _rclone: Option<Rclone>,
-    /// The library folder (the folder provider): only Bunko reads it.
+    /// The library folder (the folder provider).
     _folder: Option<Folder>,
     sim: Option<Cloudsim>,
     env: Env,
@@ -223,7 +223,8 @@ fn setup(paths: &Paths, suite: Suite, p: Provider, work: &Path, reader: &str) ->
     let (mut sim, mut rc, mut folder) = (None, None, None);
     if want.cloud {
         if p == Provider::Folder {
-            // Bunko's library folder; the reader reaches it only through Bunko.
+            // Bunko's library folder; the reader reaches it through Bunko, or (shared)
+            // through its Local Folder, the folder dropped on its page.
             let f = Folder::create(work)?;
             f.seed(&files)?;
             context["folder"] = json!({"path": f.root});

@@ -130,9 +130,8 @@ pub trait CloudStore: Send + Sync {
     /// feed is steady; false on timeout.
     fn wait_steady(&self, timeout: Duration) -> bool;
     fn set_hooks(&self, hooks: Arc<dyn CloudHooks>);
-    /// Publish the cloud queue file from the server's queue document (§9.1; the store
-    /// dedups and throttles). `true` when a write was queued or scheduled.
-    fn publish_queue_doc(&self, doc: Value) -> io::Result<bool>;
+    /// The OCR queue the store's series-file sink writes from (queue file v2 §6).
+    fn set_series_queue_source(&self, src: Arc<dyn bunko_remote::SeriesQueueSource>);
     /// Every op in the outbox.
     fn outbox(&self) -> Vec<bunko_remote::outbox::OpSummary>;
     /// Unresolved conflict rows `(kind, path, detail)`.
@@ -188,8 +187,8 @@ impl<B: Backend> CloudStore for RemoteStore<B> {
     fn set_hooks(&self, hooks: Arc<dyn CloudHooks>) {
         RemoteStore::set_hooks(self, hooks)
     }
-    fn publish_queue_doc(&self, doc: Value) -> io::Result<bool> {
-        RemoteStore::publish_queue_doc(self, doc)
+    fn set_series_queue_source(&self, src: Arc<dyn bunko_remote::SeriesQueueSource>) {
+        RemoteStore::set_series_queue_source(self, src)
     }
     fn outbox(&self) -> Vec<bunko_remote::outbox::OpSummary> {
         RemoteStore::outbox(self)
@@ -326,6 +325,11 @@ impl StoreHandle {
         self.store.is_some()
     }
 
+    /// The connected store's instance id (the lease marker's), if a store runs.
+    pub fn instance_id(&self) -> Option<String> {
+        self.store.as_ref().map(|s| s.instance_id())
+    }
+
     /// First adoption is done (true without a store: there is nothing to adopt).
     pub fn adopted(&self) -> bool {
         self.store.as_ref().is_none_or(|s| s.adopted())
@@ -356,11 +360,11 @@ impl StoreHandle {
         }
     }
 
-    /// Publish the cloud copy of the queue file (§9.1); nothing without a store.
-    pub fn publish_queue_doc(&self, doc: Value) -> io::Result<bool> {
-        match &self.store {
-            Some(s) => s.publish_queue_doc(doc),
-            None => Ok(false),
+    /// The OCR queue the store's series-file sink writes from (queue file v2 §6);
+    /// nothing without a store.
+    pub fn set_series_queue_source(&self, src: Arc<dyn bunko_remote::SeriesQueueSource>) {
+        if let Some(s) = &self.store {
+            s.set_series_queue_source(src);
         }
     }
 
@@ -849,6 +853,8 @@ pub fn open_library_store(
         rc.bunko_version = bunko_core::VERSION.to_string();
         rc.per_user_files = bunko_core::reader_tree::advertised();
         rc.dedup = lib.dedup;
+        // Each series' OCR queue file and the marker's queue block (queue file v2 §6.10).
+        rc.status_files = lib.status_files;
         test_cloud::StoreTune::current().apply(&mut rc);
         #[cfg(feature = "testing")]
         test_cloud::apply_tune(&layout.base, &mut rc);

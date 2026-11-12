@@ -129,8 +129,9 @@ pub enum Provider {
     Microsoft,
     Mega,
     Rclone,
-    /// A library folder on this disk, Bunko's `folder` backend: no reader can be driven
-    /// on it (the reader's Local Folder needs the File System Access picker).
+    /// A library folder on this disk, Bunko's `folder` backend. The reader reaches it
+    /// through Bunko, or (shared) through its Local Folder, the folder dropped on the
+    /// page in place of the File System Access picker; it has no direct suite.
     Folder,
 }
 
@@ -177,15 +178,15 @@ impl Suite {
         }
     }
 
-    /// The providers this suite runs on. A folder runs the suites with no reader on
-    /// the library itself (cloud) or the reader signed in to Bunko (bridge); direct and
-    /// shared need the reader's Local Folder, which only the File System Access picker
-    /// opens.
+    /// The providers this suite runs on. A folder runs cloud, bridge and shared (its
+    /// Local Folder specs: the reader on the folder Bunko keeps, through
+    /// `interop/e2e/rig/local-folder.mjs`); direct, the reader alone on its cloud, has
+    /// none: the reader's own tests cover its Local Folder.
     fn providers(self) -> &'static [Provider] {
         match self {
             Suite::Dav | Suite::Api => &[Provider::Local],
-            Suite::Cloud | Suite::Bridge => &BACKENDS,
-            Suite::Direct | Suite::Shared => &CLOUDS,
+            Suite::Cloud | Suite::Bridge | Suite::Shared => &BACKENDS,
+            Suite::Direct => &CLOUDS,
         }
     }
 
@@ -568,9 +569,9 @@ mod tests {
             [("dav", "local"), ("shared", "rclone")]
         );
         let all = expand(&[S::All], &[P::All]).unwrap();
-        // dav and api on local; direct and shared on the four clouds; bridge and cloud
-        // on those and a folder.
-        assert_eq!(all.len(), 2 + 2 * 4 + 2 * 5);
+        // dav and api on local; direct on the four clouds; bridge, shared and cloud on
+        // those and a folder.
+        assert_eq!(all.len(), 2 + 4 + 3 * 5);
         // A suite named on its own with no provider it runs on is an error.
         let err = expand(&[S::Dav], &[P::Google]).unwrap_err().to_string();
         assert!(err.contains("dav suite runs on local only"), "{err}");
@@ -585,23 +586,30 @@ mod tests {
                 ("cloud", "mega")
             ]
         );
-        // A folder: cloud and bridge, in suite order; direct and shared cannot drive
-        // the reader's Local Folder.
+        // A folder: cloud, bridge and shared, in suite order; no direct suite.
         assert_eq!(
-            pairs(&[S::Cloud, S::Bridge], &[P::Folder]),
-            [("bridge", "folder"), ("cloud", "folder")]
+            pairs(&[S::Cloud, S::Bridge, S::Shared], &[P::Folder]),
+            [
+                ("bridge", "folder"),
+                ("shared", "folder"),
+                ("cloud", "folder")
+            ]
         );
         assert_eq!(
             pairs(&[S::All], &[P::Folder]),
-            [("bridge", "folder"), ("cloud", "folder")]
+            [
+                ("bridge", "folder"),
+                ("shared", "folder"),
+                ("cloud", "folder")
+            ]
         );
-        for s in [S::Direct, S::Shared, S::Dav, S::Api] {
+        for s in [S::Direct, S::Dav, S::Api] {
             assert!(expand(&[s], &[P::Folder]).is_err(), "{s:?}");
         }
         // The CI legs: the cloud leg on the four clouds, the folder leg on its own,
         // so no pair runs twice.
         let cloud_leg = pairs(&[S::Cloud], &[P::Google, P::Microsoft, P::Mega, P::Rclone]);
-        let folder_leg = pairs(&[S::Cloud, S::Bridge], &[P::Folder]);
+        let folder_leg = pairs(&[S::Cloud, S::Bridge, S::Shared], &[P::Folder]);
         assert!(cloud_leg.iter().all(|p| !folder_leg.contains(p)));
         assert_eq!(cloud_leg.len() + 1, pairs(&[S::Cloud], &[P::All]).len());
     }

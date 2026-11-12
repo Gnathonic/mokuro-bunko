@@ -116,6 +116,25 @@ pub const KEEP_BOTH_FOLDED: [&str; 3] = ["volume-data.json", "goals.json", "posi
 /// (Bunko writes only this spelling).
 pub const CONTROL_FILES: [&str; 2] = [".mokuro-bunko.json", ".mokuro-queue.json"];
 
+/// A series' OCR queue file (queue file v2): the lease holder's status writer
+/// regenerates it, so a duplicate-folder merge keeps the newer copy and trashes the
+/// other (it is not kept twice).
+pub use bunko_core::names::SERIES_QUEUE_FILE;
+
+/// The leftover root queue file of a 0.8 pre-release (queue file v2 §3): never written
+/// any more; the lease holder deletes it.
+pub const ROOT_QUEUE_FILE: &str = ".mokuro-queue.json";
+
+/// `rel` names a series' queue file: two segments or more, the last folding to
+/// [`SERIES_QUEUE_FILE`].
+pub fn is_series_queue_path(rel: &crate::index::RelPath) -> bool {
+    let segs = rel.segments();
+    segs.len() >= 2
+        && segs
+            .last()
+            .is_some_and(|n| bunko_core::names::is_fixed_name(n, SERIES_QUEUE_FILE))
+}
+
 /// A merge moves every copy of `name` in, never trashing one (same-name collision
 /// rule). History `.events` files and `profiles.json` are not kept twice: the newer
 /// write wins, as the reader's own import does.

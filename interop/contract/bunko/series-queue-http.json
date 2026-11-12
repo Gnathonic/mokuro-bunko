@@ -1,0 +1,69 @@
+{
+  "body": {
+    "v": 2,
+    "instance_id": "<id-1>",
+    "rev": 1,
+    "at": 946684800,
+    "clock_at": 946684800,
+    "series": "Contract Series",
+    "rows": [
+      {
+        "kind": "ocr",
+        "id": "hayai-nova",
+        "parts": [
+          {
+            "role": "recognizer",
+            "name": "Hayai Nova",
+            "version": "2.5"
+          },
+          {
+            "role": "detector",
+            "name": "PP-OCR Manga",
+            "version": "0.3"
+          }
+        ]
+      }
+    ],
+    "vols": {
+      "Volume 02": [
+        [
+          0,
+          "q",
+          null
+        ]
+      ]
+    },
+    "done": {},
+    "live": {
+      "held": {
+        "reason": "no-processor"
+      },
+      "held_rows": [],
+      "clock": [
+        [
+          946684800,
+          946684800
+        ],
+        [
+          946771200,
+          946771200
+        ]
+      ],
+      "clock_at": 946684800,
+      "batch_s": 5
+    }
+  },
+  "headers": {
+    "cache-control": "no-cache",
+    "content-type": "application/json",
+    "etag": "\"etag\"",
+    "vary": "Accept-Encoding"
+  },
+  "request": {
+    "auth": "basic:reader",
+    "headers": {},
+    "method": "GET",
+    "path": "/mokuro-reader/Contract%20Series/.mokuro-series-queue.json"
+  },
+  "status": 200
+}

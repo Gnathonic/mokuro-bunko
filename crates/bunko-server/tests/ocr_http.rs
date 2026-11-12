@@ -419,6 +419,226 @@ async fn queue_file_document_etag_gzip_and_refusals() {
     e.ocr.stop().await;
 }
 
+/// The queue file v2 of each series over HTTP (`docs/design/queue-file-v2.md` §7):
+/// every job the series owes, `live` with the hold, a strong ETag and 304, a gzip form
+/// with its own tag for a long body, every spelling of the name, 404 for a folder the
+/// library does not show, an empty file for one that owes nothing, 405 for every
+/// write, 404 for a PROPFIND.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn series_queue_file_over_http() {
+    let e = env(|_| {});
+    let lib = e.core.layout.library();
+    ocr_common::write_cbz(&lib.join("Series A/V1.cbz"), 3);
+    e.ocr.archive_arrived(&lib.join("Series A/V1.cbz"));
+    for i in 0..40 {
+        let p = lib.join(format!(
+            "Long Example Series/Long Example Series Volume {i:03}.cbz"
+        ));
+        ocr_common::write_cbz(&p, 2);
+        e.ocr.archive_arrived(&p);
+    }
+    std::fs::create_dir_all(lib.join("Series B")).unwrap();
+    std::fs::write(lib.join("Series B/notes.txt"), b"x").unwrap();
+    std::fs::create_dir_all(lib.join("history")).unwrap();
+    std::fs::write(lib.join("loose.txt"), b"x").unwrap();
+    let app = Router::new()
+        .fallback(|| async { (StatusCode::IM_A_TEAPOT, "dav") })
+        .layer(axum::middleware::from_fn_with_state(
+            QueueFileState {
+                core: e.core.clone(),
+                ocr: Some(e.ocr.clone()),
+            },
+            queue_file::middleware,
+        ));
+    let path = "/mokuro-reader/Series%20A/.mokuro-series-queue.json";
+    let req = |method: &str, path: &str| {
+        Request::builder()
+            .method(method)
+            .uri(path)
+            .body(Body::empty())
+            .unwrap()
+    };
+    let (status, headers, body) = send(&app, req("GET", path)).await;
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+    let doc: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(doc["v"], 2);
+    assert_eq!(doc["series"], "Series A");
+    assert_eq!(doc["instance_id"], e.ocr.series_queue_state().instance_id(),);
+    assert!(
+        doc["rev"].as_u64().unwrap() > 1_000_000_000_000,
+        "time-based"
+    );
+    assert_eq!(
+        doc["rows"],
+        json!([{"kind": "ocr", "id": "hayai-nova",
+                "parts": [{"role": "recognizer", "name": "Hayai Nova", "version": "2.5"},
+                          {"role": "detector", "name": "PP-OCR Manga", "version": "0.3"}]}])
+    );
+    assert_eq!(doc["vols"], json!({"V1": [[0, "q", null]]}));
+    assert_eq!(doc["done"], json!({}));
+    assert_eq!(doc["live"]["held"], json!({"reason": "no-processor"}));
+    assert_eq!(doc["live"]["held_rows"], json!([]));
+    assert_eq!(doc["live"]["batch_s"], 5);
+    assert_eq!(doc["live"]["clock"].as_array().unwrap().len(), 2);
+    assert_eq!(doc["clock_at"], doc["live"]["clock_at"]);
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.starts_with("{\"v\":2,\"instance_id\":"), "{text}");
+    let etag = headers["etag"].to_str().unwrap().to_string();
+    assert_eq!(etag.len(), 34, "{etag}");
+    assert_eq!(headers["cache-control"], "no-cache");
+    assert_eq!(headers["vary"], "Accept-Encoding");
+    assert_eq!(headers["content-type"], "application/json");
+    assert!(
+        headers.get("content-encoding").is_none(),
+        "a short body is never gzipped"
+    );
+    // The same queue, rebuilt: the same tag; 304 for any tag in the list.
+    e.ocr.series_queue_state().expire();
+    let get_if = |tag: &str| {
+        Request::get(path)
+            .header(header::IF_NONE_MATCH, tag)
+            .body(Body::empty())
+            .unwrap()
+    };
+    let (status, headers2, body) = send(&app, get_if(&format!("\"other\", {etag}"))).await;
+    assert_eq!(status, 304);
+    assert!(body.is_empty());
+    assert_eq!(headers2["etag"].to_str().unwrap(), etag);
+    // HEAD: the headers, no body.
+    let (status, headers3, body) = send(&app, req("HEAD", path)).await;
+    assert_eq!(status, 200);
+    assert!(body.is_empty());
+    assert_eq!(headers3["etag"].to_str().unwrap(), etag);
+    // Every spelling of the name and of the folder is the same file.
+    for other in [
+        "/mokuro-reader/series%20a/.MOKURO-SERIES-QUEUE.JSON",
+        "/mokuro-reader/Series%20A/.mokuro-%C5%BFeries-queue.json",
+        "/mokuro-reader/./Series%20A/.mokuro-series-queue.json",
+    ] {
+        let (status, h, _) = send(&app, req("GET", other)).await;
+        assert_eq!(status, 200, "{other}");
+        assert_eq!(h["etag"].to_str().unwrap(), etag, "{other}");
+    }
+    // A folder the library does not show: 404. One that owes nothing: an empty file.
+    for missing in [
+        "/mokuro-reader/No%20Such/.mokuro-series-queue.json",
+        "/mokuro-reader/history/.mokuro-series-queue.json",
+        "/mokuro-reader/loose.txt/.mokuro-series-queue.json",
+    ] {
+        assert_eq!(send(&app, req("GET", missing)).await.0, 404, "{missing}");
+    }
+    let (status, _, body) = send(
+        &app,
+        req("GET", "/mokuro-reader/Series%20B/.mokuro-series-queue.json"),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let empty: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(empty["series"], "Series B");
+    assert_eq!(empty["vols"], json!({}));
+    assert_eq!(empty["rows"], json!([]));
+    // A long body: gzipped on request, with its own tag; either tag is "not modified".
+    let long = "/mokuro-reader/Long%20Example%20Series/.mokuro-series-queue.json";
+    let (_, plain_h, plain) = send(&app, req("GET", long)).await;
+    assert!(plain.len() >= 1024, "{}", plain.len());
+    let plain_tag = plain_h["etag"].to_str().unwrap().to_string();
+    let gz = Request::get(long)
+        .header(header::ACCEPT_ENCODING, "gzip, br")
+        .body(Body::empty())
+        .unwrap();
+    let (status, gz_h, packed) = send(&app, gz).await;
+    assert_eq!(status, 200);
+    assert_eq!(gz_h["content-encoding"], "gzip");
+    let gz_tag = gz_h["etag"].to_str().unwrap().to_string();
+    assert_eq!(
+        gz_tag,
+        format!("{}-gz\"", &plain_tag[..plain_tag.len() - 1])
+    );
+    let mut text = Vec::new();
+    std::io::Read::read_to_end(&mut flate2::read::GzDecoder::new(&packed[..]), &mut text).unwrap();
+    assert_eq!(text, plain);
+    for tag in [&plain_tag, &gz_tag] {
+        let r = Request::get(long)
+            .header(header::ACCEPT_ENCODING, "gzip")
+            .header(header::IF_NONE_MATCH, tag.as_str())
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(send(&app, r).await.0, 304, "{tag}");
+    }
+    // Writes: 405, in every spelling, onto it as well; PROPFIND: in no listing.
+    for method in [
+        "PUT",
+        "DELETE",
+        "PROPPATCH",
+        "LOCK",
+        "UNLOCK",
+        "MKCOL",
+        "POST",
+        "MOVE",
+        "COPY",
+    ] {
+        let r = Request::builder()
+            .method(method)
+            .uri("/mokuro-reader/Series%20A/.Mokuro-Series-Queue.json")
+            .header("destination", "http://h/mokuro-reader/Series%20A/x.json")
+            .body(Body::empty())
+            .unwrap();
+        let (status, h, _) = send(&app, r).await;
+        assert_eq!(status, 405, "{method}");
+        assert_eq!(h["allow"], "GET, HEAD, OPTIONS");
+    }
+    for method in ["MOVE", "COPY"] {
+        let r = Request::builder()
+            .method(method)
+            .uri("/mokuro-reader/Series%20A/x.json")
+            .header(
+                "destination",
+                "http://h/mokuro-reader/Series%20A/.MOKURO-series-queue.json",
+            )
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(send(&app, r).await.0, 405, "{method} onto it");
+    }
+    assert_eq!(send(&app, req("PROPFIND", path)).await.0, 404);
+    assert_eq!(
+        send(&app, req("OPTIONS", path)).await.0,
+        StatusCode::IM_A_TEAPOT
+    );
+    // Other files of the folder are WebDAV's.
+    assert_eq!(
+        send(&app, req("GET", "/mokuro-reader/Series%20A/V1.cbz"))
+            .await
+            .0,
+        StatusCode::IM_A_TEAPOT
+    );
+    e.stop.cancel();
+    e.ocr.stop().await;
+}
+
+/// The read gate is a GET of a file in the series folder: with anonymous downloads off,
+/// a visitor is asked to sign in.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn series_queue_file_has_the_read_gate_of_its_folder() {
+    let e = env(|c| c.registration.allow_anonymous_download = false);
+    let lib = e.core.layout.library();
+    ocr_common::write_cbz(&lib.join("Series A/V1.cbz"), 3);
+    let app = Router::new()
+        .fallback(|| async { (StatusCode::IM_A_TEAPOT, "dav") })
+        .layer(axum::middleware::from_fn_with_state(
+            QueueFileState {
+                core: e.core.clone(),
+                ocr: Some(e.ocr.clone()),
+            },
+            queue_file::middleware,
+        ));
+    let r = Request::get("/mokuro-reader/Series%20A/.mokuro-series-queue.json")
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(send(&app, r).await.0, 401);
+    e.stop.cancel();
+    e.ocr.stop().await;
+}
+
 #[test]
 fn queue_file_eta_hysteresis() {
     let doc = |eta: &str| {

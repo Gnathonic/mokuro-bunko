@@ -1,8 +1,10 @@
 //! The `folder` provider: a library folder on this disk that Bunko keeps as its storage
 //! backend (`storage.library.backend: folder`), the way it keeps a cloud. The folder is
 //! the library root, the part Drive's `mokuro-reader` folder plays, so its files sit
-//! straight below it. Nothing serves it to the reader: the reader's Local Folder opens
-//! a folder only through the File System Access picker, which a rig cannot answer.
+//! straight below it. Nothing serves it to the reader: the `shared` suite's Local
+//! Folder specs drop it on the reader's page, which gives the page a handle to it in
+//! place of the File System Access picker a rig cannot answer
+//! (`interop/e2e/rig/local-folder.mjs`).
 
 use super::super::server::{CLOUD_FOLDER, CloudLogin, folder_login};
 use anyhow::{Context, Result};

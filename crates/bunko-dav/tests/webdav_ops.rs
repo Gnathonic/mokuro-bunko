@@ -1473,6 +1473,41 @@ async fn listings_hide_staging_files_and_symlinks_stay_contained() {
     }
 }
 
+/// A series' OCR queue file (a cloud store's copy, in any spelling) is in no listing of
+/// its folder, at any depth; a folder of that name and the name at the library root are
+/// not Bunko's file and stay listed.
+#[tokio::test]
+async fn listings_hide_the_series_queue_file() {
+    let env = Env::new();
+    std::fs::write(env.lib("series/.mokuro-series-queue.json"), b"{}").unwrap();
+    std::fs::write(env.lib("series/.MOKURO-SERIES-QUEUE.JSON"), b"{}").unwrap();
+    std::fs::write(env.lib(".mokuro-series-queue.json"), b"{}").unwrap();
+    for (path, depth) in [
+        ("/mokuro-reader/series", "1"),
+        ("/mokuro-reader", "infinity"),
+    ] {
+        let r = env
+            .req(None, "PROPFIND", path, &[("depth", depth)], b"")
+            .await;
+        assert_eq!(r.code(), 207);
+        let t = r.text();
+        assert!(!t.contains("series/.mokuro-series-queue.json"), "{t}");
+        assert!(
+            !t.to_lowercase()
+                .contains("series/.mokuro-series-queue.json"),
+            "{t}"
+        );
+        assert!(t.contains("/mokuro-reader/series/vol1.cbz"), "{t}");
+    }
+    let r = env
+        .req(None, "PROPFIND", "/mokuro-reader", &[("depth", "1")], b"")
+        .await;
+    assert!(
+        r.text()
+            .contains("/mokuro-reader/.mokuro-series-queue.json")
+    );
+}
+
 /// Adding an OCR file is an `upload`; overwriting it an `edit`; re-sending its exact bytes
 /// replaces nothing and is an `edit` marked `unchanged` (generation-upgrade.md §3).
 #[tokio::test]
