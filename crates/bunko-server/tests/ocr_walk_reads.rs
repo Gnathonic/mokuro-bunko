@@ -606,6 +606,197 @@ fn a_changed_cloud_sidecar_is_judged_on_what_is_there_now() {
     }
 }
 
+/// The upgrade's own swap: a ready volume's layer copied in as its main sidecar is a new
+/// version of the main, read once by the next walk, which decides as a fresh census does;
+/// a restart after it reads nothing.
+#[test]
+fn a_swapped_main_is_judged_at_its_new_version() {
+    for (name, fake) in [
+        ("drive", FakeBackend::drive_like()),
+        ("mega", FakeBackend::mega_like()),
+    ] {
+        let mut t = Cloud::start(fake);
+        let (first, _, _) = t.walk();
+        assert_eq!(first.ready, ["B/Vol 1.cbz"], "{name}");
+        let cbz = t.root.join("B/Vol 1.cbz");
+        let layer = t.root.join("B/Vol 1.fast.mokuro");
+        t.up().direct_replace(&cbz, &layer).unwrap();
+        t.store().wait_steady(WAIT);
+        t.sync();
+        let (now, reads, _) = t.walk();
+        eprintln!("{name}: after the swap: {reads:?}");
+        assert!(now.ready.is_empty(), "{name}: {now:?}");
+        let f = fresh(&t.root);
+        assert_eq!((&now.owed, &now.ready), (&f.owed, &f.ready), "{name}");
+        assert!(
+            total(&reads) <= 1 && reads.keys().all(|r| r == "B/Vol 1.mokuro"),
+            "{name}: at most the new main, once: {reads:?}"
+        );
+        t.stop();
+        t.open();
+        let (again, reads, _) = t.walk();
+        assert!(reads.is_empty(), "{name}: after a restart: {reads:?}");
+        let f = fresh(&t.root);
+        assert_eq!((again.owed, again.ready), (f.owed, f.ready), "{name}");
+    }
+}
+
+// ---- a local folder as the cloud store ---------------------------------------------
+
+/// A local folder connected as the cloud store (`FolderBackend`), whose content version is
+/// no file's identity: the file's mtime and size, as a WebDAV host's is without an ETag.
+/// Every file here has one mtime (a library copied or unpacked with its timestamps), so a
+/// current and an outdated layer of one size share a version: the store's effective mtime
+/// (salted by the file's id) keeps one file's facts from ever being another's. Each walk
+/// decides as a census that never saw the library; settings and a restart read nothing; a
+/// file rewritten at its size is read once; a series folder renamed (new ids: the facts
+/// are not found by version on a store of path ids) is judged on what is there.
+#[test]
+fn a_folder_store_with_weak_versions_judges_each_file_on_its_own_bytes() {
+    use bunko_remote::folder::{FolderBackend, FolderConfig};
+    type Store = Arc<RemoteStore<FolderBackend>>;
+    let tmp = TempDir::new().unwrap();
+    let disk = tmp.path().join("library-folder");
+    let at = std::time::SystemTime::now() - Duration::from_secs(3600);
+    let put = |rel: &str, bytes: &[u8], at: std::time::SystemTime| {
+        let p = disk.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, bytes).unwrap();
+        let f = std::fs::File::options().write(true).open(&p).unwrap();
+        f.set_modified(at).unwrap();
+    };
+    let files = library();
+    for (rel, bytes) in &files {
+        put(rel, bytes, at);
+    }
+    let len = |rel: &str| files.iter().find(|(r, _)| r == rel).unwrap().1.len();
+    assert_eq!(len("A/Vol 1.fast.mokuro"), len("B/Vol 2.fast.mokuro"));
+    let root = tmp.path().join("cloud/s/library");
+    let open = || -> (Store, MountGuard) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let backend = rt
+            .block_on(FolderBackend::connect(FolderConfig {
+                path: disk.clone(),
+                root_name: FOLDER.into(),
+                state_dir: tmp.path().join("cloud/s"),
+                watch: false,
+            }))
+            .unwrap();
+        drop(rt);
+        let mut cfg = RemoteStoreConfig::new(root.clone(), tmp.path().join("cloud/s"), FOLDER);
+        cfg.poll_active = Duration::from_secs(3600);
+        cfg.poll_idle = Duration::from_secs(3600);
+        cfg.lease = false;
+        let store = RemoteStore::open_shared(cfg, Arc::new(backend)).unwrap();
+        assert!(store.wait_steady(WAIT), "{:?}", store.engine_state());
+        let mount = bunko_store::mount(store.clone() as Arc<dyn LibraryStore>);
+        (store, mount)
+    };
+    // The store lists what the folder holds: `rel` there (or gone) at the size on disk.
+    let sync = |store: &Store, rel: &str, there: bool| {
+        let deadline = std::time::Instant::now() + WAIT;
+        loop {
+            store.feed().poll_now();
+            assert!(store.wait_steady(WAIT));
+            let listed = bunko_store::fs::metadata(root.join(rel))
+                .ok()
+                .map(|m| m.len());
+            let disk = std::fs::metadata(disk.join(rel)).ok().map(|m| m.len());
+            if listed == disk && listed.is_some() == there {
+                return;
+            }
+            assert!(std::time::Instant::now() < deadline, "{rel}: {listed:?}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    let version = |rel: &str| {
+        bunko_store::fs::metadata(root.join(rel))
+            .unwrap()
+            .version()
+            .cloned()
+    };
+    let (store, mount) = open();
+    assert_eq!(
+        version("A/Vol 1.fast.mokuro"),
+        version("B/Vol 2.fast.mokuro"),
+        "two files, one version"
+    );
+    let db = Arc::new(Database::open(tmp.path().join("mokuro.db")).unwrap());
+    let up = census(&root, Some(db.clone()));
+    let first = decide(&root, &up);
+    assert_eq!(first.owed, expected(), "{first:?}");
+    assert_eq!(first, fresh(&root));
+    let read = up.sidecar_facts().reads();
+    assert_eq!(read, 11, "each main and each `fast` layer once");
+    up.configure(&upgrade_config(), &rows());
+    assert_eq!(decide(&root, &up), first);
+    assert_eq!(up.sidecar_facts().reads(), read, "nothing read again");
+
+    // A restart.
+    drop(up);
+    drop(mount);
+    drop(store);
+    let (store, mount) = open();
+    let up = census(&root, Some(db.clone()));
+    assert_eq!(decide(&root, &up), first);
+    assert_eq!(
+        up.sidecar_facts().reads(),
+        0,
+        "nothing read after a restart"
+    );
+
+    // Rewritten at its size, a second later: an older revision's output now.
+    let older = hayai(current() - 1, "fast", "S");
+    assert_eq!(older.len(), len("A/Vol 1.fast.mokuro"));
+    put("A/Vol 1.fast.mokuro", &older, at + Duration::from_secs(1));
+    store.feed().poll_now();
+    let deadline = std::time::Instant::now() + WAIT;
+    while version("A/Vol 1.fast.mokuro") == version("A/Vol 2.fast.mokuro") {
+        assert!(std::time::Instant::now() < deadline);
+        store.feed().poll_now();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let now = decide(&root, &up);
+    let mut want = expected();
+    want.insert("A/Vol 1.cbz".into(), owed(&["g-2"], &["g-2"], false));
+    assert_eq!(now.owed, want);
+    assert_eq!(now, fresh(&root));
+    assert_eq!(up.sidecar_facts().reads(), 1, "the new version only");
+
+    // A series folder renamed.
+    drop(up);
+    drop(mount);
+    drop(store);
+    std::fs::rename(disk.join("A"), disk.join("C")).unwrap();
+    let (store, _mount) = open();
+    sync(&store, "C/Vol 1.fast.mokuro", true);
+    sync(&store, "A/Vol 1.fast.mokuro", false);
+    let up = census(&root, Some(db.clone()));
+    let moved = decide(&root, &up);
+    let now = fresh(&root);
+    assert_eq!((&moved.owed, &moved.ready), (&now.owed, &now.ready));
+    assert!(moved.owed.contains_key("C/Vol 1.cbz"), "{moved:?}");
+    eprintln!(
+        "folder store: first walk {read} reads; after the series folder moved {}",
+        up.sidecar_facts().reads()
+    );
+    assert!(
+        up.sidecar_facts().reads() <= 7,
+        "at most the moved series' sidecars"
+    );
+    up.sidecar_facts().prune();
+    let kept: Vec<String> = db
+        .sidecar_facts_keys()
+        .unwrap()
+        .into_iter()
+        .map(|k| k.sidecar_path)
+        .collect();
+    assert!(kept.iter().all(|p| !p.starts_with("A/")), "{kept:?}");
+}
+
 // ---- a local library ---------------------------------------------------------------
 
 /// The same on a local library: the facts outlive a settings change and a restart (in

@@ -727,11 +727,14 @@
   `mokuro.db` (`sidecar_facts`): a settings change and a restart read no unchanged
   sidecar again, and its decisions are exactly those of a census reading every file.
   A sidecar the reader replaces (in place, or MEGA's delete-then-upload) is read once at
-  its new version; a cloud file renamed or moved (a case rename, a series folder renamed)
-  keeps its version and is not read again; a local file is pinned by its size and mtime
+  its new version; a file renamed or moved on Google Drive, OneDrive or MEGA (a case
+  rename, a series folder renamed) keeps its version and is not read again (on WebDAV
+  and a connected local folder, which know a file by its path, it is read once under its
+  new name); a local file is pinned by its size and mtime
   (one written within the last 3 seconds is read again until it is older, so two writes
   within one tick of the file system's clock are never taken for one). The facts of
-  files that are gone or changed are pruned after a walk. Layers no generation writes
+  files that are gone or changed are pruned after a walk, never while the library folder
+  itself is missing (a disk or share not mounted yet). Layers no generation writes
   are no longer read for the earlier beta's clean-up unless their name is one it gave.
 - **Turning this server's OCR off stops it at once.** With OCR on this machine turned
   off mid-queue (This server, the OCR settings or the setup wizard), the server went on

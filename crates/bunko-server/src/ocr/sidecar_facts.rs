@@ -18,8 +18,11 @@
 //! version read after the read (a read racing a write is used once and not kept), never
 //! for an I/O error (the network), and never for a cloud file the store gives no
 //! version. A cloud file renamed or moved keeps its version, and its new name finds the
-//! facts by it (a local file's size and mtime tie nothing together across paths, so
-//! there a new name is read once). Rows of files that are gone or changed are pruned.
+//! facts by it where the store keeps the file's id through a rename (Drive, OneDrive,
+//! MEGA: its effective mtime is salted by that id); on a store that knows a file by its
+//! path (WebDAV, a connected local folder), as on a local disk, whose size and mtime tie
+//! nothing together across paths, a new name is read once. Rows of files that are gone
+//! or changed are pruned (never while the library folder itself is missing).
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -492,8 +495,13 @@ impl SidecarFactsCache {
     /// Drop the facts of every file that is gone or changed since: those whose path
     /// reaches no file, or a file at another version. A cloud file renamed in case only
     /// (the folder lists another spelling of its name at its very version) keeps its
-    /// facts under the new spelling. Returns how many went.
+    /// facts under the new spelling. Returns how many went. A library folder that is
+    /// not there (a disk or share not mounted yet) tells nothing of its files: nothing
+    /// goes, or every sidecar would be read again once it is back.
     pub fn prune(&self) -> usize {
+        if !fs::metadata(&self.library).is_ok_and(|m| m.is_dir()) {
+            return 0;
+        }
         let Some(db) = &self.db else {
             let mut memory = self.memory.lock();
             let before = memory.len();
@@ -634,6 +642,36 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         assert!(cache.get(&path).is_none());
         assert_eq!(cache.prune(), 1);
+    }
+
+    /// A library folder that is not there (a share not mounted yet) prunes nothing: its
+    /// files are not gone, and their facts are good again once it is back.
+    #[test]
+    fn a_library_that_is_not_there_prunes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = dir.path().join("library");
+        std::fs::create_dir_all(lib.join("S")).unwrap();
+        let path = lib.join("S/v.mokuro");
+        write_aged(
+            &path,
+            br#"{"version":"0.2.1","pages":[]}"#,
+            Duration::from_secs(3600),
+        );
+        let db = Arc::new(Database::open(dir.path().join("mokuro.db")).unwrap());
+        let cache = SidecarFactsCache::new(lib.clone(), Some(db.clone()));
+        cache.get(&path).unwrap();
+        assert_eq!(db.sidecar_facts_keys().unwrap().len(), 1);
+        let away = dir.path().join("unmounted");
+        std::fs::rename(&lib, &away).unwrap();
+        assert_eq!(cache.prune(), 0);
+        assert_eq!(db.sidecar_facts_keys().unwrap().len(), 1, "kept");
+        std::fs::rename(&away, &lib).unwrap();
+        let again = SidecarFactsCache::new(lib.clone(), Some(db.clone()));
+        again.get(&path).unwrap();
+        assert_eq!(again.reads(), 0, "not read again once it is back");
+        // A file that is gone from a library that is there goes.
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(again.prune(), 1);
     }
 
     /// A file written a moment ago may be written again within its clock's tick, at the
