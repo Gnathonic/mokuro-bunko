@@ -2503,3 +2503,397 @@ async fn a_socket_opens_when_the_scheduler_answers_after_30_seconds() {
     );
     assert!(started.elapsed() >= Duration::from_secs(30));
 }
+
+// --- this server's OCR turned off mid-queue ------------------------------------------------
+
+/// This server's OCR as `serve` runs it (a background install), counting its starts and
+/// its processor's ends: an end is every session wound down, its models freed.
+struct CountedLocal {
+    fake: bunko_processor::FakePipeline,
+    install: Arc<FakeInstall>,
+    starts: std::sync::atomic::AtomicUsize,
+    ended: Arc<std::sync::atomic::AtomicUsize>,
+    /// How much longer than its sessions its end takes (ms): a processor slow to free
+    /// its models.
+    end_delay_ms: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl bunko_server::ocr::LocalProcessorFactory for CountedLocal {
+    fn start(
+        &self,
+        results_dir: &std::path::Path,
+    ) -> Result<bunko_server::ocr::LocalChannels, String> {
+        self.starts
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let mut channels = FakeLocal(self.fake.clone()).start(results_dir)?;
+        let ended = self.ended.clone();
+        let delay = self.end_delay_ms.clone();
+        channels.finished = channels.finished.map(|f| {
+            tokio::spawn(async move {
+                let _ = f.await;
+                let ms = delay.load(std::sync::atomic::Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(ms)).await;
+                ended.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            })
+        });
+        Ok(channels)
+    }
+    fn installer(&self) -> Option<Arc<dyn bunko_server::ocr::BackgroundInstall>> {
+        Some(self.install.clone())
+    }
+}
+
+/// Wait up to `secs` for `f` to hold.
+async fn eventually<F: std::future::Future<Output = bool>>(
+    what: &str,
+    secs: u64,
+    mut f: impl FnMut() -> F,
+) {
+    let until = std::time::Instant::now() + Duration::from_secs(secs);
+    while std::time::Instant::now() < until {
+        if f().await {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("{what}: not within {secs}s");
+}
+
+/// The archives of the next `n` volume ops a processor is sent (within 10 s), sorted.
+async fn next_volumes(ops: &mut tokio::sync::mpsc::UnboundedReceiver<Op>, n: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    while out.len() < n {
+        let op = tokio::time::timeout(Duration::from_secs(10), ops.recv())
+            .await
+            .expect("a volume in time")
+            .expect("the link open");
+        if let Op::Volume(v) = op {
+            out.push(v.archive);
+        }
+    }
+    out.sort();
+    out
+}
+
+/// This server's OCR (one lane) reading `A/V1` (held before its last page until
+/// `hold` is cleared) with `A/V2` queued behind it in its session.
+struct LocalRun {
+    dir: tempfile::TempDir,
+    core: Core,
+    lib: std::path::PathBuf,
+    ocr: OcrControl,
+    fake: bunko_processor::FakePipeline,
+    factory: Arc<CountedLocal>,
+    hold: Arc<std::sync::atomic::AtomicBool>,
+    stop: CancellationToken,
+}
+
+impl LocalRun {
+    async fn start() -> LocalRun {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.storage.base_path = dir.path().join("storage");
+        config.ocr.autobench = false;
+        config.ocr.local_processing = true;
+        config.ocr.concurrency = 1;
+        let layout = config.storage.layout();
+        layout.ensure_directories().unwrap();
+        let db = Arc::new(
+            Database::open_with(
+                layout.database(),
+                &DbOptions {
+                    bcrypt_cost: 4,
+                    ..DbOptions::default()
+                },
+            )
+            .unwrap(),
+        );
+        let backend = Arc::new(DbAuthBackend::new(db.clone(), layout.clone()));
+        let core = Core::new(Arc::new(RwLock::new(config)), None, backend);
+        let hold = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let fake = bunko_processor::FakePipeline::new(bunko_processor::FakeConfig {
+            engines: vec!["hayai-nova".into()],
+            page_delay: Duration::from_millis(5),
+            overlap: 1,
+            hold: Some(hold.clone()),
+            ..Default::default()
+        });
+        let lib = layout.library();
+        for v in ["A/V1.cbz", "A/V2.cbz"] {
+            ocr_common::write_cbz(&lib.join(v), 3);
+        }
+        let factory = Arc::new(CountedLocal {
+            fake: fake.clone(),
+            install: FakeInstall::new(None),
+            starts: std::sync::atomic::AtomicUsize::new(0),
+            ended: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            end_delay_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        });
+        let ocr = OcrControl::new(OcrDeps {
+            core: core.clone(),
+            db: Some(db),
+            facts: Arc::new(FileFacts),
+            locks: Arc::new(DavLocks(bunko_dav::PathWriteLocks::new())),
+            local: Some(factory.clone()),
+            clock: None,
+        });
+        let stop = CancellationToken::new();
+        ocr.start(stop.clone());
+        let run = LocalRun {
+            dir,
+            core,
+            lib,
+            ocr,
+            fake,
+            factory,
+            hold,
+            stop,
+        };
+        eventually("this server reads a volume", 20, || {
+            let ocr = run.ocr.clone();
+            let ran = run.fake.ran().len();
+            async move { ran >= 1 && ocr.ask(|s| s.claims.len()).await == Some(2) }
+        })
+        .await;
+        run
+    }
+
+    /// `ocr.local_processing` saved and applied, as the settings pages do.
+    async fn set_local(&self, on: bool) -> Value {
+        self.core.config.write().ocr.local_processing = on;
+        let config = self.core.config.read().clone();
+        let ocr = self.ocr.clone();
+        tokio::task::spawn_blocking(move || ocr.apply_config(&config))
+            .await
+            .unwrap()
+    }
+
+    /// Whether this server is a machine, has a lane, a session, a claim.
+    async fn local_state(&self) -> (bool, bool, bool, bool) {
+        self.ocr
+            .ask(|s| {
+                (
+                    s.machines.contains_key("local"),
+                    s.lanes.iter().any(|l| l.pid == "local"),
+                    s.sessions.values().any(|x| x.local),
+                    s.claims.values().any(|c| c.pid == "local"),
+                )
+            })
+            .await
+            .unwrap()
+    }
+
+    fn starts(&self) -> usize {
+        self.factory
+            .starts
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn ended(&self) -> usize {
+        self.factory.ended.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn scratch(&self) -> Vec<std::path::PathBuf> {
+        walk(&self.dir.path().join("storage/.processing"))
+    }
+}
+
+/// Regression (owner report: "I changed settings to remove this machine's OCR backend,
+/// but it still keeps processing OCR tasks"). Turning this server's OCR off mid-queue
+/// stops it at once: the volume it was reading is cancelled, what it held goes back to
+/// the queue and on to the processor that is connected, its in-process processor ends
+/// (its engine freed), nothing it ran is installed, its scratch directory is empty, and
+/// it is no machine any more. Nothing starts it again while it is off (an install that
+/// ends, time passing). Turned on again it starts by itself and reads volumes; turned
+/// off again it stops again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn turning_this_servers_ocr_off_mid_queue_stops_it_at_once() {
+    let run = LocalRun::start().await;
+    // A processor connects with nothing left to take.
+    let mut remote = fake_processor(&run.ocr, "tower").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !std::iter::from_fn(|| remote.try_recv().ok()).any(|o| matches!(o, Op::Volume(_))),
+        "nothing was left for it"
+    );
+
+    run.set_local(false).await;
+
+    // At once: no machine, lane, session or claim of this server is left.
+    assert_eq!(run.local_state().await, (false, false, false, false));
+    // What it held went to the processor that is connected.
+    assert_eq!(
+        next_volumes(&mut remote, 2).await,
+        ["/mokuro-reader/A/V1.cbz", "/mokuro-reader/A/V2.cbz"]
+    );
+    // Its in-process processor ended: its sessions wound down, the engine freed.
+    eventually("the processor ends", 20, || {
+        let n = run.ended();
+        async move { n == 1 }
+    })
+    .await;
+    // Nothing it ran was installed; nothing is left in its scratch directory.
+    eventually("an empty scratch directory", 10, || {
+        let left = run.scratch();
+        async move { left.is_empty() }
+    })
+    .await;
+    assert!(!run.lib.join("A/V1.mokuro").exists());
+    assert!(!run.lib.join("A/V2.mokuro").exists());
+    // It is no machine of the status.
+    let (connected, processors) = run
+        .ocr
+        .ask(|s| (s.connected_machines(), s.processors()))
+        .await
+        .unwrap();
+    assert!(
+        connected.iter().all(|m| m["machine"] != "local"),
+        "{connected:?}"
+    );
+    assert!(
+        processors.iter().all(|m| m["local"] != true),
+        "{processors:?}"
+    );
+    // Nothing starts it while it is off: an install that ends, time passing.
+    let opened = run.fake.opened();
+    run.factory.install.end("done", true);
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(run.starts(), 1);
+    assert_eq!(run.fake.opened(), opened);
+    assert_eq!(run.local_state().await, (false, false, false, false));
+    assert!(
+        run.ocr
+            .running_jobs()
+            .iter()
+            .all(|j| j.get("machine") != Some(&json!("local"))),
+        "{:?}",
+        run.ocr.running_jobs()
+    );
+
+    // On again: it starts by itself and reads what arrives.
+    run.hold.store(false, std::sync::atomic::Ordering::SeqCst);
+    run.set_local(true).await;
+    eventually("this server's OCR starts again", 20, || {
+        let n = run.starts();
+        let up = run.local_state();
+        async move { n == 2 && up.await.0 }
+    })
+    .await;
+    ocr_common::write_cbz(&run.lib.join("B/V1.cbz"), 3);
+    run.ocr.archive_arrived(&run.lib.join("B/V1.cbz"));
+    eventually("B/V1 read by this server", 30, || {
+        let done = run.lib.join("B/V1.mokuro").is_file();
+        async move { done }
+    })
+    .await;
+
+    // Off again: it stops again.
+    run.set_local(false).await;
+    assert_eq!(run.local_state().await, (false, false, false, false));
+    eventually("the second processor ends", 20, || {
+        let n = run.ended();
+        async move { n == 2 }
+    })
+    .await;
+    run.stop.cancel();
+    run.ocr.stop().await;
+}
+
+/// A backend change while this server's OCR runs restarts it cleanly: the old processor
+/// has ended before the new one starts, what it held goes back to the queue and to the
+/// new one, and nothing of the old one is left in its scratch directory.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_backend_change_restarts_this_servers_ocr_cleanly() {
+    let run = LocalRun::start().await;
+    let old = run
+        .ocr
+        .ask(|s| s.sessions.keys().cloned().collect::<Vec<_>>())
+        .await
+        .unwrap();
+    assert_eq!(old.len(), 1);
+
+    run.ocr
+        .restart_local("the OCR backend preference changed")
+        .await;
+
+    assert_eq!(
+        (run.ended(), run.starts()),
+        (1, 2),
+        "ended before the start"
+    );
+    assert!(run.local_state().await.0);
+    let processing = run.dir.path().join("storage/.processing");
+    assert!(
+        !processing.join(&old[0]).exists(),
+        "the old session's scratch"
+    );
+    run.hold.store(false, std::sync::atomic::Ordering::SeqCst);
+    eventually("both volumes read by the new processor", 30, || {
+        let done = ["A/V1.mokuro", "A/V2.mokuro"]
+            .iter()
+            .all(|v| run.lib.join(v).is_file());
+        async move { done }
+    })
+    .await;
+    eventually("an empty scratch directory", 10, || {
+        let left = run.scratch();
+        async move { left.is_empty() }
+    })
+    .await;
+    run.stop.cancel();
+    run.ocr.stop().await;
+}
+
+/// The server stopping right after this server's OCR was turned off waits for the old
+/// processor's wind-down: the stop that turning it off spawned had taken the
+/// processor's end, so the server's stop found nothing to wait for and returned while
+/// the processor and its engine were still being torn down.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stop_right_after_turning_this_servers_ocr_off_waits_for_its_wind_down() {
+    let run = LocalRun::start().await;
+    run.factory
+        .end_delay_ms
+        .store(1500, std::sync::atomic::Ordering::SeqCst);
+    run.set_local(false).await;
+    // The wind-down that turning it off started is under way.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(run.ended(), 0, "still winding down");
+
+    run.stop.cancel();
+    run.ocr.stop().await;
+
+    assert_eq!(
+        run.ended(),
+        1,
+        "the server's stop returned before its OCR ended"
+    );
+    // Nothing starts it again once stopped.
+    run.ocr.restart_local("an install ended").await;
+    assert_eq!(run.starts(), 1);
+}
+
+/// Removing this machine's OCR backend turns OCR on this machine off and waits for it
+/// to have stopped before its files go: turning it off says how many volumes went back
+/// to the queue, and the wait returns only once its processor has ended (its engine
+/// freed) and its scratch directory is empty, however slow that is.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn turning_off_to_remove_the_backend_waits_until_this_servers_ocr_stopped() {
+    let run = LocalRun::start().await;
+    run.factory
+        .end_delay_ms
+        .store(1000, std::sync::atomic::Ordering::SeqCst);
+    let applied = run.set_local(false).await;
+    assert_eq!(applied["returned"], 2, "{applied}");
+    assert_eq!(run.ended(), 0, "still winding down");
+
+    let ocr = run.ocr.clone();
+    tokio::task::spawn_blocking(move || ocr.wait_local_stopped("its OCR backend is being removed"))
+        .await
+        .unwrap();
+
+    assert_eq!(run.ended(), 1, "returned before this server's OCR ended");
+    assert!(run.scratch().is_empty(), "{:?}", run.scratch());
+    assert_eq!(run.local_state().await, (false, false, false, false));
+    run.stop.cancel();
+    run.ocr.stop().await;
+}

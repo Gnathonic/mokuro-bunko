@@ -2,7 +2,7 @@
 //! in-process processor, kept by the scheduler so a registration, a drop and the claims
 //! it returns are one step. Each connected machine contributes lanes.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use bunko_proto::{
     Catalog, HostInfo, MAX_ENTRIES_PER_ACCOUNT, MAX_IDENTITY_BYTES, MAX_PROCESSOR_NAME,
@@ -632,7 +632,16 @@ impl Scheduler {
     }
 
     /// The in-process processor is up: machine `local` with `ocr.concurrency` lanes.
+    /// With local processing off (turned off while it was starting) it is not taken:
+    /// dropping its link ends it.
     pub fn local_up(&mut self, ops: mpsc::UnboundedSender<Op>, catalog: Catalog, host: HostInfo) {
+        if !self.settings.local_processing {
+            self.log(
+                "This server's OCR came up after local processing was turned off: stopped again",
+            );
+            drop(ops);
+            return;
+        }
         let now = self.now();
         let catalog_value = serde_json::to_value(&catalog).unwrap_or(json!({}));
         let host_value = serde_json::to_value(&host).unwrap_or(json!({}));
@@ -790,12 +799,23 @@ impl Scheduler {
             .filter(|(_, s)| s.pid == pid)
             .map(|(k, _)| k.clone())
             .collect();
-        for sid in sids {
-            self.sessions.remove(&sid);
-            self.ended_sessions.insert(sid, now);
+        for sid in &sids {
+            self.sessions.remove(sid);
+            if machine.local {
+                // Its runner may still write there while it winds down.
+                self.local_scratch.insert(sid.clone());
+            }
+            self.ended_sessions.insert(sid.clone(), now);
         }
         self.results
             .retain(|(sid, _), _| self.sessions.contains_key(sid));
+        if !machine.local {
+            // Results it uploaded whose `volume_done` never came: nobody collects them
+            // now (its claims went back above; one being installed keeps its file).
+            for sid in &sids {
+                self.sweep_session_scratch(sid);
+            }
+        }
         self.breakers.remove(pid);
         // Its volumes (and their spooled archives) go to whoever takes them next.
         for holders in self.volume_owners.values_mut() {
@@ -806,7 +826,18 @@ impl Scheduler {
         // A processor that drops off usually comes back: its autobench runs wait for it.
         let identity = (!machine.local && !self.stopping)
             .then(|| (machine.host_value.clone(), machine.catalog_value.clone()));
-        self.bench_machine_left(&machine.name, identity);
+        // What a benchmark it ran says it ended of: this server's OCR has no link to
+        // lose, so "local disconnected" said nothing.
+        let why = if !machine.local {
+            format!("{} disconnected", machine.name)
+        } else if !self.settings.local_processing {
+            "OCR on this machine was turned off".to_string()
+        } else if self.stopping {
+            "the server stopped".to_string()
+        } else {
+            format!("this server's OCR stopped ({reason})")
+        };
+        self.bench_machine_left(&machine.name, identity, &why);
         self.rebuild_lanes();
         self.bump();
         self.bump_page();
@@ -821,6 +852,59 @@ impl Scheduler {
         }
         // Dropping `machine` drops its link: the socket task sees the end and closes.
         drop(machine);
+    }
+
+    /// This server's own OCR was turned off: it stops now ([`Self::drop_processor`]).
+    /// What it runs that is not being installed goes back to the queue unrecorded (a
+    /// finished result being moved into place completes), its sessions, lanes, the
+    /// volumes it holds by volume (and their spooled archives) and its benchmarks go,
+    /// and its link is dropped: the in-process processor abandons its sessions and
+    /// frees their models (the control waits for that, then sweeps its scratch). Its
+    /// strikes and start backoffs go too: turned on again, it starts clean.
+    pub fn local_off(&mut self, why: &str) {
+        self.drop_processor(LOCAL, why);
+        self.stopped.retain(|(_, m)| m != LOCAL);
+        self.strikes.retain(|(_, m), _| m != LOCAL);
+        self.start_backoff.retain(|(_, m), _| m != LOCAL);
+    }
+
+    /// What dropped sessions of this server's OCR left in `.processing`, removed once
+    /// its processor has wound down and nothing writes there any more: a volume's
+    /// workspace, a result it finished as it was stopped. A claim of such a session
+    /// still being installed keeps its directory (the install removes it).
+    pub fn sweep_local_scratch(&mut self) {
+        for sid in std::mem::take(&mut self.local_scratch) {
+            self.sweep_session_scratch(&sid);
+        }
+    }
+
+    /// Remove what an ended session left in `.processing/<sid>`, except the directory of
+    /// a claim of it still being installed (the install reads it, then removes it).
+    // unmounted: the `.processing` spool, beside the library.
+    #[allow(clippy::disallowed_methods)]
+    fn sweep_session_scratch(&self, sid: &str) {
+        if !bunko_proto::valid_id(sid) {
+            return;
+        }
+        let installing: HashSet<&str> = self
+            .claims
+            .values()
+            .filter(|c| c.sid.as_deref() == Some(sid))
+            .filter_map(|c| c.claim.as_deref())
+            .collect();
+        let dir = self.storage().join(".processing").join(sid);
+        for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            if installing.contains(entry.file_name().to_string_lossy().as_ref()) {
+                continue;
+            }
+            let _ = if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                std::fs::remove_dir_all(entry.path())
+            } else {
+                std::fs::remove_file(entry.path())
+            };
+        }
+        // Only once empty: a result being installed is still there.
+        let _ = std::fs::remove_dir(&dir);
     }
 
     /// Every registration (local first, then by lowercase name), as the admin reads them.

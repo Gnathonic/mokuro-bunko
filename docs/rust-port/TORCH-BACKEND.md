@@ -508,7 +508,9 @@ A handle is shared by any number of threads (device work is serialised inside).
   `paddle-manga/embed-fp32` (bf16/fp32, cast on load; bit-identical to the model's table) or
   `embed-fp16`. hayai-nova reads `hayai-nova/{pos-table,token-embeddings,tokenizer}` from the
   existing manifest. `bunko.special` / `bunko.prompt` are checked against the code's
-  constants. hayai-nova packages: patch budget 512 only (static axis).
+  constants. hayai-nova packages: a static axis of 512 patches; a patch budget from 1 to
+  512 resizes each crop for it and masks the rest of the axis (packs before 0.8.0 refuse
+  any budget but 512, and the host asks for a pack update).
 * Layout **(changed: B's target names)**:
   `<storage>/models/torch/<engine>/<precision>/{weights-*.safetensors, <target>/{vision,prefill,step}.pt2}`,
   targets `<os>-cuda-sm_NN` (a device tries its own arch, then every older one: PTX),

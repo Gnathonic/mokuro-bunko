@@ -119,7 +119,12 @@ impl Scheduler {
             })
         });
         if !sent {
-            self.fail_session_start(&claimed.pid, &row, &job, &format!("{name} disconnected"));
+            let why = if local {
+                "this server's OCR stopped".to_string()
+            } else {
+                format!("{name} disconnected")
+            };
+            self.fail_session_start(&claimed.pid, &row, &job, &why);
             return;
         }
         self.sessions.insert(sid.clone(), session);
@@ -291,6 +296,11 @@ impl Scheduler {
         if let Some(s) = self.sessions.get_mut(sid) {
             s.spooling.push(job.clone());
         }
+        // The claim names the session it is fetched for: a fetch that ends after the
+        // claim went back (this server's OCR turned off) leaves the job's next claim alone.
+        if let Some(c) = self.claims.get_mut(job) {
+            c.sid = Some(sid.to_string());
+        }
         self.log(format!(
             "Fetching {} from the cloud for local OCR",
             job.file_name()
@@ -314,8 +324,14 @@ impl Scheduler {
             s.spooling.retain(|j| j != job);
             s.spooling.len() != before
         });
-        if !self.claims.contains_key(job) {
-            // Returned meanwhile; the pin goes with `result`.
+        let ours = self
+            .claims
+            .get(job)
+            .is_some_and(|c| c.sid.as_deref() == Some(sid) && c.claim.is_none());
+        if !ours {
+            // Returned meanwhile (its machine dropped), and maybe claimed again since by
+            // another session or machine: that claim is not this fetch's. The pin goes
+            // with `result`.
         } else {
             match result {
                 Err(e) => self.release(
@@ -415,6 +431,9 @@ impl Scheduler {
         let s = self.sessions.get(sid)?;
         if self.stopping {
             return Some("the worker is stopping".into());
+        }
+        if s.local && !self.settings.local_processing {
+            return Some("local processing was turned off".into());
         }
         if self.held(&s.machine) {
             return Some("the queue is held".into());

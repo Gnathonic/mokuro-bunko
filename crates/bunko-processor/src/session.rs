@@ -1705,6 +1705,17 @@ fn work(shared: &Shared) {
         let completed = result.is_ok() && !shared.run_cancel.is_cancelled();
         job.archive.finish(completed);
         let result = match result {
+            // The session was stopped on purpose (cancelled, or the processor leaving):
+            // the runner may report the volume it cut short as a stopped pipeline. That
+            // is the stop, not a broken session (no `fatal`, no `exit 1`, no ERROR). A
+            // session not abandoned keeps every failure.
+            Err(RunError::Fatal(error)) if shared.session.abandon.is_cancelled() => {
+                tracing::info!(
+                    "session {}: volume {claim} stopped with the session ({error})",
+                    shared.session.sid
+                );
+                Err(RunError::Cancelled)
+            }
             Err(RunError::Fatal(error)) => {
                 tracing::error!(
                     "session {}: the pipeline failed: {error}",

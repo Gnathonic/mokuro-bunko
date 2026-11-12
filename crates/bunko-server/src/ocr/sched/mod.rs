@@ -294,6 +294,8 @@ pub struct Claimed {
     pub lane: u64,
     pub pid: String,
     pub machine: String,
+    /// The session it was sent to; a local claim on a remote store names its session
+    /// already while its archive is fetched ([`Msg::Spooled`]).
     pub sid: Option<String>,
     pub claim: Option<String>,
     /// `(size, mtime_ns)` at claim / submit: the file the result must match.
@@ -439,6 +441,11 @@ pub struct Scheduler {
     /// even when no series file ever showed them (`series_queue_snapshot`). At most
     /// [`RECENT_FINISHED_MAX`], none older than a day.
     pub recent_finished: IndexMap<String, f64>,
+    /// Sessions of this server's own OCR that were dropped while its processor may still
+    /// write into their `.processing/<sid>` (a runner winding down, a result it finished
+    /// as it was stopped): swept once it has wound down
+    /// ([`Scheduler::sweep_local_scratch`]).
+    pub local_scratch: HashSet<String>,
 }
 
 /// How many lately finished volumes the scheduler keeps ([`Scheduler::recent_finished`]).
@@ -526,6 +533,7 @@ impl Scheduler {
             judging: HashMap::new(),
             settled_arrivals: Vec::new(),
             recent_finished: IndexMap::new(),
+            local_scratch: HashSet::new(),
             deps,
         }
     }
@@ -1182,6 +1190,11 @@ impl Scheduler {
             self.forget_volume_owners();
         }
         self.settings = settings;
+        if local_changed && !self.settings.local_processing {
+            // This server's OCR stops now, not after what it holds (its session would
+            // never drain): what it runs goes back to the queue.
+            self.local_off("local processing was turned off");
+        }
         if by_volume_now {
             self.hold_volumes_in_flight();
         }

@@ -165,11 +165,15 @@ Sans/Serif CJK by `tools/vulkan_selftest/make_crops.py`, vertical and horizontal
 blurred ones, no copyrighted pages) and must return the golden texts exactly — what libtorch
 fp32 on the CPU reads from them (`examples/vulkan_check golden`). Any difference skips the
 runtime on that device (cached until runtime/pack/driver/model change). libtorch itself is
-the reference and is not self-tested.
+the reference and is not self-tested. hayai-nova's goldens are read at patch budget 512: a
+recognizer for 256 or 384 self-tests a load at 512 first, then loads at its own budget, and
+the verdict serves every budget. A pack from before 0.8.0 refuses budgets other than 512;
+that refusal is no verdict against the runtime (the session asks for a pack update).
 
 Checking a runtime by hand: `MOKURO_VULKAN_PACK=… MOKURO_VULKAN_MODELS_DIR=…
 cargo run -p bunko-engines --example vulkan_check -- check hayai-nova <golden.json>
---runtime ncnn|webgpu [--device gpu:N]`.
+--runtime ncnn|webgpu [--device gpu:N] [--budget 256]` (at a budget other than 512 the
+crops that read differently are listed, not failed).
 
 ## 6. Surfaces and tests
 

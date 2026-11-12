@@ -9,7 +9,7 @@ use bunko_remote::backend::{
     BErr, Backend, ChangeItem, ChangePage, Cursor, HashKind, OpCtx, RNode, UploadSource,
     UploadTarget, read_to_vec,
 };
-use bunko_remote::folder::{FolderBackend, FolderConfig, account_id, snapshot_path};
+use bunko_remote::folder::{EMPTY_SETTLE, FolderBackend, FolderConfig, account_id, snapshot_path};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
@@ -67,6 +67,21 @@ impl Lib {
 
     fn mkdir(&self, rel: &str) {
         std::fs::create_dir_all(self.abs(rel)).unwrap();
+    }
+
+    /// Give the file at `rel` the modification time `t`.
+    fn stamp(&self, rel: &str, t: SystemTime) {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(self.abs(rel))
+            .unwrap()
+            .set_modified(t)
+            .unwrap();
+    }
+
+    /// The file at `rel` was last written `age` ago.
+    fn age(&self, rel: &str, age: Duration) {
+        self.stamp(rel, SystemTime::now() - age);
     }
 
     fn stage(&self, bytes: &[u8]) -> (PathBuf, [u8; 32]) {
@@ -343,8 +358,13 @@ async fn listings_hide_internal_names_swap_files_and_links() {
     lib.put("S/again.cbz.1.crswap", b"half");
     lib.put("S/other.cbz", b"");
     lib.put("S/other.cbz.2.crswap", b"half");
-    // An empty file without a swap file is a file.
+    // An empty file without a swap file, once it is older than a write in progress
+    // could be, is a file.
     lib.put("S/empty.txt", b"");
+    // A swap file hides its empty file however long the write takes.
+    for rel in ["S/new.cbz", "S/again.cbz", "S/other.cbz", "S/empty.txt"] {
+        lib.age(rel, EMPTY_SETTLE * 2);
+    }
     let b = lib.open().await;
     let mut want = vec![
         ".mokuro-bunko.json",
@@ -374,6 +394,193 @@ async fn listings_hide_internal_names_swap_files_and_links() {
     // The swap lands: now it is listed.
     std::fs::rename(lib.abs("S/new.cbz.crswap"), lib.abs("S/new.cbz")).unwrap();
     assert!(pids(&b).await.contains(&"S/new.cbz".to_string()));
+}
+
+/// Whether `pid` shows anywhere: a full listing, its folder's listing, `find_named`,
+/// `stat` and a fresh change cursor's walk.
+async fn shown(b: &FolderBackend, pid: &str) -> bool {
+    let (dir, name) = pid.rsplit_once('/').unwrap_or(("", pid));
+    let in_all = pids(b).await.iter().any(|p| p == pid);
+    let in_dir = list_dir(b, dir).await.unwrap().iter().any(|n| n.pid == pid);
+    let named = !b.find_named(dir, name).await.unwrap().0.is_empty();
+    let stat = b.stat(pid).await.unwrap().is_some();
+    assert!(
+        in_all == in_dir && in_dir == named && named == stat,
+        "{pid}: list_all {in_all}, list_dir {in_dir}, find_named {named}, stat {stat}"
+    );
+    in_all
+}
+
+/// Chromium's write makes the empty target before it makes the swap file: in between,
+/// the target alone is already the write in progress.
+#[tokio::test]
+async fn an_empty_file_is_a_write_in_progress_until_it_settles() {
+    let lib = Lib::new();
+    lib.put("S/Vol 1.cbz", b"zip");
+    let b = lib.open().await;
+    let c = b.start_cursor().await.unwrap();
+    // getFileHandle(create): the empty target, no swap file yet.
+    lib.put("S/Vol 2.cbz", b"");
+    assert!(!shown(&b, "S/Vol 2.cbz").await);
+    let (items, c) = page(&b, &c).await;
+    assert!(items.is_empty(), "{items:?}");
+    // Written a moment short of the settle time: still in progress.
+    lib.age("S/Vol 2.cbz", EMPTY_SETTLE - Duration::from_secs(5));
+    assert!(!shown(&b, "S/Vol 2.cbz").await);
+    // Older than that: an empty file, listed as it is.
+    lib.age("S/Vol 2.cbz", EMPTY_SETTLE + Duration::from_secs(1));
+    assert!(shown(&b, "S/Vol 2.cbz").await);
+    let (items, _) = page(&b, &c).await;
+    assert_eq!(upserts(&items), ["S/Vol 2.cbz"]);
+    // A file with bytes is listed however new it is.
+    lib.put("S/Vol 3.cbz", b"zip");
+    assert!(shown(&b, "S/Vol 3.cbz").await);
+}
+
+/// `items` with every folder's times set to 0.
+fn without_folder_times(items: &[ChangeItem]) -> Vec<ChangeItem> {
+    let mut items = items.to_vec();
+    for i in &mut items {
+        if let ChangeItem::Upsert(n) = i
+            && n.is_dir
+        {
+            n.base_mtime_ms = 0;
+            n.created_ms = 0;
+        }
+    }
+    items
+}
+
+/// Where a filesystem folds case, every lookup checks the name's spelling against the
+/// folder's listing, kept a moment. A file made since that listing was read is found
+/// all the same.
+#[tokio::test]
+async fn a_file_made_just_after_a_lookup_is_found() {
+    let lib = Lib::new();
+    lib.put("S/a.cbz", b"a");
+    let b = lib.open().await;
+    b.force_exact_spelling();
+    assert!(b.stat("S/a.cbz").await.unwrap().is_some());
+    lib.put("S/b.cbz", b"b");
+    assert!(b.stat("S/b.cbz").await.unwrap().is_some());
+    assert!(shown(&b, "S/b.cbz").await);
+    // A folder made since, and a file in it.
+    lib.put("S/new/c.cbz", b"c");
+    assert!(b.stat("S/new").await.unwrap().is_some());
+    assert!(b.stat("S/new/c.cbz").await.unwrap().is_some());
+    assert_eq!(b.stat("S/nothing.cbz").await.unwrap(), None);
+}
+
+/// A network share's clock may run ahead of this computer's: a time a little ahead is
+/// a write just made, one far ahead is a wrong clock and hides nothing.
+#[tokio::test]
+async fn an_empty_file_stamped_ahead_of_the_clock() {
+    let lib = Lib::new();
+    lib.put("S/a.cbz", b"");
+    lib.put("S/b.cbz", b"");
+    lib.stamp("S/a.cbz", SystemTime::now() + Duration::from_secs(120));
+    lib.stamp(
+        "S/b.cbz",
+        SystemTime::now() + Duration::from_secs(365 * 86_400),
+    );
+    let b = lib.open().await;
+    assert!(!shown(&b, "S/a.cbz").await);
+    assert!(shown(&b, "S/b.cbz").await);
+}
+
+/// Bunko's own empty files are its own writes, never a reader's in progress.
+#[tokio::test]
+async fn bunkos_own_empty_files_show_at_once() {
+    let lib = Lib::new();
+    lib.put("S/old.txt", b"");
+    lib.age("S/old.txt", EMPTY_SETTLE * 2);
+    let b = lib.open().await;
+    let made = upload_new(&lib, &b, "S", "made.txt", b"").await.unwrap();
+    assert_eq!(made.size, 0);
+    assert!(shown(&b, "S/made.txt").await);
+    let replaced = replace(&lib, &b, "S/made.txt", b"").await.unwrap();
+    assert_eq!(
+        b.stat("S/made.txt").await.unwrap().unwrap().cver,
+        replaced.cver
+    );
+    // A copy is a new file (its time is now) of an empty file Bunko did not write.
+    b.copy("S/old.txt", "S", "copy.txt").await.unwrap();
+    assert!(shown(&b, "S/copy.txt").await);
+    // Moved, it is still Bunko's.
+    b.update("S/made.txt", Some(""), Some("moved.txt"), None)
+        .await
+        .unwrap();
+    assert!(shown(&b, "moved.txt").await);
+}
+
+/// No watcher event marks the moment an empty file settles: the change feed is woken
+/// for it, whether or not the folder is watched.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_feed_looks_again_when_an_empty_file_settles() {
+    for watching in [false, true] {
+        let lib = Lib::new();
+        lib.put("S/Vol 1.cbz", b"zip");
+        lib.put("S/Vol 2.cbz", b"");
+        lib.age("S/Vol 2.cbz", EMPTY_SETTLE - Duration::from_secs(2));
+        let b = if watching {
+            lib.open_watching().await
+        } else {
+            lib.open().await
+        };
+        let c = b.start_cursor().await.unwrap();
+        let t0 = Instant::now();
+        b.wait_change(&c, Duration::from_secs(120)).await.unwrap();
+        let took = t0.elapsed();
+        assert!(
+            took < Duration::from_secs(30),
+            "watching {watching}: {took:?}"
+        );
+        let (items, c) = page(&b, &c).await;
+        assert_eq!(upserts(&items), ["S/Vol 2.cbz"], "watching {watching}");
+        // Nothing left to settle: back at max.
+        let t0 = Instant::now();
+        b.wait_change(&c, Duration::from_millis(800)).await.unwrap();
+        assert!(
+            t0.elapsed() >= Duration::from_millis(700),
+            "watching {watching}"
+        );
+    }
+}
+
+/// The feed may get to its wait only after the file it held back has settled (a big
+/// page took a while to apply): it looks again at once, not at the next poll.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_file_that_settled_before_the_wait_is_looked_for_at_once() {
+    for watching in [false, true] {
+        let lib = Lib::new();
+        lib.put("S/Vol 1.cbz", b"zip");
+        lib.put("S/Vol 2.cbz", b"");
+        lib.age("S/Vol 2.cbz", EMPTY_SETTLE - Duration::from_millis(500));
+        let b = if watching {
+            lib.open_watching().await
+        } else {
+            lib.open().await
+        };
+        let c = b.start_cursor().await.unwrap();
+        // Settled (and its slack gone) before the wait begins.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        let t0 = Instant::now();
+        b.wait_change(&c, Duration::from_secs(120)).await.unwrap();
+        let took = t0.elapsed();
+        assert!(
+            took < Duration::from_secs(10),
+            "watching {watching}: {took:?}"
+        );
+        let (items, c) = page(&b, &c).await;
+        assert_eq!(upserts(&items), ["S/Vol 2.cbz"], "watching {watching}");
+        // The walk that listed it leaves nothing due: back at max.
+        let t0 = Instant::now();
+        b.wait_change(&c, Duration::from_millis(800)).await.unwrap();
+        assert!(
+            t0.elapsed() >= Duration::from_millis(700),
+            "watching {watching}"
+        );
+    }
 }
 
 #[cfg(unix)]
@@ -990,9 +1197,11 @@ async fn changes_report_what_happened_outside() {
             .iter()
             .all(|i| matches!(i, ChangeItem::Removed { .. }))
     );
-    // At least once: the same cursor again gives the same items.
+    // At least once: the same cursor again gives the same items. A folder's times may
+    // have moved: NTFS refreshes the times a listing shows for a folder lazily, after
+    // a file was written into it.
     let (again, c1b) = page(&b, &c0).await;
-    assert_eq!(again, items);
+    assert_eq!(without_folder_times(&again), without_folder_times(&items));
     assert_eq!(c1b, c1);
     // Moving on: nothing new.
     let (items, c2) = page(&b, &c1).await;
@@ -1443,6 +1652,8 @@ async fn find_named_compares_nfc_and_reports_the_disk_spelling() {
         .write(true)
         .create_new(true)
         .open(lib.abs("S").join(NFD))
+        // Not empty: a new empty file is a write in progress, listed by nothing.
+        .and_then(|mut f| std::io::Write::write_all(&mut f, b"decomposed"))
         .is_ok();
     let on_disk: Vec<String> = std::fs::read_dir(lib.abs("S"))
         .unwrap()

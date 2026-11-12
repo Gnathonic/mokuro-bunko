@@ -627,15 +627,14 @@ result is also in the audit log (see [configuration](configuration.md#audit-log)
 tower. NaFlex fits the crop to the 16×16 patch grid that packs closest to the
 budget, keeping its aspect ratio, then pads to exactly the budget, so the
 budget *is* the resolution a line is read at: on a long vertical column it
-buys 4, 5 or 6 patch rows across the glyph at 256, 384 or 512. The 0.7.0
-release packages are compiled for 512 only: a row set to 256 or 384 does not
-start ("hayai-nova packages are compiled for patch budget 512, not N"),
-although the admin page offers those values. Only a build with the ONNX
-recognizer (the `onnx-vlm` feature, in no release) reads at 256 or 384;
-there cost is linear
-in the budget and independent of crop shape, and the memory difference across
-the whole range is small next to the model itself, so lowering it saves time,
-not memory. 512 is the default rather than the model card's 384 because on the
+buys 4, 5 or 6 patch rows across the glyph at 256, 384 or 512. Every
+backend reads at all three: libtorch's packages keep a static axis of 512
+patches, and a smaller budget resizes the crop for it and masks the rest of
+the axis; ncnn and WebGPU run each crop at its own patch count. Backend packs
+from before 0.8.0 read 512 only (libtorch and ncnn refuse 256 and 384), and
+the session then asks for a pack update (`mokuro-bunko install-ocr --force`).
+The memory difference across the whole range is small next to the model
+itself, so lowering the budget saves time, not memory. 512 is the default rather than the model card's 384 because on the
 model author's own benchmark 384 reads worse than the previous hayai model
 and only 512 beats it; dense vertical lettering and novel columns are exactly
 where the difference shows.

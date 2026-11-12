@@ -406,7 +406,7 @@ async fn dispatch(s: &AdminState, api_path: &str, req: ApiRequest) -> Response {
         ["machine"] if get => machine::overview(s).await,
         ["machine", "ocr"] if put => machine::ocr(s, &req).await,
         ["machine", "install"] if post => machine::install(s, &req).await,
-        ["machine", "remove"] if post => machine::remove(s).await,
+        ["machine", "remove"] if post => machine::remove(s, &req).await,
         ["machine", "jobs"] if post => machine::start_job(s, &req).await,
         ["machine", "jobs", id] if get => machine::job(s, &req, id).await,
         ["machine", "logs"] if get => machine::logs(s, &req).await,
