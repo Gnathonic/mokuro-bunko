@@ -670,7 +670,11 @@ impl SeriesQueueSink {
             }
             (busy, replayed)
         };
-        let (files, leftovers) = {
+        let tracked: Vec<String> = {
+            let st = self.st.lock();
+            st.landed.keys().chain(st.staged.keys()).cloned().collect()
+        };
+        let (files, leftovers, bare) = {
             let idx = core.index.lock();
             let files = idx.series_level_files(&fold(SERIES_QUEUE_FILE));
             let leftovers: Vec<String> = idx
@@ -679,7 +683,19 @@ impl SeriesQueueSink {
                 .filter(|e| !e.is_dir && e.pending_op.is_none())
                 .map(|e| e.name)
                 .collect();
-            (files, leftovers)
+            // Series whose folder holds no archive any more (every volume moved out
+            // or deleted): what a file there names, done or queued, no reader has a
+            // volume of.
+            let bare: BTreeSet<String> = files
+                .iter()
+                .filter_map(|(rel, _)| rel.segments().first().map(|f| fold(f)))
+                .chain(snap.finished.keys().cloned())
+                .chain(tracked)
+                .collect::<BTreeSet<String>>()
+                .into_iter()
+                .filter(|key| !idx.folder_holds_archive(key))
+                .collect();
+            (files, leftovers, bare)
         };
         let mut settled: BTreeMap<String, bool> = BTreeMap::new();
         {
@@ -736,14 +752,26 @@ impl SeriesQueueSink {
                     .unwrap_or_default();
                 let calm = !busy.contains(&key) && !src.regeneration_pending(&folder);
                 settled.insert(key.clone(), calm);
-                if calm && let Some(b) = snap.unshown_finishes(&key, base.as_ref(), &clock) {
+                // Owing nothing, with no archive left in its folder: its file is never
+                // written again, only deleted, its `done` tail with it.
+                let vacated = live.is_none() && bare.contains(&key);
+                if calm
+                    && !vacated
+                    && let Some(b) = snap.unshown_finishes(&key, base.as_ref(), &clock)
+                {
                     // Finished between two looks, never shown: its `done` entry.
                     base = Some(b);
                 }
                 let is_settled = !gone(base.as_ref(), live) || calm;
-                let mut class = classify(base.as_ref(), live, &snap, is_settled, &clock, drift);
+                let mut class = if vacated {
+                    None
+                } else {
+                    classify(base.as_ref(), live, &snap, is_settled, &clock, drift)
+                };
                 if st.forced.contains(&key) {
-                    if live.is_some() || base.as_ref().is_some_and(|b| !b.expired(snap.now)) {
+                    if !vacated
+                        && (live.is_some() || base.as_ref().is_some_and(|b| !b.expired(snap.now)))
+                    {
                         class = Some(Class::Hard);
                     } else {
                         st.forced.remove(&key);
@@ -764,7 +792,7 @@ impl SeriesQueueSink {
                         );
                     }
                     None => {
-                        let keep = !drift && st.drifted.contains(&key);
+                        let keep = !vacated && !drift && st.drifted.contains(&key);
                         if !keep {
                             st.backlog.unmark(&task);
                             st.drifted.remove(&key);
@@ -774,7 +802,7 @@ impl SeriesQueueSink {
                             && st
                                 .landed
                                 .get(&key)
-                                .is_some_and(|l| l.file.expired(snap.now));
+                                .is_some_and(|l| vacated || l.file.expired(snap.now));
                         if expired {
                             st.backlog.mark(
                                 Task::Expire(key.clone()),
@@ -793,7 +821,7 @@ impl SeriesQueueSink {
             !st.backlog.is_empty() && st.last_flush.is_none_or(|t| t.elapsed() >= self.window)
         };
         if flush {
-            self.flush(core, &snap, &settled).await;
+            self.flush(core, &snap, &settled, &bare).await;
         }
         true
     }
@@ -901,6 +929,7 @@ impl SeriesQueueSink {
         core: &Arc<Core<B>>,
         snap: &Arc<Snapshot>,
         settled: &BTreeMap<String, bool>,
+        bare: &BTreeSet<String>,
     ) {
         let throttles = self.throttles.swap(0, Ordering::Relaxed);
         let (order, burst) = {
@@ -983,10 +1012,12 @@ impl SeriesQueueSink {
                 Task::Expire(key) => {
                     let folder = {
                         let mut st = self.st.lock();
-                        // Still owing nothing, nothing on its way, its tail expired?
+                        // Still owing nothing, nothing on its way, its tail expired or
+                        // its folder left with no archive?
+                        let retire = |l: &Landed| bare.contains(key) || l.file.expired(snap.now);
                         let still = !snap.series.contains_key(key)
                             && !st.staged.contains_key(key)
-                            && st.landed.get(key).is_some_and(|l| l.file.expired(snap.now));
+                            && st.landed.get(key).is_some_and(retire);
                         if !still {
                             st.backlog.unmark(&task);
                             continue;
@@ -1005,7 +1036,11 @@ impl SeriesQueueSink {
                     match r {
                         Ok(()) => {
                             st.backlog.unmark(&task);
-                            if st.landed.get(key).is_some_and(|l| l.file.expired(snap.now)) {
+                            if st
+                                .landed
+                                .get(key)
+                                .is_some_and(|l| bare.contains(key) || l.file.expired(snap.now))
+                            {
                                 st.landed.remove(key);
                                 let _ = self.db.series_queue_del(key);
                             }

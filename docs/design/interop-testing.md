@@ -848,6 +848,15 @@ out a debounce and decide at its end whether to write.
   Under load, S4 on `dav` also caught Bunko publishing a cover it made from an archive
   the reader had moved away meanwhile, under the old name: the old folder never
   emptied (`thumbs`: no cover for an archive that is gone).
+  On `microsoft` and `rclone`, both caught the queue v2 reader installing a finished
+  image-only volume's first OCR through its upgrade pass, which the scoped pull runs
+  before the listing cache shows the sidecar to the image-only installer. The pass
+  fitted `img_path` onto the device's image names, so a renamed main lost its block
+  (S6), and kept the reader's series uuid while the other volume took Bunko's, so the
+  series rename refused the volume as not local (S4). Both installers now make one
+  write. Past that, S4 on every cloud caught Bunko keeping the old folder's series
+  file once the reader had moved every volume out: its `done` tail keeps a file a day,
+  so the folder never emptied. A series file whose folder holds no archive now goes.
 - The driver reads the listing the provider cache holds now, not `cloudFiles`, whose
   incremental updates arrive on a 300 ms trailing edge: a `deleteVolume` right after
   `renameVolume` otherwise found the renamed volume not backed up.

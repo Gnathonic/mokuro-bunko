@@ -315,7 +315,7 @@ Tolerance: `tol(x) = max(60 s, 0.25 · max(0, x))`, where x is the published tim
 | **P0 hard** | A job added. A job removed (after settle). A new `done` entry. A volume renamed. The rows table changed (a new engine version in `parts`). First publish. Takeover or foreign `instance_id`. A feed event showing the file changed or deleted by anyone but this sink. |
 | **P1 state** | `q`/`c` → `r`. `r`/`c` → `q` (claim released). Unpriced ↔ priced for a row that is not held. |
 | **P2 drift** (judged only right after a confirmed clock switch) | A queued job with `|clock(w) − e| > tol(clock(w) − now)`. A running job with `e_live − e_pub > max(300 s, 0.5·(e_pub − t0))`. |
-| **P3 tidy** | Delete a file with empty `vols` whose `done` tail has expired. Delete stray case variants. Delete the leftover root `.mokuro-queue.json`. |
+| **P3 tidy** | Delete a file with empty `vols` whose `done` tail has expired. Delete the file of a series that owes nothing and whose folder holds no archive any more (every volume moved out or deleted: a reader renaming a series volume by volume), `done` tail and all, and name nothing done there again. Delete stray case variants. Delete the leftover root `.mokuro-queue.json`. |
 
 **Never a trigger:**
 - time passing;
@@ -577,7 +577,7 @@ This replaces "absent from the truncated file, so ask the manifest" and "`done[]
 
 2. Replace only the cached entries under `S/` with the result, through a new `replaceFolderEntries`. **Never** call `refreshSeriesIndexes` with a partial map, because it deletes other series' indexes.
 3. Run `refreshSeriesIndexForSeries(S)`, which re-downloads `series.json` if its stamp moved.
-4. Run `requestOcrUpgradePass(type, [{title: S, files}])` for the primary sidecar, through `mokuro_sha256`.
+4. Run `requestOcrUpgradePass(type, [{title: S, files}])` for the primary sidecar, through `mokuro_sha256`. This usually runs before the listing cache shows the sidecar to the image-only installer, so for a volume with no OCR yet the pass writes what that installer writes: the file's pages as they are and its series uuid.
 5. Run `pullLayersForVolume(uuid, type)` for each local row of S whose volume finished.
 6. If neither the `series.json` stamp nor a layer file moved, retry at +60 s, +120 s and +240 s, then leave it to the next normal listing. The settle rule (§5.3) makes this rare.
 

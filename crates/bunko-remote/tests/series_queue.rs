@@ -489,6 +489,62 @@ fn a_volume_finished_before_any_file_showed_it_is_named_done_once_settled() {
 }
 
 #[test]
+fn a_folder_left_with_no_archive_loses_its_file_done_tail_and_all() {
+    // Regression (rig S4): a reader renames a series volume by volume, so the old
+    // folder kept only the series file, its `done` tail holding it there for a day: a
+    // series folder that never emptied.
+    let t = T::new(
+        FakeBackend::drive_like(),
+        &[("Alpha/Alpha 1.cbz", b"zip"), ("Alpha/Alpha 2.cbz", b"zip")],
+        no_tune,
+    );
+    let at = wall() - 1.0;
+    t.src.set(|s| {
+        s.finished.insert(
+            "alpha".into(),
+            (
+                "Alpha".into(),
+                BTreeMap::from([("Alpha 1".to_string(), at), ("Alpha 2".to_string(), at)]),
+            ),
+        );
+    });
+    t.connect();
+    wait_until("Alpha's done tail", || {
+        t.file("Alpha").is_some_and(|a| {
+            a["done"].get("Alpha 1").is_some() && a["done"].get("Alpha 2").is_some()
+        })
+    });
+    t.idle();
+    // The reader renames the series: each archive moves to the new folder.
+    t.fake.reader_rename(
+        &format!("{FOLDER}/Alpha/Alpha 1.cbz"),
+        &format!("{FOLDER}/Alpha renamed/Alpha 1.cbz"),
+    );
+    t.s().feed().poll_now();
+    t.idle();
+    std::thread::sleep(Duration::from_millis(800));
+    assert!(
+        t.file("Alpha").is_some(),
+        "an archive is left: the file stays"
+    );
+    t.fake.reader_rename(
+        &format!("{FOLDER}/Alpha/Alpha 2.cbz"),
+        &format!("{FOLDER}/Alpha renamed/Alpha 2.cbz"),
+    );
+    t.s().feed().poll_now();
+    wait_until("Alpha's file gone", || t.file("Alpha").is_none());
+    // And it stays gone: the volumes it named done are not named there again, and the
+    // new folder, owing nothing, gets no file.
+    let n = t.uploads();
+    std::thread::sleep(Duration::from_millis(1500));
+    t.s().feed().poll_now();
+    t.idle();
+    assert!(t.file("Alpha").is_none());
+    assert!(t.file("Alpha renamed").is_none());
+    assert_eq!(t.uploads(), n);
+}
+
+#[test]
 fn foreign_files_are_rewritten_and_leftovers_deleted() {
     let foreign = br#"{"v":2,"instance_id":"another-bunko","rev":1,"vols":{}}"#;
     let t = T::new(
