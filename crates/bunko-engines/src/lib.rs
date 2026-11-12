@@ -1383,7 +1383,12 @@ impl EnginePipeline {
             },
             spec.patch_budget,
         );
-        let r = vb.recognizer(engine, &dev, candidates, opts, golden, info, Some(fetch))?;
+        let r = vb
+            .recognizer(engine, &dev, candidates, opts, golden, info, Some(fetch))
+            .map_err(|e| match torch::pack_budget_error(&e, spec.patch_budget) {
+                Some(update) => format!("{e} ({update})"),
+                None => e,
+            })?;
         Ok(r)
     }
 
@@ -1440,7 +1445,10 @@ impl EnginePipeline {
                 spec.patch_budget,
                 threads,
             )
-            .map_err(|e| format!("could not load {engine}: {e}"))?;
+            .map_err(|e| {
+                torch::pack_budget_error(&e, spec.patch_budget)
+                    .unwrap_or_else(|| format!("could not load {engine}: {e}"))
+            })?;
         Ok(r)
     }
 
@@ -1597,6 +1605,11 @@ impl EnginePipeline {
         if let Some(r) = &resolved {
             match self.recognizer(spec, &placement, r.precision, r.backend.as_deref()) {
                 Ok(rec) => recognizer = Some(rec),
+                // A pack that cannot read this patch budget: updating it is the fix, and
+                // the CPU reads with the same pack (no slow run that ends in the same
+                // refusal).
+                #[cfg(feature = "torch")]
+                Err(e) if e.contains(torch::PACK_UPDATE) => return Err(e),
                 Err(e) if placement.is_gpu() => {
                     let gpu = placement.device.clone();
                     warn!("{engine} could not start on {gpu} ({e}); falling back to the CPU");

@@ -12,7 +12,8 @@ use std::sync::{Arc, Mutex};
 use bunko_vlm::Rgb;
 use bunko_vlm::detok::Detokenizer;
 use bunko_vlm::hayai::{
-    BATCH, BOS, D_AXIS, EOS, MAX_NEW_TOKENS, NEG, PAD, PATCH, PATCH_DIM, freqs, size_for_budget,
+    BATCH, BOS, D_AXIS, EOS, MAX_NEW_TOKENS, NEG, PAD, PATCH, PATCH_DIM, check_budget, freqs,
+    size_for_budget,
 };
 use bunko_vlm::npy::Npy;
 use bunko_vlm::pyfmt::py_strip;
@@ -27,8 +28,9 @@ const BOS_I: i64 = BOS as i64;
 const EOS_I: i64 = EOS as i64;
 const PAD_I: i64 = PAD as i64;
 
-/// The patch budget the packages are compiled for (the vision graph's patch axis is
-/// static).
+/// The patches per crop the packages are compiled for (the vision graph's patch axis is
+/// static). A smaller patch budget resizes the crop for it and leaves the rest of the
+/// axis masked ([`check_budget`]).
 pub const PACKAGE_BUDGET: usize = 512;
 
 /// The host files of hayai-nova (the graphs come as a [`PackageSet`]).
@@ -57,6 +59,7 @@ pub struct TorchHayai {
     pos_cache: PosCache,
     d_model: i64,
     detok: Detokenizer,
+    /// The crops' patch budget (at most [`PACKAGE_BUDGET`]).
     budget: usize,
     text_cos: Tensor,
     text_sin: Tensor,
@@ -76,11 +79,7 @@ impl TorchHayai {
         at: Placement,
         budget: usize,
     ) -> Result<Self, TorchError> {
-        if budget != PACKAGE_BUDGET {
-            return Err(TorchError::Arg(format!(
-                "hayai-nova packages are compiled for patch budget {PACKAGE_BUDGET}, not {budget}"
-            )));
-        }
+        check_budget(budget, PACKAGE_BUDGET).map_err(TorchError::Arg)?;
         let dev = at.dev;
         if let Some(sp) = pkgs.metadata("bunko.special") {
             let v: serde_json::Value = serde_json::from_str(&sp)
@@ -200,7 +199,9 @@ impl TorchHayai {
     /// Returns generated token ids per crop (EOS_I/PAD_I removed).
     pub fn generate_ids(&self, crops: &[&Rgb]) -> Result<Vec<Vec<u32>>, TorchError> {
         let b = crops.len();
-        let p = self.budget;
+        // The graphs' patch axis; a crop fills at most `budget` of it, the rest is masked.
+        let p = PACKAGE_BUDGET;
+        let budget = self.budget;
         let pd = self.pos_dim;
         let dev = self.dev;
         // §5.3 preprocessing (bunko-vlm hayai.rs, verbatim), one crop per task: the
@@ -219,7 +220,7 @@ impl TorchHayai {
             .zip(shapes.iter_mut())
             .collect();
         crate::par::for_each(tasks, |((((crop, pv), pmask), pos), shape)| {
-            let (th, tw) = size_for_budget(crop.height, crop.width, p);
+            let (th, tw) = size_for_budget(crop.height, crop.width, budget);
             let img = resize(crop, tw, th, Filter::Bilinear);
             let (hp, wp) = (th / PATCH, tw / PATCH);
             for py in 0..hp {
