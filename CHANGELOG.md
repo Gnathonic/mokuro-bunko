@@ -712,6 +712,35 @@
 - **Dependency updates**: zip 9, rcgen 0.14, windows 0.62, windows-sys 0.61.
 
 ### Fixed
+- **A cloud library upgraded from a 0.8 pre-release lets go of its root queue file.**
+  The pre-release wrote `.mokuro-queue.json` at the library root, and its writes of
+  that file stayed in the outbox across the upgrade. One still on its way was sent
+  after the upgrade. Writes whose bytes had been lost stood in the Storage panel as
+  failed for good (attempts 0, "the staged bytes cannot be read"), each with a
+  `failed-op` conflict. At startup these writes are now dropped, whatever their state,
+  and so are the conflicts they left. The lease holder then deletes the file, as it
+  already did for a leftover with no writes pending.
+- **Two writes of one file staged at once no longer lose both.** This is how the
+  pre-release lost those bytes. Its two queue-file writers could stage the file
+  together. The newer write superseded the older one in the middle of its staging,
+  which removed the older write's bytes. The older write then saved itself again
+  without its bytes, failed at upload, and also superseded the newer write. A write
+  now supersedes only older writes of its file. A write superseded while it is being
+  staged stays superseded. This applies to every coalesced write: queue files,
+  `series.json` and `catalog.json`.
+- **A write whose bytes are gone no longer stands failed for good.** Such a write can
+  never be sent. A status file's write is dropped, because Bunko writes the file again
+  when it is due. Any other write, such as an OCR result or a compiled file, is
+  reported as a `lost-write` conflict that names its path. A write whose bytes changed
+  after staging still fails and keeps its bytes for the export.
+- **The series queue files wait quietly for the OCR queue.** Until the scheduler's
+  first walk of the library was over (an hour on a large cloud library), the store's
+  series-file sink asked it for the queue about a hundred times a second. It now asks
+  once a second. The admin storage status (`library.storage.series_queue`) shows the
+  sink's state: `waiting_for_first_walk`, `adopting`, `fenced`, `writing`, `idle`,
+  `no_source`, or `off` with `status_files: false`. It also shows the files the sink
+  wrote, its backlog, and when its last window ran, so a library with no series files
+  yet says why.
 - **Turning this server's OCR off stops it at once.** With OCR on this machine turned
   off mid-queue (This server, the OCR settings or the setup wizard), the server went on
   claiming volumes for its own OCR for minutes: the setting retired only its idle slots,

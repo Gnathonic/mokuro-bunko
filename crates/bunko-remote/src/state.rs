@@ -604,6 +604,24 @@ impl StateDb {
         .unwrap_or_default()
     }
 
+    /// Mark every unresolved conflict of one of `kinds` at the library path `path`
+    /// (ASCII case aside) resolved; returns how many.
+    pub fn conflicts_resolve_at(&self, kinds: &[ConflictRow], path: &str) -> usize {
+        kinds
+            .iter()
+            .map(|k| {
+                self.with("conflicts_resolve_at", |c| {
+                    c.execute(
+                        "UPDATE conflict SET resolved = 1 \
+                         WHERE kind = ?1 AND lower(path) = lower(?2) AND resolved = 0",
+                        params![k.as_str(), path],
+                    )
+                })
+                .unwrap_or(0)
+            })
+            .sum()
+    }
+
     /// Mark a conflict resolved.
     pub fn conflict_resolve(&self, id: i64) {
         let _ = self.with("conflict_resolve", |c| {

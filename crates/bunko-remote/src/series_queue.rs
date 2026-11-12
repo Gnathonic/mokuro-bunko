@@ -25,7 +25,12 @@
 //! - **Foreign files** (§6.8, §10): the index says whose version each series file is
 //!   (the ledger). A file this sink tracks that is no longer its own, or gone, is
 //!   rewritten at P0; another Bunko's file where nothing is owed, a stray spelling and
-//!   the root `.mokuro-queue.json` a 0.8 pre-release left are deleted (P3).
+//!   the root `.mokuro-queue.json` a 0.8 pre-release left are deleted (P3). The
+//!   pre-release's writes of that file are dropped at startup (`outbox.rs` replay), so
+//!   none holds it as pending.
+//! - **No answer yet** (the server's queue, until the scheduler's first walk of the
+//!   library is over): the source is asked again after [`SNAPSHOT_RETRY`].
+//!   [`SeriesQueueSink::status_json`] says so, and why nothing else is written.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
@@ -62,10 +67,18 @@ pub trait SeriesQueueSource: Send + Sync {
     /// Series `folder`'s compiled metadata may still change from work already asked
     /// for (a recompile armed, queued or running): the settle rule's second half.
     fn regeneration_pending(&self, folder: &str) -> bool;
+    /// While [`snapshot`](Self::snapshot) has no answer: what it waits for, one word
+    /// (`first_walk`), which the sink's status shows as `waiting_for_<word>`. `None`:
+    /// nothing in particular (the status says `waiting_for_queue`).
+    fn waiting_for(&self) -> Option<&'static str> {
+        None
+    }
 }
 
 /// How long the sink waits for a snapshot.
 pub const SNAPSHOT_WAIT: Duration = Duration::from_secs(5);
+/// A source with no answer is asked again this long after.
+pub const SNAPSHOT_RETRY: Duration = Duration::from_secs(1);
 /// The sink looks at the queue at least this often (holds, foreign files), and writes
 /// once per window.
 pub const TICK_MAX: Duration = Duration::from_secs(30);
@@ -146,6 +159,22 @@ struct Staged {
     forced: bool,
 }
 
+/// What the sink's last look found (its status, [`SeriesQueueSink::status_json`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Phase {
+    /// No look yet.
+    Starting,
+    /// The store's first adoption runs: nothing is written before it ends.
+    Adopting,
+    /// The fence is shut: this Bunko does not hold the lease (yet), or a caller's
+    /// gate holds the writes.
+    Fenced,
+    /// The source had no answer (what it waits for, if it says).
+    Waiting(Option<&'static str>),
+    /// Writing what the queue needs.
+    Ready,
+}
+
 struct State {
     /// The clock in use (confirmed by a marker write); None before the first.
     clock: Option<Clock>,
@@ -167,7 +196,12 @@ struct State {
     snap: Option<Arc<Snapshot>>,
     last_tick: Option<Instant>,
     last_flush: Option<Instant>,
+    /// When the last window's burst ran, ms since the epoch (this machine's clock).
+    last_flush_ms: Option<i64>,
     last_refit: Option<Instant>,
+    /// The source had no answer: asked again at this time.
+    retry_at: Option<Instant>,
+    phase: Phase,
     /// The hold the last confirmed marker carries.
     marker_hold: Option<HoldSig>,
     /// The hold an early heartbeat is waiting to carry, and when it is due.
@@ -399,7 +433,10 @@ impl SeriesQueueSink {
                 snap: None,
                 last_tick: None,
                 last_flush: None,
+                last_flush_ms: None,
                 last_refit: None,
+                retry_at: None,
+                phase: Phase::Starting,
                 marker_hold: None,
                 early: None,
                 last_early: None,
@@ -423,6 +460,8 @@ impl SeriesQueueSink {
 
     pub(crate) fn set_source(&self, src: Arc<dyn SeriesQueueSource>) {
         *self.source.lock() = Some(src);
+        // A new source is asked at once.
+        self.st.lock().retry_at = None;
         self.wake.notify_one();
         // A marker written before there was a queue carries no block yet.
         if let Some(hb) = self.heartbeat.get() {
@@ -464,6 +503,38 @@ impl SeriesQueueSink {
     /// The clock in use.
     pub fn clock(&self) -> Option<Clock> {
         self.st.lock().clock.clone()
+    }
+
+    /// What the admin's storage status shows of the sink: `state` (why it writes
+    /// nothing yet, or whether writes are on their way), `files` (the series files it
+    /// wrote that are in the store), `staged` (writes on their way), `backlog` (writes
+    /// and deletes waiting for a window) and `last_flush_at` (when the last window's
+    /// burst ran, Unix seconds; `null` before the first).
+    ///
+    /// `state`: `no_source` (no OCR queue to write from yet), `starting`, `adopting`
+    /// (the store's first adoption runs), `fenced` (this Bunko does not hold the
+    /// lease, or is still claiming it), `waiting_for_<what>` (the queue has no answer
+    /// yet: `waiting_for_first_walk` until the scheduler's first walk of the library is
+    /// over), `writing` or `idle`.
+    pub fn status_json(&self) -> Value {
+        let source = self.source.lock().is_some();
+        let st = self.st.lock();
+        let state = match st.phase {
+            _ if !source => "no_source".to_string(),
+            Phase::Starting => "starting".into(),
+            Phase::Adopting => "adopting".into(),
+            Phase::Fenced => "fenced".into(),
+            Phase::Waiting(what) => format!("waiting_for_{}", what.unwrap_or("queue")),
+            Phase::Ready if !st.backlog.is_empty() || !st.staged.is_empty() => "writing".into(),
+            Phase::Ready => "idle".into(),
+        };
+        json!({
+            "state": state,
+            "files": st.landed.len(),
+            "staged": st.staged.len(),
+            "backlog": st.backlog.len(),
+            "last_flush_at": st.last_flush_ms.map(|ms| ms as f64 / 1000.0),
+        })
     }
 
     /// The store's clock against this machine's, seconds (0 without a lease).
@@ -561,6 +632,12 @@ impl SeriesQueueSink {
     fn next_wait(&self) -> Duration {
         let tick = self.window.min(TICK_MAX);
         let st = self.st.lock();
+        if let Some(at) = st.retry_at {
+            // Nothing to do before the source answers.
+            return at
+                .saturating_duration_since(Instant::now())
+                .max(Duration::from_millis(10));
+        }
         let mut wait = st
             .last_tick
             .map_or(Duration::ZERO, |t| tick.saturating_sub(t.elapsed()));
@@ -622,7 +699,15 @@ impl SeriesQueueSink {
     /// shut: another Bunko holds the lease): the loop looks again soon.
     pub(crate) async fn tick<B: Backend>(&self, core: &Arc<Core<B>>) -> bool {
         self.apply_outcomes();
-        if !core.gate_open() || !core.adopted() {
+        let shut = if !core.adopted() {
+            Some(Phase::Adopting)
+        } else if !core.gate_open() {
+            Some(Phase::Fenced)
+        } else {
+            None
+        };
+        if let Some(phase) = shut {
+            self.st.lock().phase = phase;
             return false;
         }
         let Some(src) = self.source.lock().clone() else {
@@ -631,21 +716,32 @@ impl SeriesQueueSink {
         let tick = self.window.min(TICK_MAX);
         let due = {
             let st = self.st.lock();
-            st.judge_drift
-                || st.last_tick.is_none_or(|t| t.elapsed() >= tick)
-                || st
-                    .early
-                    .as_ref()
-                    .is_some_and(|(_, at)| Instant::now() >= *at)
-                || (!st.backlog.is_empty()
-                    && st.last_flush.is_none_or(|t| t.elapsed() >= self.window))
+            let now = Instant::now();
+            st.retry_at.is_none_or(|t| now >= t)
+                && (st.judge_drift
+                    // The first look since the fence opened (or ever).
+                    || matches!(st.phase, Phase::Starting | Phase::Adopting | Phase::Fenced)
+                    || st.last_tick.is_none_or(|t| t.elapsed() >= tick)
+                    || st.early.as_ref().is_some_and(|(_, at)| now >= *at)
+                    || (!st.backlog.is_empty()
+                        && st.last_flush.is_none_or(|t| t.elapsed() >= self.window)))
         };
         if !due {
             return true;
         }
         let Some(snap) = self.fresh_snapshot().await else {
+            // No answer (the server's queue, until its first walk of the library is
+            // over): asked again in a second, not at once.
+            let mut st = self.st.lock();
+            st.retry_at = Some(Instant::now() + SNAPSHOT_RETRY);
+            st.phase = Phase::Waiting(src.waiting_for());
             return true;
         };
+        {
+            let mut st = self.st.lock();
+            st.retry_at = None;
+            st.phase = Phase::Ready;
+        }
         let snap = Arc::new(snap);
         // What the outbox and the index say, read before the sink's lock.
         let (busy, replayed) = {
@@ -940,6 +1036,7 @@ impl SeriesQueueSink {
             let burst = st.budget.window();
             st.backlog.age(snap.now, self.window.as_secs_f64());
             st.last_flush = Some(Instant::now());
+            st.last_flush_ms = Some(now_ms());
             (st.backlog.order(), burst)
         };
         let mut used = 0;

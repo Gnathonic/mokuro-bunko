@@ -132,6 +132,8 @@ pub trait CloudStore: Send + Sync {
     fn set_hooks(&self, hooks: Arc<dyn CloudHooks>);
     /// The OCR queue the store's series-file sink writes from (queue file v2 §6).
     fn set_series_queue_source(&self, src: Arc<dyn bunko_remote::SeriesQueueSource>);
+    /// The series-file sink's status (`{"state": "off"}` with `status_files` off).
+    fn series_queue_status(&self) -> Value;
     /// Every op in the outbox.
     fn outbox(&self) -> Vec<bunko_remote::outbox::OpSummary>;
     /// Unresolved conflict rows `(kind, path, detail)`.
@@ -189,6 +191,12 @@ impl<B: Backend> CloudStore for RemoteStore<B> {
     }
     fn set_series_queue_source(&self, src: Arc<dyn bunko_remote::SeriesQueueSource>) {
         RemoteStore::set_series_queue_source(self, src)
+    }
+    fn series_queue_status(&self) -> Value {
+        match self.series_queue() {
+            Some(sink) => sink.status_json(),
+            None => json!({"state": "off"}),
+        }
     }
     fn outbox(&self) -> Vec<bunko_remote::outbox::OpSummary> {
         RemoteStore::outbox(self)
@@ -408,8 +416,10 @@ impl StoreHandle {
     }
 
     /// The admin status's `library.storage` block (§11): what the store is, its
-    /// health and sync, caches, the outbox, conflicts, the lease, the provider quota and
-    /// the `problems[]` of kinds `storage-*`. Never a secret.
+    /// health and sync, caches, the outbox, conflicts, the lease, the provider quota,
+    /// the series queue files' sink (`series_queue`: why it writes nothing yet, the
+    /// files it wrote, its backlog) and the `problems[]` of kinds `storage-*`. Never a
+    /// secret.
     pub fn status_json(&self) -> Value {
         let (engine, progress) = match self.engine_state() {
             None => ("unconnected".to_string(), Value::Null),
@@ -435,6 +445,7 @@ impl StoreHandle {
         });
         let poll = self.store.as_ref().map(|s| poll_json(&s.poll_cadence()));
         let outbox = self.store.as_ref().map(|s| outbox_json(&s.outbox()));
+        let series_queue = self.store.as_ref().map(|s| s.series_queue_status());
         let conflicts: Vec<Value> = self
             .store
             .as_ref()
@@ -521,6 +532,7 @@ impl StoreHandle {
             "submissions": submissions,
             "lease": lease,
             "quota": self.quota_json(),
+            "series_queue": series_queue,
             "problems": problems,
         })
     }

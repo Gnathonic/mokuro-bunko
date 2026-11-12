@@ -180,6 +180,29 @@ impl<B: Backend> Core<B> {
     }
 }
 
+/// A Deferred write whose bytes and row are staged, not yet coalesced with older
+/// writes of its file or shown in the index: `publish` between its two steps
+/// (feature `testing`, so that a test can run another writer in between).
+#[cfg(feature = "testing")]
+pub struct HalfStaged(Op);
+
+#[cfg(feature = "testing")]
+impl<B: Backend> RemoteStore<B> {
+    /// The first step of a Deferred publish of `src` at `dest`: its bytes taken into
+    /// the outbox, its op STAGED.
+    pub fn stage_half(&self, src: &Path, dest: &Path, w: &WriteIntent) -> io::Result<HalfStaged> {
+        let rel = self.rel(dest)?;
+        self.check_target(&rel, dest, Some(&w.origin))?;
+        Ok(HalfStaged(self.core.stage_put(src, rel, w)?))
+    }
+
+    /// The second step: older writes of the file superseded, the index marker set.
+    /// Returns the op's id.
+    pub fn stage_rest(&self, h: HalfStaged) -> io::Result<u64> {
+        Ok(self.core.stage_deferred(h.0)?.id)
+    }
+}
+
 impl<B: Backend> RemoteStore<B> {
     pub(crate) fn staging_file(&self, p: &Path) -> Option<PathBuf> {
         let rel = self.rel(p).ok()?;
