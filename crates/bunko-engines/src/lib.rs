@@ -637,7 +637,8 @@ impl EnginePipeline {
     }
 
     /// The error of a row whose engine has no compiled package for `placement`'s device
-    /// here or in the release.
+    /// here or in the release. Only the torch rows' needs ask (`need_for`).
+    #[cfg_attr(not(feature = "torch"), allow(dead_code))]
     fn no_package_error(&self, engine: &str, placement: &Placement, label: &str) -> String {
         #[cfg(feature = "torch")]
         let wanted = self
