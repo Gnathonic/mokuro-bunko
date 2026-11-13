@@ -60,7 +60,7 @@ pub const MAX_POOLED_WORKERS: u32 = 64;
 pub const SOURCE_EXTRA: u32 = 2;
 /// CPU seconds the detect stage spends on a page beside a text-box recognizer: AnimeText
 /// block detection, 0.8-1.0 on a 24-core host and 1.05-1.3 on a 16-core desktop
-/// (Dragon Ball, 9.4 blocks a page); it sizes the stage's share of the cores.
+/// (a test volume, 9.4 blocks a page); it sizes the stage's share of the cores.
 pub const DETECT_CPU_SECONDS: f64 = 0.9;
 /// Intra-op threads of a text-box recognizer's session at most (the models' own
 /// packages stop at eight: more does not help them).
