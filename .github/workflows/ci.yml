@@ -13,6 +13,11 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Rust is pinned to 1.99.1 in every workflow, not `stable`. Cargo 1.100 moved build
+# scripts' output to build/<package>/<hash>/out, and ort-sys 2.0.0-rc.13 still finds
+# the target folder by counting up from there: on Windows, where ONNX Runtime is a DLL,
+# its copy of onnxruntime.dll then fails and the build stops. ort-sys rc.15 reads the
+# target folder properly; move back to `stable` together with that upgrade.
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
@@ -25,7 +30,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
-          toolchain: stable
+          toolchain: "1.99.1" # not stable: see the note in ci.yml
           components: rustfmt
       - run: cargo fmt --all --check
       - run: cargo fmt --check --manifest-path packaging/docker-init/Cargo.toml
@@ -36,7 +41,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
-          toolchain: stable
+          toolchain: "1.99.1" # not stable: see the note in ci.yml
           components: clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       # The full build (default features, links ONNX Runtime) and the lite build.
@@ -69,7 +74,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
-          toolchain: stable
+          toolchain: "1.99.1" # not stable: see the note in ci.yml
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo test --workspace --locked
       - name: lite build compiles and tests on every OS
@@ -83,7 +88,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
-          toolchain: stable
+          toolchain: "1.99.1" # not stable: see the note in ci.yml
           targets: x86_64-unknown-linux-musl
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
       - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
