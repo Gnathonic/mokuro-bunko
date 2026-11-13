@@ -79,3 +79,7 @@ required-features = ["torch"]
 [[example]]
 name = "textbox_read"
 required-features = ["nc-models"]
+
+[[example]]
+name = "textbox_bench"
+required-features = ["nc-models"]
