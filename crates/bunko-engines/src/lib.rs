@@ -705,9 +705,17 @@ impl EnginePipeline {
     }
 
     /// The text-box recognizer of `engine` (ONNX Runtime on the CPU), loaded once and
-    /// shared by the sessions that read with it.
+    /// shared by the sessions that read with it. Its threads are sized for an engine
+    /// stage of `workers` over `share` physical cores ([`plan::textbox_session_threads`]);
+    /// a benchmark that tries other widths keeps the loaded session (one thread a worker
+    /// stays right a few workers either way).
     #[cfg(feature = "nc-models")]
-    fn textbox_recognizer(&self, engine: &str) -> Result<Arc<dyn Recognizer>, String> {
+    fn textbox_recognizer(
+        &self,
+        engine: &str,
+        share: usize,
+        workers: u32,
+    ) -> Result<Arc<dyn Recognizer>, String> {
         let mut loaded = self.textbox.lock();
         loaded.retain(|(_, r)| r.strong_count() > 0);
         if let Some(r) = loaded
@@ -718,14 +726,10 @@ impl EnginePipeline {
             return Ok(r);
         }
         let files = models::ensure_all(&self.store, &models::textbox_ids(engine))?;
+        let threads = plan::textbox_session_threads(share, workers);
+        info!("{engine}: one shared session of {threads} thread(s) for {workers} worker(s)");
         let opts = RuntimeOptions {
-            // The models' own packages stop at eight threads: more does not help them.
-            intra_threads: plan::cpu_engine_threads(
-                plan::physical_cpu_count(),
-                plan::performance_core_count(),
-                self.config.jobs,
-            )
-            .min(8),
+            intra_threads: threads,
             targets: vec![ExecutionTarget::Cpu],
             copies: 1,
             spinning: false,
@@ -1589,10 +1593,22 @@ impl EnginePipeline {
             )?;
         }
 
+        let host_of = |placement: &Placement| plan::Host {
+            budget: plan::host_worker_budget(plan::logical_cpu_count(), self.config.jobs),
+            physical_cores: plan::physical_cpu_count(),
+            jobs: self.config.jobs,
+            fast_gpu: placement.is_gpu() && self.bf16_native(placement),
+        };
         let mut recognizer = None;
         #[cfg(feature = "nc-models")]
         if textbox {
-            recognizer = Some(self.textbox_recognizer(engine)?);
+            // The session's threads follow the engine stage's planned width.
+            let host = host_of(&placement);
+            let workers = plan::plan(engine, road, &placement.device, &spec.pools, &host)
+                .iter()
+                .find(|s| s.key == plan::STAGE_ENGINE)
+                .map_or(1, |s| s.workers);
+            recognizer = Some(self.textbox_recognizer(engine, host.share(), workers)?);
         }
         if let Some(r) = &resolved {
             match self.recognizer(spec, &placement, r.precision, r.backend.as_deref()) {
@@ -1633,11 +1649,7 @@ impl EnginePipeline {
             info!("{engine} precision: {} ({})", r.precision, r.why);
         }
 
-        let host = plan::Host {
-            budget: plan::host_worker_budget(plan::logical_cpu_count(), self.config.jobs),
-            physical_cores: plan::physical_cpu_count(),
-            fast_gpu: placement.is_gpu() && self.bf16_native(&placement),
-        };
+        let host = host_of(&placement);
         let stages = plan::plan(engine, road, &placement.device, &spec.pools, &host);
         let detect_workers = stages
             .iter()

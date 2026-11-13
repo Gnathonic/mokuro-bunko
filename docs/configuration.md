@@ -1429,7 +1429,7 @@ it is written, so editing them never stops a running job.
 
 | Key | Values | Meaning |
 |---|---|---|
-| `stage_workers` | `{stage: 1–64}` | How many workers a stage runs. For the `engine` stage on a card, a number above 1 (up to 8) runs that many threads over the one loaded model, only worth it on a card with spare compute; unset, it is 1, or 2 on a fast card in a host with 16 or more physical cores. On the CPU the engine stage stays at 1. |
+| `stage_workers` | `{stage: 1–64}` | How many workers a stage runs. For the `engine` stage on a card, a number above 1 (up to 8) runs that many threads over the one loaded model, only worth it on a card with spare compute; unset, it is 1, or 2 on a fast card in a host with 16 or more physical cores. On the CPU the engine stage of `hayai-nova` and `paddle-manga` stays at 1; that of `charspot-small` and `nar-small` is a pool of workers over one loaded model, by default sized from the physical cores (about 15 on a 24-core host for `nar-small`), and a number here sets it. |
 | `queue_capacity` | `{stage: 1–256}` | How many pages may wait in the queue a stage fills. Capacity is memory (a decoded page can be ~14 MB); the default is small on purpose. |
 | `stage_device` | `{stage: cpu \| "gpu:<n>"}` | Where a stage's model runs. Absent means auto: card 0 when there is one, else the CPU. Only stages holding a model take one. |
 

@@ -178,7 +178,10 @@ pub fn host_worker_budget(logical_cpus: usize, jobs: usize) -> u32 {
 /// ([`VolumeRunner::width_ceilings`]), mirroring the engines' planner: a pooled CPU
 /// stage up to the host budget (at most 8, 4 on the ppocr-manga road as 0.5.2); the
 /// device-bound engine stage up to 8 threads over its one session on a GPU (and the
-/// budget), 1 on the CPU. Never below what the engines derived themselves.
+/// budget), 1 on the CPU; an engine stage on the CPU that is not device-bound (a
+/// text-box recognizer's workers over one shared session) up to the job's physical
+/// cores, which on an SMT host is the budget plus 2 (the budget counts two logical CPUs
+/// a worker past the first 6). Never below what the engines derived themselves.
 pub fn estimated_ceiling(
     stage: Option<&crate::pipeline::StageReport>,
     engine: &str,
@@ -193,6 +196,9 @@ pub fn estimated_ceiling(
             } else {
                 1
             }
+        }
+        Some(s) if s.key == "engine" && !s.device.starts_with("gpu") => {
+            (budget + 2).min(physical_cpu_count().max(1) as u32)
         }
         _ => budget.min(pooled_cap),
     };
@@ -1434,6 +1440,35 @@ mod tests {
             6,
             "never below the derivation"
         );
+    }
+
+    /// A text-box recognizer's engine stage on the CPU is a pool (not device-bound): the
+    /// fallback ceiling lets it widen to the job's physical cores, like the planner.
+    #[test]
+    fn a_pooled_cpu_engine_stage_may_widen() {
+        let pool = crate::pipeline::StageReport {
+            key: "engine".into(),
+            device: "cpu".into(),
+            device_bound: false,
+            ..Default::default()
+        };
+        let cores = physical_cpu_count() as u32;
+        // a 24-core SMT host, one job: budget 22, the planner's ceiling 24
+        assert_eq!(
+            estimated_ceiling(Some(&pool), "nar-small", 22, 1),
+            24.min(cores)
+        );
+        assert_eq!(
+            estimated_ceiling(Some(&pool), "nar-small", 22, 30),
+            30,
+            "never below the derivation"
+        );
+        // a detect stage beside it keeps the pooled cap
+        let detect = crate::pipeline::StageReport {
+            key: "detect".into(),
+            ..pool.clone()
+        };
+        assert_eq!(estimated_ceiling(Some(&detect), "nar-small", 22, 4), 8);
     }
 
     /// The server can pick a volume of JPEG XL pages as the sample: its pages count.

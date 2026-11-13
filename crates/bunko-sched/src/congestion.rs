@@ -898,4 +898,51 @@ mod tests {
         );
         assert_eq!(widen_target(&s).as_deref(), Some("detect"));
     }
+
+    /// A text-box recognizer's engine stage on the CPU is a pool of workers over one
+    /// shared session (not device-bound): when it sets the pace the verdict widens it,
+    /// where a device-bound engine stage only says it cannot be widened.
+    #[test]
+    fn a_busy_pooled_cpu_engine_is_widened() {
+        // (engine device-bound, with the post stage)
+        let stats = |device_bound: bool, post: bool| {
+            let mut stages = vec![
+                json!({"key": "detect", "device": "cpu", "workers": 4, "items": 120, "busy_seconds": 110.0, "starved_seconds": 0.0, "blocked_seconds": 2.0}),
+                json!({"key": "engine", "device": "cpu", "workers": 15, "device_bound": device_bound, "items": 120, "busy_seconds": 588.0, "starved_seconds": 6.0, "blocked_seconds": 0.0}),
+            ];
+            if post {
+                stages.push(json!({"key": "post", "device": "cpu", "workers": 1, "items": 120, "busy_seconds": 0.5, "starved_seconds": 39.2, "blocked_seconds": 0.0}));
+            }
+            json!({
+                "elapsed_seconds": 40.0, "items": 120,
+                "stages": stages,
+                "queues": [
+                    {"name": "detect->engine", "capacity": 4, "mean_depth": 0.4, "max_depth": 4},
+                    {"name": "engine->post", "capacity": 15, "mean_depth": 0.0, "max_depth": 1}
+                ]
+            })
+        };
+        let s = summarize(&stats(false, false)).unwrap();
+        assert_eq!(
+            s["verdict"],
+            json!("engine busy 98% of 15 workers — widen engine")
+        );
+        assert_eq!(widen_target(&s).as_deref(), Some("engine"));
+        // With the post stage waiting on it, the post stage's wait names it.
+        let s = summarize(&stats(false, true)).unwrap();
+        assert_eq!(
+            s["verdict"],
+            json!("post starved 98% waiting on engine — widen engine")
+        );
+        assert_eq!(widen_target(&s).as_deref(), Some("engine"));
+        // A device-bound engine stage (a libtorch recognizer on the CPU) is never widened.
+        for post in [false, true] {
+            let s = summarize(&stats(true, post)).unwrap();
+            assert_eq!(
+                s["verdict"],
+                json!("engine busy 98% on the cpu — it sets the pace and cannot be widened")
+            );
+            assert_eq!(widen_target(&s), None);
+        }
+    }
 }
