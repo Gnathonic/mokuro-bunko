@@ -16,9 +16,10 @@
 //! The text-box recognizers (charspot-small, nar-small: ONNX Runtime, CPU only) read one
 //! block crop per call, too little work to keep a wide intra-op pool busy, so their
 //! engine stage is a pooled CPU stage instead: many workers over one shared session of
-//! one or two threads ([`textbox_session_threads`]). The job's physical cores are split
-//! between it and the detect stage by what a page costs each
-//! ([`textbox_engine_workers`], [`textbox_detect_workers`]); a 24-core host reads
+//! one or two threads ([`textbox_session_threads`]). The job's cores ([`core_count`],
+//! SMT threads aside) are split between it and the detect stage by what a page costs
+//! each ([`textbox_engine_workers`], [`textbox_detect_workers`]); an explicit engine
+//! width leaves detect at its share of that default split. A 24-core host reads
 //! nar-small on AnimeText blocks about 3x faster that way than with one 8-thread
 //! worker, at half the CPU time a block. Width 0 (0.5.2's fused serial fallback) runs
 //! as 1.
@@ -164,16 +165,16 @@ pub fn textbox_detect_workers(engine_workers: u32, share: usize) -> u32 {
 }
 
 /// Intra-op threads of a text-box recognizer's one shared session, for an engine stage
-/// of `workers` over the job's `share` of physical cores: the job's cores (at most 8)
-/// for a single worker, as before the stage was pooled; 2 for two workers; 1 for a
-/// wider pool. Each call reads one block, too little to keep a pool busy: on a 24-core
+/// of `workers`: `single` (at most 8) for a single worker, where `single` is the job's
+/// [`cpu_engine_threads`] as before the stage was pooled (all physical cores but one,
+/// or the performance cores of a hybrid CPU); 2 for two workers; 1 for a wider pool. Each call reads one block, too little to keep a pool busy: on a 24-core
 /// host, 16 workers spent 0.19 CPU-s a block at 1 thread, 0.20 at 2, 0.23 at 4 and
 /// 0.29 at 8, for the same blocks a second, while at one worker 8 threads read 2.3x
 /// faster than 1 and at two, 2 threads read 30% faster than 1 (at four, 14%, for 10%
 /// more CPU time). The text is the same at every width and thread count.
-pub fn textbox_session_threads(share: usize, workers: u32) -> usize {
+pub fn textbox_session_threads(single: usize, workers: u32) -> usize {
     match workers {
-        0 | 1 => share.clamp(1, TEXTBOX_THREADS_MAX),
+        0 | 1 => single.clamp(1, TEXTBOX_THREADS_MAX),
         2 => 2,
         _ => 1,
     }
@@ -198,44 +199,109 @@ pub fn cpu_engine_threads(physical: usize, performance: Option<usize>, jobs: usi
     }
 }
 
+/// A sysctl of type int (macOS), None when it is missing or not positive.
+#[cfg(target_os = "macos")]
+fn sysctl_count(name: &std::ffi::CStr) -> Option<usize> {
+    use std::ffi::{c_char, c_int, c_void};
+    unsafe extern "C" {
+        fn sysctlbyname(
+            name: *const c_char,
+            oldp: *mut c_void,
+            oldlenp: *mut usize,
+            newp: *mut c_void,
+            newlen: usize,
+        ) -> c_int;
+    }
+    let mut n: c_int = 0;
+    let mut len = std::mem::size_of::<c_int>();
+    // SAFETY: a sysctl of type int read into an int of the given length.
+    let rc = unsafe {
+        sysctlbyname(
+            name.as_ptr(),
+            (&raw mut n).cast(),
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    (rc == 0 && n > 0).then_some(n as usize)
+}
+
 /// Performance cores of a hybrid CPU, when the OS reports them (macOS
 /// `hw.perflevel0.physicalcpu`; None on a CPU of one kind or elsewhere).
 pub fn performance_core_count() -> Option<usize> {
     #[cfg(target_os = "macos")]
     {
-        use std::ffi::{c_char, c_int, c_void};
-        unsafe extern "C" {
-            fn sysctlbyname(
-                name: *const c_char,
-                oldp: *mut c_void,
-                oldlenp: *mut usize,
-                newp: *mut c_void,
-                newlen: usize,
-            ) -> c_int;
-        }
-        let read = |name: &std::ffi::CStr| {
-            let mut n: c_int = 0;
-            let mut len = std::mem::size_of::<c_int>();
-            // SAFETY: a sysctl of type int read into an int of the given length.
-            let rc = unsafe {
-                sysctlbyname(
-                    name.as_ptr(),
-                    (&raw mut n).cast(),
-                    &mut len,
-                    std::ptr::null_mut(),
-                    0,
-                )
-            };
-            (rc == 0 && n > 0).then_some(n as usize)
-        };
         // perflevel1 exists only on a CPU with a second (efficiency) level.
-        read(c"hw.perflevel1.physicalcpu")?;
-        read(c"hw.perflevel0.physicalcpu")
+        sysctl_count(c"hw.perflevel1.physicalcpu")?;
+        sysctl_count(c"hw.perflevel0.physicalcpu")
     }
     #[cfg(not(target_os = "macos"))]
     {
         None
     }
+}
+
+/// Cores without their SMT siblings on every OS: [`physical_cpu_count`] on Linux,
+/// `hw.physicalcpu` on macOS, the processor-core records on Windows (logical CPUs
+/// where none of these answers). The planner's [`Host::physical_cores`] is this: a
+/// text-box recognizer's pool takes one worker a core, and past the cores a worker adds
+/// CPU time a block, not blocks. The thread counts of the libtorch and ONNX recognizers
+/// keep [`physical_cpu_count`] (logical CPUs outside Linux), which they were tuned on.
+pub fn core_count() -> usize {
+    #[cfg(target_os = "macos")]
+    if let Some(n) = sysctl_count(c"hw.physicalcpu") {
+        return n.min(logical_cpu_count());
+    }
+    #[cfg(windows)]
+    if let Some(n) = windows_core_count() {
+        return n.min(logical_cpu_count());
+    }
+    physical_cpu_count()
+}
+
+/// Processor cores as Windows lists them (`GetLogicalProcessorInformationEx`, one
+/// `RelationProcessorCore` record a core, whatever its SMT threads).
+#[cfg(windows)]
+fn windows_core_count() -> Option<usize> {
+    use windows_sys::Win32::System::SystemInformation::{
+        GetLogicalProcessorInformationEx, RelationProcessorCore,
+    };
+    let mut len: u32 = 0;
+    // SAFETY: a null buffer of length 0 only asks for the length needed.
+    unsafe {
+        GetLogicalProcessorInformationEx(RelationProcessorCore, std::ptr::null_mut(), &mut len)
+    };
+    if len == 0 {
+        return None;
+    }
+    // u64 words: the records hold pointer-aligned fields.
+    let mut buf = vec![0u64; (len as usize).div_ceil(8)];
+    // SAFETY: the buffer holds at least `len` bytes, and `len` says so.
+    let ok = unsafe {
+        GetLogicalProcessorInformationEx(RelationProcessorCore, buf.as_mut_ptr().cast(), &mut len)
+    };
+    if ok == 0 {
+        return None;
+    }
+    // Each record starts with its relationship (i32) and its size in bytes (u32).
+    let bytes: &[u8] =
+        // SAFETY: a view of the u64 buffer's own bytes, of which `len` were written.
+        unsafe { std::slice::from_raw_parts(buf.as_ptr().cast(), (len as usize).min(buf.len() * 8)) };
+    let mut cores = 0;
+    let mut at = 0;
+    while at + 8 <= bytes.len() {
+        let word = |i: usize| u32::from_ne_bytes(bytes[i..i + 4].try_into().unwrap_or_default());
+        let (relation, size) = (word(at) as i32, word(at + 4) as usize);
+        if size == 0 {
+            break;
+        }
+        if relation == RelationProcessorCore {
+            cores += 1;
+        }
+        at += size;
+    }
+    (cores > 0).then_some(cores)
 }
 
 /// Physical cores (0.5.2 sized on those, not on SMT threads).
@@ -293,6 +359,7 @@ pub fn host_worker_budget(logical_cpus: usize, jobs: usize) -> u32 {
 pub struct Host {
     /// Detect workers this session may have ([`host_worker_budget`]).
     pub budget: u32,
+    /// Cores without their SMT siblings ([`core_count`]).
     pub physical_cores: usize,
     /// Concurrent jobs sharing the host (a text-box engine takes its part of one share).
     pub jobs: usize,
@@ -372,13 +439,15 @@ pub fn plan(
         }
     };
     let share = host.share();
-    // A text-box engine stage's width: the explicit one, else its part of the cores.
-    let textbox_width = textbox.map(|cost| {
+    // A text-box engine stage's default width: its part of the cores.
+    let textbox_default = textbox.map(|cost| textbox_engine_workers(cost, share));
+    // Its width: the explicit one, else the default.
+    let textbox_width = textbox_default.map(|w| {
         pools
             .stage_workers
             .get(STAGE_ENGINE)
             .copied()
-            .unwrap_or_else(|| textbox_engine_workers(cost, share))
+            .unwrap_or(w)
             .clamp(1, MAX_POOLED_WORKERS)
     });
     // The pace: the device-bound stage's period, or the text-box engine pool's.
@@ -412,8 +481,11 @@ pub fn plan(
                 1
             } else if let (STAGE_ENGINE, Some(w)) = (d.0, textbox_width) {
                 w
-            } else if let (STAGE_DETECT, Some(w)) = (d.0, textbox_width) {
-                // Beside a text-box engine the detect stage takes the cores it leaves.
+            } else if let (STAGE_DETECT, Some(w)) = (d.0, textbox_default) {
+                // Beside a text-box engine the detect stage takes the cores its default
+                // width leaves. From the default, not an explicit width: each stage's
+                // derived width stands alone, so a benchmark's winner pins only the
+                // widths that differ from them and the next session runs what it ran.
                 textbox_detect_workers(w, share).clamp(1, ceiling)
             } else if pace > 0.0 {
                 ((STAGE_WIDTH_HEADROOM * cost / pace).ceil() as u32).clamp(1, ceiling)
@@ -723,10 +795,12 @@ mod tests {
                 let c = width_ceilings(&p, &h);
                 assert_eq!(c["engine"], (physical / jobs) as u32, "{at}");
                 assert_eq!(c["detect"], h.budget.clamp(1, CPU_WORKERS_MAX), "{at}");
-                // One thread a worker once the pool is wide.
-                let threads = textbox_session_threads(h.share(), engine_workers);
+                // One thread a worker once the pool is wide; a lone worker keeps the
+                // threads it had before the stage was pooled.
+                let single = cpu_engine_threads(physical, None, jobs);
+                let threads = textbox_session_threads(single, engine_workers);
                 let want = match engine_workers {
-                    1 => physical / jobs,
+                    1 => ((physical - 1) / jobs).min(TEXTBOX_THREADS_MAX),
                     2 => 2,
                     _ => 1,
                 };
@@ -759,17 +833,38 @@ mod tests {
     fn textbox_engine_widths_when_set() {
         let big = smt(24, 1);
         let mut pools = PoolsSpec::default();
-        // An explicit engine width is honoured, and detect takes the cores it leaves.
-        pools.stage_workers.insert("engine".into(), 12);
-        let p = plan("nar-small", Road::Reconciled, "cpu", &pools, &big);
-        assert_eq!((p[0].workers, p[1].workers), (5, 12));
-        assert_eq!(textbox_session_threads(big.share(), 12), 1);
-        assert_eq!(textbox_session_threads(big.share(), 2), 2);
+        // An explicit engine width is honoured, and detect keeps the width the default
+        // engine width gives it: a benchmark that widened only the engine pins only
+        // the engine, and the next session runs the detect width it measured.
+        let auto = plan("nar-small", Road::Reconciled, "cpu", &pools, &big);
+        for engine in [12, 16, 1] {
+            pools.stage_workers.insert("engine".into(), engine);
+            let p = plan("nar-small", Road::Reconciled, "cpu", &pools, &big);
+            assert_eq!((p[0].workers, p[1].workers), (auto[0].workers, engine));
+        }
+        let single = cpu_engine_threads(24, None, 1);
+        assert_eq!(textbox_session_threads(single, 12), 1);
+        assert_eq!(textbox_session_threads(single, 2), 2);
         // One worker: today's single 8-thread session.
-        pools.stage_workers.insert("engine".into(), 1);
-        let p = plan("nar-small", Road::Reconciled, "cpu", &pools, &big);
-        assert_eq!(p[1].workers, 1);
-        assert_eq!(textbox_session_threads(big.share(), 1), TEXTBOX_THREADS_MAX);
+        assert_eq!(textbox_session_threads(single, 1), TEXTBOX_THREADS_MAX);
+        // The lone worker's threads: all cores but one, or a hybrid CPU's performance
+        // cores, split across jobs, as before the stage was pooled.
+        assert_eq!(
+            textbox_session_threads(cpu_engine_threads(4, None, 1), 1),
+            3
+        );
+        assert_eq!(
+            textbox_session_threads(cpu_engine_threads(2, None, 1), 1),
+            1
+        );
+        assert_eq!(
+            textbox_session_threads(cpu_engine_threads(8, Some(4), 2), 1),
+            2
+        );
+        assert_eq!(
+            textbox_session_threads(cpu_engine_threads(4, None, 2), 1),
+            1
+        );
         pools.stage_workers.insert("engine".into(), 0);
         let p = plan("nar-small", Road::Reconciled, "cpu", &pools, &big);
         assert_eq!(p[1].workers, 1, "0 runs as 1");
@@ -786,6 +881,16 @@ mod tests {
         pools.stage_workers.insert("engine".into(), 16);
         let p = plan("nar-small", Road::Reconciled, "cpu", &pools, &big);
         assert_eq!(widths(&p), vec![(3, 4), (16, 16), (1, 1)]);
+    }
+
+    /// Cores count once whatever their SMT threads (Linux reads the topology the same
+    /// way the libtorch thread counts do).
+    #[test]
+    fn core_count_leaves_out_smt_threads() {
+        let cores = core_count();
+        assert!(cores >= 1 && cores <= logical_cpu_count());
+        #[cfg(target_os = "linux")]
+        assert_eq!(cores, physical_cpu_count());
     }
 
     #[test]

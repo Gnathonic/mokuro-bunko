@@ -229,8 +229,9 @@ cores) split across jobs. `charspot-small` and `nar-small` read one block a
 call, so on the CPU their engine stage is a pool instead: many workers over
 one loaded model of one thread each, taking the job's physical cores in
 proportion to what a page costs it next to the detect stage (about 15 of 24
-for `nar-small`, 7 of 24 for `charspot-small`), the detect stage sized to the
-rest. The other stages get pools sized from the host. Widths and queue depths only
+for `nar-small`, 7 of 24 for `charspot-small`; a core counts once, SMT
+threads aside), the detect stage sized to the rest of that default split.
+The other stages get pools sized from the host. Widths and queue depths only
 change speed. Moving the engine to another device can change the sidecar:
 under an automatic precision mode, a device without native bf16 can resolve
 to a different precision (see [Precision modes](#precision-modes)).
