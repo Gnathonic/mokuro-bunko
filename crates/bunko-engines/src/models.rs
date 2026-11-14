@@ -152,6 +152,8 @@ pub fn ppocr_ids() -> Vec<&'static str> {
 /// Host files the libtorch recognizer of `engine` always reads besides its compiled
 /// package. paddle-manga's input embeddings come with its packages' weights; only
 /// a package without them (an older or hand-made one) also needs [`paddle_embed_id`].
+/// nar-small's package holds no weights: it binds the authors' `model.safetensors`
+/// (the file its CPU graph reads too) and reads its vocabulary on the host.
 pub fn torch_host_ids(engine: &str, _precision: Precision) -> Vec<&'static str> {
     match engine {
         HAYAI => vec![
@@ -160,6 +162,11 @@ pub fn torch_host_ids(engine: &str, _precision: Precision) -> Vec<&'static str> 
             "hayai-nova/tokenizer",
         ],
         PADDLE => vec!["paddle-manga/tokenizer"],
+        #[cfg(feature = "nc-models")]
+        NAR => vec![
+            bunko_ocr::models::NAR_VOCABULARY,
+            bunko_ocr::models::NAR_WEIGHTS,
+        ],
         _ => Vec::new(),
     }
 }
@@ -279,8 +286,9 @@ pub fn torch_host_files(
             embeddings: Some(r[1].path.clone()),
             tokenizer: r[2].path.clone(),
             unpack_cache: None,
+            weights: Vec::new(),
         },
-        _ => {
+        PADDLE => {
             let blob = package
                 .parent()
                 .is_some_and(|p| p.join("weights-decoder.safetensors").is_file());
@@ -299,8 +307,19 @@ pub fn torch_host_files(
                 embeddings,
                 tokenizer: r[0].path.clone(),
                 unpack_cache: None,
+                weights: Vec::new(),
             }
         }
+        #[cfg(feature = "nc-models")]
+        NAR => crate::torch::TorchFiles {
+            package,
+            tokenizer: r[0].path.clone(),
+            pos_table: None,
+            embeddings: None,
+            unpack_cache: None,
+            weights: vec![r[1].path.clone()],
+        },
+        _ => return Err(format!("{engine} has no libtorch host files")),
     })
 }
 
@@ -550,6 +569,24 @@ mod tests {
                 }
                 assert!(m.get(paddle_embed_id(p)).is_some());
             }
+        }
+    }
+
+    /// nar-small's package holds no weights: on the GPU it binds the authors'
+    /// `model.safetensors` and reads its vocabulary on the host.
+    #[cfg(feature = "nc-models")]
+    #[test]
+    fn nar_reads_its_vocabulary_and_the_authors_weights_on_the_gpu() {
+        assert_eq!(
+            torch_host_ids(NAR, Precision::Fp32),
+            vec![
+                bunko_ocr::models::NAR_VOCABULARY,
+                bunko_ocr::models::NAR_WEIGHTS
+            ]
+        );
+        let m = Manifest::builtin();
+        for id in torch_host_ids(NAR, Precision::Fp32) {
+            assert!(m.get(id).is_some(), "{id}");
         }
     }
 

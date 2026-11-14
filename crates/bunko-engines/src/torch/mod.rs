@@ -16,6 +16,7 @@
 
 pub mod loader;
 pub mod recognizer;
+pub mod textbox;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -28,6 +29,7 @@ use tracing::{info, warn};
 pub use bunko_torch::abi;
 pub use loader::{Pack, PackLoadError};
 pub use recognizer::TorchRecognizer;
+pub use textbox::TorchTextbox;
 
 /// Use this pack directory instead of searching `<storage>/backends/`.
 pub const PACK_ENV: &str = "MOKURO_TORCH_PACK";
@@ -44,6 +46,26 @@ const OLD_PACK_BUDGET_REFUSALS: &[&str] = &[
 
 /// What the error for such a pack asks for ([`pack_budget_error`]).
 pub const PACK_UPDATE: &str = "update the OCR backend pack";
+
+/// Why a text-box engine does not run on a pack without `bt_read_chars` (one built
+/// before 0.8.0).
+pub const TEXTBOX_PACK_REASON: &str = "the OCR backend pack predates GPU text-box reading; update the OCR backend pack (`mokuro-bunko install-ocr --force`)";
+
+/// A GPU that reports less memory than this reads text boxes in batches of
+/// [`TEXTBOX_SMALL_BATCH`] instead of its package's own `bunko.max_batch`.
+pub const TEXTBOX_SMALL_VRAM_MB: u64 = 4096;
+/// The text-box batch of a GPU under [`TEXTBOX_SMALL_VRAM_MB`].
+pub const TEXTBOX_SMALL_BATCH: u32 = 8;
+
+/// The batch cap of a text-box engine on a device that reports `vram_mb`
+/// (`DeviceEntry::vram_mb`): [`TEXTBOX_SMALL_BATCH`] on a GPU under
+/// [`TEXTBOX_SMALL_VRAM_MB`], else None (the package's own `bunko.max_batch`). Unknown
+/// memory is None.
+pub fn textbox_max_batch(vram_mb: Option<u64>) -> Option<u32> {
+    vram_mb
+        .filter(|mb| *mb < TEXTBOX_SMALL_VRAM_MB)
+        .map(|_| TEXTBOX_SMALL_BATCH)
+}
 
 /// The error to show when `err` is a pack's refusal of patch budget `budget` (a pack from
 /// before 0.8.0, which reads 512 only): the pack is to update, not the device. None for
@@ -129,6 +151,7 @@ pub struct TorchBackend {
     pub pack: Arc<Pack>,
     pub report: DevicesReport,
     loaded: Mutex<HashMap<Key, Weak<TorchRecognizer>>>,
+    textboxes: Mutex<HashMap<Key, Weak<TorchTextbox>>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -252,6 +275,7 @@ fn open_backend(backends_dirs: &[PathBuf], cpu_only: bool) -> Result<Arc<TorchBa
                         pack: Arc::new(pack),
                         report,
                         loaded: Mutex::new(HashMap::new()),
+                        textboxes: Mutex::new(HashMap::new()),
                     }));
                 }
                 Err(e) => errors.push(format!("{}: {e}", dir.display())),
@@ -314,6 +338,37 @@ pub struct TorchFiles {
     pub embeddings: Option<PathBuf>,
     /// Where `.pt2` zips are unpacked to be loaded in place (under `<storage>`).
     pub unpack_cache: Option<PathBuf>,
+    /// Weights a weightless package binds at load (nar-small: the authors'
+    /// `model.safetensors`). Empty for hayai-nova and paddle-manga, whose packages
+    /// find their shared weights beside them.
+    pub weights: Vec<PathBuf>,
+}
+
+/// The load options of a text-box engine: its vocabulary, the weights its package
+/// binds, the unpack cache, the preprocessing threads and the batch cap (None: the
+/// package's own `bunko.max_batch`).
+pub fn textbox_load_options(
+    files: &TorchFiles,
+    threads: u32,
+    max_batch: Option<u32>,
+) -> LoadOptions {
+    LoadOptions {
+        tokenizer: files.tokenizer.to_string_lossy().into_owned(),
+        threads,
+        weights: Some(
+            files
+                .weights
+                .iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect(),
+        ),
+        cache_dir: files
+            .unpack_cache
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned()),
+        max_batch,
+        ..LoadOptions::default()
+    }
 }
 
 impl TorchBackend {
@@ -399,6 +454,63 @@ impl TorchBackend {
             ));
         }
         let r = Arc::new(TorchRecognizer::new(self.pack.clone(), handle, info));
+        map.retain(|_, w| w.strong_count() > 0);
+        map.insert(key, Arc::downgrade(&r));
+        Ok(r)
+    }
+
+    /// The text-box reader of `engine` for these files on `device`, shared while anyone
+    /// holds it. `max_batch` caps the crops per graph call ([`textbox_max_batch`]; None:
+    /// the package's own). A pack without `bt_read_chars` answers
+    /// [`TEXTBOX_PACK_REASON`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn textbox(
+        &self,
+        engine: &'static str,
+        precision: Precision,
+        device: &str,
+        files: &TorchFiles,
+        threads: u32,
+        max_batch: Option<u32>,
+    ) -> Result<Arc<TorchTextbox>, String> {
+        if !self.pack.reads_chars() {
+            return Err(TEXTBOX_PACK_REASON.into());
+        }
+        let key = Key {
+            engine: engine.into(),
+            precision,
+            device: device.into(),
+            dir: files.package.clone(),
+            budget: max_batch.unwrap_or(0),
+            threads,
+        };
+        let mut map = self.textboxes.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(r) = map.get(&key).and_then(Weak::upgrade) {
+            return Ok(r);
+        }
+        let opts = textbox_load_options(files, threads, max_batch);
+        let handle = self
+            .pack
+            .load(engine, &files.package, precision.as_str(), device, &opts)?;
+        let li = handle.info()?;
+        info!(
+            "{engine} {} on {device} (libtorch {}, batch {}, {} bound weights) loaded in {:.1}s from {}",
+            li.precision,
+            li.torch,
+            li.batch,
+            li.weights,
+            li.load_seconds,
+            files.package.display()
+        );
+        // As for the recognizers: the package must have bound to the pack's libtorch.
+        let foreign = self.pack.foreign_libraries();
+        if !foreign.is_empty() {
+            return Err(format!(
+                "libtorch libraries from outside the pack were loaded ({}); remove them from LD_LIBRARY_PATH / LD_PRELOAD",
+                foreign.join(", ")
+            ));
+        }
+        let r = Arc::new(TorchTextbox::new(self.pack.clone(), handle, li));
         map.retain(|_, w| w.strong_count() > 0);
         map.insert(key, Arc::downgrade(&r));
         Ok(r)
@@ -545,6 +657,41 @@ mod tests {
         let second = backend_in(&dirs, true).err().unwrap_or_default();
         assert_ne!(second, first, "looked again");
         assert!(forget_failure());
+    }
+
+    #[test]
+    fn text_box_load_options_carry_the_weights_and_the_vocabulary() {
+        let f = TorchFiles {
+            package: "/p/model".into(),
+            tokenizer: "/v.json".into(),
+            pos_table: None,
+            embeddings: None,
+            unpack_cache: Some("/u".into()),
+            weights: vec!["/w.safetensors".into()],
+        };
+        let o = textbox_load_options(&f, 4, Some(16));
+        assert_eq!(o.tokenizer, "/v.json");
+        assert_eq!(o.weights, Some(vec!["/w.safetensors".to_string()]));
+        assert_eq!(
+            (o.threads, o.max_batch, o.patch_budget),
+            (4, Some(16), None)
+        );
+        assert_eq!(o.cache_dir.as_deref(), Some("/u"));
+        assert_eq!(textbox_load_options(&f, 4, None).max_batch, None);
+        // Nothing of the recognizers' options.
+        assert_eq!(
+            (o.pos_table, o.embeddings, o.backend, o.vision),
+            (None, None, None, None)
+        );
+    }
+
+    #[test]
+    fn a_small_gpu_caps_the_text_box_batch() {
+        assert_eq!(textbox_max_batch(Some(3072)), Some(8));
+        assert_eq!(textbox_max_batch(Some(4095)), Some(8));
+        assert_eq!(textbox_max_batch(Some(4096)), None);
+        assert_eq!(textbox_max_batch(Some(24564)), None);
+        assert_eq!(textbox_max_batch(None), None);
     }
 
     fn entry(id: &str, kind: &str, arch: &str, isa: &[&str], formats: &[&str]) -> DeviceEntry {
