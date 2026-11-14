@@ -16,6 +16,7 @@
 
 pub mod abi;
 pub mod graphmeta;
+pub mod onnx_weights;
 
 #[cfg(feature = "libtorch")]
 mod aoti;
