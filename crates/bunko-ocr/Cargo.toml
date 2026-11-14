@@ -45,6 +45,8 @@ flate2 = "1"
 # Unpacking the libtorch packages (.pt2 = stored zip) at install time.
 zip = { workspace = true }
 crc32fast = "1"
+# Mapping a graph's external weights instead of reading them into memory (runtime::build_session).
+memmap2 = "0.9"
 unicode-normalization = "0.1"
 bunko-thumb = { path = "../bunko-thumb" }
 mozjpeg = { version = "0.10", optional = true }

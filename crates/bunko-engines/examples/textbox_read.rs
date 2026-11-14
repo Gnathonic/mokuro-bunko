@@ -4,7 +4,8 @@
 //!
 //! ```text
 //! cargo run -p bunko-engines --release --features nc-models --example textbox_read -- \
-//!     <charspot|nar> <model.onnx> <vocabulary.json> <image>...
+//!     charspot <model.onnx> <vocabulary.json> <image>...
+//! cargo run ... -- nar <graph.onnx> <model.safetensors> <vocabulary.json> <image>...
 //! ```
 
 use std::path::PathBuf;
@@ -16,10 +17,19 @@ use bunko_vlm::Rgb;
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.len() < 4 {
-        bail!("usage: textbox_read <charspot|nar> <model.onnx> <vocabulary.json> <image>...");
+    let usage = "usage: textbox_read charspot <model.onnx> <vocabulary.json> <image>... | \
+                 nar <graph.onnx> <model.safetensors> <vocabulary.json> <image>...";
+    // nar-small's graph reads its weights from a file of their own.
+    let first_image = if args.first().map(String::as_str) == Some("nar") {
+        4
+    } else {
+        3
+    };
+    if args.len() <= first_image {
+        bail!(usage);
     }
-    let (model, vocab) = (PathBuf::from(&args[1]), PathBuf::from(&args[2]));
+    let model = PathBuf::from(&args[1]);
+    let vocab = PathBuf::from(&args[first_image - 1]);
     let opts = RuntimeOptions {
         intra_threads: 8,
         ..Default::default()
@@ -28,12 +38,12 @@ fn main() -> Result<()> {
         .then(|| Charspot::load(&model, &vocab, &opts))
         .transpose()?;
     let nar = (args[0] == "nar")
-        .then(|| NarSmall::load(&model, &vocab, &opts))
+        .then(|| NarSmall::load(&model, &PathBuf::from(&args[2]), &vocab, &opts))
         .transpose()?;
     if charspot.is_none() && nar.is_none() {
         bail!("unknown recognizer {}", args[0]);
     }
-    for file in &args[3..] {
+    for file in &args[first_image..] {
         let img = image::open(file).with_context(|| file.clone())?.to_rgb8();
         let crop = Rgb {
             width: img.width() as usize,

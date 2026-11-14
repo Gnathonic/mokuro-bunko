@@ -152,8 +152,7 @@ fn release_source(engine: &str) -> (&'static str, &'static str) {
 }
 
 /// The text-box recognizers (muscgab; weights CC BY-NC-SA 4.0), fetched from their
-/// repos at these revisions: `(repo, revision)` and the manifest ids of the graph and
-/// the vocabulary.
+/// repos at these revisions: `(repo, revision)` and the manifest ids of their files.
 #[cfg(feature = "nc-models")]
 pub const CHARSPOT_SOURCE: (&str, &str) = (
     "muscgab/manga-ocr-charspot-small",
@@ -163,55 +162,120 @@ pub const CHARSPOT_SOURCE: (&str, &str) = (
 pub const CHARSPOT_MODEL: &str = "charspot-small/model";
 #[cfg(feature = "nc-models")]
 pub const CHARSPOT_VOCABULARY: &str = "charspot-small/vocabulary";
+/// nar-small is the model of the repo's `r16` branch (161 output slots). Its author
+/// publishes it as `model.safetensors` and PyTorch code only, so the graph is ours
+/// (`tools/textbox_export`): an ONNX graph holding no trained weights, whose weight
+/// entries point into the author's `model.safetensors`, fetched from the author's repo
+/// at this commit. ONNX Runtime gets that file from memory under the name the graph
+/// gives it ([`NAR_WEIGHTS_LOCATION`]).
 #[cfg(feature = "nc-models")]
 pub const NAR_SOURCE: (&str, &str) = (
     "muscgab/manga-ocr-nar-small",
-    "81ff4f3313263d1da349946a9dd20d14e0fb0e66",
+    "8cc14c152ccb21da3aa88fa51a92766537c12da2",
 );
 #[cfg(feature = "nc-models")]
-pub const NAR_MODEL: &str = "nar-small/model";
+pub const NAR_MODEL: &str = "nar-small/graph-r16";
+#[cfg(feature = "nc-models")]
+pub const NAR_WEIGHTS: &str = "nar-small/weights-r16";
 #[cfg(feature = "nc-models")]
 pub const NAR_VOCABULARY: &str = "nar-small/vocabulary";
-
-/// `(manifest id, engine, role, path in the repo, flat name, sha256, size)`.
+/// The external-data location the nar-small graph's weight entries name.
 #[cfg(feature = "nc-models")]
-const TEXTBOX_FILES: [(&str, &str, &str, &str, &str, &str, u64); 4] = [
-    (
-        CHARSPOT_MODEL,
-        "charspot-small",
-        "recognizer",
-        "model.onnx",
-        "charspot-small_model.onnx",
-        "05fb79760f8e3dbc989b61f23a34c46b511818a2166573ce7e41d994f4403843",
-        43_992_111,
-    ),
-    (
-        CHARSPOT_VOCABULARY,
-        "charspot-small",
-        "dictionary",
-        "vocab.json",
-        "charspot-small_vocab.json",
-        "9f72fc7852b1432bcb61b3b94b2e4cd8abef52b01e9051550a6a3070e2b314d5",
-        62_244,
-    ),
-    (
-        NAR_MODEL,
-        "nar-small",
-        "recognizer",
-        "onnx/mangaocr_nar_small_fp32.onnx",
-        "nar-small_fp32.onnx",
-        "5ee628dfd40c59c522022d87c31f8f903104198877b9ba4cf795603dc540dcf5",
-        213_095_336,
-    ),
-    (
-        NAR_VOCABULARY,
-        "nar-small",
-        "dictionary",
-        "nar_vocabulary_6817.json",
-        "nar-small_vocabulary_6817.json",
-        "9f1059427b54216c869dbf1244157f86bef74b1a0061c46a6001402c6f0c1dbf",
-        48_538,
-    ),
+pub const NAR_WEIGHTS_LOCATION: &str = "model.safetensors";
+/// Our release of weightless graphs for the text-box recognizers.
+#[cfg(feature = "nc-models")]
+pub const TEXTBOX_RELEASE: &str = "textbox-graphs-v1";
+
+/// One file of a text-box recognizer.
+#[cfg(feature = "nc-models")]
+struct TextboxFile {
+    id: &'static str,
+    engine: &'static str,
+    role: &'static str,
+    /// The path in the author's repo, or for [`TextboxFile::ours`] the asset name in
+    /// [`TEXTBOX_RELEASE`].
+    file: &'static str,
+    /// The name under `<storage>/models/<engine>/`.
+    stored: &'static str,
+    /// The name a local mirror and an override directory may hold it as.
+    flat: &'static str,
+    sha256: &'static str,
+    size: u64,
+    /// A file of our release (the weightless graph) rather than the author's repo.
+    ours: bool,
+    /// For a graph: the manifest id of the weights file it reads.
+    requires: Option<&'static str>,
+    /// For a weights file: the manifest id of the graph that reads it.
+    part_of: Option<&'static str>,
+}
+
+#[cfg(feature = "nc-models")]
+const TEXTBOX_FILES: [TextboxFile; 5] = [
+    TextboxFile {
+        id: CHARSPOT_MODEL,
+        engine: "charspot-small",
+        role: "recognizer",
+        file: "model.onnx",
+        stored: "model.onnx",
+        flat: "charspot-small_model.onnx",
+        sha256: "05fb79760f8e3dbc989b61f23a34c46b511818a2166573ce7e41d994f4403843",
+        size: 43_992_111,
+        ours: false,
+        requires: None,
+        part_of: None,
+    },
+    TextboxFile {
+        id: CHARSPOT_VOCABULARY,
+        engine: "charspot-small",
+        role: "dictionary",
+        file: "vocab.json",
+        stored: "vocab.json",
+        flat: "charspot-small_vocab.json",
+        sha256: "9f72fc7852b1432bcb61b3b94b2e4cd8abef52b01e9051550a6a3070e2b314d5",
+        size: 62_244,
+        ours: false,
+        requires: None,
+        part_of: None,
+    },
+    TextboxFile {
+        id: NAR_MODEL,
+        engine: "nar-small",
+        role: "recognizer",
+        file: "nar-small_r16_graph.onnx",
+        stored: "nar-small_r16_graph.onnx",
+        flat: "nar-small_r16_graph.onnx",
+        sha256: "d630455db967a243ca70e887db5a96866bbd6e052e56f27297495aa136159948",
+        size: 714_861,
+        ours: true,
+        requires: Some(NAR_WEIGHTS),
+        part_of: None,
+    },
+    TextboxFile {
+        id: NAR_WEIGHTS,
+        engine: "nar-small",
+        role: "weights",
+        file: "model.safetensors",
+        stored: "r16_model.safetensors",
+        flat: "nar-small_r16_model.safetensors",
+        sha256: "bc7418e27d476f86bb5984b45974d69cf9f7623eff6b9b57012df2c8fc9920a3",
+        size: 217_035_140,
+        ours: false,
+        requires: None,
+        part_of: Some(NAR_MODEL),
+    },
+    TextboxFile {
+        id: NAR_VOCABULARY,
+        engine: "nar-small",
+        role: "dictionary",
+        file: "nar_vocabulary_6817.json",
+        stored: "nar_vocabulary_6817.json",
+        flat: "nar-small_vocabulary_6817.json",
+        sha256: "9f1059427b54216c869dbf1244157f86bef74b1a0061c46a6001402c6f0c1dbf",
+        size: 48_538,
+        ours: false,
+        requires: None,
+        part_of: None,
+    },
 ];
 
 fn hf(repo: &str, rev: &str, path: &str) -> String {
@@ -231,8 +295,8 @@ fn flat_name(id: &str) -> Option<&'static str> {
         return Some(ANIMETEXT_FILE);
     }
     #[cfg(feature = "nc-models")]
-    if let Some(f) = TEXTBOX_FILES.iter().find(|f| f.0 == id) {
-        return Some(f.4);
+    if let Some(f) = TEXTBOX_FILES.iter().find(|f| f.id == id) {
+        return Some(f.flat);
     }
     crate::models_release::PPOCR_RELEASE_NAMES
         .iter()
@@ -383,33 +447,52 @@ impl Manifest {
             requires: Vec::new(),
         });
         #[cfg(feature = "nc-models")]
-        for (id, engine, role, file, flat, sha256, size) in TEXTBOX_FILES {
-            let (repo, revision) = if engine == "nar-small" {
+        for f in &TEXTBOX_FILES {
+            let (repo, revision) = if f.engine == "nar-small" {
                 NAR_SOURCE
             } else {
                 CHARSPOT_SOURCE
             };
             files.push(ModelFile {
-                engine: engine.into(),
-                role: role.into(),
-                precision: file.ends_with(".onnx").then(|| "fp32".into()),
-                part_of: None,
-                id: id.into(),
-                path: format!("{engine}/{}", file.rsplit('/').next().unwrap_or(file)),
-                // From the author's repo at the pin: these weights are not rehosted.
-                url: hf(repo, revision, file),
-                mirrors: local_mirror(flat),
-                sha256: sha256.into(),
-                size,
-                license: "CC-BY-NC-SA-4.0".into(),
+                engine: f.engine.into(),
+                role: f.role.into(),
+                precision: (f.file.ends_with(".onnx") || f.file.ends_with(".safetensors"))
+                    .then(|| "fp32".into()),
+                part_of: f.part_of.map(str::to_string),
+                id: f.id.into(),
+                path: format!("{}/{}", f.engine, f.stored),
+                // The weights come from the author's repo at the pin and are not
+                // rehosted; only our weightless graph comes from our release.
+                url: if f.ours {
+                    format!(
+                        "https://github.com/Gnathonic/mokuro-bunko/releases/download/{TEXTBOX_RELEASE}/{}",
+                        f.file
+                    )
+                } else {
+                    hf(repo, revision, f.file)
+                },
+                mirrors: local_mirror(f.flat),
+                sha256: f.sha256.into(),
+                size: f.size,
+                // The graph is a translation of the author's Apache-2.0 model code.
+                license: if f.ours {
+                    "Apache-2.0"
+                } else {
+                    "CC-BY-NC-SA-4.0"
+                }
+                .into(),
                 source: Source {
                     repo: repo.into(),
                     revision: revision.into(),
-                    path: file.into(),
+                    path: if f.ours {
+                        format!("{TEXTBOX_RELEASE}/{}", f.file)
+                    } else {
+                        f.file.into()
+                    },
                 },
                 target: None,
                 unpack_to: None,
-                requires: Vec::new(),
+                requires: f.requires.map(str::to_string).into_iter().collect(),
             });
         }
         Manifest { files }
@@ -1858,6 +1941,110 @@ mod tests {
             fs::read_to_string(dir.join(UNPACKED_STAMP)).unwrap(),
             stamp_text(&sha)
         );
+    }
+
+    /// nar-small is the r16 model: our weightless graph from our release, the author's
+    /// weights and vocabulary from the author's repo at the pinned commit.
+    #[cfg(feature = "nc-models")]
+    #[test]
+    fn nar_small_is_r16_as_a_graph_over_the_authors_weights() {
+        let m = Manifest::builtin();
+        let r16 = "8cc14c152ccb21da3aa88fa51a92766537c12da2";
+        assert_eq!(NAR_SOURCE, ("muscgab/manga-ocr-nar-small", r16));
+        let graph = m.get(NAR_MODEL).unwrap();
+        let weights = m.get(NAR_WEIGHTS).unwrap();
+        let vocab = m.get(NAR_VOCABULARY).unwrap();
+        // The graph: our release, small (it holds no weights), bound to the weights.
+        assert_eq!(
+            graph.url,
+            format!(
+                "https://github.com/Gnathonic/mokuro-bunko/releases/download/{TEXTBOX_RELEASE}/nar-small_r16_graph.onnx"
+            )
+        );
+        assert!(graph.size < 2_000_000, "{}", graph.size);
+        assert_eq!(graph.license, "Apache-2.0");
+        assert_eq!(graph.requires, [NAR_WEIGHTS]);
+        assert_eq!(graph.source.revision, r16);
+        // The weights and the vocabulary: the author's repo at the pin, never rehosted.
+        for f in [weights, vocab] {
+            assert!(
+                f.url.starts_with(&format!(
+                    "https://huggingface.co/muscgab/manga-ocr-nar-small/resolve/{r16}/"
+                )),
+                "{}",
+                f.url
+            );
+            assert_eq!(f.license, "CC-BY-NC-SA-4.0");
+            assert_eq!(f.source.revision, r16);
+        }
+        assert!(weights.url.ends_with("/model.safetensors"));
+        assert_eq!(weights.size, 217_035_140);
+        assert_eq!(
+            weights.sha256,
+            "bc7418e27d476f86bb5984b45974d69cf9f7623eff6b9b57012df2c8fc9920a3"
+        );
+        assert_eq!(weights.part_of.as_deref(), Some(NAR_MODEL));
+        // The first release's 213 MB graph is no file of this build: a prune removes it.
+        assert!(
+            m.files
+                .iter()
+                .all(|f| f.path != "nar-small/mangaocr_nar_small_fp32.onnx")
+        );
+        for f in m.engine_files("nar-small") {
+            assert!(f.path.starts_with("nar-small/"), "{}", f.path);
+            assert_eq!(f.sha256.len(), 64);
+        }
+        // Ids, store paths and mirror names are each unique across the manifest.
+        let mut ids: Vec<&str> = m.files.iter().map(|f| f.id.as_str()).collect();
+        let mut paths: Vec<&str> = m.files.iter().map(|f| f.path.as_str()).collect();
+        let n = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        paths.sort_unstable();
+        paths.dedup();
+        assert_eq!((ids.len(), paths.len()), (n, n));
+        let flats: Vec<&str> = TEXTBOX_FILES.iter().map(|f| f.flat).collect();
+        let mut unique = flats.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), flats.len());
+    }
+
+    #[cfg(feature = "nc-models")]
+    #[test]
+    fn prune_removes_the_first_nar_small_graph() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let store = ModelStore::new(
+            StoreOptions {
+                root: root.clone(),
+                override_dir: None,
+                download: false,
+            },
+            Manifest::builtin(),
+        );
+        let touch = |rel: &str| {
+            let p = root.join(rel);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(&p, b"x").unwrap();
+            p
+        };
+        let old = [
+            touch("nar-small/mangaocr_nar_small_fp32.onnx"),
+            touch("nar-small/mangaocr_nar_small_fp32.onnx.verified"),
+        ];
+        let kept = [
+            touch("nar-small/nar_vocabulary_6817.json"),
+            touch("nar-small/nar-small_r16_graph.onnx"),
+            touch("nar-small/r16_model.safetensors"),
+        ];
+        store.prune();
+        for p in &old {
+            assert!(!p.exists(), "removed {}", p.display());
+        }
+        for p in &kept {
+            assert!(p.exists(), "kept {}", p.display());
+        }
     }
 
     #[test]

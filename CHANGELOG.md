@@ -278,20 +278,24 @@
 - **Two more OCR engines: `charspot-small` and `nar-small`.**
   [manga-ocr-charspot-small](https://huggingface.co/muscgab/manga-ocr-charspot-small)
   finds and classifies every character and has no decoder;
-  [manga-ocr-nar-small](https://huggingface.co/muscgab/manga-ocr-nar-small) writes a
-  text in one pass. Both run on ONNX Runtime on the CPU and need no backend pack, and
+  [manga-ocr-nar-small](https://huggingface.co/muscgab/manga-ocr-nar-small) (the model
+  of its `r16` branch) writes a text of up to 160 characters in one pass. Both run on
+  ONNX Runtime on the CPU and need no backend pack, and
   both read a whole text block at once rather than a line: the layout's blocks on a
   line detector, the detector's own boxes on `animetext-blocks`. Their text stands as
   read; PP-OCR's read is used only where they read nothing. On a 16-core desktop CPU a
   12-page sample ran at 2.1 pages a second with `charspot-small` and 1.2 with
   `nar-small`, where hayai-nova reads 0.4. Japanese only. Their weights are
   CC BY-NC-SA 4.0 (non-commercial); they are fetched from the author's repository at a
-  pinned revision when a generation first uses them.
-  Measured on 1,000 text boxes of JMangaBench_Read with each model's own package,
-  boxes read exactly: `charspot-small` 93.5%, `nar-small` 92.0%, hayai-nova 89.1%,
-  paddle-manga 84.8%. Through this pipeline, where a detector first has to find the
-  text in each box again, `charspot-small` read 89.4% and `nar-small` 90.6% on
-  `animetext-blocks`, and PP-OCR's own reader 88.8%.
+  pinned revision when a generation first uses them. The author publishes nar-small's
+  `r16` model without an ONNX file: Bunko runs it with a 0.7 MB graph of its own that
+  holds no weights (from the pre-release `textbox-graphs-v1`; `tools/textbox_export`)
+  over the author's own `model.safetensors`.
+  On all 7,789 boxes of JMangaBench_Read v1.3.3 (Composite, 1 − NED over printed and
+  non-printed boxes / boxes read exactly), through this pipeline with each box on a page
+  of its own: `nar-small` 95.84 / 90.6% on the default detector and 96.73 / 92.1% on
+  `animetext-blocks`, `charspot-small` 93.72 / 86.0% and 95.08 / 88.0%, against
+  hayai-nova's 94.58 / 86.2% (docs/rust-port/MODELS.md §8).
 - **Two more detectors: `ctd-lines` and `animetext-blocks`** (weights GPL-3.0).
   `ctd-lines` is the line map of
   [comic-text-detector](https://github.com/dmMaze/comic-text-detector): it boxes
@@ -524,6 +528,14 @@
   are test builds, never offered as an update.
 
 ### Changed
+- **`nar-small` reads with the `r16` model** of `muscgab/manga-ocr-nar-small` (commit
+  `8cc14c1`) instead of the model of the repository's first release: +1.0 Composite on
+  JMangaBench_Read through the pipeline (95.84 against 94.84; +0.7 on
+  `animetext-blocks`), up to 160 characters a block instead of 64, at about the same speed.
+  It downloads 218 MB (the author's weights and our weightless graph) in place of the
+  first release's 213 MB ONNX file, which a store prune then removes. Its engine
+  revision is now 2, so with upgrades on, `nar-small` layers written by a 0.8
+  pre-release are read again once.
 - **nar-small and charspot-small use the whole CPU on big hosts.** These engines read
   one text block at a time, too little work for one reader with many threads, so they
   kept only about 6 cores busy however big the host. Now many one-thread readers share

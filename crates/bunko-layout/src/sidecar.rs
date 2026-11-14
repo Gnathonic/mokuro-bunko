@@ -31,8 +31,15 @@ pub const RECOGNIZER_REPOS: [(&str, &str); 5] = [
 /// engine's number only when its output changes (new weights or export, a layout
 /// change): with upgrades on, every older sealed file of that engine is OCR'd again,
 /// and processors announcing an older revision are offered none of its work.
-pub const ENGINE_REVISIONS: [(&str, u32); 3] =
-    [("hayai-nova", 2), ("paddle-manga", 2), ("ppocr-manga", 2)];
+///
+/// nar-small 2: the model of its repo's `r16` branch (0.8 pre-releases read with the
+/// first release).
+pub const ENGINE_REVISIONS: [(&str, u32); 4] = [
+    ("hayai-nova", 2),
+    ("paddle-manga", 2),
+    ("ppocr-manga", 2),
+    ("nar-small", 2),
+];
 
 /// `engine`'s current output revision; 1 for an engine not in [`ENGINE_REVISIONS`].
 /// An absent `ocr_engine.revision` reads as 1 (what 0.7 wrote): current for an engine
@@ -676,6 +683,9 @@ mod tests {
         assert_eq!(block.get("revision"), Some(&Value::Int(i64::from(current))));
         // 0.8's line detector (PP-OCR manga v0.3) made every engine's output new.
         assert!(ENGINE_REVISIONS.iter().all(|(_, r)| *r >= 2));
+        // nar-small's r16 model replaced the one 0.8 pre-releases read with.
+        assert_eq!(engine_revision("nar-small"), 2);
+        assert_eq!(engine_revision("charspot-small"), 1);
         assert_eq!(
             engine_revision("no-such-engine"),
             1,

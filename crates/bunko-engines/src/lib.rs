@@ -638,7 +638,8 @@ impl EnginePipeline {
     }
 
     /// The error of a row whose engine has no compiled package for `placement`'s device
-    /// here or in the release.
+    /// here or in the release. Only the torch rows' needs ask (`need_for`).
+    #[cfg_attr(not(feature = "torch"), allow(dead_code))]
     fn no_package_error(&self, engine: &str, placement: &Placement, label: &str) -> String {
         #[cfg(feature = "torch")]
         let wanted = self
@@ -746,9 +747,16 @@ impl EnginePipeline {
             .all(|f| f.verified)
             .then(|| models::textbox_source(engine))
             .flatten();
-        let rec =
-            textbox::TextboxRecognizer::load(engine, &files[0].path, &files[1].path, &opts, source)
-                .map_err(|e| format!("could not load {engine}: {e}"))?;
+        // The graph, the vocabulary, then the weights of a graph that holds none.
+        let rec = textbox::TextboxRecognizer::load(
+            engine,
+            &files[0].path,
+            files.get(2).map(|f| f.path.as_path()),
+            &files[1].path,
+            &opts,
+            source,
+        )
+        .map_err(|e| format!("could not load {engine}: {e}"))?;
         let rec = Arc::new(rec);
         loaded.push((rec.info().engine, threads, Arc::downgrade(&rec)));
         Ok(rec)

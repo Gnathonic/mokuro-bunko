@@ -4,13 +4,13 @@
 //!
 //! ```text
 //! cargo run -p bunko-engines --release --features nc-models,gpl-models --example textbox_bench -- \
-//!     nar <model.onnx> <vocabulary.json> <crops-dir> [--n 600] [--warm 32] \
+//!     nar <graph.onnx> <vocabulary.json> <crops-dir> --weights <model.safetensors> [--n 600] [--warm 32] \
 //!         [--threads 1,2,4,8] [--workers 1,2,4,8,12,16]
 //!     charspot <model.onnx> <vocabulary.json> <crops-dir> [same options]
 //!     animetext <yolo12x.onnx> <volume.cbz>... [--n 60] [--warm 4] \
 //!         [--threads shipped,per:2,6] [--workers 1,2,4,8]
-//!     mixed <nar.onnx> <vocabulary.json> <crops-dir> <yolo12x.onnx> <volume.cbz>... \
-//!         --engine W:T --detect W:T [--secs 20]
+//!     mixed <nar-graph.onnx> <vocabulary.json> <crops-dir> <yolo12x.onnx> <volume.cbz>... \
+//!         --weights <model.safetensors> --engine W:T --detect W:T [--secs 20]
 //! ```
 //!
 //! The inputs are decoded before any timing (crops: every k-th file of the directory
@@ -250,7 +250,18 @@ fn textbox(
     let mut reference: Option<Vec<(String, String)>> = None;
     for &t in &threads {
         let (nar, charspot) = if kind == "nar" {
-            (Some(NarSmall::load(&model, &vocab, &opts(t))?), None)
+            let weights = opt
+                .get("weights")
+                .context("nar needs --weights <model.safetensors> (the r16 graph holds none)")?;
+            (
+                Some(NarSmall::load(
+                    &model,
+                    Path::new(weights),
+                    &vocab,
+                    &opts(t),
+                )?),
+                None,
+            )
         } else {
             (None, Some(Charspot::load(&model, &vocab, &opts(t))?))
         };
@@ -392,7 +403,15 @@ fn mixed(pos: &[String], opt: &std::collections::HashMap<String, String>) -> Res
         opt.get("n").map_or(Ok(600), |s| s.parse())?,
     )?;
     let (pages, _) = load_pages(&pos[4..], 60)?;
-    let nar = NarSmall::load(Path::new(&pos[0]), Path::new(&pos[1]), &opts(et))?;
+    let weights = opt
+        .get("weights")
+        .context("mixed needs --weights <model.safetensors> (the r16 graph holds none)")?;
+    let nar = NarSmall::load(
+        Path::new(&pos[0]),
+        Path::new(weights),
+        Path::new(&pos[1]),
+        &opts(et),
+    )?;
     let det = bunko_ocr::animetext::AnimeText::load(Path::new(&pos[3]), &opts(dt))?;
     for c in crops.iter().take(16) {
         nar.read(c)?;

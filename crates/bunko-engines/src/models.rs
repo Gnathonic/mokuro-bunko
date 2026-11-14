@@ -64,7 +64,8 @@ pub fn textbox_source(engine: &str) -> Option<(&'static str, &'static str)> {
     }
 }
 
-/// Manifest ids of a text-box recognizer's files: the graph, then the vocabulary.
+/// Manifest ids of a text-box recognizer's files: the graph, the vocabulary, then the
+/// weights file of a graph that holds no weights (nar-small's).
 pub fn textbox_ids(engine: &str) -> Vec<&'static str> {
     match engine {
         #[cfg(feature = "nc-models")]
@@ -76,6 +77,7 @@ pub fn textbox_ids(engine: &str) -> Vec<&'static str> {
         NAR => vec![
             bunko_ocr::models::NAR_MODEL,
             bunko_ocr::models::NAR_VOCABULARY,
+            bunko_ocr::models::NAR_WEIGHTS,
         ],
         _ => Vec::new(),
     }
