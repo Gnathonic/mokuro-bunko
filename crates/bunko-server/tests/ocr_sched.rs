@@ -1723,6 +1723,68 @@ fn a_processor_with_an_older_engine_revision_gets_no_work() {
     }
 }
 
+/// A registering processor is told the engines of the enabled rows, and a row's detector
+/// when it is not the default one: a block detector's compiled package is fetched ahead
+/// of work too. Each want once; a disabled row wants nothing.
+#[test]
+fn a_registration_names_the_detector_of_a_row_that_reads_with_another_one() {
+    let row = |id: &str, engine: &str, detector: Option<&str>| {
+        let mut g = layer(id, id);
+        g.engine = engine.into();
+        g.detector = detector.map(str::to_string);
+        g
+    };
+    let mut off = row("g-6", &primary().engine, Some("ctd-lines"));
+    off.enabled = false;
+    let mut h = harness(vec![
+        primary(),
+        row("g-2", "nar-small", Some("animetext-blocks")),
+        row("g-3", "nar-small", Some("animetext-blocks")),
+        row("g-4", "nar-small", None),
+        row("g-5", "charspot-small", Some("animetext-blocks")),
+        off,
+    ]);
+    h.at(0.0);
+    let (reply, mut rx) = tokio::sync::oneshot::channel();
+    h.s.handle(Msg::Register {
+        input: bunko_server::ocr::sched::RegisterInput {
+            username: "acct-tower".into(),
+            body: serde_json::json!({
+                "protocol": 3,
+                "name": "tower",
+                "host": {"cpu": "Test CPU (8 cores)", "backend": "cpu"},
+                "catalog": {"engines": ENGINES, "detectors": ["ppocr-manga"],
+                            "devices": [{"id": "cpu", "label": "CPU"}],
+                            "engine_revisions": current_revisions(ENGINES)},
+                "max_sessions": 1,
+            }),
+            account_stamp: None,
+        },
+        reply,
+    });
+    let bunko_server::ocr::sched::RegisterOutcome::Ok(reg) = rx.try_recv().unwrap() else {
+        panic!("register refused")
+    };
+    let want = |engine: &str, detector: Option<&str>| bunko_proto::EngineWant {
+        engine: engine.into(),
+        precision: primary().precision,
+        detector: detector.map(str::to_string),
+    };
+    assert_eq!(
+        reg.engines,
+        Some(vec![
+            want(&primary().engine, None),
+            want("nar-small", Some("animetext-blocks")),
+            want("nar-small", None),
+            want("charspot-small", Some("animetext-blocks")),
+        ])
+    );
+    // On the wire: the default detector is left out, another one is named.
+    let wire = serde_json::to_value(&reg).unwrap();
+    assert_eq!(wire["engines"][0].get("detector"), None, "{wire}");
+    assert_eq!(wire["engines"][1]["detector"], "animetext-blocks", "{wire}");
+}
+
 /// An installed sidecar carries its install time, its revision (1 where the runner
 /// wrote none) and a v1 content seal over the block that holds both.
 #[test]
