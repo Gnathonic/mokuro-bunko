@@ -653,7 +653,8 @@ Text-box engines go through `runtime::place_runnable` with a text-box arm in `fo
 ## 12. Planner and benchmark
 
 - **`stage_seconds` GPU arms** for text-box engines: nar-small 0.12 s a page (fp32 on gfx1201:
-  80 crops/s at 9.4 blocks a page) and charspot-small 0.1 (248 crops/s). The planner keeps one
+  80 crops/s at 9.4 blocks a page) and charspot-small 0.1 (its engine stage on gfx1201 took
+  0.094 to 0.125 s a page; the spike's 248 crops/s had given 0.04). The planner keeps one
   figure per engine; fp16 nar is faster, but with AnimeText on the CPU the detect width is at
   its ceiling either way. The lead replaces these with NVIDIA figures after the measurement
   in §20.5.

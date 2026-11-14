@@ -393,8 +393,10 @@ random inputs: in bf16 the step's argmax can tie-flip between eager and compiled
 
 #### Verified targets of the text-box packages (`textbox-torch-v1`)
 
-nar-small and charspot-small, fp32 and fp16. "Verified" means the package read all 7,929
-JMangaBench_Read crops as the reference does, on a card of that target.
+nar-small fp32 and fp16, and charspot-small fp32. "Verified" means the package passed its
+gate over the 7,929 JMangaBench_Read crops on a card of that target: every crop read as
+the reference does at fp32 (charspot-small's boxes within 0.5 px), and at most 7 texts
+differing at fp16.
 
 | target | status | cards |
 |---|---|---|
