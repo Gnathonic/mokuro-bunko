@@ -15,6 +15,7 @@ The crop-level parity gate is the Rust harness (ltbench) on the real crop sets.
 Text-box engines (``textbox.PINS``: nar-small) take the crop-level gate here instead:
 
     python -m torch_export.verify <out> nar-small fp32|fp16 <target> --crops DIR --expected FILE [--n N] [--batch B]
+                                  [--reads FILE]
 
 binds the authors' pinned ``model.safetensors`` by ``bunko.weights`` (cast to F16 first
 when the package says ``bunko.weights_dtype = fp16``, as the host does), feeds every crop
@@ -23,7 +24,10 @@ when the package says ``bunko.weights_dtype = fp16``, as the host does), feeds e
 ``tools/textbox_export/check_parity.py --expected`` writes). fp32 compares the ids, up
 to and including the first end id, and exits 0 only when every crop is identical (fp32
 has no tolerance). fp16 compares the decoded texts and exits 0 when at most
-``floor(0.001 x crops)`` differ (``texts_gate``, TEXTBOX-GPU.md §11). Any package whose constants live
+``floor(0.001 x crops)`` differ (``texts_gate``, TEXTBOX-GPU.md §11). ``--reads FILE`` writes
+what the package read in ``--expected``'s own form (``{"file","ids","text"}`` lines), so a
+read at one batch size is another's ``--expected`` and ``python -m torch_export
+compare-reads`` pairs any two (``gate.py``). Any package whose constants live
 inside it is refused before it is loaded (``weights_inside``), and
 ``python -m torch_export refuse-embedded DIR`` checks a whole build or staging tree.
 """
@@ -62,6 +66,30 @@ def text_of(ids: list[int], chars: list[str]) -> str:
     ids = list(ids)
     ids = ids[:ids.index(end)] if end in ids else ids
     return "".join(chars[i] for i in ids if 0 <= i < end)
+
+
+def package_meta(pt2: Path) -> dict[str, str]:
+    """A ``.pt2``'s metadata as the loader's ``get_metadata`` returns it, read from the
+    archive without loading it (``<role>/data/aotinductor/<model>/*.wrapper_metadata.json``,
+    where AOTInductor writes it on every OS); ``{}`` when the archive has none."""
+    with zipfile.ZipFile(pt2) as z:
+        names = sorted(n for n in z.namelist() if n.endswith("_metadata.json") and "/data/aotinductor/" in n)
+        wrapper = [n for n in names if n.endswith(".wrapper_metadata.json")]
+        return json.loads(z.read((wrapper or names)[0])) if names else {}
+
+
+def check_textbox_meta(meta: dict, precision: str, pin, where) -> None:
+    """Refuse (SystemExit) a package that binds its authors' weights another way than its
+    precision says: an fp32 package binds them as stored (no ``bunko.weights_dtype``),
+    any other says that precision there (the host casts the file to it at load and the
+    cdylib refuses anything else), and a ``bunko.weights_sha256`` must be the pin's."""
+    want = None if precision == "fp32" else precision
+    got = meta.get("bunko.weights_dtype")
+    if got != want:
+        raise SystemExit(f"{where}: bunko.weights_dtype is {got!r}, a {precision} package says {want!r}")
+    sha = meta.get("bunko.weights_sha256")
+    if sha is not None and getattr(pin, "sha256", sha) != sha:
+        raise SystemExit(f"{where}: bunko.weights_sha256 is {sha}, not the pinned {pin.sha256}")
 
 
 def texts_gate(differ: int, crops: int, limit: float = 0.001) -> bool:
@@ -192,7 +220,7 @@ def load_pkg(path: Path, weights: dict, device_index: int):
 
 
 def _verify_textbox(out: Path, engine: str, precision: str, target: str, crops: Path, expected: Path,
-                    device: str, n: int | None = None, batch: int = 32):
+                    device: str, n: int | None = None, batch: int = 32, reads: Path | None = None):
     """``verify_textbox``'s work; also returns what it holds loaded (package, weights), so
     ``main`` can end the process before releasing it (Windows, see ``_finish``)."""
     import torch
@@ -250,17 +278,14 @@ def _verify_textbox(out: Path, engine: str, precision: str, target: str, crops: 
             raise SystemExit(f"{pkg}: {key} is {meta.get(key)!r}, not {value!r}")
     if not json.loads(meta.get("bunko.weights", "{}")):
         raise SystemExit(f"{pkg}: no bunko.weights map: its constants are not bound to the authors' {pin.file}")
-    want_dtype = "fp16" if precision == "fp16" else None
-    if meta.get("bunko.weights_dtype") != want_dtype:
-        raise SystemExit(f"{pkg}: bunko.weights_dtype is {meta.get('bunko.weights_dtype')!r}, "
-                         f"a {precision} package says {want_dtype!r}")
+    check_textbox_meta(meta, precision, pin, pkg)
     if precision == "fp16":
         def same(got, ids):
             return text_of(got, chars) == text_of(ids, chars)
     else:
         def same(got, ids):
             return same_ids(got, ids, end)
-    identical, differ = 0, []
+    identical, differ, rows = 0, [], []
     t0 = time.time()
     with torch.no_grad():
         for i in range(0, len(files), batch):
@@ -272,24 +297,33 @@ def _verify_textbox(out: Path, engine: str, precision: str, target: str, crops: 
                                                    for k, v in buf.items()})
             ids = m(*(torch.from_numpy(buf[k]).to(dev) for k in ("P", "V", "R", "C", "H", "W"))).cpu().tolist()
             for p, got in zip(chunk, ids):
+                if reads is not None:
+                    rows.append(json.dumps({"file": p.name, "ids": got, "text": text_of(got, chars)},
+                                           ensure_ascii=False) + "\n")
                 if same(got, want[p.name]):
                     identical += 1
                 else:
                     differ.append(p.name)
-    print(f"{len(files)} crops in {time.time() - t0:.1f}s, batch {batch}", file=sys.stderr)
+    took = time.time() - t0
+    print(f"{len(files)} crops in {took:.1f}s, batch {batch}", file=sys.stderr)
+    if reads is not None:
+        Path(reads).parent.mkdir(parents=True, exist_ok=True)
+        Path(reads).write_text("".join(rows), encoding="utf-8")
     passed = texts_gate(len(differ), len(files)) if precision == "fp16" else identical == len(files)
     res = {"crops": len(files), "identical": identical, "differ": differ, "batch": batch,
-           "compared": "texts" if precision == "fp16" else "ids", "passed": passed}
+           "compared": "texts" if precision == "fp16" else "ids", "passed": passed,
+           # the whole loop: crops decoded and prepared on the CPU, then read
+           "crops_per_s": round(len(files) / took, 1) if took > 0 else None}
     return res, [m, weights]
 
 
 def verify_textbox(out: Path, engine: str, precision: str, target: str, crops: Path, expected: Path,
-                   device: str, n: int | None = None, batch: int = 32) -> dict:
+                   device: str, n: int | None = None, batch: int = 32, reads: Path | None = None) -> dict:
     """A text-box package against the authors' output, crop by crop:
     ``{"crops": n, "identical": k, "differ": [file, ...], "passed": bool, ...}`` (fp32:
     ids, every crop; fp16: texts, ``texts_gate``). Refuses (SystemExit) a package with
     weights inside before loading it."""
-    res, held = _verify_textbox(out, engine, precision, target, crops, expected, device, n, batch)
+    res, held = _verify_textbox(out, engine, precision, target, crops, expected, device, n, batch, reads)
     _release(held)
     return res
 
@@ -337,6 +371,8 @@ def main(argv=None) -> int:
     ap.add_argument("--expected", type=Path, help="text-box engines: check_parity.py --expected JSON lines")
     ap.add_argument("--n", type=int, default=None, help="text-box engines: only the first N crops by name")
     ap.add_argument("--batch", type=int, default=32, help="text-box engines: crops per call")
+    ap.add_argument("--reads", type=Path, default=None,
+                    help="text-box engines: write what the package read here ({file, ids, text} lines)")
     a = ap.parse_args(argv)
     from .__main__ import _imports
 
@@ -347,7 +383,7 @@ def main(argv=None) -> int:
         if a.crops is None or a.expected is None:
             raise SystemExit(f"{a.engine}: --crops and --expected are required")
         res, held = _verify_textbox(a.out, a.engine, a.precision, a.target, a.crops, a.expected, a.device, a.n,
-                                    a.batch)
+                                    a.batch, a.reads)
         print(json.dumps(res), flush=True)
         return _finish(0 if res["passed"] else 1, held)
     import torch

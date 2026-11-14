@@ -17,6 +17,13 @@
   verify OUT ENGINE PREC TARGET [...]
                                   python -m torch_export.verify (text-box engines:
                                   --crops DIR --expected FILE, the crop-level gate)
+  gate-bundle --out BUILD -e ENGINE -p PREC -t TARGET --crops DIR --reference FILE --fp32 FILE
+              --commit C --dest DIR
+                                  one target's self-contained crop-gate bundle (package, crops,
+                                  expected files, these sources at C, run.sh, SHA256SUMS; gate.py)
+  gate-run BUNDLE                 the bundle's checks (what its run.sh runs); exit 0 = passed
+  compare-reads A B [--limit L]   differing texts of two reads files; exit 0 within floor(L x n)
+  block-preds READS BLOCKS OUT    crop texts joined per page key: paired.py's {key, pred} lines
   refuse-embedded DIR...          exit 1 on the first .pt2 with its weights inside
                                   (*_embed.pt2, or an entry > pinned weights / 4)
   fetch-windows-cross             download the pinned Windows wheels + llvm-mingw used to
@@ -169,6 +176,43 @@ def cmd_refuse_embedded(a) -> int:
     return 0
 
 
+def cmd_gate_bundle(a) -> int:
+    from .gate import stage_bundle
+
+    stage_bundle(Path(a.out), a.engine, a.precision, a.target, Path(a.crops), Path(a.reference), Path(a.fp32),
+                 a.commit, Path(a.dest))
+    return 0
+
+
+def cmd_gate_run(a) -> int:
+    from .gate import run_gate
+
+    s = run_gate(Path(a.bundle))
+    print(json.dumps({k: s[k] for k in ("target", "crops_per_s", "passed")}))
+    for name, c in [("reference", s["checks"]["reference"]), ("fp32", s["checks"]["fp32"]),
+                    *s["checks"]["batches"].items()]:
+        d, n = c.get("differ") or [], c.get("crops")
+        detail = c.get("error") or f"{len(d)} of {n} differ, first {d[:3]}"
+        print(f"{name:10} {'pass' if c['passed'] else 'FAIL'}  {detail}")
+    return 0 if s["passed"] else 1
+
+
+def cmd_compare_reads(a) -> int:
+    from .gate import compare_reads
+
+    r = compare_reads(Path(a.a), Path(a.b), a.limit)
+    print(json.dumps(r, ensure_ascii=False))
+    return 0 if r["passed"] else 1
+
+
+def cmd_block_preds(a) -> int:
+    from .gate import block_preds
+
+    n = block_preds(Path(a.reads), Path(a.blocks), Path(a.out))
+    print(f"wrote {a.out}: {n} keys", file=sys.stderr)
+    return 0
+
+
 def cmd_check_isa(a) -> int:
     from .checks import zmm_count
 
@@ -220,6 +264,30 @@ def main(argv=None) -> int:
     s.add_argument("--base-url", default=None)
     s.add_argument("--flat", default=None, help="also hard-link every asset under its flat release name into DIR")
     s.set_defaults(fn=cmd_textbox_manifest)
+    s = sub.add_parser("gate-bundle")
+    s.add_argument("--out", required=True, help="the build tree (<engine>/<precision>/<target>/build.json)")
+    s.add_argument("-e", "--engine", required=True)
+    s.add_argument("-p", "--precision", required=True)
+    s.add_argument("-t", "--target", required=True)
+    s.add_argument("--crops", required=True)
+    s.add_argument("--reference", required=True, help="the authors' output at this precision (check_parity.py)")
+    s.add_argument("--fp32", required=True, help="the authors' fp32 output (check_parity.py)")
+    s.add_argument("--commit", required=True, help="the exporter commit the package was built from")
+    s.add_argument("--dest", required=True, help="a new directory")
+    s.set_defaults(fn=cmd_gate_bundle)
+    s = sub.add_parser("gate-run")
+    s.add_argument("bundle")
+    s.set_defaults(fn=cmd_gate_run)
+    s = sub.add_parser("compare-reads")
+    s.add_argument("a")
+    s.add_argument("b")
+    s.add_argument("--limit", type=float, default=0.001)
+    s.set_defaults(fn=cmd_compare_reads)
+    s = sub.add_parser("block-preds")
+    s.add_argument("reads")
+    s.add_argument("blocks")
+    s.add_argument("out")
+    s.set_defaults(fn=cmd_block_preds)
     s = sub.add_parser("refuse-embedded")
     s.add_argument("dirs", nargs="+")
     s.set_defaults(fn=cmd_refuse_embedded)

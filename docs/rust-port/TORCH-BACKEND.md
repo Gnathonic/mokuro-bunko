@@ -458,7 +458,20 @@ so that GPU reads on the CPU; there is no looser tolerance and no revision bump.
 package has its own gate (TEXTBOX-GPU.md §11, §20.4): on the same 7,929 crops its texts
 differ from the authors' fp16 and from fp32 on at most `floor(0.001 × n)` crops each, and
 `paired.py` shows no JMangaBench_Read loss against fp32. A target whose fp16 package fails
-it is shipped with fp32 only, so its GPU reads nar at fp32.
+it is shipped with fp32 only, so its GPU reads nar at fp32. `textbox-manifest` refuses a
+package whose `bunko.weights_dtype` disagrees with its precision directory.
+
+**Gate tooling** (`tools/torch_export/torch_export/gate.py`). `python -m torch_export
+gate-bundle` stages one self-contained directory per target for a test machine: the
+package, the crops, the two expected files, the exporter's sources at the build commit,
+`run.sh` and a `SHA256SUMS` (never the authors' weights: the test machine fetches them, and
+`verify` checks their pin). `run.sh` checks the sums before and after the run, reads every
+crop at batch 1, 8 and 32 (`verify --reads`, one process each) and checks the batch-32
+read against the authors' output at that precision and against fp32, and each pair of
+batch sizes, each within `floor(0.001 × n)`; `results/summary.json` holds the counts and
+crops/s. `compare-reads A B` compares any two reads files (`verify --reads`, the Rust
+`nar_torch_parity*` tests' `MOKURO_NAR_PARITY_READS`, `check_parity.py --expected`), and
+`block-preds` joins crop texts per page into `paired.py`'s input.
 
 **cdylib.** `GraphSet` (`package.rs`) loads a set of graphs of any roles, checks that
 they agree on `bunko.io`, `bunko.weights_dtype` and `bunko.weights_format`, and binds
