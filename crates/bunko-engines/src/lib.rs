@@ -695,26 +695,39 @@ impl EnginePipeline {
         Vec::new()
     }
 
-    /// Log why a text-box row reads on the CPU although a GPU was asked for or is here
-    /// (`why`, from [`runtime::place_runnable`]). A pack without `bt_read_chars` is a
-    /// reason to note once per process, not a warning: the row runs, on the CPU; with no
-    /// libtorch pack the CPU is this machine's only text-box route. Anything else (a GPU
-    /// with no package for the engine) is warned about, as for hayai-nova.
+    /// Whether the loaded libtorch pack reads text boxes (`bt_read_chars`); `None` with
+    /// no libtorch pack.
     #[cfg(feature = "nc-models")]
-    fn note_textbox_on_cpu(&self, engine: &str, why: &str) {
+    fn pack_reads_chars(&self) -> Option<bool> {
         #[cfg(feature = "torch")]
         if let Ok(tb) = self.torch() {
-            if tb.pack.reads_chars() {
-                warn!("{engine}: running on the CPU: {why}");
-            } else if !TEXTBOX_PACK_NOTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                info!(
-                    "{engine}: reading on the CPU: {}",
-                    torch::TEXTBOX_PACK_REASON
-                );
-            }
-            return;
+            return Some(tb.pack.reads_chars());
         }
-        info!("{engine}: reading on the CPU: {why}");
+        None
+    }
+
+    /// Log why a text-box row reads on the CPU although a GPU was asked for or is here
+    /// (`why`, from [`runtime::place_runnable`]; [`textbox_cpu_reason`] picks the pack's
+    /// reason where it is the cause). A row that pinned its engine stage to a GPU is
+    /// warned about on every session; an unpinned row runs on the CPU as planned, noted
+    /// once per process per reason ([`textbox_cpu_note`]).
+    #[cfg(feature = "nc-models")]
+    fn note_textbox_on_cpu(
+        &self,
+        engine: &str,
+        asked: Option<&str>,
+        devices: &[Device],
+        why: &str,
+    ) {
+        let (reason, pack) = textbox_cpu_reason(asked, devices, self.pack_reads_chars(), why);
+        match textbox_cpu_note(engine, asked, &reason, pack) {
+            None => warn!("{engine}: running on the CPU: {reason}"),
+            Some(key) => {
+                if TEXTBOX_CPU_NOTED.lock().insert(key) {
+                    info!("{engine}: reading on the CPU: {reason}");
+                }
+            }
+        }
     }
 
     /// nar-small or charspot-small on a libtorch GPU at fp32: the package for the
@@ -1019,7 +1032,7 @@ impl EnginePipeline {
     /// over [`textbox_formats`](Self::textbox_formats) at fp32 with that device's
     /// package targets, else the CPU (the ONNX route, no targets). With no libtorch pack
     /// the CPU is the need and `fallback` says why; a pack without `bt_read_chars` says
-    /// [`torch::TEXTBOX_PACK_REASON`].
+    /// [`torch::TEXTBOX_PACK_REASON`] when that is the cause ([`textbox_cpu_reason`]).
     #[cfg(feature = "torch")]
     fn textbox_need(&self, engine: &str, mode: &str) -> Result<EngineNeed, String> {
         let engine: &'static str = models::ENGINES
@@ -1037,10 +1050,11 @@ impl EnginePipeline {
             Err(e) => {
                 fallback.get_or_insert_with(|| e.clone());
             }
-            Ok(tb) if !tb.pack.reads_chars() && fallback.is_some() => {
-                fallback = Some(torch::TEXTBOX_PACK_REASON.to_string());
+            Ok(tb) => {
+                fallback = fallback.map(|why| {
+                    textbox_cpu_reason(None, &devices, Some(tb.pack.reads_chars()), &why).0
+                });
             }
-            Ok(_) => {}
         }
         let label = devices
             .iter()
@@ -1926,7 +1940,8 @@ impl EnginePipeline {
                 |pl| self.textbox_formats(engine, pl),
             );
             if let Some(why) = why {
-                self.note_textbox_on_cpu(engine, &why);
+                let asked = spec.pools.stage_device.get(plan::STAGE_ENGINE);
+                self.note_textbox_on_cpu(engine, asked.map(String::as_str), &devices, &why);
             }
             placement = p;
             #[cfg(feature = "torch")]
@@ -2234,11 +2249,54 @@ pub(crate) fn textbox_gpu_formats(
 #[cfg(feature = "torch")]
 const TEXTBOX_CPU_TARGET: &str = "onnx";
 
-/// Whether the reason a text-box row reads on the CPU (a pack without
-/// `bt_read_chars`) has been logged in this process: once is enough.
-#[cfg(all(feature = "torch", feature = "nc-models"))]
-static TEXTBOX_PACK_NOTED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+/// Why a text-box row reads on the CPU, as [`runtime::place_runnable`] reported it
+/// (`why`): the pack's own reason ([`torch::TEXTBOX_PACK_REASON`]) only when the device
+/// the row was placed on is a libtorch GPU and the loaded pack has no `bt_read_chars`
+/// (`pack_reads_chars` is `None` with no libtorch pack); any other reason (a pinned GPU
+/// this machine lacks, a GPU only the Vulkan pack drives, no package for the device)
+/// as given. `true` with the pack's reason.
+#[cfg_attr(not(feature = "torch"), allow(dead_code))]
+pub(crate) fn textbox_cpu_reason(
+    asked: Option<&str>,
+    devices: &[Device],
+    pack_reads_chars: Option<bool>,
+    why: &str,
+) -> (String, bool) {
+    let (p, _) = runtime::place(asked, devices);
+    if pack_reads_chars == Some(false) && p.is_gpu() && p.provider != "vulkan" {
+        #[cfg(feature = "torch")]
+        return (torch::TEXTBOX_PACK_REASON.to_string(), true);
+    }
+    (why.to_string(), false)
+}
+
+/// How a text-box row's CPU placement is logged: `None`, a warning on every session,
+/// when the row pinned its engine stage to a GPU; otherwise the key of a note logged
+/// once per process (the pack's reason once for every engine, any other reason once per
+/// engine and reason, which names the device).
+#[cfg_attr(not(feature = "nc-models"), allow(dead_code))]
+pub(crate) fn textbox_cpu_note(
+    engine: &str,
+    asked: Option<&str>,
+    reason: &str,
+    pack_reason: bool,
+) -> Option<String> {
+    let pinned = asked
+        .map(|a| a.trim().to_ascii_lowercase())
+        .is_some_and(|a| !matches!(a.as_str(), "" | "auto" | "cpu"));
+    if pinned {
+        None
+    } else if pack_reason {
+        Some("pack".to_string())
+    } else {
+        Some(format!("{engine}\n{reason}"))
+    }
+}
+
+/// The text-box CPU notes already logged in this process ([`textbox_cpu_note`]'s keys).
+#[cfg(feature = "nc-models")]
+static TEXTBOX_CPU_NOTED: std::sync::LazyLock<Mutex<std::collections::HashSet<String>>> =
+    std::sync::LazyLock::new(Default::default);
 
 #[cfg(test)]
 mod backends_dirs_tests {
@@ -2279,6 +2337,79 @@ mod backends_dirs_tests {
         assert!(textbox_gpu_formats("hayai-nova", true, &["fp32"], true).is_empty());
         assert_eq!(textbox_precisions("nar-small"), ["fp32"]);
         assert!(textbox_precisions("paddle-manga").is_empty());
+    }
+
+    /// The pack's reason only where it is the cause: a libtorch GPU the row was placed
+    /// on, under a pack without `bt_read_chars`. A pinned GPU this machine lacks and a
+    /// GPU only the Vulkan pack drives keep their own reason.
+    #[test]
+    fn a_text_box_cpu_reason_names_its_cause() {
+        let dev = |id: &str, provider: &str| Device {
+            format_engines: Default::default(),
+            id: id.into(),
+            label: id.into(),
+            formats: vec!["fp32".into()],
+            provider: Some(provider.into()),
+            arch: None,
+        };
+        let rocm = [dev("cpu", "cpu"), dev("gpu:0", "rocm")];
+        let vulkan = [dev("cpu", "cpu"), dev("gpu:0", "vulkan")];
+        let why = "gpu:0 (gpu:0) has no compiled package for this engine here";
+        #[cfg(feature = "torch")]
+        {
+            let pack = (torch::TEXTBOX_PACK_REASON.to_string(), true);
+            assert_eq!(textbox_cpu_reason(None, &rocm, Some(false), why), pack);
+            assert_eq!(
+                textbox_cpu_reason(Some("auto"), &rocm, Some(false), why),
+                pack
+            );
+            assert_eq!(
+                textbox_cpu_reason(Some("gpu:0"), &rocm, Some(false), why),
+                pack
+            );
+        }
+        let own = |w: &str| (w.to_string(), false);
+        // The pack reads text boxes: the GPU has no package for the engine.
+        assert_eq!(textbox_cpu_reason(None, &rocm, Some(true), why), own(why));
+        // No libtorch pack at all.
+        assert_eq!(textbox_cpu_reason(None, &rocm, None, why), own(why));
+        // A pinned GPU this machine lacks.
+        let gone = "gpu:5 is not a device of this machine";
+        assert_eq!(
+            textbox_cpu_reason(Some("gpu:5"), &rocm, Some(false), gone),
+            own(gone)
+        );
+        // A GPU only the Vulkan pack drives.
+        assert_eq!(
+            textbox_cpu_reason(None, &vulkan, Some(false), why),
+            own(why)
+        );
+    }
+
+    /// A row pinned to a GPU is warned about every time; an unpinned row is noted once
+    /// per process per reason, and the pack's reason once for every engine.
+    #[test]
+    fn a_text_box_cpu_note_warns_only_for_a_pin() {
+        assert_eq!(
+            textbox_cpu_note("nar-small", Some("gpu:0"), "r", false),
+            None
+        );
+        assert_eq!(
+            textbox_cpu_note("nar-small", Some(" GPU:1 "), "r", true),
+            None
+        );
+        let note = |asked| textbox_cpu_note("nar-small", asked, "r", false);
+        assert_eq!(note(None), Some("nar-small\nr".to_string()));
+        assert_eq!(note(Some("auto")), note(None));
+        assert_eq!(note(Some("")), note(None));
+        assert_ne!(
+            textbox_cpu_note("charspot-small", None, "r", false),
+            note(None)
+        );
+        assert_eq!(
+            textbox_cpu_note("nar-small", None, "r", true),
+            textbox_cpu_note("charspot-small", None, "other", true)
+        );
     }
 
     /// The Vulkan formats in the catalog: a GPU only the Vulkan pack drives runs no
