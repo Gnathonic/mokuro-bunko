@@ -206,6 +206,61 @@ pub unsafe extern "C" fn bt_read(
     }
 }
 
+// The loader calls it through this type.
+const _: crate::abi::ReadCharsFn = bt_read_chars;
+
+/// # Safety
+/// `h` is a live handle; `crops` points at `n` crops whose `data` holds
+/// `width * height * 3` bytes each (a crop of zero width or height may have a null
+/// `data`); out pointers are null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn bt_read_chars(
+    h: *mut c_void,
+    crops: *const BtCrop,
+    n: usize,
+    json_out: *mut *mut c_char,
+    err: *mut *mut c_char,
+) -> i32 {
+    let r = guarded(err, || {
+        let h = handle(h)?;
+        if n > 0 && crops.is_null() {
+            return Err(TorchError::Arg("crops is null".into()));
+        }
+        let raw: &[BtCrop] = if n == 0 {
+            &[]
+        } else {
+            // SAFETY: the caller passes `n` crops.
+            unsafe { std::slice::from_raw_parts(crops, n) }
+        };
+        let mut imgs = Vec::with_capacity(n);
+        for (i, c) in raw.iter().enumerate() {
+            let (w, hgt) = (c.width as usize, c.height as usize);
+            // A box of zero width or height reads "" (its place in the results kept).
+            let bytes = if w == 0 || hgt == 0 {
+                Vec::new()
+            } else if c.data.is_null() {
+                return Err(TorchError::Arg(format!("crop {i} has no data")));
+            } else {
+                // SAFETY: the caller guarantees width*height*3 readable bytes.
+                unsafe { std::slice::from_raw_parts(c.data, w * hgt * 3) }.to_vec()
+            };
+            imgs.push(
+                Rgb::from_raw(w, hgt, bytes)
+                    .ok_or_else(|| TorchError::Arg(format!("crop {i} has a bad size")))?,
+            );
+        }
+        let refs: Vec<&Rgb> = imgs.iter().collect();
+        to_json(&h.read_chars(&refs)?)
+    });
+    match r {
+        Ok(s) => {
+            put(json_out, s);
+            BT_OK
+        }
+        Err(code) => code,
+    }
+}
+
 /// # Safety
 /// `h` is null or a handle from `bt_load` that no other thread is using.
 #[unsafe(no_mangle)]

@@ -184,6 +184,18 @@ pub fn nar_input(crop: &Rgb) -> NarInput {
     }
 }
 
+/// nar-small's inputs for a list of crops: the indices of the non-empty crops, in order,
+/// and their inputs. Empty crops get none: they read `""` without a model call, and
+/// keep their place through the indices.
+pub fn nar_inputs(crops: &[&Rgb]) -> (Vec<usize>, Vec<NarInput>) {
+    crops
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| !empty(c))
+        .map(|(i, c)| (i, nar_input(c)))
+        .unzip()
+}
+
 /// A batch of nar-small inputs, row-major: `patches` `[len, 324, 588]`, `valid`,
 /// `rows`, `cols` `[len, 324]`, and each crop's grid as `heights` / `widths` `[len]`.
 #[derive(Clone, Debug, PartialEq)]
@@ -257,6 +269,33 @@ mod tests {
         assert_eq!(batches(130, 64), vec![0..64, 64..128, 128..130]);
         assert_eq!(batches(64, 64), vec![0..64]);
         assert!(batches(0, 64).is_empty());
+    }
+
+    #[test]
+    fn nar_batch_skips_empty_crops() {
+        let blank = Rgb {
+            width: 0,
+            height: 0,
+            data: vec![],
+        };
+        let ink = Rgb {
+            width: 20,
+            height: 40,
+            data: vec![30; 20 * 40 * 3],
+        };
+        assert!(empty(&blank));
+        assert!(!empty(&ink));
+        let (kept, ins) = nar_inputs(&[&blank, &ink, &blank]);
+        assert_eq!(kept, vec![1]);
+        assert_eq!(ins.len(), 1);
+        assert_eq!(ins[0], nar_input(&ink));
+        // A box of zero width (or height) only is empty too.
+        let line = Rgb {
+            width: 0,
+            height: 5,
+            data: vec![],
+        };
+        assert_eq!(nar_inputs(&[&line, &ink]).0, vec![1]);
     }
 
     #[test]

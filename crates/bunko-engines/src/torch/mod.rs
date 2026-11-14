@@ -367,6 +367,7 @@ impl TorchBackend {
                 .unpack_cache
                 .as_ref()
                 .map(|p| p.to_string_lossy().into_owned()),
+            max_batch: None,
         };
         let handle = self
             .pack

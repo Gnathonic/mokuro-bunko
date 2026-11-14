@@ -1,5 +1,6 @@
 //! hayai-nova and paddle-manga on **libtorch** (mokuro-bunko 0.7's recognizer backend;
-//! design: `docs/rust-port/TORCH-BACKEND.md`).
+//! design: `docs/rust-port/TORCH-BACKEND.md`), and the text-box recognizer nar-small
+//! (`docs/rust-port/TEXTBOX-GPU.md`).
 //!
 //! The recognizers run AOTInductor packages (`.pt2`: vision, decoder prefill, decoder
 //! step) compiled with the exact torch of the pack, through `tch` 0.26 (libtorch 2.13)
@@ -32,6 +33,8 @@ mod paddle;
 mod par;
 #[cfg(feature = "libtorch")]
 mod runtime;
+#[cfg(feature = "libtorch")]
+mod textbox;
 #[cfg(feature = "libtorch")]
 mod unpack;
 

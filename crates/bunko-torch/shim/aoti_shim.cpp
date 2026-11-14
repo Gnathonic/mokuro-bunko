@@ -155,6 +155,29 @@ void bt_tensor_release_storage(at::Tensor* t) {
   }
 }
 
+// Turns TF32 off for cuDNN convolutions and for matmuls (libtorch allows it for cuDNN by
+// default on Ampere and newer, which changes fp32 results). Process-wide; a no-op on the
+// CPU. The legacy setters: torch 2.13 keeps them, and they set the new per-backend
+// precisions too (cuBLAS: "highest").
+void bt_aoti_tf32_off() {
+  try {
+    auto& ctx = at::globalContext();
+    ctx.setAllowTF32CuDNN(false);
+    ctx.setAllowTF32CuBLAS(false);
+  } catch (...) {
+  }
+}
+
+// Which TF32 uses libtorch allows: bit 0 cuDNN, bit 1 matmul (cuBLAS); -1 on error.
+int bt_aoti_tf32_state() {
+  try {
+    auto& ctx = at::globalContext();
+    return (ctx.allowTF32CuDNN() ? 1 : 0) | (ctx.allowTF32CuBLAS() ? 2 : 0);
+  } catch (...) {
+    return -1;
+  }
+}
+
 // Returns the number of outputs written to `outs` (<= max_out), -1 on error.
 int bt_aoti_run(void* h, at::Tensor** ins, int n_in, at::Tensor** outs, int max_out, char** err) {
   try {

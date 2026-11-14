@@ -14,7 +14,17 @@
 //!                  char **json_out, char **err);                  // ["text", ...], one per crop
 //! void     bt_free(void *handle);
 //! void     bt_free_str(char *s);
+//!
+//! // Optional (a pack may lack it; the loader looks it up by name): text-box engines.
+//! int32_t  bt_read_chars(void *handle, const BtCrop *crops, size_t n,
+//!                        char **json_out, char **err);            // [CharsRead, ...], one per crop
 //! ```
+//!
+//! `bt_read_chars` answers one [`CharsRead`] per crop, in crop order:
+//! `{"text":"...","chars":[["字",x0,y0,x1,y1,score], ...] | null}`, boxes in crop
+//! pixels, `chars` null for nar-small. A crop of zero width or height (its `data` may be
+//! null) reads `""` without a model call. On a hayai-nova or paddle-manga handle it is
+//! [`BT_ERR_ARG`]. `bt_read` on a text-box handle returns the texts.
 //!
 //! Rules: no tensor crosses the boundary, only RGB8 crops in and UTF-8 JSON out. Every
 //! string the library hands out (`json_out`, `err`) is freed with `bt_free_str`. A
@@ -52,7 +62,34 @@ pub mod symbols {
     pub const READ: &[u8] = b"bt_read\0";
     pub const FREE: &[u8] = b"bt_free\0";
     pub const FREE_STR: &[u8] = b"bt_free_str\0";
+    /// Optional: packs before 0.8 lack it.
+    pub const READ_CHARS: &[u8] = b"bt_read_chars\0";
 }
+
+/// `bt_read_chars`.
+pub type ReadCharsFn = unsafe extern "C" fn(
+    *mut std::ffi::c_void,
+    *const BtCrop,
+    usize,
+    *mut *mut std::ffi::c_char,
+    *mut *mut std::ffi::c_char,
+) -> i32;
+
+/// The package I/O id (`bunko.io`) of the text-box engines' graphs (nar-small,
+/// charspot-small). `bt_info` reports `io: 0` for their handles.
+pub const TEXTBOX_IO: &str = "textbox-1";
+
+/// One crop's `bt_read_chars` result.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CharsRead {
+    pub text: String,
+    /// Each character with its box in crop pixels; `None` for nar-small (no boxes).
+    pub chars: Option<Vec<CharEntry>>,
+}
+
+/// A character and its box in crop pixels: `(char, x0, y0, x1, y1, score)`, a JSON array.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CharEntry(pub String, pub f32, pub f32, pub f32, pub f32, pub f32);
 
 /// One crop: tightly packed RGB8 rows (`width * 3` bytes each), `height` rows.
 #[repr(C)]
@@ -177,6 +214,11 @@ pub struct LoadOptions {
     /// `weights-*.safetensors` in the parent of `model_dir` (`<engine>/<precision>/`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub weights: Option<Vec<String>>,
+    /// Text-box engines: the largest batch of one graph run, below the package's own
+    /// (`bunko.max_batch`) on small GPUs. `None`: the package's. Never serialised when
+    /// unset, so packs before it see the options they know.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_batch: Option<u32>,
 }
 
 /// `bt_info`: what a loaded handle is.
@@ -1139,6 +1181,42 @@ mod tests {
         for bad in ["", "/abs", "\\abs", "a/../b", "..", "C:/x", "a//b"] {
             assert!(!safe_relative(bad), "{bad}");
         }
+    }
+
+    #[test]
+    fn chars_read_json_shape() {
+        let nar = CharsRead {
+            text: "字".into(),
+            chars: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&nar).unwrap(),
+            r#"{"text":"字","chars":null}"#
+        );
+        let cs = CharsRead {
+            text: "字".into(),
+            chars: Some(vec![CharEntry("字".into(), 1.0, 2.0, 3.0, 4.0, 0.5)]),
+        };
+        assert_eq!(
+            serde_json::to_string(&cs).unwrap(),
+            r#"{"text":"字","chars":[["字",1.0,2.0,3.0,4.0,0.5]]}"#
+        );
+        let back: Vec<CharsRead> =
+            serde_json::from_str(r#"[{"text":"字","chars":[["字",1.0,2.0,3.0,4.0,0.5]]}]"#)
+                .unwrap();
+        assert_eq!(back, vec![cs]);
+    }
+
+    #[test]
+    fn old_packs_never_see_max_batch() {
+        let o = LoadOptions {
+            tokenizer: "v.json".into(),
+            ..Default::default()
+        };
+        assert!(!serde_json::to_string(&o).unwrap().contains("max_batch"));
+        let back: LoadOptions =
+            serde_json::from_str(r#"{"tokenizer":"v.json","max_batch":8}"#).unwrap();
+        assert_eq!(back.max_batch, Some(8));
     }
 
     #[test]

@@ -31,6 +31,23 @@ unsafe extern "C" {
         err: *mut *mut c_char,
     ) -> c_int;
     fn bt_tensor_release_storage(t: *mut C_tensor);
+    fn bt_aoti_tf32_off();
+    #[cfg(test)]
+    fn bt_aoti_tf32_state() -> c_int;
+}
+
+/// Turns TF32 off for cuDNN and matmuls, process-wide (fp32 graphs then compute in
+/// fp32 on Ampere and newer; a no-op on the CPU).
+pub(crate) fn tf32_off() {
+    // SAFETY: sets two flags of libtorch's global context; no arguments.
+    unsafe { bt_aoti_tf32_off() }
+}
+
+/// Which TF32 uses libtorch allows: bit 0 cuDNN, bit 1 matmul; -1 when it cannot say.
+#[cfg(test)]
+pub(crate) fn tf32_state() -> i32 {
+    // SAFETY: reads two flags of libtorch's global context; no arguments.
+    unsafe { bt_aoti_tf32_state() }
 }
 
 /// Frees `t`'s storage now, even while something else still references it (see
@@ -287,6 +304,11 @@ pub fn dev_f32(v: &[f32], shape: &[i64], dev: TDev) -> Tensor {
 
 /// A host i64 slice as a tensor on `dev`.
 pub fn dev_i64(v: &[i64], shape: &[i64], dev: TDev) -> Tensor {
+    Tensor::from_slice(v).view(shape).to_device(dev)
+}
+
+/// A host i32 slice as a tensor on `dev`.
+pub fn dev_i32(v: &[i32], shape: &[i64], dev: TDev) -> Tensor {
     Tensor::from_slice(v).view(shape).to_device(dev)
 }
 
