@@ -926,6 +926,25 @@ mod tests {
         assert_eq!(nar["cpu_note"], Value::Null);
     }
 
+    /// AnimeText may be put on any device (its libtorch GPU route); the line detectors
+    /// stay on the CPU.
+    #[test]
+    fn animetext_may_take_any_device() {
+        let c = catalog(default_devices());
+        let devices = |id: &str| {
+            c["detectors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|d| d["id"] == id)
+                .unwrap()["devices"]
+                .clone()
+        };
+        assert_eq!(devices("animetext-blocks"), json!("any"));
+        assert_eq!(devices("ppocr-manga"), json!(["cpu"]));
+        assert_eq!(devices("ctd-lines"), json!(["cpu"]));
+    }
+
     #[test]
     fn entry_of_default_row() {
         let row = generations::default_generation("g-1");

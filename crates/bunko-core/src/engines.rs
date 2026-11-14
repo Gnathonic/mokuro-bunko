@@ -246,6 +246,9 @@ pub const DETECTORS: &[DetectorSpec] = &[
     // A block detector: it boxes whole pieces of text, and the engine finds the lines
     // in each. Only for the engines that read blocks ([`EngineSpec::blocks`]). Not the
     // 0.5.x `animetext` (one line per block, whatever the engine): that id stays removed.
+    // On the CPU it runs on ONNX Runtime; on an NVIDIA or AMD GPU it also runs through
+    // the libtorch backend pack (a compiled graph of ours bound to the same ONNX file's
+    // weights, `detector-torch-v1`), with the CPU as its fallback.
     DetectorSpec {
         id: "animetext-blocks",
         label: "AnimeText YOLO12-x block detector (deepghs)",
@@ -254,7 +257,7 @@ pub const DETECTORS: &[DetectorSpec] = &[
         license: "GPL-3.0",
         class: LicenseClass::Gpl,
         line_level: false,
-        cpu_only_reason: "AnimeText runs on the CPU",
+        cpu_only_reason: "",
     },
 ];
 

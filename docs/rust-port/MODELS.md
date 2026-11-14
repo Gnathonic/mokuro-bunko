@@ -230,6 +230,46 @@ and the author's Apache-2.0 `LICENSE`; the compiled-in manifest
 the GPU names `textbox-torch-v1` as its export set where one read on the CPU names
 `textbox-graphs-v1`. Neither changes the engine revision: the ids are the same.
 
+### 2.5 The `detector-torch-v1` release: AnimeText on a GPU
+
+On an NVIDIA or AMD card with the libtorch backend pack, the `animetext-blocks` detector
+runs through a compiled AOTInductor package of the YOLO12-x network instead of ONNX
+Runtime: `torch/animetext-blocks/fp32/<target>/detector.pt2`, one per GPU target, fp32
+only, made by `tools/torch_export` (`python -m torch_export build -e animetext-blocks -p
+fp32 -t <target>`). The exporter rebuilds the network with the pinned ultralytics
+(`detector.ULTRALYTICS_VERSION`, 8.4.212; installed from `requirements-detector.txt`,
+build time only) and one patch, an `A2C2f.forward` that takes its `gamma` as a
+`[1, C, 1, 1]` parameter, so that every one of the package's 425 constants is a FLOAT
+initializer of the ONNX file §2.2 mirrors (the gammas `model.6.gamma` and
+`model.8.gamma` are `onnx::Mul_2760` and `onnx::Mul_2777`). The package holds **no
+trained weights**: `bunko.weights_format = onnx` makes the cdylib read those
+initializers out of `animetext_yolo12x.onnx` at load (a small protobuf walker,
+`bunko_torch::onnx_weights`; the file's size is checked first, and a FLOAT16,
+external-data or truncated tensor is refused), the same file at the same pin the CPU
+route reads, and `verify` and `publish_detector.sh` refuse any package whose constants
+live inside it. The package holds no suppression either: the cdylib returns the raw
+candidates scored 0.3 or more (`bt_detect_blocks`), from the same letterboxed canvas as
+the CPU route (`bunko_vlm::animetext::canvas_chw`), and the host runs the one
+post-processing both routes share (`bunko_ocr::animetext::blocks_from_output`).
+
+A target ships only when its gate passes on a card of that target (or, for a target
+with no card to test, on its verified neighbours from the same exporter commit): the
+same block set as ONNX Runtime on the CPU on every one of at least 300 pages, every
+corner within 0.01 page px, and no crop edge moved. A target that fails is left out,
+and that GPU detects on the CPU.
+
+The package is compiled Ultralytics code, so it is **AGPL-3.0**, and it goes only in its
+own pre-release `detector-torch-v1` (never in `textbox-torch-v1`), with a `NOTICE.md`
+(the ultralytics version, `tools/torch_export/torch_export/detector.py` and the exporter
+commit every package records as `bunko.exporter_commit`, the `A2C2f` patch, the weights'
+source and sha256) and the AGPL-3.0 text as `LICENSE`. `publish_detector.sh` refuses a
+stage built from a modified tree or from more than one commit, and refuses to publish
+until that commit is public. Only builds with the `gpl-models` feature know the release
+(`crates/bunko-ocr/src/detector_torch_models.json`). A sidecar detected on the GPU names
+`detector-torch-v1` first in its export set (`detector-torch-v1+textbox-torch-v1` with
+nar-small on the GPU too); the detector has no revision, and the GPU route does not
+give it one: the blocks are the same.
+
 ## 3. The pipeline (`tools/onnx_export/`)
 
 ```

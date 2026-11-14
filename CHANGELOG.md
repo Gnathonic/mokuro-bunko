@@ -318,6 +318,22 @@
   refused with the reason. Its repository is gated, so its file is fetched from this
   project's `upstream-models-v1` release. Neither is the `ctd` or `animetext` detector
   of 0.5: a row that still names one of those keeps reading with `ppocr-manga`.
+- **The AnimeText block detector runs on an NVIDIA or AMD GPU** with the libtorch
+  backend pack, with the same blocks as on the CPU (in testing about 22 pages/s on an
+  RX 9070 XT, 2.4x the CPU pool of a 16-core desktop, which leaves those cores to a
+  CPU engine pool). It runs at fp32 from a compiled graph with no weights in it (the
+  pre-release `detector-torch-v1`, one package per card type; AGPL-3.0, since it is
+  compiled Ultralytics code) bound to the same `animetext_yolo12x.onnx` the CPU route
+  reads; the suppression of overlapping boxes stays on the host, one code for both
+  routes. Its `detect` stage follows the engine's card, else goes to the first card
+  that has a package for it; a card with less than 4 GB of memory, a card the release
+  has no package for, a backend pack without the detector, `ocr.backend: cpu`, or a
+  failed load keeps it on the CPU, with the reason in the log.
+  `pools.stage_device.detect` may now name a card for a row on `animetext-blocks` (the
+  line detectors stay CPU only), the planner sizes a detect stage on a card, and the
+  benchmark tries it on the CPU too and keeps the faster. The sidecar's
+  `ocr_engine.weights` names `detector-torch-v1` first in its export set when the
+  blocks were detected on a card. Only builds with GPL models (`gpl-models`) have it.
 - **Model licences are shown, and restricted ones can be built out.** The admin panel
   shows the licence beside an engine or detector whose weights are not Apache-2.0, and
   the catalog API carries `license` and `license_class` for each. The models above are
