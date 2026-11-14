@@ -1160,4 +1160,39 @@ mod library_ocr_tests {
             .collect();
         assert!(hayai_only.iter().all(|id| !ids.contains(id)), "{ids:?}");
     }
+
+    /// O3: a 0.7.x pack is not loaded, and doctor says to install this release's.
+    #[test]
+    fn doctor_refuses_a_pack_of_an_older_release() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.yaml");
+        std::fs::write(
+            &config,
+            format!("storage:\n  base_path: {}\n", dir.path().display()),
+        )
+        .unwrap();
+        let target = OcrTarget {
+            role: Role::Library,
+            storage: dir.path().to_path_buf(),
+            processor_config: None,
+            library: Some(crate::cfgfile::load_effective_quiet(&config).unwrap()),
+            reason: String::new(),
+        };
+        crate::cmd::install_ocr::tests::fake_pack_of(&target.backends_dir(), "cpu", "0.7.12");
+        let c = check_backend(&target);
+        assert!(c.status == Status::Fail, "{}", c.detail);
+        assert!(
+            c.detail
+                .contains("the backend pack is from mokuro-bunko 0.7.12"),
+            "{}",
+            c.detail
+        );
+        assert!(
+            c.detail
+                .contains("which opens the packs of 0.8.0-beta.1 to"),
+            "{}",
+            c.detail
+        );
+        assert!(c.hint.as_deref().is_some_and(|h| h.contains("install-ocr")));
+    }
 }

@@ -1867,6 +1867,113 @@ pub(crate) mod tests {
         std::fs::write(pack.join("pack.json"), m.to_string()).unwrap();
     }
 
+    /// [`fake_pack`] built by mokuro-bunko `version`, named so it can sit beside one.
+    pub(crate) fn fake_pack_of(root: &Path, variant: &str, version: &str) {
+        let name = if variant == VULKAN {
+            "vulkan-old".to_string()
+        } else {
+            format!("torch-{variant}-old")
+        };
+        let pack = root.join(&name);
+        std::fs::create_dir_all(&pack).unwrap();
+        let m = serde_json::json!({
+            "format": 1, "name": name, "variant": variant, "torch": "2.13.0",
+            "target": bunko_update::TARGET, "os": "linux", "arch": "x86_64", "abi": 1,
+            "library": "", "bunko_version": version, "files": []
+        });
+        std::fs::write(pack.join("pack.json"), m.to_string()).unwrap();
+    }
+
+    /// What the NEW binary's `update prefetch` decides (autoupdate.rs): an update to
+    /// 0.8 replaces every 0.7.x pack (O3, packs are tied to the release).
+    #[test]
+    fn an_update_replaces_every_0_7_pack() {
+        let dir = tempfile::tempdir().unwrap();
+        let pack = dir.path().join("torch-cu130-2.13.0");
+        std::fs::create_dir_all(pack.join("lib")).unwrap();
+        std::fs::write(pack.join("lib/libtorch.so"), b"1234").unwrap();
+        let write = |version: &str| {
+            let m = serde_json::json!({
+                "format": 1, "name": "torch-cu130-2.13.0", "variant": "cu130", "torch": "2.13.0",
+                "target": bunko_update::TARGET, "os": "linux", "arch": "x86_64", "abi": 1, "library": "",
+                "bunko_version": version,
+                "files": [{"path": "lib/libtorch.so", "size": 4, "sha256": "00"}]
+            });
+            std::fs::write(pack.join("pack.json"), m.to_string()).unwrap();
+        };
+        for (v, kept) in [
+            ("0.7.4", false),
+            ("0.7.12", false),
+            ("0.8.0-beta.1", true),
+            ("0.8.0", true),
+            ("v0.8.0", true),
+        ] {
+            write(v);
+            assert_eq!(
+                pack_this_release_keeps(&pack, "0.8.0").is_some(),
+                kept,
+                "{v} in 0.8.0"
+            );
+        }
+        for (v, kept) in [
+            ("0.7.4", false),
+            ("0.7.12", false),
+            ("0.8.0-beta.1", true),
+            ("0.8.0", false),
+        ] {
+            write(v);
+            assert_eq!(
+                pack_this_release_keeps(&pack, "0.8.0-beta.1").is_some(),
+                kept,
+                "{v} in 0.8.0-beta.1"
+            );
+        }
+    }
+
+    /// A binary replaced by hand, or a container recreated on 0.8, over a 0.7.x pack:
+    /// the pack does not count as installed, so the install runs before the backend
+    /// starts. The Vulkan pack goes through the same floor.
+    #[test]
+    fn need_installs_over_an_older_release_pack() {
+        let hw = nvidia();
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.yaml");
+        std::fs::write(
+            &config,
+            format!("storage:\n  base_path: {}\n", dir.path().display()),
+        )
+        .unwrap();
+        let target = || crate::ocr_target::OcrTarget {
+            role: crate::ocr_target::Role::Library,
+            storage: dir.path().to_path_buf(),
+            processor_config: None,
+            library: Some(crate::cfgfile::load_effective_quiet(&config).unwrap()),
+            reason: String::new(),
+        };
+        let backends = target().backends_dir();
+        fake_pack_of(&backends, "cu130", "0.7.12");
+        match need(&target(), &hw) {
+            Need::Install { variant, .. } => assert_eq!(variant, "cu130"),
+            other => panic!("a 0.7.12 pack must not count as installed: {other:?}"),
+        }
+        assert!(already_fits(std::slice::from_ref(&backends), "cu130").is_none());
+        assert!(
+            already_fits(std::slice::from_ref(&backends), "cpu").is_none(),
+            "nor serve the CPU"
+        );
+        fake_pack(&backends, "cu130");
+        assert!(!matches!(need(&target(), &hw), Need::Install { .. }));
+        // The Vulkan pack goes through the same floor.
+        if crate::hwdetect::vulkan_wanted("auto", &hw, bunko_update::TARGET).is_some() {
+            fake_pack_of(&backends, VULKAN, "0.7.12");
+            let n = need(&target(), &hw);
+            assert!(
+                matches!(&n, Need::Extra { variant, route: false, .. } if variant == VULKAN),
+                "{n:?}"
+            );
+        }
+    }
+
     /// An NVIDIA machine whose driver takes the cu130 pack.
     pub(crate) fn nvidia() -> crate::hwdetect::Hardware {
         crate::hwdetect::Hardware {

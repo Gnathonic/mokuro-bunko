@@ -333,7 +333,14 @@ pub struct PackManifest {
 /// any change to those files until it is decided either way. Packs of 0.7.0 differ (0.7.1
 /// changed bunko-torch and the pack script); packs of 0.7.1 to 0.7.3 leak a libtorch
 /// recognizer's weights on every session (0.7.4 frees them when the recognizer is dropped).
-pub const OLDEST_PACK_RELEASE: &str = "0.7.4";
+///
+/// 0.8 adds the text-box and block-detector routes and hayai budgets below 512, which
+/// older packs lack: backend packs are tied to the release, so a 0.7.x pack is refused
+/// and the install paths (start-up, `install-ocr --if-needed`, an update's prefetch)
+/// bring this release's pack before OCR uses the backend. The floor is the workspace
+/// version of the commit that moved it, 0.8.0-beta.1, which was never published as a
+/// pack.
+pub const OLDEST_PACK_RELEASE: &str = "0.8.0-beta.1";
 
 /// Whether a build of mokuro-bunko `release` opens a pack built by `pack_version`: a
 /// release from [`OLDEST_PACK_RELEASE`] up to `release` itself (never a later one: an
@@ -997,6 +1004,40 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("install-ocr"), "{text}");
+    }
+
+    /// O3: packs are tied to the release. 0.8 refuses every 0.7.x pack; the floor is
+    /// the workspace version of the commit that moved it (L11).
+    #[test]
+    fn the_floor_is_0_8_0_beta_1() {
+        assert_eq!(OLDEST_PACK_RELEASE, "0.8.0-beta.1");
+        for release in ["0.8.0-beta.1", "0.8.0"] {
+            for old in ["0.7.4", "0.7.12"] {
+                assert!(!release_opens_pack(old, release), "{old} in {release}");
+            }
+            assert!(release_opens_pack("0.8.0-beta.1", release), "{release}");
+            assert!(release_opens_pack("v0.8.0-beta.1", release), "{release}");
+            assert!(
+                release_opens_pack("", release),
+                "a development pack in {release}"
+            );
+        }
+        assert!(release_opens_pack("0.8.0", "0.8.0"));
+        assert!(release_opens_pack("v0.8.0", "0.8.0"));
+        // Never a later release's pack: a 0.8.0-beta.1 build refuses 0.8.0's.
+        assert!(!release_opens_pack("0.8.0", "0.8.0-beta.1"));
+        assert!(!release_opens_pack("v0.8.0", "0.8.0-beta.1"));
+        assert!(release_opens_pack("0.8.0", "0.8.1"));
+        assert!(!release_opens_pack("0.8.1", "0.8.0"));
+        let e = PackError::Release {
+            found: "0.7.12".into(),
+            wanted: "0.8.0".into(),
+        }
+        .to_string();
+        assert!(
+            e.contains("opens the packs of 0.8.0-beta.1 to 0.8.0") && e.contains("install-ocr"),
+            "{e}"
+        );
     }
 
     #[test]
