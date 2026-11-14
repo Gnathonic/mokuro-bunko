@@ -654,34 +654,11 @@ fn check_packages(
     let (mut present, mut missing, mut cannot) = (Vec::new(), Vec::new(), Vec::new());
     let mut on_cpu = Vec::new();
     for (engine, mode) in &rows {
-        match pipeline.package_status_for(engine, mode) {
-            // The text-box engines' CPU route (ONNX Runtime): no compiled package.
-            Ok(st) if models::textbox_engine(engine) && st.need.device == "cpu" => {
-                on_cpu.push(match &st.need.fallback {
-                    Some(why) => format!("{engine} reads on the CPU ({why})"),
-                    None => format!("{engine} reads on the CPU"),
-                })
-            }
-            Ok(st) if st.ready() => present.push(format!(
-                "{engine} {} on {} ({})",
-                st.need.precision, st.need.device, st.need.label
-            )),
-            Ok(st) => {
-                let mut what = Vec::new();
-                if st.package.is_none() {
-                    what.push(format!("package: one of {}", st.need.targets.join(", ")));
-                }
-                if !st.missing_host_files.is_empty() {
-                    what.push(st.missing_host_files.join(", "));
-                }
-                missing.push(format!(
-                    "{engine} {} on {} ({})",
-                    st.need.precision,
-                    st.need.device,
-                    what.join("; ")
-                ))
-            }
-            Err(e) => cannot.push(format!("{engine}: {e}")),
+        match package_row(engine, pipeline.package_status_for(engine, mode)) {
+            PackageRow::Present(s) => present.push(s),
+            PackageRow::Missing(s) => missing.push(s),
+            PackageRow::Cannot(s) => cannot.push(s),
+            PackageRow::OnCpu(s) => on_cpu.push(s),
         }
     }
     let mut detail = Vec::new();
@@ -719,6 +696,60 @@ fn check_packages(
     } else {
         Check::pass("Compiled packages", detail)
     })
+}
+
+/// One row of the compiled-packages check.
+#[cfg(feature = "ocr")]
+#[derive(Debug, PartialEq, Eq)]
+enum PackageRow {
+    Present(String),
+    Missing(String),
+    /// No package can run this row here: the check fails.
+    Cannot(String),
+    /// A text-box engine on its CPU route (ONNX Runtime), which needs no compiled
+    /// package: a note, never a failure. Its missing files are the Models check's.
+    OnCpu(String),
+}
+
+/// How [`check_packages`] reports `engine`'s row from its package status.
+#[cfg(feature = "ocr")]
+fn package_row(engine: &str, status: Result<bunko_engines::PackageStatus, String>) -> PackageRow {
+    use bunko_engines::models;
+    let textbox = models::textbox_engine(engine);
+    match status {
+        // The text-box engines' CPU route (ONNX Runtime): no compiled package.
+        Ok(st) if textbox && st.need.device == "cpu" => {
+            PackageRow::OnCpu(match &st.need.fallback {
+                Some(why) => format!("{engine} reads on the CPU ({why})"),
+                None => format!("{engine} reads on the CPU"),
+            })
+        }
+        Ok(st) if st.ready() => PackageRow::Present(format!(
+            "{engine} {} on {} ({})",
+            st.need.precision, st.need.device, st.need.label
+        )),
+        Ok(st) => {
+            let mut what = Vec::new();
+            if st.package.is_none() {
+                what.push(format!("package: one of {}", st.need.targets.join(", ")));
+            }
+            if !st.missing_host_files.is_empty() {
+                what.push(st.missing_host_files.join(", "));
+            }
+            PackageRow::Missing(format!(
+                "{engine} {} on {} ({})",
+                st.need.precision,
+                st.need.device,
+                what.join("; ")
+            ))
+        }
+        // A text-box row that cannot be placed (its ONNX files missing with downloads
+        // off) is no compiled package's fault.
+        Err(e) if textbox => PackageRow::OnCpu(format!(
+            "{engine} reads on the CPU: {e} (see the Models check)"
+        )),
+        Err(e) => PackageRow::Cannot(format!("{engine}: {e}")),
+    }
 }
 
 /// The model files `ids` (what `models download` fetches for this machine: PP-OCR and
@@ -982,6 +1013,28 @@ mod tray_lib_tests {
         assert!(c.hint.unwrap().contains("system tray"));
         let c = tray_check(&TrayHost::NoBus("no address".into()), "KDE");
         assert!(c.detail.contains("session D-Bus"));
+    }
+}
+
+#[cfg(all(test, feature = "ocr"))]
+mod package_row_tests {
+    use super::*;
+
+    /// A text-box row whose files are missing with downloads off reads on the CPU and
+    /// needs no compiled package: a note, not "NOT RUNNABLE HERE". A recognizer that
+    /// cannot run here still is.
+    #[test]
+    fn a_text_box_row_that_cannot_place_is_no_package_failure() {
+        let off = "nar-small's files are not here and downloads are off (MOKURO_MODELS_DOWNLOAD)";
+        let row = package_row("nar-small", Err(off.to_string()));
+        assert!(
+            matches!(&row, PackageRow::OnCpu(s) if s.contains(off) && s.contains("Models check")),
+            "{row:?}"
+        );
+        assert_eq!(
+            package_row("hayai-nova", Err("no package".into())),
+            PackageRow::Cannot("hayai-nova: no package".into())
+        );
     }
 }
 
