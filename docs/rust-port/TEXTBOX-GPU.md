@@ -62,6 +62,32 @@ The original design's other recommendations stand as decided unless the owner sa
 otherwise (§22): the target set (CUDA sm_75/sm_80 on Linux and Windows, six ROCm gfx
 targets), the new pre-releases for the `.pt2` files, and landing before 0.8.0.
 
+Lead calls after the builder check (2026-11-13; the owner reviews them):
+
+- **L1 A failed fp32 gate.** That target is left out of the manifest, so its GPU uses the CPU
+  route, and the failure goes to the owner. Never a revision bump; never a looser tolerance
+  without the owner's sign-off (§20).
+- **L2 Targets without a test card.** gfx1201, gfx1030, gfx1032 (through the gfx1030
+  override) and sm_80 on Linux and Windows are verified on real cards. gfx1100/1101/1102/1200
+  and sm_75 ship built but unverified, as hayai's RDNA3 targets did, and only once their
+  verified neighbours pass from the same exporter commit. The docs say which is which.
+- **L3 The NVIDIA gates.** The lead runs them on the 24-core host with an RTX 4090 while its
+  GPU is idle. Code work goes on meanwhile; only publishing waits for them. The lead puts the
+  measured figures into `textbox_gpu_seconds` and `DETECT_GPU_SECONDS`.
+- **L4 Publishing order.** Everything is staged and tested through
+  `MOKURO_TORCH_MODELS_MIRROR`. The owner publishes `textbox-torch-v1` once, after plans 01-03
+  pass their gates, and `detector-torch-v1` once, after plan 04, if the owner approves it
+  (§22 Q1). No release is added to later. `textbox-graphs-v1` goes out first (§17).
+- **L5 A GPU host with no pack** (was §22 Q2): a background fetch while the CPU route serves
+  (`Need::Refresh` with `have: None`).
+- **L6 The refresh switch** (was §22 Q3): `MOKURO_OCR_AUTO_INSTALL`, on by default.
+- **L7 hayai budgets ride the refresh** (was §22 Q6): yes on GPU variants; the cpu pack keeps
+  today's "update the OCR backend pack" error.
+- **L8 Targets and release names** (was §22 Q7): adopted as listed above;
+  `textbox-torch-v1`, `detector-torch-v1`.
+- **L9 An engine-stage CPU candidate.** The benchmark tries `stage_device.engine = cpu` beside
+  the GPU for text-box rows, so a weak GPU never makes a row slower than the CPU pool (§12).
+
 ## 3. Goals, non-goals, anti-goals
 
 **Goals**
@@ -217,6 +243,8 @@ on a recognizer) returns `BT_ERR_ARG`.
   overview read this copy without loading a pack.
 - Each route still checks its own symbol. A pack whose features claim a route whose symbol
   is missing is logged (`warn!`) and that route stays on the CPU.
+- Each feature joins `BT_FEATURES` in the commit that adds its route, so `pack.json` never
+  claims a route the pack lacks.
 
 **Package I/O ids** (`bunko.io`, a string, checked by `GraphSet::load`; `IO_VERSIONS` is
 untouched): `textbox-1` (nar-small, charspot-small) and `detect-1` (AnimeText). `bt_info`
@@ -238,7 +266,10 @@ reports `io: 0` for these handles.
 detector (the field is required; the JSON shape does not change). `LoadOptions.weights`
 carries the authors' safetensors path, or the ONNX path for the detector. One new field,
 `max_batch: Option<u32>` (`serde(default, skip_serializing_if = "Option::is_none")`), caps
-the batch below the package's on small GPUs.
+the batch below the package's on small GPUs. It defaults to `None`. The host sets it from
+`DeviceEntry.vram_mb` and the measured peak memory per batch (under 4 GiB: 8) and passes it
+through `TorchBackend::textbox`; TORCH-BACKEND.md records the rule. A text-box run that runs
+out of memory fails the page, as hayai's does.
 
 ## 7. Export pipeline (`tools/torch_export`)
 
@@ -264,6 +295,8 @@ the batch below the package's on small GPUs.
 - **Refusals.** The exporter refuses to write a package if any constant has no key in the
   weights file, if a key's shape or dtype differs from the file's, if any weight is left
   inside the package, or if `TORCH_EXPORT_WIN_EMBED=1` or `TORCH_EXPORT_CPU_EMBED=1` is set.
+  The publish script and `verify.py` refuse any `.pt2` whose constants live inside the package
+  as well; the spike's packages with weights inside are never staged, mirrored or uploaded.
 - **Pins.** It reads the weights by sha256 and refuses another file: nar `bc7418e2…`
   (217,035,140 B), charspot `3dec2846…` (43,860,012 B), AnimeText ONNX `5dd2bb9f…`
   (236,662,175 B).
@@ -303,12 +336,19 @@ That is the ONNX graph's I/O plus a batch dim, so Bunko's `nar_input` feeds it u
 - `tail(emb[R,144,H8,W8], boxes[R,N,4], geo[R,N,4], mask[R,N] bool)` → `ids, pair, start, end`;
   R in 1..512, N in 2..1024, bounded at run time by the authors' `tail_budget` (2^18 rows x
   chars²) and `ROWS_PER_TAIL` (512).
+- A tail part is padded to `max(2, n0)` characters, `n0` its first row's count, with the
+  padding's mask false (the graph needs N ≥ 2). A part always takes at least one row, so a row
+  with `n0 > 512` still runs. Both rules are checked against the authors' `backends/cuda.py` at
+  the pin, and a test covers `n0 > 512`.
 - fp32 only (the authors' fp16 differs on 3/100 texts).
 
 ### 7.5 AnimeText
 
 - ultralytics pinned at **8.3.105** (the ONNX file's own producer; build-time only, never
-  shipped), with `onnx`, in a separate `requirements-detector.txt`.
+  shipped), with `onnx`, in a separate `requirements-detector.txt`. The spike ran 8.4.212, so
+  the spike's constant mapping and parity check are re-run under 8.3.105 before
+  `detector.py` is written. If they fail, the pin is 8.4.212, which was measured. The exporter
+  refuses any other version than the pin.
 - `DetectionModel("yolo12x.yaml", nc=1)`, `fuse()`, A2C2f's forward patched to
   `x + gamma * y` with `gamma` a `[1,C,1,1]` parameter. Every state-dict tensor is loaded
   strictly from the ONNX initializer of the same name (the two gammas from `onnx::Mul_2760`
@@ -318,7 +358,7 @@ That is the ONNX graph's I/O plus a batch dim, so Bunko's `nar_input` feeds it u
 - `B = Dim(1, 8)`, `H = 32·Dim(1, 20)`, `W = 32·Dim(1, 20)`.
 - Metadata adds `bunko.weights_format = "onnx"`, `bunko.weights_sha256 = 5dd2bb9f…`,
   `bunko.weights_size = 236662175`, `bunko.source = deepghs/AnimeText_yolo@a180c191…`,
-  `bunko.ultralytics = 8.3.105`.
+  `bunko.ultralytics` = the version actually used.
 
 ## 8. Artefacts, releases and hosting
 
@@ -346,11 +386,17 @@ That is the ONNX graph's I/O plus a batch dim, so Bunko's `nar_input` feeds it u
   nothing extra. charspot's CPU route reads `model.onnx`, its GPU route `model.safetensors`:
   only the chosen route's file is fetched; the fallback fetches its file when it is needed
   (44 MB). AnimeText's GPU route needs the `.pt2` only.
+- So when the GPU route is the plan, `recognizer_ids` and `download_plan` add the text-box
+  engine's `torch_host_ids` (today they treat these engines as ONNX-only, and `models
+  download` on a GPU host fetches charspot's `model.onnx`). `prefetch_rows` also fetches nar's
+  fp16 package when the row's mode can resolve to fp16 on that device, as hayai's prefetch does.
+- `build_textbox_manifest` takes the pin (authors' weights or ONNX file) and the licence, so
+  one builder writes both releases' manifests; it is tested for both.
 - **Licences.** The text-box `.pt2` files are compiled from the authors' Apache-2.0 code and
   hold no weights; `textbox-torch-v1` carries `NOTICE.md` and the authors' `LICENSE`, as
   `textbox-graphs-v1` does, and everything stays behind `nc-models`. The AnimeText `.pt2` is
   compiled Ultralytics model code (AGPL-3.0) and binds GPL-3.0 weights; `detector-torch-v1`
-  carries `NOTICE.md` (ultralytics 8.3.105, the export script's path and commit, the weights'
+  carries `NOTICE.md` (the ultralytics version used, the export script's path and commit, the weights'
   source and sha) and the AGPL-3.0 text, stays behind `gpl-models`, and is never referenced
   by a `--permissive-models` build.
 
@@ -385,7 +431,10 @@ thin three-role wrapper, so hayai and paddle code is unchanged. `Aoti`, `Placeme
   the pack does not re-hash 236 MB at each load.
 - **Dtype check before binding**, for every engine: `bt_aoti_load_constants` compares each
   tensor's dtype with `runner->getConstantNamesToDtypes()` and refuses with "constant X is
-  F32, the package wants F16". This is inside the cdylib, not the host ABI.
+  F32, the package wants F16". This is inside the cdylib, not the host ABI. It is tested at
+  the cdylib level: a libtorch-feature test in `package.rs` binds F32 tensors to the fp16
+  package through `Weights::load(.., None)` (AOTI metadata may be compiled into the model
+  library, so rewriting a package copy's metadata proves nothing).
 
 ### 9.3 Engines
 
@@ -421,13 +470,19 @@ workspace dependencies of its own [v].
   sizes `exp` in f32, boxes rounded to f32, NMS in f32 with its `1e-6`, the "centre in the
   central half" rule (0.25 of each side), suppression at IoU ≥ 0.2, ruby ≥ 0.5 dropped,
   heat > 0.3, geometry over the lower median of the max sides, first index on argmax ties,
-  and `end[cur] > best` strictly in `chain`.
+  and `end[cur] > best` strictly in `chain`. The module header and the licence listing keep
+  the authors' Apache-2.0 attribution (Apache §4).
 - `bunko_vlm::animetext::canvas_chw(canvas: &Rgb) -> Vec<f32>` (u8 → f32 /255, CHW, red
   first). `bunko-ocr` gains a dependency on `bunko-vlm` (no cycle: `bunko-vlm` depends on no
   workspace crate).
 
 The ONNX route and the libtorch route then build bit-identical input tensors from one
 function, and no tensor crosses the ABI.
+
+**TF32 off.** libtorch lets cuDNN convolutions use TF32 by default on Ampere and newer, and
+AnimeText is 84% convolutions. `bt_init` turns TF32 off for cuDNN and for matmul
+(`setAllowTF32CuDNN(false)` and the matmul flag). This also applies to hayai and paddle, so
+the NVIDIA gate (§20.5) re-checks their sm_80 output on a test volume with the new pack.
 
 **Vulkan pack.** No change: text-box engines and the detector are never offered on Vulkan
 devices (the format loops list only hayai and paddle).
@@ -460,6 +515,9 @@ Text-box engines go through `runtime::place_runnable` with a text-box arm in `fo
 | CPU | `["fp32"]` when the ONNX files are obtainable |
 | GPU | the pack is loaded and `bt_read_chars` exists; the device's formats filtered by `store.torch_package_obtainable(engine, p, torch_targets(..))` (nar: fp32 and fp16; charspot: fp32; never bf16); and the host files (weights, vocabulary) are obtainable |
 
+- The text-box arm loads, falls back and returns its recognizer itself, before the generic
+  `resolved` / `self.recognizer()` block that serves hayai and paddle. nar's resolved precision
+  (§11) therefore never reaches that block; charspot keeps its fixed fp32 path.
 - A GPU result loads through `TorchBackend::textbox(..)`, with a weak cache keyed by engine,
   precision, device, package dir and threads.
 - Any GPU load error: `warn!` and `textbox_recognizer()` (the ONNX CPU route, pool sizing
@@ -516,6 +574,10 @@ Text-box engines go through `runtime::place_runnable` with a text-box arm in `fo
   exists only for some engines (nar fp16; hayai and paddle bf16), `format_engines` records
   which, so the server does not route a hayai row to a GPU that only has text-box packages,
   and `formats_for_engine` keeps a nar row off bf16.
+- `engine_formats` applies the full text-box test of §10.2 (`bt_read_chars` present, packages
+  obtainable, host files obtainable), not only `torch_package_obtainable`, so an old pack never
+  advertises GPU formats it cannot run. `format_engines` is built for GPU devices only; the CPU
+  entry would only mislead.
 - New rows from `detector_torch_models.json` (cfg `gpl-models`); `detector_ids` is unchanged
   (CPU) and `detector_torch_ids(device)` covers the GPU route.
 
@@ -525,8 +587,12 @@ Text-box engines go through `runtime::place_runnable` with a text-box arm in `fo
   (`engines.rs:187-202`). `EngineSpec` gains `precision_formats: &[&str]`: nar
   `["fp32","fp16"]`, hayai and paddle all three, everyone else `[]`.
   `engine_modes(engine)` returns the auto modes plus those formats; the admin catalog
-  (`admin/ocr.rs:229`) and `bunko-sched precision::engine_modes` use it. The admin UI is
-  data-driven and already resets a row whose mode the new engine lacks [v].
+  (`admin/ocr.rs:229`) uses it. The admin UI is data-driven and already resets a row whose
+  mode the new engine lacks [v].
+- `bunko-sched` has no `bunko-core` dependency (only a dev-dependency), so
+  `precision::engine_modes` keeps its own static table, which gains nar-small (the auto modes
+  plus fp32 and fp16). A dev-dependency test keeps it equal to the `bunko-core` registry, the
+  pattern the crate already uses for `ARCHIVE_EXTENSIONS`.
 - `is_precision_engine` and `candidates` gain nar in `bunko-sched`; the `bunko-engines` copies
   become re-exports of `bunko-sched`'s, as `bf16_native` already is, so the tables cannot
   drift.
@@ -555,7 +621,8 @@ Text-box engines go through `runtime::place_runnable` with a text-box arm in `fo
 - **`stage_seconds` GPU arms** for text-box engines: nar-small 0.12 s a page (fp32 on gfx1201:
   80 crops/s at 9.4 blocks a page) and charspot-small 0.04 (248 crops/s). The planner keeps one
   figure per engine; fp16 nar is faster, but with AnimeText on the CPU the detect width is at
-  its ceiling either way. NVIDIA figures replace these after the measurement in §20.5.
+  its ceiling either way. The lead replaces these with NVIDIA figures after the measurement
+  in §20.5.
 - `plan()` already treats a GPU text-box engine stage as device-bound (`textbox = None` on a
   GPU, `plan.rs:394-398`), so the CPU pool helpers stay unused there. The default engine
   width on a fast GPU of a 16+-core host is 2 (`FAST_GPU_ENGINE_THREADS`); one page is in host
@@ -572,6 +639,10 @@ Text-box engines go through `runtime::place_runnable` with a text-box arm in `fo
 - **Benchmark candidate.** When a row has a block detector and both devices are possible,
   the benchmark adds a `stage_device.detect = cpu` candidate and pins the faster: a many-core
   host with a weak GPU can be faster on the CPU.
+- **Engine-stage CPU candidate (L9).** For a text-box row whose engine can run on a GPU, the
+  benchmark also adds a `stage_device.engine = cpu` candidate beside the GPU one and pins the
+  faster. fp32 nar or charspot on a weak GPU (RDNA2/3) may be slower than the CPU pool. Output
+  is identical either way (§20.1), so this only picks the placement.
 - The module docs (`plan.rs:16-24`, "CPU only") are rewritten.
 
 ## 13. CPU fallback matrix
@@ -585,7 +656,7 @@ Text-box engines go through `runtime::place_runnable` with a text-box arm in `fo
 | GPU load or bind fails (VRAM, driver) | CPU | CPU | `warn!`, at session start |
 | `ocr.backend: cpu` | CPU | CPU | |
 | `stage_device.engine: cpu` / `stage_device.detect: cpu` | CPU | CPU | per stage |
-| GPU under 4 GiB VRAM | GPU if it loads | CPU | detector floor (guess) |
+| GPU under 4 GiB VRAM | GPU if it loads, `max_batch` 8 (§6) | CPU | detector floor (guess) |
 
 The fallback keeps the CPU pool sizing from #106 (`textbox_recognizer`).
 
@@ -605,9 +676,10 @@ The fallback keeps the CPU pool sizing from #106 (`textbox_recognizer`).
 ## 15. Registry, admin, config, docs
 
 - `crates/bunko-core/src/engines.rs`: nar-small and charspot-small get `cpu_only_reason: ""`
-  and `cpu_note` "Runs on an NVIDIA or AMD GPU with the libtorch backend pack, otherwise on
-  the CPU" (each in the plan that ships its route); AnimeText's detector `cpu_only_reason`
-  becomes `""`. Fix the "on ONNX Runtime" comment.
+  (each in the plan that ships its route); their `cpu_note` stays empty, since that field is a
+  caution shown when the CPU is picked and the catalog's `devices: "any"` already signals the
+  GPU route. AnimeText's detector `cpu_only_reason` becomes `""`. Fix the "on ONNX Runtime"
+  comment.
 - `generations.rs:893` replaces `"detect" => true` with "the effective detector's
   `cpu_only_reason` is non-empty"; `gpu:<n>` is then accepted for `animetext-blocks` and still
   refused for `ppocr-manga` and `ctd-lines`.
@@ -652,6 +724,10 @@ nar-small and charspot-small → `read-chars-1` (cfg `nc-models`); detector `ani
 → `detect-blocks-1` (cfg `gpl-models`); hayai-nova with a budget other than 512 →
 `hayai-budgets-1`. The installer, doctor and `open_session`'s reasons all use it.
 
+hayai budgets ride the refresh (L7): on a GPU variant, today's hard "update the OCR backend
+pack" error for a hayai row below budget 512 becomes a self-healing refresh. On the cpu pack
+(rule 2) it stays the error.
+
 ### 16.3 When a host refreshes
 
 `install_ocr::need()` gets a new non-blocking outcome between `Satisfied` and `Extra`:
@@ -668,15 +744,21 @@ It is returned when all of these hold:
 3. Either a pack of that variant that this release opens is installed and lacks a needed
    feature (`have: Some(..)`), or no pack is installed and every runnable row that wants the
    GPU pack also runs without one (text-box rows, AnimeText rows; `have: None`, a full
-   archive through the same lane; see §22 question 2). Rows that cannot run without a pack
-   (hayai, paddle) keep today's blocking `Need::Install`.
-4. The installed pack is a release pack the installer may replace: `bunko_version` not empty
-   (a development pack is never replaced), not `MOKURO_TORCH_PACK`. A pack found in the
-   bundled directory, `/opt` or a processor's fallback directory is not replaced; the new
-   pack goes into the role's own `backends_dir()`, which `discover` searches first.
-5. The host has a GPU the pack serves: AMD, the hwdetect `gfx` is in the pack's
-   `requires.gpu_archs` and the torch manifests have a package for it; NVIDIA, always (sm_75
-   and sm_80 packages cover Turing on; hwdetect has no `sm_`).
+   archive through the same lane, fetched in the background while the CPU route serves;
+   lead call L5). Rows that cannot run without a pack (hayai, paddle) keep today's blocking
+   `Need::Install`.
+4. The pack may be refreshed. This is two conditions, not one `replaceable` flag:
+   - A development pack (`bunko_version` empty) or a pack set by `MOKURO_TORCH_PACK` never
+     refreshes.
+   - A release pack outside the role's own `backends_dir()` (the bundled directory, `/opt`, a
+     processor's fallback directory) is not replaced in place, but it still refreshes: the new
+     pack is installed into the own directory (a thin refresh linking from the found pack, or
+     the full archive), which `discover` searches first. `pack_swap::at_start` then finds no
+     `<name>` there and only renames `.next-<name>` into place.
+5. The host has a GPU the pack serves: AMD, the hwdetect `gfx`, mapped through the same HSA
+   override rule as `prepare_rocm_env` (gfx1032 → gfx1030), is in the pack's
+   `requires.gpu_archs` and the torch manifests have a package for it (a gfx1032 test covers
+   this); NVIDIA, always (sm_75 and sm_80 packages cover Turing on; hwdetect has no `sm_`).
 6. A runnable row needs a feature the pack lacks: `torch_features_for(row) \ pack.json.features`
    is not empty. Library: `config.ocr.generations` (`.runnable()`), with `detector`,
    `patch_budget` and `pools.stage_device`; a row whose engine stage (or, for
@@ -686,7 +768,7 @@ It is returned when all of these hold:
    (`BackendArtifact.features`), checked in the child before any download; otherwise the
    outcome is "nothing to fetch for this release", recorded and retried daily.
 8. No standing failure in `<backends>/.pack-refresh.json` is due later.
-9. Automatic installs are on (`MOKURO_OCR_AUTO_INSTALL`, default on) and
+9. Automatic installs are on (`MOKURO_OCR_AUTO_INSTALL`, default on; lead call L6) and
    `MOKURO_OCR_PACK_REFRESH` is not `off`. When only this rule fails the outcome is still
    `Need::Refresh` but it is offered (doctor, the admin button, the CLI), never fetched by
    itself.
@@ -720,8 +802,11 @@ New child mode `install-ocr --if-needed --refresh` (background) and `install-ocr
 5. Probe in the child with `MOKURO_TORCH_PACK=<.next dir>`: the pack loads, finds this GPU and
    reports `Pack::features() ⊇ lacks`. Otherwise delete `.next-<name>` and fail.
 6. Fetch the new routes' model files with that pack (nar ~3.7 MB of `.pt2`; charspot ~5.8 MB
-   plus 44 MB of the authors' weights; AnimeText ~5.1 MB).
-7. Write `<backends>/.swap-at-start.json` `{name, staged, from, to, features, at}`.
+   plus 44 MB of the authors' weights; AnimeText ~5.1 MB): the child runs `prefetch_rows` for
+   the rows behind `lacks` with `MOKURO_TORCH_PACK` set to the staged directory (fp32, plus fp16
+   for nar when its mode benchmarks it).
+7. Write `<backends>/.swap-at-start.json` (a `pack_swap::SwapRecord`)
+   `{name, staged, from, to, features, at}`.
 8. Never touch the installed pack. A full install, `--force` or a release switch deletes
    `.next-*` and the record.
 
@@ -791,7 +876,9 @@ stops and a processor never pauses as "installing".
 - Reports (optional, ignored by old libraries): `HostInfo.backend_pack: Option<String>`,
   `HostInfo.pack_features: Vec<String>`, `UpdateReport.kind: Option<String>` = `"pack"`.
 - Scheduling needs nothing new: a processor lists GPU formats for nar-small only once the new
-  pack is loaded (§10.4); until then the library places those rows on its CPU or elsewhere.
+  pack is loaded, because `engine_formats` applies the full text-box test, `bt_read_chars`
+  included, and builds `format_engines` for GPU devices only (§10.4). Until then the library
+  places those rows on its CPU or elsewhere.
 - The refresh runs even with `processor.auto_update` off: it brings this release's own pack,
   not a new release.
 
@@ -817,10 +904,14 @@ stops and a processor never pauses as "installing".
 - `xtask torch-pack` writes `features` into `pack.json` and a second archive,
   `mokuro-bunko-backend-<ver>-<platform>-<variant>.thin.tar.zst`: `pack.json` first, then every
   file outside `lib_dir`.
+- That name would parse as variant `cu130.thin` today. `parse_pack_name` skips any
+  `.thin.tar.zst`, and `collect_backends` reads the thin archives separately to fill
+  `BackendArtifact.thin`.
 - `xtask manifest`: `BackendArtifact` gains `features: Vec<String>` and
   `thin: Option<ThinArtifact { url, sha256, size }>`, both `serde(default)`; 0.7.x installers
-  ignore them. `xtask verify` checks the thin archive; `publish.yml` uploads 3-6 more assets of
-  about 1 MB each.
+  ignore them. `xtask verify` checks the thin archive. `release.yml` uploads the 3-6 extra
+  assets of about 1 MB each: its `dist/*.tar.zst*` glob already takes them, so no workflow
+  changes. `publish.yml` only un-drafts the release.
 - PACKAGING.md §8: "A feature an older pack lacks does not move the floor: the pack lists its
   `features`, and a host whose enabled rows need one it lacks fetches its release's pack (thin
   refresh)."
@@ -842,7 +933,20 @@ also keep a host from refreshing.
 | backend packs with the new cdylib, `features` and the thin archives | `release.yml` at the 0.8.0 tag | **owner**: tag, then `publish.yml` |
 | branches and PRs | agents, locally | **owner** |
 
-No authors' weights are uploaded anywhere.
+No authors' weights are uploaded anywhere, and no package with weights inside is staged.
+
+**Order (L4).**
+
+1. `textbox-graphs-v1` (#102) is published before any of this ships; it is nar's CPU
+   fallback.
+2. Everything is staged and tested locally through `MOKURO_TORCH_MODELS_MIRROR`.
+3. The NVIDIA gates run (L3): the lead runs them on the 24-core host with an RTX 4090, only
+   while its GPU is idle. Code work does not wait for them; publishing does.
+4. The owner publishes `textbox-torch-v1` once, after plans 01-03 pass their gates (nar fp32
+   and fp16, charspot). No partial release that is later added to.
+5. The owner publishes `detector-torch-v1` once, after plan 04, if the owner approves it
+   (§22 Q1).
+6. The compiled-in manifests are filled after publication and before the 0.8.0 tag.
 
 ## 18. Effect on users
 
@@ -858,10 +962,12 @@ No authors' weights are uploaded anywhere.
 ## 19. Risks
 
 1. **fakegpu-built CUDA packages are untested for these graphs.** The spikes compiled on a real
-   AMD device; the SDPA pin matters for nar. The first NVIDIA run gates everything (§20.5).
+   AMD device; the SDPA pin matters for nar. The first NVIDIA run gates publishing (§17,
+   §20.5).
 2. **fp32 on ROCm is BLAS-bound.** nar fp32 runs about 8.5 pages/s on an RX 9070 XT; AnimeText
    fp32 is MIOpen-bound. RDNA2/3 cards may be slower than the CPU pool on big hosts; the
-   benchmark's `detect: cpu` candidate and the fp16 option for nar cover it.
+   benchmark's `detect: cpu` and `engine: cpu` candidates (§12) and the fp16 option for nar
+   cover it.
 3. **charspot decode parity.** The authors' ONNX does NMS and the chain in-graph; the GPU route
    uses the Rust port. Gate on texts and boxes over ≥ 1,000 crops.
 4. **Batch numerics.** nar fp32 ids were identical on 1,024 crops at b32 only. Gate at b1, b8
@@ -882,15 +988,26 @@ No authors' weights are uploaded anywhere.
 ## 20. Tests and verification gates
 
 1. **Package parity (`verify.py`, every built package, on a device that runs it).**
+   The crop set is JMangaBench_Read's 7,929 block crops (7,789 scored keys), compared with
+   the project's `paired.py`. A "0.1%" limit is `floor(0.001 × n)` of that set's own count.
    - nar fp32: all ids up to and including the first end id (6817) identical to the authors'
      fp32 PyTorch on all 7,929 JMangaBench_Read block crops.
-   - nar fp16: texts against the authors' fp16 on all 7,929 crops, at most 0.1% differing
-     (measured 0.03%). Ids past the end id are not compared.
+   - nar fp16: texts against the authors' fp16 on all 7,929 crops, at most 7 differing
+     (`floor(0.001 × 7,929)`; measured 2). Ids past the end id are not compared.
    - charspot: texts identical to the authors' ONNX, boxes within 0.5 px, order identical, on
      ≥ 1,000 crops.
    - AnimeText: identical block sets against ONNX Runtime CPU on ≥ 300 real pages (DB test
      volumes plus JMangaBench_Read pages, spreads and odd canvases), every matched corner
      within 0.01 page px, no crop edge moved (`floor`/`ceil` as `page.rs`).
+   - **A failed fp32 gate (L1).** That target is left out of the manifest, so that GPU uses
+     the CPU route, and the failure goes to the owner. It never bumps a revision, and it never
+     ships under a looser tolerance without the owner's sign-off. fp16 has its own gate (4).
+   - **Which targets are verified (L2).** On real cards: gfx1201, gfx1030, gfx1032 (through
+     the gfx1030 override), and sm_80 on Linux and on Windows. Every file copied to a test
+     machine is hash-checked there. gfx1100, gfx1101, gfx1102, gfx1200 and sm_75 (Linux and
+     Windows) have no test card: they ship built but unverified, as hayai's RDNA3 targets did
+     (TORCH-BACKEND.md), and only once their verified neighbours pass from the same exporter
+     commit. The docs list which targets were verified.
 2. **Rust parity** (ignored tests with env vars, as `nar_parity` today): `nar_torch_parity`,
    `nar_torch_parity_fp16`, `charspot_torch_parity`, `charspot_decode_parity` (the Rust decode
    against `core.py` on dumped dense and tail outputs), `animetext_torch_parity`.
@@ -898,15 +1015,19 @@ No authors' weights are uploaded anywhere.
    sidecar text at fp32 (nar, charspot, AnimeText); the count of differing fp16 nar lines goes
    in the CHANGELOG.
 4. **fp16 accuracy.** On full JMangaBench_Read (Hard only as a tie-breaker), fp16's composite
-   is not below fp32's under `paired.py` (the 95% CI reaches 0; EM losses ≤ wins + 0.1% of
-   boxes). Batch stability at b1, b8, b32 on all 7,929 crops.
-5. **Speed and the NVIDIA gate.** On the 24-core host with an RTX 4090 (the owner runs it) and
-   on the RX 9070 XT: crops/s per batch for each package, pages/s end to end, which stage
-   bounds, GPU utilisation; AnimeText b1/b4/b8 (decides the combiner); nar fp32 vs fp16;
-   through the benchmark's width search with AnimeText and with the PP-OCR detector; against
-   the CPU pool. sm_75 if a card is available.
+   is not below fp32's under `paired.py` (the 95% CI reaches 0; EM losses ≤ wins + 7, which is
+   `floor(0.001 × 7,789)` keys). Batch stability at b1, b8, b32 on all 7,929 crops.
+5. **Speed and the NVIDIA gate.** On the 24-core host with an RTX 4090 (the lead runs it, while
+   its GPU is idle; L3) and on the RX 9070 XT: crops/s per batch for each package, pages/s end
+   to end, which stage bounds, GPU utilisation; AnimeText b1/b4/b8 (decides the combiner); nar
+   fp32 vs fp16; through the benchmark's width search with AnimeText and with the PP-OCR
+   detector; against the CPU pool. With TF32 now off in `bt_init` (§9), the same run re-checks
+   hayai and paddle sm_80 output on a test volume with the new pack. The lead puts the
+   measured figures into `textbox_gpu_seconds` and `DETECT_GPU_SECONDS`. sm_75 has no test
+   card (L2).
 6. **Fallback matrix** (§13) with a dev pack, a 0.7.12 pack, the cpu pack, `ocr.backend: cpu`
-   and a forced load failure: each OCRs correctly with the reason logged.
+   and a forced load failure (the weights file truncated in a scratch model store): each OCRs
+   correctly with the reason logged.
 7. **Unit tests** in each plan; every `cargo test` runs with `XDG_CONFIG_HOME` and
    `XDG_DATA_HOME` redirected.
 8. **Live check** on a local trial server only: install the 0.7.12 rocm7.1 pack; serve the dev
@@ -926,38 +1047,27 @@ No authors' weights are uploaded anywhere.
 | 04 AnimeText on the GPU | §7.5, §9.2 ONNX weights, §9.3 detector, §10.3, §12 detect, §15 detector | 01 | 5-6 days |
 | 05 pack refresh | §6 features, §16 | 01-04 merged for the final feature list | 4-5 days |
 
-02, 03 and 04 can run in parallel after 01. 05 can start after 01; its `BT_FEATURES` list is
-final only once 02-04 have landed. The 0.8.0 tag needs all five; one pack update carries all
-of it.
+02, 03 and 04 each run on their own branch and worktree off 01, and they merge one at a time;
+all three edit `package.rs`, `runtime.rs`, `abi.rs`, `ffi.rs`, `open_session` and
+`bunko-vlm/src/textbox.rs`. `pack-inputs.txt` is re-blessed after each merge. 05 can start
+after 01; each feature joins `BT_FEATURES` in the commit that adds its route (§6), so 05 lists
+only routes that have landed. The 0.8.0 tag needs all five; one pack update carries all of it.
 
 ## 22. Open questions for the owner
 
 The spec assumes the recommended answer to each; a different answer changes only the named
-part.
+part. The questions keep their original numbers. Q2, Q3, Q6 and Q7 are settled as lead calls
+L5-L8 (§2).
 
-1. **AGPL `.pt2`.** The weightless AnimeText `.pt2` is compiled from Ultralytics' AGPL-3.0
-   model code (the mirrored ONNX already declares AGPL-3.0 in its metadata). Publish it in a
-   separate pre-release `detector-torch-v1` with the AGPL-3.0 text and a NOTICE, used only by
-   `gpl-models` builds? Recommended: yes. The alternative is no GPU route for AnimeText.
-2. **GPU hosts with no pack at all whose GPU-capable rows are only text-box or AnimeText rows.**
-   Today such a library already installs the GPU pack before its first OCR, blocking
-   (`needs_backend` counts every non-PP-OCR row). The spec makes that install non-blocking
-   through the refresh lane, with the CPU route serving meanwhile (about 350 MB for CUDA,
-   about 3 GB for ROCm). Recommended: yes. The alternative: never install a pack for such rows.
-3. **What gates the automatic refresh.** The OCR auto-install switch (`MOKURO_OCR_AUTO_INSTALL`,
-   on by default, which also covers Docker) or the release auto-update settings (`update.auto`,
-   `processor.auto_update`, opt-in, ignored in Docker)? Recommended: the auto-install switch.
-4. **Restart when the refreshed pack is staged.** Restart by itself at a quiet moment (new OCR
-   claims held on every machine until the running volumes and uploads finish, as `update.auto`
-   does), or wait for the next start? Recommended: restart by itself; `MOKURO_OCR_PACK_REFRESH=
-   next-start` keeps the waiting per host.
-5. **nar-small's default on GPUs.** Keep `auto-accuracy` at fp32 (recommended, as decided), and
-   say in docs and admin that AMD users should pick `auto-balanced` or `fp16`? On an RX 9070 XT
-   fp32 nar is about 8.5 pages/s, close to the CPU pool, and fp16 about 140, with the same
-   JMangaBench_Read score. NVIDIA fp32 is not measured yet.
-6. **hayai patch budgets ride the refresh.** The same mechanism turns today's hard "update the
-   OCR backend pack" error for hayai rows below budget 512 into a self-healing update
-   (`hayai-budgets-1`). That extends decision 4 to those hayai rows. Recommended: yes.
-7. **The rest of the original list**, adopted as recommended: the target set (CUDA sm_75/sm_80
-   on Linux and Windows, ROCm gfx1030/1100/1101/1102/1200/1201), and the release names
-   `textbox-torch-v1` and `detector-torch-v1`.
+- **Q1. AGPL `.pt2`.** The weightless AnimeText `.pt2` is compiled from Ultralytics' AGPL-3.0
+  model code (the mirrored ONNX already declares AGPL-3.0 in its metadata). Publish it in a
+  separate pre-release `detector-torch-v1` with the AGPL-3.0 text and a NOTICE, used only by
+  `gpl-models` builds? Recommended: yes. The alternative is no GPU route for AnimeText.
+- **Q4. Restart when the refreshed pack is staged.** Restart by itself at a quiet moment (new OCR
+  claims held on every machine until the running volumes and uploads finish, as `update.auto`
+  does), or wait for the next start? Recommended: restart by itself; `MOKURO_OCR_PACK_REFRESH=
+  next-start` keeps the waiting per host.
+- **Q5. nar-small's default on GPUs.** Keep `auto-accuracy` at fp32 (recommended, as decided), and
+  say in docs and admin that AMD users should pick `auto-balanced` or `fp16`? On an RX 9070 XT
+  fp32 nar is about 8.5 pages/s, close to the CPU pool, and fp16 about 140, with the same
+  JMangaBench_Read score. NVIDIA fp32 is not measured yet.
