@@ -117,7 +117,10 @@ What each licence means for us:
 - **muscgab's recognizers (weights CC BY-NC-SA 4.0).** Non-commercial use, attribution,
   share alike. We do not rehost the weights. The inference code they are published with
   is Apache-2.0 and `crates/bunko-engines/src/textbox.rs` follows its pre- and
-  post-processing. Their cards name AnimeText-OCR (CC BY-NC-SA 4.0) as real training data.
+  post-processing. `crates/bunko-vlm/src/textbox.rs` ports charspot-small's Apache-2.0
+  `core.py` (decode, NMS, reading-order chain) and `backends/cuda.py` (canvas batches,
+  tail parts) to Rust, with the attribution kept in its module header. Their cards name
+  AnimeText-OCR (CC BY-NC-SA 4.0) as real training data.
   nar-small's `r16` model is published as PyTorch weights only; the ONNX graph Bunko runs
   it with is ours, made from the author's Apache-2.0 model code, and holds no weights
   (§2.3). So do the compiled libtorch graphs of its GPU route (§2.4).

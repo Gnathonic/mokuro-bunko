@@ -113,6 +113,19 @@ pub fn empty(crop: &Rgb) -> bool {
 }
 
 // --- charspot ----------------------------------------------------------------
+//
+// Attribution (Apache License 2.0, section 4). The charspot code in this section
+// (`charspot_canvas`, the decode `charspot_detect` / `charspot_nms`, the reading-order
+// `charspot_chain`, the class table `charspot_classes`, and the canvas batching beside
+// them) is a port to Rust of `manga_ocr_charspot_small/core.py` and
+// `manga_ocr_charspot_small/backends/cuda.py` from the Hugging Face repository
+// `muscgab/manga-ocr-charspot-small` at revision
+// `72ca29202673880ca9c67b1c02c107535be4472b`, which are licensed under the Apache
+// License, Version 2.0 (https://www.apache.org/licenses/LICENSE-2.0). Changed from the
+// original: rewritten in Rust, the numpy arithmetic kept in the same dtypes, and the
+// batched NMS, chain and canvas grouping run per crop on the host. This notice stays
+// with the port. (The model's weights are CC BY-NC-SA 4.0 and are not part of this
+// code.)
 
 /// charspot's input for a crop: the canvas, and the factors that take canvas pixels
 /// back to crop pixels (`x`, `y`).
@@ -127,6 +140,251 @@ pub fn charspot_canvas(crop: &Rgb) -> (Rgb, (f32, f32)) {
         (crop.height as f64 / rh as f64) as f32,
     );
     (canvas, back)
+}
+
+/// A character centre is a heat value strictly above this (`core.HEAT_THR`).
+pub const CHARSPOT_HEAT_THR: f32 = 0.3;
+/// A kept box removes another whose IoU with it is at least this (`core.NMS_IOU`).
+pub const CHARSPOT_NMS_IOU: f32 = 0.2;
+/// A box whose furigana score is at least this is dropped (`core.RUBY_THR`).
+pub const CHARSPOT_RUBY_THR: f32 = 0.5;
+/// The dense heads' stride in canvas pixels.
+pub const CHARSPOT_STRIDE: usize = 8;
+
+/// One crop's dense maps on its canvas: channel-major `height x width` cells at stride
+/// 8; `heat` and `ruby` one channel each, `boxes` four (centre offsets `x`, `y` in
+/// cells, then the log sizes `w`, `h` in cells).
+#[derive(Debug, Clone, Copy)]
+pub struct DenseMaps<'a> {
+    pub heat: &'a [f32],
+    pub boxes: &'a [f32],
+    pub ruby: &'a [f32],
+    pub height: usize,
+    pub width: usize,
+}
+
+/// The characters charspot keeps in a crop, in NMS keep order: boxes
+/// `[x0, y0, x1, y1]` in canvas pixels, their centre scores, and the geometry the tail
+/// graph reads (centre `x`, `y`, width, height over the lower median of the larger
+/// sides).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Detected {
+    pub boxes: Vec<[f32; 4]>,
+    pub scores: Vec<f32>,
+    pub geo: Vec<[f32; 4]>,
+}
+
+/// `exp` of an f32, correctly rounded to f32 (through f64), so it is the same on every
+/// platform. numpy's own vectorised f32 `exp` is up to 2 ulp from this; the boxes then
+/// differ in the last bit at most, far inside the route's 0.5 px tolerance.
+fn exp_f32(x: f32) -> f32 {
+    (f64::from(x).exp()) as f32
+}
+
+/// numpy's `clip(x, lo, None)`, which keeps a NaN.
+fn clip_low(x: f32, lo: f32) -> f32 {
+    if x < lo { lo } else { x }
+}
+
+/// numpy's `maximum` / `minimum`, which keep a NaN.
+fn np_max(a: f32, b: f32) -> f32 {
+    if a.is_nan() || b.is_nan() {
+        f32::NAN
+    } else {
+        a.max(b)
+    }
+}
+
+fn np_min(a: f32, b: f32) -> f32 {
+    if a.is_nan() || b.is_nan() {
+        f32::NAN
+    } else {
+        a.min(b)
+    }
+}
+
+/// numpy's `argmax`: the first index of the largest value, or of the first NaN.
+fn argmax(values: impl IntoIterator<Item = f32>) -> usize {
+    let mut best = (0, f32::NEG_INFINITY);
+    for (i, v) in values.into_iter().enumerate() {
+        if v.is_nan() {
+            return i;
+        }
+        if i == 0 || v > best.1 {
+            best = (i, v);
+        }
+    }
+    best.0
+}
+
+/// `core.detect` over the crop's own `h8 x w8` region in the top-left corner of its
+/// canvas maps: the centres above the threshold in row-major order, their boxes
+/// (centres `(j + dx) * 8` in f64, sizes `exp(s) * 8` in f32, then cast to f32), NMS
+/// over all of them, then the furigana dropped. `None` when nothing is kept.
+pub fn charspot_detect(maps: &DenseMaps, h8: usize, w8: usize) -> Option<Detected> {
+    let (h8, w8) = (h8.min(maps.height), w8.min(maps.width));
+    let plane = maps.height * maps.width;
+    let stride = CHARSPOT_STRIDE as f64;
+    let mut cells = Vec::new();
+    let mut boxes = Vec::new();
+    let mut scores = Vec::new();
+    for i in 0..h8 {
+        for j in 0..w8 {
+            let k = i * maps.width + j;
+            let score = maps.heat[k];
+            if score > CHARSPOT_HEAT_THR {
+                let ch = |c: usize| maps.boxes[c * plane + k];
+                let cx = (j as f64 + f64::from(ch(0))) * stride;
+                let cy = (i as f64 + f64::from(ch(1))) * stride;
+                let w = exp_f32(ch(2)) * CHARSPOT_STRIDE as f32;
+                let h = exp_f32(ch(3)) * CHARSPOT_STRIDE as f32;
+                let (hw, hh) = (f64::from(w / 2.0), f64::from(h / 2.0));
+                boxes.push([
+                    (cx - hw) as f32,
+                    (cy - hh) as f32,
+                    (cx + hw) as f32,
+                    (cy + hh) as f32,
+                ]);
+                scores.push(score);
+                cells.push(k);
+            }
+        }
+    }
+    if cells.is_empty() {
+        return None;
+    }
+    let keep: Vec<usize> = charspot_nms(&boxes, &scores)
+        .into_iter()
+        .filter(|&k| maps.ruby[cells[k]] < CHARSPOT_RUBY_THR)
+        .collect();
+    if keep.is_empty() {
+        return None;
+    }
+    let kb: Vec<[f32; 4]> = keep.iter().map(|&k| boxes[k]).collect();
+    let sc: Vec<f32> = keep.iter().map(|&k| scores[k]).collect();
+    // The lower median of each box's larger side.
+    let mut sides: Vec<f32> = kb
+        .iter()
+        .map(|b| np_max(b[2] - b[0], b[3] - b[1]))
+        .collect();
+    sides.sort_by(f32::total_cmp);
+    let u = sides[(sides.len() - 1) / 2];
+    let geo = kb
+        .iter()
+        .map(|b| {
+            [
+                (b[0] + b[2]) / 2.0 / u,
+                (b[1] + b[3]) / 2.0 / u,
+                clip_low(b[2] - b[0], 1.0) / u,
+                clip_low(b[3] - b[1], 1.0) / u,
+            ]
+        })
+        .collect();
+    Some(Detected {
+        boxes: kb,
+        scores: sc,
+        geo,
+    })
+}
+
+/// `core.nms`: boxes by score, descending, equal scores in their order (numpy's stable
+/// sort); each kept box removes every later one whose IoU with it is at least 0.2
+/// (`1e-6` added to the union, in f32) or whose centre lies within a quarter of the
+/// kept box's sides of its centre. The kept boxes' indices, in keep order.
+pub fn charspot_nms(boxes: &[[f32; 4]], scores: &[f32]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..boxes.len().min(scores.len())).collect();
+    // `argsort(-s, kind="stable")`: NaN scores last, as numpy sorts them.
+    order.sort_by(|&a, &b| {
+        let (x, y) = (-scores[a], -scores[b]);
+        match (x.is_nan(), y.is_nan()) {
+            (false, false) => x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal),
+            (a, b) => a.cmp(&b),
+        }
+    });
+    let area = |b: &[f32; 4]| clip_low(b[2] - b[0], 0.0) * clip_low(b[3] - b[1], 0.0);
+    let suppresses = |a: &[f32; 4], b: &[f32; 4]| {
+        let inter = clip_low(np_min(a[2], b[2]) - np_max(a[0], b[0]), 0.0)
+            * clip_low(np_min(a[3], b[3]) - np_max(a[1], b[1]), 0.0);
+        let iou = inter / (area(a) + area(b) - inter + 1e-6);
+        let (acx, acy) = ((a[0] + a[2]) / 2.0, (a[1] + a[3]) / 2.0);
+        let (bcx, bcy) = ((b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0);
+        let (hx, hy) = ((a[2] - a[0]) * 0.25, (a[3] - a[1]) * 0.25);
+        let inside = (bcx - acx).abs() <= hx && (bcy - acy).abs() <= hy;
+        // numpy's `~(iou < thr)`: a NaN IoU suppresses too.
+        iou >= CHARSPOT_NMS_IOU || iou.is_nan() || inside
+    };
+    let mut alive = vec![true; order.len()];
+    let mut keep = Vec::new();
+    for i in 0..order.len() {
+        if !alive[i] {
+            continue;
+        }
+        let kept = &boxes[order[i]];
+        keep.push(order[i]);
+        for (j, live) in alive.iter_mut().enumerate().skip(i + 1) {
+            if *live && suppresses(kept, &boxes[order[j]]) {
+                *live = false;
+            }
+        }
+    }
+    keep
+}
+
+/// `core.chain`: the reading order of `n = start.len()` characters (`pair` row-major
+/// `n x n`, `pair[a * n + b]` the score of `b` following `a`). Start at the best start
+/// score, follow the best unused successor, and restart at the best unused start when
+/// `end[cur]` is strictly greater than that successor's score. Ties go to the first
+/// index, as numpy's `argmax`.
+pub fn charspot_chain(pair: &[f32], start: &[f32], end: &[f32]) -> Vec<usize> {
+    let n = start.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let mut used = vec![false; n];
+    let mut cur = argmax(start.iter().copied());
+    let mut seq = Vec::with_capacity(n);
+    seq.push(cur);
+    used[cur] = true;
+    while seq.len() < n {
+        let row = &pair[cur * n..(cur + 1) * n];
+        let next = |k: usize| if used[k] { f32::NEG_INFINITY } else { row[k] };
+        let mut j = argmax((0..n).map(next));
+        if end[cur] > next(j) {
+            let rest: Vec<usize> = (0..n).filter(|&k| !used[k]).collect();
+            j = rest[argmax(rest.iter().map(|&k| start[k]))];
+        }
+        seq.push(j);
+        used[j] = true;
+        cur = j;
+    }
+    seq
+}
+
+/// charspot's class table (`core.load_vocab`): the vocabulary's characters padded with
+/// `""` to [`CHARSPOT_CLASSES`], then the tate-chu-yoko glyphs, every pair and then
+/// every triple of `!` and `?`. An error when the vocabulary is longer than that.
+pub fn charspot_classes(mut characters: Vec<String>) -> Result<Vec<String>, String> {
+    if characters.len() > CHARSPOT_CLASSES {
+        return Err(format!(
+            "{} characters, more than {CHARSPOT_CLASSES}",
+            characters.len()
+        ));
+    }
+    characters.resize(CHARSPOT_CLASSES, String::new());
+    let marks = ['!', '?'];
+    for a in marks {
+        for b in marks {
+            characters.push([a, b].iter().collect());
+        }
+    }
+    for a in marks {
+        for b in marks {
+            for c in marks {
+                characters.push([a, b, c].iter().collect());
+            }
+        }
+    }
+    Ok(characters)
 }
 
 // --- nar-small ---------------------------------------------------------------
@@ -397,5 +655,140 @@ mod tests {
                 < 1e-6
         );
         assert!(input.patches[n * 588..].iter().all(|v| *v == 0.0));
+    }
+
+    // --- charspot's decode ---------------------------------------------------
+
+    fn maps<'a>(
+        heat: &'a [f32],
+        boxes: &'a [f32],
+        ruby: &'a [f32],
+        h: usize,
+        w: usize,
+    ) -> DenseMaps<'a> {
+        DenseMaps {
+            heat,
+            boxes,
+            ruby,
+            height: h,
+            width: w,
+        }
+    }
+    // 2 x 3 cells; centres at +0.5 cell, sizes exp(0) * 8 = 8 px
+    const H: [f32; 6] = [0.9, 0.1, 0.0, 0.0, 0.5, 0.31];
+    fn bx() -> Vec<f32> {
+        [vec![0.5; 6], vec![0.5; 6], vec![0.0; 6], vec![0.0; 6]].concat()
+    }
+
+    #[test]
+    fn three_centres_three_characters() {
+        let b = bx();
+        let d = charspot_detect(&maps(&H, &b, &[0.0; 6], 2, 3), 2, 3).unwrap();
+        assert_eq!(
+            d.boxes,
+            vec![
+                [0.0, 0.0, 8.0, 8.0],
+                [8.0, 8.0, 16.0, 16.0],
+                [16.0, 8.0, 24.0, 16.0]
+            ]
+        );
+        assert_eq!(d.scores, vec![0.9, 0.5, 0.31]);
+        assert_eq!(
+            d.geo,
+            vec![
+                [0.5, 0.5, 1.0, 1.0],
+                [1.5, 1.5, 1.0, 1.0],
+                [2.5, 1.5, 1.0, 1.0]
+            ]
+        );
+    }
+
+    #[test]
+    fn furigana_is_dropped() {
+        let b = bx();
+        let mut ruby = [0.0f32; 6];
+        ruby[4] = 0.6;
+        let d = charspot_detect(&maps(&H, &b, &ruby, 2, 3), 2, 3).unwrap();
+        assert_eq!(d.boxes, vec![[0.0, 0.0, 8.0, 8.0], [16.0, 8.0, 24.0, 16.0]]);
+    }
+
+    #[test]
+    fn nothing_above_the_threshold_is_no_characters() {
+        let b = bx();
+        assert!(charspot_detect(&maps(&[0.3; 6], &b, &[0.0; 6], 2, 3), 2, 3).is_none());
+        assert!(charspot_detect(&maps(&H, &b, &[0.5; 6], 2, 3), 2, 3).is_none());
+    }
+
+    #[test]
+    fn overlap_and_centre_rules() {
+        assert_eq!(
+            charspot_nms(
+                &[
+                    [0.0, 0.0, 10.0, 10.0],
+                    [1.0, 1.0, 11.0, 11.0],
+                    [30.0, 0.0, 40.0, 10.0]
+                ],
+                &[0.9, 0.8, 0.7]
+            ),
+            vec![0, 2]
+        );
+        assert_eq!(
+            charspot_nms(
+                &[[12.0, 12.0, 14.0, 14.0], [0.0, 0.0, 20.0, 20.0]],
+                &[0.8, 0.9]
+            ),
+            vec![1]
+        );
+    }
+
+    #[test]
+    fn equal_scores_keep_the_first() {
+        assert_eq!(
+            charspot_nms(
+                &[[0.0, 0.0, 10.0, 10.0], [1.0, 1.0, 11.0, 11.0]],
+                &[0.5, 0.5]
+            ),
+            vec![0]
+        );
+    }
+
+    #[test]
+    fn the_chain_follows_the_best_successor() {
+        let pair = [0.0, 0.0, 0.5, 0.7, 0.0, 0.3, 0.1, 0.2, 0.0];
+        assert_eq!(
+            charspot_chain(&pair, &[0.1, 0.9, 0.2], &[0.0, 0.0, 0.0]),
+            vec![1, 0, 2]
+        );
+        assert_eq!(
+            charspot_chain(&pair, &[0.1, 0.9, 0.2], &[0.0, 0.8, 0.0]),
+            vec![1, 2, 0]
+        );
+    }
+
+    #[test]
+    fn an_end_tie_continues_the_chain() {
+        let pair = [0.0, 0.0, 0.5, 0.7, 0.0, 0.3, 0.1, 0.2, 0.0];
+        assert_eq!(
+            charspot_chain(&pair, &[0.1, 0.9, 0.2], &[0.0, 0.7, 0.0]),
+            vec![1, 0, 2]
+        );
+    }
+
+    #[test]
+    fn the_class_table() {
+        let t = charspot_classes(vec!["a".into(), "b".into()]).unwrap();
+        assert_eq!(t.len(), 6830);
+        assert_eq!(
+            (
+                &t[0][..],
+                &t[2][..],
+                &t[6818][..],
+                &t[6821][..],
+                &t[6822][..],
+                &t[6829][..]
+            ),
+            ("a", "", "!!", "??", "!!!", "???")
+        );
+        assert!(charspot_classes(vec![String::new(); 6819]).is_err());
     }
 }

@@ -99,29 +99,8 @@ impl std::fmt::Debug for Charspot {
 
 impl Charspot {
     pub fn load(model: &Path, vocabulary: &Path, opts: &RuntimeOptions) -> Result<Self, VlmError> {
-        let mut classes = load_characters(vocabulary)?;
-        if classes.len() > CHARSPOT_CLASSES {
-            return Err(VlmError::Asset(format!(
-                "vocabulary {}: {} characters, more than {CHARSPOT_CLASSES}",
-                vocabulary.display(),
-                classes.len()
-            )));
-        }
-        classes.resize(CHARSPOT_CLASSES, String::new());
-        // The tate-chu-yoko glyphs: every pair, then every triple, of `!` and `?`.
-        let marks = ['!', '?'];
-        for a in marks {
-            for b in marks {
-                classes.push([a, b].iter().collect());
-            }
-        }
-        for a in marks {
-            for b in marks {
-                for c in marks {
-                    classes.push([a, b, c].iter().collect());
-                }
-            }
-        }
+        let classes = charspot_classes(load_characters(vocabulary)?)
+            .map_err(|e| VlmError::Asset(format!("vocabulary {}: {e}", vocabulary.display())))?;
         let model = Model::load(model, opts).map_err(|e| VlmError::Runtime(e.to_string()))?;
         Ok(Self { model, classes })
     }
