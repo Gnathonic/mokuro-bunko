@@ -493,6 +493,21 @@ fn check_backend(target: &crate::ocr_target::OcrTarget) -> Check {
     } else {
         ""
     };
+    // No enabled row needs a pack here (ppocr-manga, and on the CPU the text-box
+    // engines, read without it): a pack that will not open is only clutter, and
+    // install-ocr would install nothing (or a pack nothing uses).
+    let needed = super::install_ocr::needs_backend(target, want.variant);
+    const NOT_NEEDED: &str = "not needed by the enabled rows here (ppocr-manga, and on the CPU the text-box engines, read without it)";
+    let unneeded = |detail: String, dir: &Path| {
+        Check::warn(
+            "OCR backend",
+            format!("{detail}; a backend pack is {NOT_NEEDED}"),
+            Some(format!(
+                "The pack is not used and can be removed: delete {}",
+                dir.display()
+            )),
+        )
+    };
     // The pack the OCR runtime will open: MOKURO_TORCH_PACK, else bunko-engines'
     // discovery order (directory by directory; a GPU pack whose driver is present,
     // then cpu).
@@ -503,6 +518,12 @@ fn check_backend(target: &crate::ocr_target::OcrTarget) -> Check {
         .clone()
         .or_else(|| bunko_engines::torch::discover_all(&dirs).into_iter().next())
     else {
+        if !needed {
+            return Check::pass(
+                "OCR backend",
+                format!("no backend pack installed; one is {NOT_NEEDED}"),
+            );
+        }
         return Check::warn(
             "OCR backend",
             format!(
@@ -529,6 +550,9 @@ fn check_backend(target: &crate::ocr_target::OcrTarget) -> Check {
         .and_then(|b| PackManifest::parse(&b).map_err(|e| e.to_string()))
     {
         Ok(m) => m,
+        Err(e) if !needed && pinned.is_none() => {
+            return unneeded(format!("{} ({how}): {e}", dir.display()), &dir);
+        }
         Err(e) => {
             return Check::fail(
                 "OCR backend",
@@ -544,7 +568,25 @@ fn check_backend(target: &crate::ocr_target::OcrTarget) -> Check {
         want.reason
     );
     // A pack of a release this build opens (abi::OLDEST_PACK_RELEASE up to this one).
-    if !bunko_engines::torch::abi::release_opens_pack(&m.bunko_version, bunko_core::VERSION) {
+    let opens =
+        bunko_engines::torch::abi::release_opens_pack(&m.bunko_version, bunko_core::VERSION);
+    if !needed && pinned.is_none() && (!opens || !pack_complete(&dir, &m)) {
+        return unneeded(
+            format!(
+                "{detail}; {}",
+                if opens {
+                    "its files are missing or damaged".to_string()
+                } else {
+                    format!(
+                        "the backend pack is from mokuro-bunko {}, which this release does not open",
+                        m.bunko_version
+                    )
+                }
+            ),
+            &dir,
+        );
+    }
+    if !opens {
         return Check::fail(
             "OCR backend",
             format!(
@@ -661,6 +703,27 @@ fn check_packages(
             PackageRow::OnCpu(s) => on_cpu.push(s),
         }
     }
+    // A text-box row's block detector: its package on the GPU a session detects on.
+    #[cfg(feature = "gpl-models")]
+    for g in config.ocr.generations.iter().filter(|g| g.runnable()) {
+        let Some(need) = pipeline.detector_need(
+            &g.engine,
+            &g.precision,
+            g.effective_detector(),
+            g.pools.stage_device.get("detect").map(String::as_str),
+        ) else {
+            continue;
+        };
+        let (list, line) = match detector_row(&need) {
+            PackageRow::Present(s) => (&mut present, s),
+            PackageRow::Missing(s) => (&mut missing, s),
+            PackageRow::Cannot(s) => (&mut cannot, s),
+            PackageRow::OnCpu(s) => (&mut on_cpu, s),
+        };
+        if !list.contains(&line) {
+            list.push(line);
+        }
+    }
     let mut detail = Vec::new();
     if !present.is_empty() {
         detail.push(format!("present: {}", present.join("; ")));
@@ -709,6 +772,27 @@ enum PackageRow {
     /// A text-box engine on its CPU route (ONNX Runtime), which needs no compiled
     /// package: a note, never a failure. Its missing files are the Models check's.
     OnCpu(String),
+}
+
+/// How [`check_packages`] reports a text-box row's block detector: its package on the
+/// GPU it detects on, or a note when it detects on the CPU (which needs no package).
+#[cfg(feature = "gpl-models")]
+fn detector_row(need: &bunko_engines::DetectorNeed) -> PackageRow {
+    let d = &need.detector;
+    if need.device == "cpu" {
+        return PackageRow::OnCpu(match &need.fallback {
+            Some(why) => format!("{d} detects on the CPU ({why})"),
+            None => format!("{d} detects on the CPU"),
+        });
+    }
+    match &need.package {
+        Some(_) => PackageRow::Present(format!("{d} fp32 on {}", need.device)),
+        None => PackageRow::Missing(format!(
+            "{d} fp32 on {} (package: one of {})",
+            need.device,
+            need.targets.join(", ")
+        )),
+    }
 }
 
 /// How [`check_packages`] reports `engine`'s row from its package status.
@@ -1036,6 +1120,38 @@ mod package_row_tests {
             PackageRow::Cannot("hayai-nova: no package".into())
         );
     }
+
+    /// A block detector's package on its GPU: present, missing (with the targets it
+    /// needs), or a note when it detects on the CPU.
+    #[cfg(feature = "gpl-models")]
+    #[test]
+    fn a_block_detectors_package_is_a_row() {
+        let mut need = bunko_engines::DetectorNeed {
+            detector: "animetext-blocks".into(),
+            device: "gpu:0".into(),
+            fallback: None,
+            targets: vec!["rocm-gfx1201".into(), "rocm-gfx12-generic".into()],
+            package: Some(PathBuf::from("/x")),
+        };
+        assert_eq!(
+            detector_row(&need),
+            PackageRow::Present("animetext-blocks fp32 on gpu:0".into())
+        );
+        need.package = None;
+        assert_eq!(
+            detector_row(&need),
+            PackageRow::Missing(
+                "animetext-blocks fp32 on gpu:0 (package: one of rocm-gfx1201, rocm-gfx12-generic)"
+                    .into()
+            )
+        );
+        need.device = "cpu".into();
+        need.fallback = Some("ocr.backend is cpu".into());
+        assert_eq!(
+            detector_row(&need),
+            PackageRow::OnCpu("animetext-blocks detects on the CPU (ocr.backend is cpu)".into())
+        );
+    }
 }
 
 #[cfg(all(test, feature = "ocr"))]
@@ -1148,6 +1264,7 @@ mod library_ocr_tests {
             &[bunko_proto::EngineWant {
                 engine: models::PADDLE.into(),
                 precision: "auto-accuracy".into(),
+                detector: None,
             }],
         )
         .unwrap();
@@ -1194,5 +1311,54 @@ mod library_ocr_tests {
             c.detail
         );
         assert!(c.hint.as_deref().is_some_and(|h| h.contains("install-ocr")));
+    }
+
+    /// A CPU-only library whose rows need no pack (a text-box engine): an old pack it
+    /// does not open is a warning that it can go, not "Run install-ocr" (which installs
+    /// nothing, or a pack nothing uses); no pack at all passes.
+    #[cfg(feature = "nc-models")]
+    #[test]
+    fn a_pack_no_row_needs_is_no_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.yaml");
+        std::fs::write(
+            &config,
+            format!(
+                "storage:\n  base_path: {}\nocr:\n  backend: cpu\n  generations:\n    - {{id: g-1, name: nar-small, engine: nar-small, primary: true, enabled: true}}\n",
+                dir.path().display()
+            ),
+        )
+        .unwrap();
+        let target = OcrTarget {
+            role: Role::Library,
+            storage: dir.path().to_path_buf(),
+            processor_config: None,
+            library: Some(crate::cfgfile::load_effective_quiet(&config).unwrap()),
+            reason: String::new(),
+        };
+        assert!(!crate::cmd::install_ocr::needs_backend(&target, "cpu"));
+        let c = check_backend(&target);
+        assert!(c.status == Status::Pass, "{}", c.detail);
+        assert!(
+            c.detail.contains("not needed by the enabled rows"),
+            "{}",
+            c.detail
+        );
+
+        crate::cmd::install_ocr::tests::fake_pack_of(&target.backends_dir(), "cpu", "0.7.12");
+        let c = check_backend(&target);
+        assert!(c.status == Status::Warn, "{}", c.detail);
+        assert!(
+            c.detail
+                .contains("from mokuro-bunko 0.7.12, which this release does not open")
+                && c.detail.contains("not needed by the enabled rows"),
+            "{}",
+            c.detail
+        );
+        let hint = c.hint.unwrap();
+        assert!(
+            hint.contains("can be removed") && !hint.contains("install-ocr"),
+            "{hint}"
+        );
     }
 }

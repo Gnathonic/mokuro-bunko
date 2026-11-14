@@ -584,6 +584,61 @@ async fn a_text_box_row_on_a_slow_gpu_reads_on_the_cpu() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cpu_that_wins_the_placement_keeps_the_gpus_precision_pick() {
+    // fp16 beats fp32 on the GPU, and the CPU beats both: the row's precision pick (the
+    // one the library stores and a GPU session reads at) stays fp16.
+    let config = FakeConfig {
+        engines: vec!["nar-small".into()],
+        gpu_formats: Some(vec!["fp32".into(), "fp16".into()]),
+        precision_page_delay: BTreeMap::from([
+            ("fp16".to_string(), Duration::from_millis(6)),
+            ("fp32".to_string(), Duration::from_millis(18)),
+        ]),
+        cpu_page_delay: Some(Duration::from_millis(3)),
+        ..Default::default()
+    };
+    let (seen, _) = run(config, spec("nar-small", "auto-balanced", &[]), false).await;
+    assert_eq!(seen.fatal, None);
+    let notes: Vec<&str> = seen
+        .trials
+        .iter()
+        .map(|t| t["note"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        &notes[..3],
+        ["precision fp16", "precision fp32", "engine on cpu"],
+        "{:#?}",
+        seen.trials
+    );
+    // The CPU trial carries the CPU's own format.
+    assert_eq!(seen.trials[2]["precision"], "fp32");
+    assert_eq!(seen.trials[2]["accepted"], true);
+    let done = seen.done.unwrap();
+    assert_eq!(done["precision"], "fp16", "{done:#?}");
+    assert_eq!(done["precision_mode"], "auto-balanced");
+    let trials = done["precision_trials"].as_array().unwrap();
+    let chosen: Vec<(&str, bool)> = trials
+        .iter()
+        .map(|t| (t["precision"].as_str().unwrap(), t["chosen"] == true))
+        .collect();
+    assert_eq!(chosen, [("fp16", true), ("fp32", false)]);
+    assert!(
+        done["precision_why"]
+            .as_str()
+            .unwrap()
+            .starts_with("benchmark: fp16 "),
+        "{done:?}"
+    );
+    assert_eq!(done["best"]["stage_device"], json!({"engine": "cpu"}));
+    // The library's pick from what it stores is the measured winner.
+    let stored = done.clone();
+    assert_eq!(
+        bunko_sched::precision::bench_pick(Some(&stored), "auto-balanced").0,
+        Some("fp16".into())
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_pinned_or_cpu_text_box_row_has_no_placement_phase() {
     let mut pinned = spec("nar-small", "auto-accuracy", &[]);
     pinned

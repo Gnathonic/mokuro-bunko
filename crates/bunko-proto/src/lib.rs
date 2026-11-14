@@ -334,6 +334,11 @@ pub struct EngineWant {
     pub engine: String,
     /// The generation's precision mode (`auto-accuracy`, `fp32`, ...).
     pub precision: String,
+    /// The generation's detector when it is not the default one (0.8 addition,
+    /// optional): a block detector's compiled package is fetched ahead of work too.
+    /// Older processors ignore it; None from an older library.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detector: Option<String>,
 }
 
 /// `RegisterReply.version_mismatch`: the library's verdict on the processor's version.
@@ -917,6 +922,23 @@ mod tests {
         );
         assert_eq!(serde_json::from_str::<RegisterReply>(&text).unwrap(), reply);
     }
+    /// An engine want names its detector only when it is not the default one; an older
+    /// library's want (no detector) still reads.
+    #[test]
+    fn engine_want_detector_is_optional() {
+        let old: EngineWant =
+            serde_json::from_str(r#"{"engine":"nar-small","precision":"auto-accuracy"}"#).unwrap();
+        assert_eq!(old.detector, None);
+        assert!(!serde_json::to_string(&old).unwrap().contains("detector"));
+        let new = EngineWant {
+            detector: Some("animetext-blocks".into()),
+            ..old
+        };
+        let text = serde_json::to_string(&new).unwrap();
+        assert!(text.contains(r#""detector":"animetext-blocks""#), "{text}");
+        assert_eq!(serde_json::from_str::<EngineWant>(&text).unwrap(), new);
+    }
+
     /// A processor older than engine revisions announces none: each engine it lists
     /// counts as revision 1. A newer one's map round-trips; an empty map is not sent.
     #[test]

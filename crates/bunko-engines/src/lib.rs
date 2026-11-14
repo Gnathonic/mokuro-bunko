@@ -216,6 +216,22 @@ pub struct Prefetched {
     pub host_files: Vec<PathBuf>,
 }
 
+/// Where a text-box row's block detector runs on this machine
+/// ([`EnginePipeline::detector_need`]).
+#[cfg(all(feature = "torch", feature = "gpl-models"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetectorNeed {
+    pub detector: String,
+    /// `cpu` or `gpu:<n>`.
+    pub device: String,
+    /// Why the CPU though a GPU was asked for or is here (as a session warns it).
+    pub fallback: Option<String>,
+    /// The targets of its fp32 package on that GPU, best first (none on the CPU).
+    pub targets: Vec<String>,
+    /// That package, when it is fully here.
+    pub package: Option<PathBuf>,
+}
+
 /// Overrides `<storage>/backends` (where backend packs are looked for).
 pub const BACKENDS_DIR_ENV: &str = "MOKURO_BACKENDS_DIR";
 
@@ -1569,16 +1585,14 @@ impl EnginePipeline {
     /// Where the detect stage of a row reading with `detector` would run beside an engine
     /// on `engine_device` ([`pick_detect_device`] over this host's
     /// [`detect_candidates`](Self::detect_candidates)), and why not on a GPU when it
-    /// could have been. The CPU for a line detector, and in a build without
-    /// `gpl-models` (no block detector).
-    #[cfg(any(feature = "nc-models", feature = "gpl-models"))]
+    /// could have been. The CPU for a line detector.
+    #[cfg(feature = "gpl-models")]
     fn detect_pick(
         &self,
         spec: &RowSpec,
         detector: &str,
         engine_device: &str,
     ) -> (String, Option<String>) {
-        #[cfg(feature = "gpl-models")]
         if models::block_detector(detector) {
             return pick_detect_device(
                 spec.pools
@@ -1590,7 +1604,6 @@ impl EnginePipeline {
                 &self.detect_candidates(detector),
             );
         }
-        let _ = (spec, detector, engine_device);
         (Placement::cpu().device, None)
     }
 
@@ -1600,6 +1613,19 @@ impl EnginePipeline {
     /// None without a libtorch pack, and none for a detector with no GPU route.
     #[cfg(feature = "gpl-models")]
     fn detect_candidates(&self, detector: &str) -> Vec<DetectCandidate> {
+        self.detect_gpus(detector, |p, targets| {
+            self.store.torch_package_obtainable(detector, p, targets)
+        })
+    }
+
+    /// [`detect_candidates`](Self::detect_candidates) with `has_package(precision,
+    /// targets)` deciding whether a device's package counts as there.
+    #[cfg(feature = "gpl-models")]
+    fn detect_gpus(
+        &self,
+        detector: &str,
+        has_package: impl Fn(&str, &[String]) -> bool,
+    ) -> Vec<DetectCandidate> {
         #[cfg(feature = "torch")]
         if detector == models::ANIMETEXT
             && let Ok(tb) = self.torch()
@@ -1614,15 +1640,82 @@ impl EnginePipeline {
                     id: d.id.clone(),
                     vram_mb: d.vram_mb,
                     runs: detects
-                        && torch::device_formats(&tb.report, &d.id, |p, targets| {
-                            self.store.torch_package_obtainable(detector, p, targets)
-                        })
-                        .contains(&"fp32"),
+                        && torch::device_formats(&tb.report, &d.id, &has_package).contains(&"fp32"),
                 })
                 .collect();
         }
-        let _ = detector;
+        let _ = (detector, has_package);
         Vec::new()
+    }
+
+    /// Where the block detector of a text-box row (`engine` in precision `mode`, reading
+    /// with `detector`, its detect stage asked for `asked`: the row's
+    /// `pools.stage_device.detect`) runs on this machine once its compiled package is
+    /// here, as a session picks it ([`pick_detect_device`]): a GPU when the pack detects
+    /// blocks and the release has an AnimeText package for one, else the CPU. None for
+    /// another engine or a line detector, and for a row this machine does not run (the
+    /// precision refusal). `models download` fetches the package ahead of the
+    /// first session ([`prefetch_detector`](Self::prefetch_detector)); `doctor` reports
+    /// it.
+    #[cfg(all(feature = "torch", feature = "gpl-models"))]
+    pub fn detector_need(
+        &self,
+        engine: &str,
+        mode: &str,
+        detector: &str,
+        asked: Option<&str>,
+    ) -> Option<DetectorNeed> {
+        if !models::textbox_engine(engine) || !models::block_detector(detector) {
+            return None;
+        }
+        // The engine's device (the CPU when it cannot place yet: its files are the
+        // Models check's); a row whose precision nothing here runs is not run here.
+        let engine_device = match self.need_for(engine, mode) {
+            Ok(need) => need.device,
+            Err(e) if e.contains(precision::PRECISION_REFUSAL) => return None,
+            Err(_) => Placement::cpu().device,
+        };
+        let gpus = self.detect_gpus(detector, |p, targets| {
+            self.store.torch_package_known(detector, p, targets)
+        });
+        let (device, fallback) = pick_detect_device(
+            asked,
+            &engine_device,
+            self.config.backend == Backend::Cpu,
+            &gpus,
+        );
+        let (targets, package) = match self.torch() {
+            Ok(tb) if device != Placement::cpu().device => {
+                let targets = Self::torch_targets(&tb, &device, Precision::Fp32);
+                let package = self
+                    .store
+                    .torch_package_present(detector, Precision::Fp32.as_str(), &targets)
+                    .map(|p| p.dir);
+                (targets, package)
+            }
+            _ => (Vec::new(), None),
+        };
+        Some(DetectorNeed {
+            detector: detector.to_string(),
+            device,
+            fallback,
+            targets,
+            package,
+        })
+    }
+
+    /// Fetch (or find) the compiled package of a [`DetectorNeed`] on a GPU, unpacked:
+    /// its directory. None on the CPU, whose route reads only the ONNX file (a host
+    /// file of the row, fetched with the others).
+    #[cfg(all(feature = "torch", feature = "gpl-models"))]
+    pub fn prefetch_detector(&self, need: &DetectorNeed) -> Result<Option<PathBuf>, String> {
+        if need.device == Placement::cpu().device {
+            return Ok(None);
+        }
+        self.store
+            .ensure_torch_package(&need.detector, Precision::Fp32.as_str(), &need.targets)
+            .map(|p| Some(p.dir))
+            .map_err(|e| e.to_string())
     }
 
     /// AnimeText on the libtorch GPU of `placement`, binding `onnx` (the CPU route's
@@ -2182,28 +2275,8 @@ impl EnginePipeline {
             if let Some(r) = &textbox_precision {
                 info!("{engine} precision: {} ({})", r.precision, r.why);
             }
-            if recognizer.is_none() {
-                // The ONNX pool on the CPU: the session's threads follow the engine
-                // stage's planned width, which leaves more cores to the pool when the
-                // block detector is to run on a GPU.
-                let host = host_of(&placement);
-                let (detect_at, _) = self.detect_pick(spec, detector, &placement.device);
-                let workers = plan::plan(
-                    engine,
-                    road,
-                    &placement.device,
-                    &detect_at,
-                    &spec.pools,
-                    &host,
-                )
-                .iter()
-                .find(|s| s.key == plan::STAGE_ENGINE)
-                .map_or(1, |s| s.workers);
-                recognizer = Some(self.textbox_recognizer(engine, workers)?);
-                // nar-small's CPU graph is ours; charspot-small runs its authors' own.
-                textbox_release =
-                    (engine == models::NAR).then(|| bunko_ocr::models::TEXTBOX_RELEASE.to_string());
-            }
+            // On the CPU the ONNX pool loads below, once the detect stage's device is
+            // known: its threads follow the final plan.
         }
         if let Some(r) = &resolved {
             match self.recognizer(spec, &placement, r.precision, r.backend.as_deref()) {
@@ -2302,6 +2375,21 @@ impl EnginePipeline {
             )
         };
         let detect_workers = detect_width(&stages);
+        // A text-box row the GPU did not take: the ONNX pool on the CPU. The session's
+        // threads follow the engine stage's width in the final plan, which leaves more
+        // cores to the pool when the block detector loaded on a GPU, and fewer when it
+        // could not and detects on the CPU after all.
+        #[cfg(feature = "nc-models")]
+        if textbox && recognizer.is_none() {
+            let workers = stages
+                .iter()
+                .find(|s| s.key == plan::STAGE_ENGINE)
+                .map_or(1, |s| s.workers);
+            recognizer = Some(self.textbox_recognizer(engine, workers)?);
+            // nar-small's CPU graph is ours; charspot-small runs its authors' own.
+            textbox_release =
+                (engine == models::NAR).then(|| bunko_ocr::models::TEXTBOX_RELEASE.to_string());
+        }
         let reader = if by_blocks {
             None
         } else {

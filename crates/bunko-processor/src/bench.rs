@@ -1257,7 +1257,13 @@ impl<'a> BenchRun<'a> {
         let derived = opened.widths.clone();
         let report = opened.runner.stats();
         let ceilings = self.ceilings_of(&*opened.runner, report.as_ref(), &derived);
-        self.precision = opened.ready.precision.clone().or(self.precision.take());
+        // `precision` stays the GPU's (the precision phase's winner, or what the row's
+        // mode resolved to there): it is the row's pick, stored and read by the library
+        // whether or not this placement is applied. On the CPU the same pick resolves to
+        // the CPU's own format; the CPU trials carry that format themselves.
+        if self.precision.is_none() {
+            self.precision = opened.ready.precision.clone();
+        }
         let gpu_runner = self.current.replace(opened);
         let cpu_trial = match self.trial(&derived, &format!("engine on {cpu}")) {
             Ok(t) => t,
@@ -1594,7 +1600,12 @@ impl<'a> BenchRun<'a> {
             derived = widths;
             tunable = self.tunable(&derived);
         }
-        if let Some(p) = &self.precision {
+        if let Some(p) = self
+            .current
+            .as_ref()
+            .and_then(|l| l.ready.precision.as_ref())
+            .or(self.precision.as_ref())
+        {
             tracing::info!(
                 "benchmark {}: the recognizer runs at {p} from here on",
                 self.op.bid

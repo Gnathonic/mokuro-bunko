@@ -1861,6 +1861,16 @@ impl ModelStore {
                     .any(|t| self.torch_manifest_graphs(engine, precision, t).is_some()))
     }
 
+    /// Whether a package for one of `targets` is on disk or listed in the manifest,
+    /// downloads allowed or not: the release builds `engine` for such a device.
+    pub fn torch_package_known(&self, engine: &str, precision: &str, targets: &[String]) -> bool {
+        self.locate_torch_package(engine, precision, targets)
+            .is_some()
+            || targets
+                .iter()
+                .any(|t| self.torch_manifest_graphs(engine, precision, t).is_some())
+    }
+
     /// Whether the package for one of `targets` is fully here, its shared weights
     /// included (no download needed): `doctor`.
     pub fn torch_package_present(
