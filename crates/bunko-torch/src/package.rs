@@ -1,5 +1,9 @@
-//! One package set: the three graphs of an engine x precision x target, their graph
-//! I/O contract (`bunko.io`) and, for GPU targets, the shared weights they bind to.
+//! One package set: the graphs of an engine x precision x target, their graph I/O
+//! contract (`bunko.io`) and, for GPU targets, the shared weights they bind to.
+//! [`PackageSet`] is the recognizers' three graphs (vision, prefill, step; `bunko.io` a
+//! number in [`IO_VERSIONS`]); [`GraphSet`] is any set of roles with a named I/O id
+//! (the text-box engines' single `model`, `bunko.io = "textbox-1"`). Both bind the
+//! same way ([`bind_all`]).
 //!
 //! `tools/torch_export` compiles GPU packages without weights: each package's
 //! `bunko.weights` metadata maps every constant (FQN) to a key of the
@@ -188,6 +192,129 @@ impl Drop for Weights {
     }
 }
 
+/// Loads the weights files once onto `dev` and binds every graph whose `bunko.weights`
+/// map is not empty to them (each of its constants by its key). `None` when no graph
+/// has a map (weights inside the packages, or the shootout's packages).
+fn bind_all(
+    graphs: &[&Aoti],
+    weight_files: &[PathBuf],
+    dev: tch::Device,
+) -> Result<Option<Weights>, TorchError> {
+    let maps: Vec<HashMap<String, String>> = graphs
+        .iter()
+        .map(|g| {
+            g.metadata("bunko.weights").map_or(Ok(HashMap::new()), |v| {
+                serde_json::from_str(&v)
+                    .map_err(|e| TorchError::Load(format!("bad bunko.weights metadata: {e}")))
+            })
+        })
+        .collect::<Result<_, _>>()?;
+    if maps.iter().all(|m| m.is_empty()) {
+        return Ok(None);
+    }
+    if weight_files.is_empty() {
+        return Err(TorchError::Load(
+            "the packages need their weights-*.safetensors files, none found".into(),
+        ));
+    }
+    let w = Weights::load(weight_files, dev)?;
+    for (g, map) in graphs.iter().zip(&maps) {
+        if map.is_empty() {
+            continue;
+        }
+        let mut bound = Vec::new();
+        for fqn in g.constant_fqns()? {
+            let key = map
+                .get(&fqn)
+                .ok_or_else(|| TorchError::Load(format!("constant {fqn} has no weights key")))?;
+            let t = w.get(key).ok_or_else(|| {
+                TorchError::Load(format!("the weights files lack {key} (for {fqn})"))
+            })?;
+            bound.push((fqn, t));
+        }
+        g.bind(&bound)?;
+    }
+    Ok(Some(w))
+}
+
+/// Package metadata keys this runtime does not act on yet: a graph that sets one would
+/// be bound wrongly, so the set is refused (the fp16 cast and the ONNX weights reader
+/// come with the routes that need them).
+const NOT_YET: [&str; 2] = ["bunko.weights_dtype", "bunko.weights_format"];
+
+/// The graphs of one package set by role (`model`; `vision`/`prefill`/`step`; ...),
+/// bound and ready to run. Unlike [`PackageSet`] it assumes no roles, and its I/O id
+/// (`bunko.io`) is a string the caller names (`textbox-1`, ...).
+pub struct GraphSet {
+    /// (role, graph), in the order given to [`GraphSet::load`].
+    pub graphs: Vec<(String, Aoti)>,
+    /// The shared weights. After the graphs: dropping `Weights` frees their memory, once
+    /// the graphs bound to them are gone (see `impl Drop for Weights`).
+    pub weights: Option<Weights>,
+}
+
+// SAFETY: the tensors are read-only after load; see `Aoti`.
+unsafe impl Send for GraphSet {}
+unsafe impl Sync for GraphSet {}
+
+impl GraphSet {
+    /// Loads each `(role, path)` graph onto `at`, refuses the set unless every graph says
+    /// `bunko.io = expect_io` and the graphs agree on `bunko.weights_dtype` and
+    /// `bunko.weights_format`, then binds them to `weight_files`.
+    pub fn load(
+        graphs: &[(&str, &Path)],
+        weight_files: &[PathBuf],
+        at: Placement,
+        expect_io: &str,
+    ) -> Result<Self, TorchError> {
+        if graphs.is_empty() {
+            return Err(TorchError::Arg(
+                "a graph set needs at least one graph".into(),
+            ));
+        }
+        for (i, (role, _)) in graphs.iter().enumerate() {
+            if graphs[..i].iter().any(|(r, _)| r == role) {
+                return Err(TorchError::Arg(format!("graph role {role} given twice")));
+            }
+        }
+        let loaded: Vec<(String, Aoti)> = graphs
+            .iter()
+            .map(|(role, path)| Ok((role.to_string(), Aoti::load(path, at.index)?)))
+            .collect::<Result<_, TorchError>>()?;
+        let meta = |key: &str| -> Vec<Option<String>> {
+            loaded.iter().map(|(_, g)| g.metadata(key)).collect()
+        };
+        let io = meta("bunko.io");
+        let io: Vec<Option<&str>> = io.iter().map(Option::as_deref).collect();
+        crate::graphmeta::check_io(&io, expect_io).map_err(TorchError::Load)?;
+        for key in NOT_YET {
+            let found = meta(key);
+            let found: Vec<Option<&str>> = found.iter().map(Option::as_deref).collect();
+            if let Some(v) = crate::graphmeta::agreed(key, &found).map_err(TorchError::Load)? {
+                return Err(TorchError::Load(format!(
+                    "{key} {v}: this runtime binds the weights as stored"
+                )));
+            }
+        }
+        let refs: Vec<&Aoti> = loaded.iter().map(|(_, g)| g).collect();
+        let weights = bind_all(&refs, weight_files, at.dev)?;
+        Ok(Self {
+            graphs: loaded,
+            weights,
+        })
+    }
+
+    /// The graph of `role`.
+    pub fn graph(&self, role: &str) -> Option<&Aoti> {
+        self.graphs.iter().find(|(r, _)| r == role).map(|(_, g)| g)
+    }
+
+    /// A metadata value of the first graph (`bunko.max_batch`, ...).
+    pub fn metadata(&self, key: &str) -> Option<String> {
+        self.graphs.first().and_then(|(_, g)| g.metadata(key))
+    }
+}
+
 /// The three graphs of one package set, bound and ready to run.
 pub struct PackageSet {
     pub vision: Aoti,
@@ -248,41 +375,7 @@ impl PackageSet {
                 "package I/O versions {ios:?}: this runtime drives {IO_VERSIONS:?} and all three graphs must agree"
             )));
         }
-        let maps: Vec<HashMap<String, String>> = [&vision, &prefill, &step]
-            .iter()
-            .map(|g| {
-                g.metadata("bunko.weights").map_or(Ok(HashMap::new()), |v| {
-                    serde_json::from_str(&v)
-                        .map_err(|e| TorchError::Load(format!("bad bunko.weights metadata: {e}")))
-                })
-            })
-            .collect::<Result<_, _>>()?;
-        let mut weights = None;
-        if maps.iter().any(|m| !m.is_empty()) {
-            if weight_files.is_empty() {
-                return Err(TorchError::Load(
-                    "the packages need their weights-*.safetensors files, none found".into(),
-                ));
-            }
-            let w = Weights::load(weight_files, at.dev)?;
-            for (g, map) in [&vision, &prefill, &step].iter().zip(&maps) {
-                if map.is_empty() {
-                    continue;
-                }
-                let mut bound = Vec::new();
-                for fqn in g.constant_fqns()? {
-                    let key = map.get(&fqn).ok_or_else(|| {
-                        TorchError::Load(format!("constant {fqn} has no weights key"))
-                    })?;
-                    let t = w.get(key).ok_or_else(|| {
-                        TorchError::Load(format!("the weights files lack {key} (for {fqn})"))
-                    })?;
-                    bound.push((fqn, t));
-                }
-                g.bind(&bound)?;
-            }
-            weights = Some(w);
-        }
+        let weights = bind_all(&[&vision, &prefill, &step], weight_files, at.dev)?;
         Ok(Self {
             vision,
             prefill,

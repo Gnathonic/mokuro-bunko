@@ -14,6 +14,7 @@
 //! nothing.
 
 pub mod abi;
+pub mod graphmeta;
 
 #[cfg(feature = "libtorch")]
 mod aoti;
