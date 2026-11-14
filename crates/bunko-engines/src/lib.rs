@@ -207,7 +207,7 @@ pub struct PackagePlan {
     pub host_ids: Vec<&'static str>,
 }
 
-/// What [`EnginePipeline::prefetch`] put in place for an engine.
+/// What [`EnginePipeline::prefetch_rows`] put in place for an engine.
 #[derive(Debug, Clone)]
 pub struct Prefetched {
     pub need: EngineNeed,
@@ -1080,27 +1080,12 @@ impl EnginePipeline {
         })
     }
 
-    /// Fetch what the default rows of `engine` (or every recognizer engine) need on
-    /// this machine ([`default_need`](Self::default_need)): host files, the compiled
-    /// package (unpacked) and its shared weights. Other precisions and devices are
-    /// fetched when a session first needs them. One result per engine.
-    #[cfg(feature = "torch")]
-    pub fn prefetch(
-        &self,
-        engine: Option<&str>,
-    ) -> Vec<(&'static str, Result<Prefetched, String>)> {
-        let rows: Vec<(&str, &str)> = models::ENGINES
-            .iter()
-            .copied()
-            .filter(|e| *e != models::PPOCR)
-            .filter(|e| engine.is_none_or(|want| want == *e))
-            .map(|e| (e, precision::MODE_ACCURACY))
-            .collect();
-        self.prefetch_rows(&rows)
-    }
-
-    /// [`prefetch`](Self::prefetch) for the given rows: `(engine, precision mode)`
-    /// (the enabled generations). Rows of engines without a recognizer are skipped.
+    /// Fetch what the given rows need on this machine: `(engine, precision mode)`, the
+    /// enabled generations (so an opt-in engine, such as the non-commercial text-box
+    /// ones, is fetched only for a row that uses it). Per row: the host files, the
+    /// compiled package (unpacked) and its shared weights, for the device and precision
+    /// [`need_for`](Self::need_for) picks; other precisions and devices are fetched when
+    /// a session first needs them. Rows of engines without a recognizer are skipped.
     #[cfg(feature = "torch")]
     pub fn prefetch_rows(
         &self,

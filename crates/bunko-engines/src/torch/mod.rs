@@ -540,22 +540,6 @@ pub fn device_formats(
         .collect()
 }
 
-/// The formats device `id` runs for any recognizer engine here: the union over
-/// hayai-nova and paddle-manga of [`device_formats`], in `fp32, bf16, fp16` order.
-pub fn runnable_formats(
-    report: &DevicesReport,
-    id: &str,
-    has_package: impl Fn(&str, &str, &[String]) -> bool,
-) -> Vec<String> {
-    engine_formats(
-        report,
-        id,
-        &[crate::models::HAYAI, crate::models::PADDLE],
-        has_package,
-    )
-    .0
-}
-
 /// The formats device `id` runs for any of `engines` (`has_package(engine, precision,
 /// targets)`, as [`device_formats`]): their union in `fp32, bf16, fp16` order, and, for
 /// each format that not every one of `engines` runs there, the engines that do (the
@@ -818,9 +802,13 @@ mod tests {
                 || (engine == "paddle-manga" && p == "fp32" && t.contains(&os("cuda-sm_75")))
                 || (p == "fp32" && t.contains(&os("cpu-x86_64-v3")))
         };
-        assert_eq!(runnable_formats(&r, "gpu:0", has), vec!["fp32", "fp16"]);
-        assert_eq!(runnable_formats(&r, "cpu", has), vec!["fp32"]);
-        assert!(runnable_formats(&r, "gpu:0", |_, _, _| false).is_empty());
+        let recognizers = [crate::models::HAYAI, crate::models::PADDLE];
+        let formats = |id: &str, has: &dyn Fn(&str, &str, &[String]) -> bool| {
+            engine_formats(&r, id, &recognizers, has).0
+        };
+        assert_eq!(formats("gpu:0", &has), vec!["fp32", "fp16"]);
+        assert_eq!(formats("cpu", &has), vec!["fp32"]);
+        assert!(formats("gpu:0", &|_, _, _| false).is_empty());
     }
 
     #[test]
@@ -874,11 +862,14 @@ mod tests {
         });
         assert_eq!(f, ["fp32"]);
         assert_eq!(only.get("fp32"), Some(&vec!["nar-small".to_string()]));
-        // runnable_formats is the union over hayai-nova and paddle-manga, as before
-        assert_eq!(
-            runnable_formats(&r, "gpu:0", |e, p, _| e == "paddle-manga" && p == "fp16"),
-            ["fp16"]
+        // the union over the engines asked about
+        let (f, _) = engine_formats(
+            &r,
+            "gpu:0",
+            &[crate::models::HAYAI, crate::models::PADDLE],
+            |e, p, _| e == "paddle-manga" && p == "fp16",
         );
+        assert_eq!(f, ["fp16"]);
     }
 
     #[test]

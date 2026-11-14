@@ -430,7 +430,7 @@ pub fn list_ids(engine: &str) -> Vec<&'static str> {
 /// (or every engine): PP-OCR, the engine's fp32 set and, with a GPU, its fp16 set
 /// too. A text-box engine has one set: its ONNX files and, with a GPU, its GPU route's
 /// host files ([`recognizer_ids`] at fp32). The compiled libtorch packages depend on
-/// the device: see `EnginePipeline::prefetch`.
+/// the device: see `EnginePipeline::prefetch_rows`.
 pub fn download_plan(engine: Option<&str>, gpu: bool) -> Vec<&'static str> {
     let mut ids = ppocr_ids();
     for &e in ENGINES {

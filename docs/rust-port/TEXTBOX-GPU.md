@@ -592,7 +592,7 @@ Text-box engines go through `runtime::place_runnable` with a text-box arm in `fo
   charspot's GPU route does not prefetch `model.onnx` (44 MB); if the GPU load fails, the CPU
   fallback fetches it on demand (L12).
 - `no_recognizer_backend` never demands a pack for text-box engines.
-- `torch::runnable_formats` also loops over the text-box engines. Where a GPU's format
+- `torch::engine_formats` (the catalog) also loops over the text-box engines. Where a GPU's format
   exists only for some engines (nar fp16; hayai and paddle bf16), `format_engines` records
   which, so the server does not route a hayai row to a GPU that only has text-box packages,
   and `formats_for_engine` keeps a nar row off bf16.

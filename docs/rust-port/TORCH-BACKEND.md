@@ -684,7 +684,7 @@ library / newer system (`abi::explain_load_error`, with libloading's source chai
 
 **Catalog and benchmarks (2026-10-03).** `describe()` lists per device only the formats a
 recognizer can run here (compute formats ∩ packages on disk or downloadable,
-`torch::runnable_formats`: a Turing card lists fp32/fp16, not bf16). The host's CPU string
+`torch::engine_formats`: a Turing card lists fp32/fp16, not bf16). The host's CPU string
 carries 0.5.2's core count (`"… (8 cores)"`, `runtime::cpu_label`). `EngineRunner` answers
 `VolumeRunner::width_ceilings` from the planner (`plan::width_ceilings`: pooled stages up
 to the budget and the road's cap, a GPU engine up to 8 threads within the budget, a CPU

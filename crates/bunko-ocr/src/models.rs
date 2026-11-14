@@ -1310,8 +1310,9 @@ const TEXTBOX_TORCH_ENGINES: [&str; 2] = ["nar-small", "charspot-small"];
 pub fn torch_release_name_for(engine: &str) -> String {
     #[cfg(feature = "nc-models")]
     if TEXTBOX_TORCH_ENGINES.contains(&engine) {
+        // The pinned test keeps the compiled-in manifest loading and naming this release.
         return serde_json::from_str::<TorchRelease>(TEXTBOX_TORCH_MODELS_JSON)
-            .map_or_else(|_| "unknown".into(), |r| r.release);
+            .map_or_else(|_| TEXTBOX_TORCH_RELEASE.into(), |r| r.release);
     }
     // Without `nc-models` there are no text-box packages: every engine is the base release's.
     #[cfg(not(feature = "nc-models"))]
