@@ -1210,4 +1210,32 @@ mod tests {
         let bad = json!([{"engine": "hayai-nova", "primary": true, "pools": {"stage_device": {"detect": "gpu:0"}}}]);
         assert!(parse_generation_list(&bad).is_err());
     }
+
+    /// The pools of a second row reading with `engine`, after the hayai primary.
+    fn layer_pools(engine: &str, pools: Value) -> Result<Pools, GenerationError> {
+        let rows = json!([
+            {"name": "main", "engine": "hayai-nova", "primary": true},
+            {"name": "layer", "engine": engine, "pools": pools}
+        ]);
+        parse_generation_list(&rows).map(|p| p.rows[1].pools.clone())
+    }
+
+    /// nar-small's engine stage may be pinned to a GPU; charspot-small's may not yet.
+    #[test]
+    fn a_nar_row_may_pin_its_engine_to_a_gpu() {
+        let pools = layer_pools("nar-small", json!({"stage_device": {"engine": "gpu:0"}})).unwrap();
+        assert_eq!(
+            pools.stage_device.get("engine").map(String::as_str),
+            Some("gpu:0")
+        );
+        let err = layer_pools(
+            "charspot-small",
+            json!({"stage_device": {"engine": "gpu:0"}}),
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err:?}").contains("that stage runs on the CPU"),
+            "{err:?}"
+        );
+    }
 }

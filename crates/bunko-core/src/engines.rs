@@ -168,8 +168,10 @@ pub const ENGINES: &[EngineSpec] = &[
         precision: false,
         blocks: false,
     },
-    // The text-box recognizers (muscgab): small networks without a decoder loop, on
-    // ONNX Runtime. Code Apache-2.0, weights CC BY-NC-SA 4.0.
+    // The text-box recognizers (muscgab): small networks without a decoder loop. On the
+    // CPU they run on ONNX Runtime; nar-small also runs on a GPU through the libtorch
+    // backend pack (the authors' weights bound to a weightless graph of ours), with the
+    // CPU as its fallback. Code Apache-2.0, weights CC BY-NC-SA 4.0.
     EngineSpec {
         id: "charspot-small",
         label: "manga-ocr-charspot-small (muscgab)",
@@ -195,7 +197,7 @@ pub const ENGINES: &[EngineSpec] = &[
         class: LicenseClass::NonCommercial,
         detector: None,
         patch_budget: false,
-        cpu_only_reason: "manga-ocr-nar-small runs on the CPU",
+        cpu_only_reason: "",
         cpu_note: "",
         precision: false,
         blocks: true,
@@ -458,5 +460,15 @@ mod tests {
             app_js.contains(&format!("const PADDLE_CPU_NOTE = '{PADDLE_CPU_NOTE}';")),
             "web/app/app.js carries another PADDLE_CPU_NOTE"
         );
+    }
+
+    /// nar-small may leave the CPU (the libtorch GPU route), with no caution when the
+    /// CPU is picked for it; charspot-small stays on the CPU until its route ships.
+    #[test]
+    fn nar_small_may_run_on_a_gpu() {
+        let nar = engine("nar-small").unwrap();
+        assert!(!nar.cpu_only());
+        assert_eq!(nar.cpu_note, "");
+        assert!(engine("charspot-small").unwrap().cpu_only());
     }
 }

@@ -408,6 +408,73 @@ random inputs: in bf16 the step's argmax can tie-flip between eager and compiled
 * Windows wrappers are `*.wrapper.pyd`; strip the archive's top `<role>/` folder when extracting
   into `unpack_to`, which then contains `data/aotinductor/model/`.
 
+## Single-graph engines
+
+0.8 adds the text-box recognizer nar-small (muscgab's `r16` model) to the libtorch route,
+on NVIDIA and AMD cards; everywhere else it keeps reading on the CPU with ONNX Runtime.
+Unlike hayai-nova and paddle-manga it is **one graph** with no generation loop: a batch
+of preprocessed crops in, 161 ids per crop out. The design is
+[TEXTBOX-GPU.md](TEXTBOX-GPU.md); this is the record of what was built.
+
+**Package.** `torch/nar-small/fp32/<target>/model.pt2`, role `model`, unpacked to
+`torch/nar-small/fp32/<target>/model/`. Metadata: `bunko.io = "textbox-1"` (a string, not
+the recognizers' integer), `bunko.max_batch = "64"` (the graph's dynamic batch is 1..64),
+`bunko.weights` mapping each of its 181 constants to a key of the author's
+`model.safetensors` (pinned: `muscgab/manga-ocr-nar-small` @ `8cc14c15…`, sha256
+`bc7418e2…20a3`, 217,035,140 B). The package holds **no weights**: the exporter
+(`python -m torch_export build nar-small fp32 <target>`) refuses `TORCH_EXPORT_WIN_EMBED`
+and `TORCH_EXPORT_CPU_EMBED` for it, drops the non-persistent buffers the graph recomputes,
+and `python -m torch_export refuse-embedded`, `verify` and `publish_textbox.sh` refuse a
+`.pt2` whose constants live inside it. The preprocessing (`bunko_vlm::textbox`: canvas,
+patches, the 14 px grid under a 324-patch budget) is the same Rust code on both routes,
+so the GPU route gets bit-identical inputs.
+
+**Release.** `textbox-torch-v1` (`bunko_ocr::models::torch_release_name_for`), its rows in
+`crates/bunko-ocr/src/textbox_torch_models.json`, built with
+`python -m torch_export textbox-manifest` and published with `publish_textbox.sh` (which
+checks every asset's sha256 after the upload). A target enters the manifest only when
+`verify` reads all 7,929 JMangaBench_Read crops with the same ids as the author's fp32
+PyTorch on a card of that target; a target with no card to test enters only when its
+verified neighbours pass from the same exporter commit. A target that fails is left out,
+so that GPU reads on the CPU; there is no looser tolerance and no revision bump.
+
+**cdylib.** `GraphSet` (`package.rs`) loads a set of graphs of any roles, checks that
+they agree on `bunko.io`, `bunko.weights_dtype` and `bunko.weights_format`, and binds
+the weight files given in `LoadOptions.weights` (for nar: the author's file). `bt_load`
+takes `nar-small` (fp32 only in this pack), `LoadOptions.tokenizer` the vocabulary.
+The optional entry point `bt_read_chars(handle, crops, n, out_json, err_out)` returns
+`[{"text", "chars"}]`, one entry per crop: an empty crop reads `""` without a model call,
+and the crops are split into batches of at most the handle's batch, in crop order. The
+ABI stays 1; the host looks the symbol up and a pack without it (0.7.x) leaves the
+text-box engines on the CPU, with the reason logged once. `bt_init` turns TF32 off for
+cuDNN and matmul on every pack, so fp32 is fp32 on Ampere and later.
+
+**Batch on small cards.** `LoadOptions.max_batch` caps the batch below the package's.
+The host sets it from the device's reported memory (`DeviceEntry.vram_mb`): a card under
+`TEXTBOX_SMALL_VRAM_MB` (4,096 MB) reads at most `TEXTBOX_SMALL_BATCH` (8) crops a call;
+any other card, or one that reports no memory, reads at the package's 64. The rule comes
+from the peak memory per batch measured on gfx1201 (the spike peaked at 2.2 GiB with two
+packages and two reference models loaded), so that a small card keeps room for the
+detector beside it. `Some(0)` is treated as 1; a cap above the package's is the
+package's.
+
+**Host.** `TorchBackend::textbox` loads the handle (shared while anyone holds it); the
+`TextboxRecognizer` reads a page's blocks in one `bt_read_chars` call and refuses an
+answer with the wrong number of entries. `open_session` places the engine stage with
+`place_runnable` over the formats a GPU can run for it (a pack with `bt_read_chars`, a
+package for its target, the host files obtainable) and falls back to the CPU pool on any
+of: no pack, a pack without the symbol, no package for the card, a failed load (a
+`warn!`), `ocr.backend: cpu`, or `stage_device.engine: cpu`. The sidecar names the
+export set it read with: `textbox-torch-v1` on the card, `textbox-graphs-v1` on the CPU.
+
+**Benchmark.** For a text-box row whose engine stage was placed on a card without being
+pinned there, the benchmark runs one trial with the engine on the card and one with it
+on the CPU (`stage_device.engine = cpu`) and keeps the faster; the card keeps a tie
+within 5%. fp32 nar on a weak card can be slower than the CPU pool of a many-core host,
+and the text is the same either way.
+
+**Verified targets.** Recorded here once the gates have run.
+
 ## Work and owners (parallel agents, shared worktree)
 
 | stream | owns | deliverable |

@@ -289,8 +289,11 @@ ocr:
   #                - charspot-small: manga-ocr-charspot-small (weights CC
   #                                BY-NC-SA 4.0, non-commercial); CPU, fast
   #                - nar-small:    manga-ocr-nar-small r16 (weights CC
-  #                                BY-NC-SA 4.0, non-commercial); CPU; the
-  #                                most accurate on JMangaBench_Read
+  #                                BY-NC-SA 4.0, non-commercial); the most
+  #                                accurate on JMangaBench_Read. Reads on an
+  #                                NVIDIA or AMD card with the libtorch
+  #                                backend pack (fp32, the same text as on
+  #                                the CPU), else on the CPU
   #                The first three engines also read scanned NOVEL pages.
   #                The 0.5 engine `mokuro` was removed. A row that still names
   #                it is kept but retired: it never runs, loses `primary` and
@@ -326,13 +329,13 @@ ocr:
   #                Reaches no other engine. 512 is the default.
   #   pools        per-stage tuning of THIS row, {} to derive it. Stage keys
   #                depend on the road: the ppocr-manga engine has detect and
-  #                layout; hayai-nova and paddle-manga have detect, engine
-  #                and post.
+  #                layout; the other engines have detect, engine and post.
   #                  stage_workers  how many pages that stage runs at once
   #                  queue_capacity how many may wait in the queue it fills
   #                  stage_device   WHERE that stage's model runs: cpu or
-  #                                 gpu:<n>; absent = auto. The ppocr-manga
-  #                                 detector is CPU only.
+  #                                 gpu:<n>; absent = auto. The detect
+  #                                 stage and charspot-small's engine
+  #                                 stage are CPU only.
   #
   # See docs/configuration.md for the full reference and docs/ocr-internals.md
   # for how it works. Renaming a row other than the primary means its files

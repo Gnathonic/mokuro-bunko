@@ -279,9 +279,9 @@
   [manga-ocr-charspot-small](https://huggingface.co/muscgab/manga-ocr-charspot-small)
   finds and classifies every character and has no decoder;
   [manga-ocr-nar-small](https://huggingface.co/muscgab/manga-ocr-nar-small) (the model
-  of its `r16` branch) writes a text of up to 160 characters in one pass. Both run on
-  ONNX Runtime on the CPU and need no backend pack, and
-  both read a whole text block at once rather than a line: the layout's blocks on a
+  of its `r16` branch) writes a text of up to 160 characters in one pass. On the CPU
+  both run on ONNX Runtime and need no backend pack (`nar-small` also reads on a GPU,
+  see below), and both read a whole text block at once rather than a line: the layout's blocks on a
   line detector, the detector's own boxes on `animetext-blocks`. Their text stands as
   read; PP-OCR's read is used only where they read nothing. On a 16-core desktop CPU a
   12-page sample ran at 2.1 pages a second with `charspot-small` and 1.2 with
@@ -296,6 +296,17 @@
   of its own: `nar-small` 95.84 / 90.6% on the default detector and 96.73 / 92.1% on
   `animetext-blocks`, `charspot-small` 93.72 / 86.0% and 95.08 / 88.0%, against
   hayai-nova's 94.58 / 86.2% (docs/rust-port/MODELS.md §8).
+- **`nar-small` reads on an NVIDIA or AMD GPU** with the libtorch backend pack (fp32,
+  the same ids as on the CPU); elsewhere it reads on the CPU as before. On a card it
+  reads all of a page's blocks in one call (in batches of up to 64, 8 on a card with
+  less than 4 GB), from a compiled graph of ours with no weights in it (the pre-release
+  `textbox-torch-v1`, about 4 MB per card type) bound to the same `model.safetensors`
+  of the author that the CPU route reads. A card the release has no package for, a
+  backend pack from before this release, or a failed load leaves the row on the CPU,
+  with the reason in the log. `pools.stage_device.engine` may now name a card for a
+  `nar-small` row, and the benchmark tries its engine stage on the CPU too and keeps
+  the faster. The sidecar's `ocr_engine.weights` names the export set it was read with
+  (`textbox-torch-v1` on a card, `textbox-graphs-v1` on the CPU).
 - **Two more detectors: `ctd-lines` and `animetext-blocks`** (weights GPL-3.0).
   `ctd-lines` is the line map of
   [comic-text-detector](https://github.com/dmMaze/comic-text-detector): it boxes
