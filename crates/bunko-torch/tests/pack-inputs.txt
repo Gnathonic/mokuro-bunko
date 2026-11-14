@@ -10,8 +10,8 @@ d372f55d2b5929872a917aeafc478d31229e3c0d74d93bc8fbf781abe42bb439  crates/bunko-n
 76590170ba7c3cf27ac54e8d634f49cf4bf0b461d96982300f90b022580465f7  crates/bunko-ncnn/shim/bunko_ncnn.cpp
 c8ff0c5822f0a0ce6d9b5f3cc17ec50d39a99e40431dc5e1785f9fb635b12ed4  crates/bunko-ncnn/shim/bunko_ncnn.h
 dd723df032f672532ad3107194dabce0b3b5218baa02e77b71fdc930e43dfc48  crates/bunko-ncnn/src/lib.rs
-c585ea4b1cf160b76a30eff27b1a20a0e8f20b1759df9da23826175ffffabe33  crates/bunko-ocr/Cargo.toml
-f45ef8fa5803f8f8c28f25ec9291c935aa8f69cb6f2d5b23a92497aac82d50fc  crates/bunko-ocr/src/animetext.rs
+fe8b80b74133ddf47bf11ce1ead6069e1c6748234b73889d82d5908cc3e5bfd9  crates/bunko-ocr/Cargo.toml
+68af474840a86a70816a053e10475ed8026e0bab04833bc70f088c0ca29b40e7  crates/bunko-ocr/src/animetext.rs
 a0ea74856acd845a84d638d40a865ec515b484a9bb9259a2a8acbb365fc8688f  crates/bunko-ocr/src/blocks.rs
 afec91406ad9352c231b1a9a5b7e5a68122d30e1261a987c5583aeb6ea765772  crates/bunko-ocr/src/error.rs
 76773e4c7a15ecfbc1cbde4b85c43598a651d4149a3b95438631b65f1b4a0215  crates/bunko-ocr/src/image/decode.rs
@@ -60,6 +60,7 @@ ddd67372b3b4c003445d2a0b5f11ec989f0ea5fdad6c9cb813292d97aeb23da3  crates/bunko-t
 74e71e71a4fda0435d3e30b9798102557c014538cb835fddf7783d0f676375fe  crates/bunko-torch/src/textbox.rs
 5dbee203a2a2c64c0edc1be2202b79b90493a9f63a37bc3b5ccc4cc1313d1861  crates/bunko-torch/src/unpack.rs
 c791a07357e96e93f04e75e82cef9bd371d38d6e2c49255859dc969089755898  crates/bunko-vlm/Cargo.toml
+530dbfd4a2a19a8fb2bb9581746dea3675e03307c4a75e498b32e7dc56bb4e78  crates/bunko-vlm/src/animetext.rs
 28af23c5a735260137c4d70d2f694ff1860686c8ac88a8a74b860e32f143336c  crates/bunko-vlm/src/cache.rs
 151e4973d7f54cef8cc2a40d1e3a70750adc8f7b4a8ef8f0f7376e0a98d7bbec  crates/bunko-vlm/src/crop.rs
 9b45fa0548a6e219fce1e0800ad49a1db6c7d5d8c828a8789271d24c9c2cc656  crates/bunko-vlm/src/detok.rs
@@ -69,7 +70,7 @@ c536a4bcc34a13437bcbea912a8b8c8fe2b4a737f7a0494f013a31dc429bd878  crates/bunko-v
 27a67d58f4cf9ae5456e493d1336fba4236ce9b3f1563307c00b959b8f913e99  crates/bunko-vlm/src/hayai/gpu.rs
 793db3ad03d70fa79e4b4f7378150b1e3a70c23af460818c926370c396db870f  crates/bunko-vlm/src/hayai/onnx.rs
 0012b5a8e4f80232a669966970920b99e5c53bf20900b580cd7b979ed296c096  crates/bunko-vlm/src/image.rs
-2f15dfb3c0c52475e26a20a751c256cf631ba67877487dcb31f28e93d0bd8f5c  crates/bunko-vlm/src/lib.rs
+8b64d8103c1efe35d418775ecd6627aeb234a45f67e5b7e7ed7f8bdc19143655  crates/bunko-vlm/src/lib.rs
 5faddb4b51fa76e0f9558abf200945e10c213a2f0538fa8d7284fdad12d1eb67  crates/bunko-vlm/src/npy.rs
 e9b5749ebc117fbf68b185724134aa98b549f3beb0031280884ea0da3e0b6c88  crates/bunko-vlm/src/paddle.rs
 8af000a6844fd225eddda372bbd8c485f68ad33afaca2dab0b449371eadbdb21  crates/bunko-vlm/src/paddle/gpu.rs

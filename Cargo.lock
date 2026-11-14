@@ -718,6 +718,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "bunko-thumb",
+ "bunko-vlm",
  "crc32fast",
  "flate2",
  "hex",
