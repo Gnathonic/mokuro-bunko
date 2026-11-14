@@ -233,8 +233,9 @@ for `nar-small`, 7 of 24 for `charspot-small`; a core counts once, SMT
 threads aside), the detect stage sized to the rest of that default split.
 On a card, `nar-small`'s engine stage is like any other recognizer's: one
 loaded model, a page's blocks read in one call (split into the package's
-batches, at most 64 blocks, or 8 on a card with less than 4 GB), with the
-same text as the CPU pool. Where it cannot run on the card (no backend pack,
+batches, at most 64 blocks, or 8 on a card with less than 4 GB), at fp32
+with the same text as the CPU pool, or at fp16 (every auto precision mode on
+a card that has nar's fp16 package; see [Precision modes](#precision-modes)). Where it cannot run on the card (no backend pack,
 a pack without text-box reading, no package for that card, a failed load) it
 falls back to the CPU pool and logs why.
 The other stages get pools sized from the host. Widths and queue depths only
@@ -302,9 +303,16 @@ forced `fp32` / `bf16` / `fp16`. `ppocr-manga` fixes its own and ignores it.
   *not eligible* and is never offered the row. A row that no connected
   machine can run is **held**, and the admin card, the queue page (admins)
   and `.mokuro-queue.json` (jobs in state `held`) say so.
-- `hayai-nova` and `paddle-manga` sidecars record the resolved precision in
-  `ocr_engine.precision`; `ppocr-manga` sidecars (and older sidecars) have no
-  precision key.
+- `nar-small` has fp32 and fp16 only (no bf16; a row asking for bf16 is a
+  row error). Its candidates are fp16 then fp32 in every auto mode, so it
+  reads at fp16 on a card with its fp16 package and at fp32 on the CPU;
+  `auto-balanced` and `auto-speed` still benchmark the two and keep fp32 only
+  if it is more than 5% faster. fp16 runs on a card only: a forced `fp16`
+  makes CPU-only machines not eligible.
+- `hayai-nova`, `paddle-manga` and `nar-small` sidecars record the resolved
+  precision in `ocr_engine.precision`; `ppocr-manga` sidecars (and older
+  sidecars) have no precision key. The precision is not
+  part of what decides a re-read: changing it re-reads nothing.
 
 ## Benchmarks
 

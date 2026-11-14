@@ -296,8 +296,9 @@
   of its own: `nar-small` 95.84 / 90.6% on the default detector and 96.73 / 92.1% on
   `animetext-blocks`, `charspot-small` 93.72 / 86.0% and 95.08 / 88.0%, against
   hayai-nova's 94.58 / 86.2% (docs/rust-port/MODELS.md §8).
-- **`nar-small` reads on an NVIDIA or AMD GPU** with the libtorch backend pack (fp32,
-  the same ids as on the CPU); elsewhere it reads on the CPU as before. On a card it
+- **`nar-small` reads on an NVIDIA or AMD GPU** with the libtorch backend pack (at fp16
+  by default, see below; at fp32 with the same ids as on the CPU); elsewhere it reads on
+  the CPU as before. On a card it
   reads all of a page's blocks in one call (in batches of up to 64, 8 on a card with
   less than 4 GB), from a compiled graph of ours with no weights in it (the pre-release
   `textbox-torch-v1`, about 4 MB per card type) bound to the same `model.safetensors`
@@ -307,6 +308,18 @@
   `nar-small` row, and the benchmark tries its engine stage on the CPU too and keeps
   the faster. The sidecar's `ocr_engine.weights` names the export set it was read with
   (`textbox-torch-v1` on a card, `textbox-graphs-v1` on the CPU).
+- **nar-small reads at fp16 on a GPU in every auto mode**, the default `auto-accuracy`
+  included (`fp32` keeps full precision): on JMangaBench_Read fp16 scores the same as
+  fp32 (composite 96.16 vs 96.15) and runs about 17x faster on an RX 9070 XT. The CPU
+  reads at fp32. Sidecars record the precision; nothing is re-read. The fp16 package
+  is the author's own fp16 mode bound to the same fp32 `model.safetensors`, cast to
+  fp16 on the card as it loads; no fp16 copy of the weights is made or hosted. A card
+  whose fp16 package did not pass Bunko's fp16 check (at most 0.1% of JMangaBench_Read's
+  crops read differently from fp32, and no paired loss) has none and reads at fp32.
+  `nar-small` rows offer `auto-accuracy`, `auto-balanced`, `auto-speed`, `fp32` and
+  `fp16`; a row with `precision: bf16` is refused (`nar-small has no bf16; use fp16 or
+  an auto mode`), and a forced `fp16` row is never given to a machine without a card
+  that runs it.
 - **Two more detectors: `ctd-lines` and `animetext-blocks`** (weights GPL-3.0).
   `ctd-lines` is the line map of
   [comic-text-detector](https://github.com/dmMaze/comic-text-detector): it boxes
