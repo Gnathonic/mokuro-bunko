@@ -141,8 +141,34 @@ pub fn detector_ids(detector: &str) -> Vec<&'static str> {
     }
 }
 
+/// Manifest ids of the host files a block detector reads on a libtorch GPU besides its
+/// compiled package: AnimeText's `detector.pt2` binds the ONNX file the CPU route reads
+/// ([`detector_ids`]), so the GPU route plans no file of its own. Empty for a detector
+/// with no GPU route.
+pub fn detector_torch_host_ids(detector: &str) -> Vec<&'static str> {
+    match detector {
+        #[cfg(feature = "gpl-models")]
+        ANIMETEXT => vec![bunko_ocr::models::ANIMETEXT_DETECTOR],
+        _ => Vec::new(),
+    }
+}
+
 /// The `ocr_engine.weights` entry naming the ONNX export set: `{repo: release tag}`.
 pub const EXPORT_REPO: &str = "Gnathonic/mokuro-bunko";
+
+/// The one `ocr_engine.weights` entry for our export sets (the sidecar keeps one value
+/// per repo): `(EXPORT_REPO, "<detector release>+<recognizer release>")`, skipping a
+/// side that runs no file of ours. None when neither does.
+pub fn export_entry(
+    detector_release: Option<&str>,
+    recognizer_release: Option<&str>,
+) -> Option<(String, String)> {
+    let sets: Vec<&str> = [detector_release, recognizer_release]
+        .into_iter()
+        .flatten()
+        .collect();
+    (!sets.is_empty()).then(|| (EXPORT_REPO.to_string(), sets.join("+")))
+}
 
 /// Manifest ids of the PP-OCR files (every engine reads lines with them).
 pub fn ppocr_ids() -> Vec<&'static str> {
@@ -152,6 +178,12 @@ pub fn ppocr_ids() -> Vec<&'static str> {
 /// Host files the libtorch recognizer of `engine` always reads besides its compiled
 /// package. paddle-manga's input embeddings come with its packages' weights; only
 /// a package without them (an older or hand-made one) also needs [`paddle_embed_id`].
+/// nar-small's package holds no weights: it binds the authors' `model.safetensors`
+/// (the file its CPU graph reads too) and reads its vocabulary on the host.
+/// charspot-small's two graphs (`dense`, `tail`) hold none either: they bind the
+/// authors' `model.safetensors`, which its CPU route (the ONNX file, weights inside)
+/// never reads, and the decode reads the vocabulary on the host. So a charspot package
+/// on disk runs on a GPU only with these files here or downloadable.
 pub fn torch_host_ids(engine: &str, _precision: Precision) -> Vec<&'static str> {
     match engine {
         HAYAI => vec![
@@ -160,6 +192,29 @@ pub fn torch_host_ids(engine: &str, _precision: Precision) -> Vec<&'static str> 
             "hayai-nova/tokenizer",
         ],
         PADDLE => vec!["paddle-manga/tokenizer"],
+        #[cfg(feature = "nc-models")]
+        NAR => vec![
+            bunko_ocr::models::NAR_VOCABULARY,
+            bunko_ocr::models::NAR_WEIGHTS,
+        ],
+        #[cfg(feature = "nc-models")]
+        CHARSPOT => vec![
+            bunko_ocr::models::CHARSPOT_VOCABULARY,
+            bunko_ocr::models::CHARSPOT_WEIGHTS,
+        ],
+        _ => Vec::new(),
+    }
+}
+
+/// The CPU route's files a GPU prefetch of text-box `engine` fetches too, so its
+/// fallback costs nothing: nar-small's (its graph is 0.7 MB beside the weights both
+/// routes read). None for charspot-small: its 44 MB ONNX file is fetched only when
+/// its CPU route is reached (a failed GPU load, or a crop with more characters than
+/// the GPU route reads at once), L12.
+pub fn textbox_fallback_ids(engine: &str) -> Vec<&'static str> {
+    match engine {
+        #[cfg(feature = "nc-models")]
+        NAR => textbox_ids(NAR),
         _ => Vec::new(),
     }
 }
@@ -279,8 +334,9 @@ pub fn torch_host_files(
             embeddings: Some(r[1].path.clone()),
             tokenizer: r[2].path.clone(),
             unpack_cache: None,
+            weights: Vec::new(),
         },
-        _ => {
+        PADDLE => {
             let blob = package
                 .parent()
                 .is_some_and(|p| p.join("weights-decoder.safetensors").is_file());
@@ -299,8 +355,20 @@ pub fn torch_host_files(
                 embeddings,
                 tokenizer: r[0].path.clone(),
                 unpack_cache: None,
+                weights: Vec::new(),
             }
         }
+        // The package directory holds charspot-small's `dense.pt2` and `tail.pt2`.
+        #[cfg(feature = "nc-models")]
+        NAR | CHARSPOT => crate::torch::TorchFiles {
+            package,
+            tokenizer: r[0].path.clone(),
+            pos_table: None,
+            embeddings: None,
+            unpack_cache: None,
+            weights: vec![r[1].path.clone()],
+        },
+        _ => return Err(format!("{engine} has no libtorch host files")),
     })
 }
 
@@ -350,9 +418,19 @@ pub fn engine_ids(engine: &str, precision: Precision) -> Vec<&'static str> {
 
 /// Manifest ids a recognizer reads at `precision` with the backends of this build:
 /// the libtorch host files, and the ONNX graphs when the ONNX recognizers are built.
+/// A text-box recognizer reads its ONNX files on the CPU in every build, and with the
+/// libtorch backend its GPU route's host files too (each listed once).
 pub fn recognizer_ids(engine: &str, precision: Precision) -> Vec<&'static str> {
     if textbox_engine(engine) {
-        return textbox_ids(engine);
+        let mut ids = textbox_ids(engine);
+        if cfg!(feature = "torch") {
+            for id in torch_host_ids(engine, precision) {
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+        }
+        return ids;
     }
     let mut ids = Vec::new();
     if cfg!(feature = "torch") {
@@ -385,12 +463,26 @@ pub fn list_ids(engine: &str) -> Vec<&'static str> {
 
 /// Every device-independent file a machine should fetch ahead of time for `engine`
 /// (or every engine): PP-OCR, the engine's fp32 set and, with a GPU, its fp16 set
-/// too. The compiled libtorch packages depend on the device: see
-/// `EnginePipeline::prefetch`.
+/// too. A text-box engine has one set: its ONNX files and, with a GPU, its GPU route's
+/// host files ([`recognizer_ids`] at fp32). The compiled libtorch packages depend on
+/// the device: see `EnginePipeline::prefetch_rows`.
 pub fn download_plan(engine: Option<&str>, gpu: bool) -> Vec<&'static str> {
     let mut ids = ppocr_ids();
     for &e in ENGINES {
         if engine.is_some_and(|want| want != e) {
+            continue;
+        }
+        if textbox_engine(e) {
+            let set = if gpu {
+                recognizer_ids(e, Precision::Fp32)
+            } else {
+                textbox_ids(e)
+            };
+            for id in set {
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
             continue;
         }
         let mut precisions = vec![Precision::Fp32];
@@ -553,6 +645,99 @@ mod tests {
         }
     }
 
+    /// The GPU detector binds the ONNX file the CPU detector reads: the GPU route plans
+    /// no extra host file (Q21).
+    #[cfg(feature = "gpl-models")]
+    #[test]
+    fn the_gpu_detector_reads_the_cpu_detectors_file() {
+        assert_eq!(detector_torch_host_ids(ANIMETEXT), detector_ids(ANIMETEXT));
+        assert_eq!(
+            detector_torch_host_ids(ANIMETEXT),
+            [bunko_ocr::models::ANIMETEXT_DETECTOR]
+        );
+        assert!(detector_torch_host_ids(CTD).is_empty());
+    }
+
+    /// nar-small's package holds no weights: on the GPU it binds the authors'
+    /// `model.safetensors` and reads its vocabulary on the host.
+    #[cfg(feature = "nc-models")]
+    #[test]
+    fn nar_reads_its_vocabulary_and_the_authors_weights_on_the_gpu() {
+        assert_eq!(
+            torch_host_ids(NAR, Precision::Fp32),
+            vec![
+                bunko_ocr::models::NAR_VOCABULARY,
+                bunko_ocr::models::NAR_WEIGHTS
+            ]
+        );
+        let m = Manifest::builtin();
+        for id in torch_host_ids(NAR, Precision::Fp32) {
+            assert!(m.get(id).is_some(), "{id}");
+        }
+    }
+
+    /// charspot-small's GPU route binds the authors' `model.safetensors` and reads the
+    /// vocabulary on the host; its CPU route reads the ONNX file, never the safetensors.
+    #[cfg(feature = "nc-models")]
+    #[test]
+    fn each_charspot_route_reads_its_own_weights() {
+        assert_eq!(
+            torch_host_ids(CHARSPOT, Precision::Fp32),
+            vec![
+                bunko_ocr::models::CHARSPOT_VOCABULARY,
+                bunko_ocr::models::CHARSPOT_WEIGHTS
+            ]
+        );
+        assert!(!textbox_ids(CHARSPOT).contains(&bunko_ocr::models::CHARSPOT_WEIGHTS));
+        let m = Manifest::builtin();
+        for id in torch_host_ids(CHARSPOT, Precision::Fp32) {
+            assert!(m.get(id).is_some(), "{id}");
+        }
+    }
+
+    /// L12: a GPU prefetch of charspot-small does not fetch its 44 MB ONNX file (the CPU
+    /// route fetches it if it is ever reached); nar-small's CPU graph comes along, as
+    /// it reads the same weights as the GPU route.
+    #[cfg(feature = "nc-models")]
+    #[test]
+    fn a_gpu_prefetch_of_charspot_leaves_the_onnx_file() {
+        assert!(textbox_fallback_ids(CHARSPOT).is_empty());
+        assert_eq!(textbox_fallback_ids(NAR), textbox_ids(NAR));
+        assert!(textbox_fallback_ids(PPOCR).is_empty());
+    }
+
+    /// The GPU plan holds charspot's safetensors once (Q21); the CPU plan does not.
+    #[cfg(all(feature = "nc-models", feature = "torch"))]
+    #[test]
+    fn a_gpu_plan_holds_charspot_weights() {
+        let w = bunko_ocr::models::CHARSPOT_WEIGHTS;
+        let ids = recognizer_ids(CHARSPOT, Precision::Fp32);
+        assert_eq!(ids.iter().filter(|id| **id == w).count(), 1, "{ids:?}");
+        assert!(download_plan(Some(CHARSPOT), true).contains(&w));
+        assert!(!download_plan(Some(CHARSPOT), false).contains(&w));
+    }
+
+    /// Our export sets go in one `Gnathonic/mokuro-bunko` entry (the sidecar keeps one
+    /// value per repo): the detector's release first, then the recognizer's.
+    #[test]
+    fn one_export_entry_for_our_sets() {
+        assert_eq!(
+            export_entry(None, Some("textbox-graphs-v1")),
+            Some((EXPORT_REPO.to_string(), "textbox-graphs-v1".to_string()))
+        );
+        assert_eq!(
+            export_entry(Some("detector-torch-v1"), Some("textbox-torch-v1"))
+                .unwrap()
+                .1,
+            "detector-torch-v1+textbox-torch-v1"
+        );
+        assert_eq!(
+            export_entry(Some("detector-torch-v1"), None).unwrap().1,
+            "detector-torch-v1"
+        );
+        assert_eq!(export_entry(None, None), None);
+    }
+
     #[test]
     fn offline_and_empty_means_installing() {
         let tmp = tempfile::tempdir().unwrap();
@@ -598,5 +783,32 @@ mod tests {
         assert!(
             vulkan_host_ids(HAYAI, &["ncnn", "webgpu"]).contains(&"hayai-nova/token-embeddings")
         );
+    }
+    /// A GPU host's plan holds the text-box GPU route's host files (Q21); a CPU-only
+    /// plan holds the ONNX route's files alone.
+    #[cfg(all(feature = "nc-models", feature = "torch"))]
+    #[test]
+    fn a_gpu_plan_holds_the_text_box_host_files() {
+        let host = torch_host_ids(NAR, Precision::Fp32);
+        assert_eq!(
+            host,
+            [
+                bunko_ocr::models::NAR_VOCABULARY,
+                bunko_ocr::models::NAR_WEIGHTS
+            ]
+        );
+        let ids = recognizer_ids(NAR, Precision::Fp32);
+        assert!(host.iter().all(|id| ids.contains(id)), "{ids:?}");
+        assert_eq!(
+            ids.iter()
+                .filter(|id| **id == bunko_ocr::models::NAR_WEIGHTS)
+                .count(),
+            1
+        );
+        let gpu = download_plan(Some(NAR), true);
+        assert!(host.iter().all(|id| gpu.contains(id)), "{gpu:?}");
+        let mut cpu = ppocr_ids();
+        cpu.extend(textbox_ids(NAR));
+        assert_eq!(download_plan(Some(NAR), false), cpu);
     }
 }

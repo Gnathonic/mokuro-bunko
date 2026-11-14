@@ -14,8 +14,11 @@
 //! default `backends/`, see `EngineConfig::backends_dirs`), the directories are tried
 //! in order, each in that order ([`discover_all`]).
 
+#[cfg(feature = "gpl-models")]
+pub mod detector;
 pub mod loader;
 pub mod recognizer;
+pub mod textbox;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -28,6 +31,7 @@ use tracing::{info, warn};
 pub use bunko_torch::abi;
 pub use loader::{Pack, PackLoadError};
 pub use recognizer::TorchRecognizer;
+pub use textbox::TorchTextbox;
 
 /// Use this pack directory instead of searching `<storage>/backends/`.
 pub const PACK_ENV: &str = "MOKURO_TORCH_PACK";
@@ -44,6 +48,31 @@ const OLD_PACK_BUDGET_REFUSALS: &[&str] = &[
 
 /// What the error for such a pack asks for ([`pack_budget_error`]).
 pub const PACK_UPDATE: &str = "update the OCR backend pack";
+
+/// Why a text-box engine does not run on a pack without `bt_read_chars` (one built
+/// before 0.8.0).
+pub const TEXTBOX_PACK_REASON: &str = "the OCR backend pack predates GPU text-box reading; update the OCR backend pack (`mokuro-bunko install-ocr --force`)";
+
+/// Why the block detector does not run on a pack without `bt_detect_blocks` (one built
+/// before 0.8.0). After the pack floor moves to 0.8 a released build never loads such a
+/// pack, so only a development pack shows it.
+pub const DETECTOR_PACK_REASON: &str = "the OCR backend pack predates GPU block detection; update the OCR backend pack (`mokuro-bunko install-ocr --force`)";
+
+/// A GPU that reports less memory than this reads text boxes in batches of
+/// [`TEXTBOX_SMALL_BATCH`] instead of its package's own `bunko.max_batch`.
+pub const TEXTBOX_SMALL_VRAM_MB: u64 = 4096;
+/// The text-box batch of a GPU under [`TEXTBOX_SMALL_VRAM_MB`].
+pub const TEXTBOX_SMALL_BATCH: u32 = 8;
+
+/// The batch cap of a text-box engine on a device that reports `vram_mb`
+/// (`DeviceEntry::vram_mb`): [`TEXTBOX_SMALL_BATCH`] on a GPU under
+/// [`TEXTBOX_SMALL_VRAM_MB`], else None (the package's own `bunko.max_batch`). Unknown
+/// memory is None.
+pub fn textbox_max_batch(vram_mb: Option<u64>) -> Option<u32> {
+    vram_mb
+        .filter(|mb| *mb < TEXTBOX_SMALL_VRAM_MB)
+        .map(|_| TEXTBOX_SMALL_BATCH)
+}
 
 /// The error to show when `err` is a pack's refusal of patch budget `budget` (a pack from
 /// before 0.8.0, which reads 512 only): the pack is to update, not the device. None for
@@ -129,6 +158,9 @@ pub struct TorchBackend {
     pub pack: Arc<Pack>,
     pub report: DevicesReport,
     loaded: Mutex<HashMap<Key, Weak<TorchRecognizer>>>,
+    textboxes: Mutex<HashMap<Key, Weak<TorchTextbox>>>,
+    #[cfg(feature = "gpl-models")]
+    detectors: Mutex<HashMap<Key, Weak<detector::TorchDetector>>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -252,6 +284,9 @@ fn open_backend(backends_dirs: &[PathBuf], cpu_only: bool) -> Result<Arc<TorchBa
                         pack: Arc::new(pack),
                         report,
                         loaded: Mutex::new(HashMap::new()),
+                        textboxes: Mutex::new(HashMap::new()),
+                        #[cfg(feature = "gpl-models")]
+                        detectors: Mutex::new(HashMap::new()),
                     }));
                 }
                 Err(e) => errors.push(format!("{}: {e}", dir.display())),
@@ -314,6 +349,37 @@ pub struct TorchFiles {
     pub embeddings: Option<PathBuf>,
     /// Where `.pt2` zips are unpacked to be loaded in place (under `<storage>`).
     pub unpack_cache: Option<PathBuf>,
+    /// Weights a weightless package binds at load (nar-small: the authors'
+    /// `model.safetensors`). Empty for hayai-nova and paddle-manga, whose packages
+    /// find their shared weights beside them.
+    pub weights: Vec<PathBuf>,
+}
+
+/// The load options of a text-box engine: its vocabulary, the weights its package
+/// binds, the unpack cache, the preprocessing threads and the batch cap (None: the
+/// package's own `bunko.max_batch`).
+pub fn textbox_load_options(
+    files: &TorchFiles,
+    threads: u32,
+    max_batch: Option<u32>,
+) -> LoadOptions {
+    LoadOptions {
+        tokenizer: files.tokenizer.to_string_lossy().into_owned(),
+        threads,
+        weights: Some(
+            files
+                .weights
+                .iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect(),
+        ),
+        cache_dir: files
+            .unpack_cache
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned()),
+        max_batch,
+        ..LoadOptions::default()
+    }
 }
 
 impl TorchBackend {
@@ -367,6 +433,7 @@ impl TorchBackend {
                 .unpack_cache
                 .as_ref()
                 .map(|p| p.to_string_lossy().into_owned()),
+            max_batch: None,
         };
         let handle = self
             .pack
@@ -402,6 +469,138 @@ impl TorchBackend {
         map.insert(key, Arc::downgrade(&r));
         Ok(r)
     }
+
+    /// The text-box reader of `engine` for these files on `device`, shared while anyone
+    /// holds it. `max_batch` caps the crops per graph call ([`textbox_max_batch`]; None:
+    /// the package's own). A pack without `bt_read_chars` answers
+    /// [`TEXTBOX_PACK_REASON`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn textbox(
+        &self,
+        engine: &'static str,
+        precision: Precision,
+        device: &str,
+        files: &TorchFiles,
+        threads: u32,
+        max_batch: Option<u32>,
+    ) -> Result<Arc<TorchTextbox>, String> {
+        if !self.pack.reads_chars() {
+            return Err(TEXTBOX_PACK_REASON.into());
+        }
+        let key = Key {
+            engine: engine.into(),
+            precision,
+            device: device.into(),
+            dir: files.package.clone(),
+            budget: max_batch.unwrap_or(0),
+            threads,
+        };
+        let mut map = self.textboxes.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(r) = map.get(&key).and_then(Weak::upgrade) {
+            return Ok(r);
+        }
+        let opts = textbox_load_options(files, threads, max_batch);
+        let handle = self
+            .pack
+            .load(engine, &files.package, precision.as_str(), device, &opts)?;
+        let li = handle.info()?;
+        info!(
+            "{engine} {} on {device} (libtorch {}, batch {}, {} bound weights) loaded in {:.1}s from {}",
+            li.precision,
+            li.torch,
+            li.batch,
+            li.weights,
+            li.load_seconds,
+            files.package.display()
+        );
+        // As for the recognizers: the package must have bound to the pack's libtorch.
+        let foreign = self.pack.foreign_libraries();
+        if !foreign.is_empty() {
+            return Err(format!(
+                "libtorch libraries from outside the pack were loaded ({}); remove them from LD_LIBRARY_PATH / LD_PRELOAD",
+                foreign.join(", ")
+            ));
+        }
+        let r = Arc::new(TorchTextbox::new(self.pack.clone(), handle, li));
+        map.retain(|_, w| w.strong_count() > 0);
+        map.insert(key, Arc::downgrade(&r));
+        Ok(r)
+    }
+
+    /// AnimeText's `detector.pt2` in `package` on `device` at fp32, bound to the
+    /// initializers of `onnx` (the CPU route's file), shared while anyone holds it.
+    /// `unpack_cache` is where a `.pt2` zip is unpacked to be loaded in place. A pack
+    /// without `bt_detect_blocks` answers [`DETECTOR_PACK_REASON`].
+    #[cfg(feature = "gpl-models")]
+    pub fn detector(
+        &self,
+        package: &Path,
+        onnx: &Path,
+        device: &str,
+        threads: u32,
+        unpack_cache: Option<&Path>,
+    ) -> Result<Arc<dyn detector::BlocksReader>, String> {
+        if !self.pack.detects_blocks() {
+            return Err(DETECTOR_PACK_REASON.into());
+        }
+        let engine = crate::models::ANIMETEXT;
+        let precision = Precision::Fp32;
+        let key = Key {
+            engine: engine.into(),
+            precision,
+            device: device.into(),
+            dir: package.to_path_buf(),
+            budget: 0,
+            threads,
+        };
+        let mut map = self.detectors.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(r) = map.get(&key).and_then(Weak::upgrade) {
+            return Ok(r);
+        }
+        let opts = detector_load_options(onnx, threads, unpack_cache);
+        let handle = self
+            .pack
+            .load(engine, package, precision.as_str(), device, &opts)?;
+        let li = handle.info()?;
+        info!(
+            "{engine} {} on {device} (libtorch {}, {} bound weights) loaded in {:.1}s from {}",
+            li.precision,
+            li.torch,
+            li.weights,
+            li.load_seconds,
+            package.display()
+        );
+        // As for the recognizers: the package must have bound to the pack's libtorch.
+        let foreign = self.pack.foreign_libraries();
+        if !foreign.is_empty() {
+            return Err(format!(
+                "libtorch libraries from outside the pack were loaded ({}); remove them from LD_LIBRARY_PATH / LD_PRELOAD",
+                foreign.join(", ")
+            ));
+        }
+        let r = Arc::new(detector::TorchDetector::new(self.pack.clone(), handle, li));
+        map.retain(|_, w| w.strong_count() > 0);
+        map.insert(key, Arc::downgrade(&r));
+        Ok(r)
+    }
+}
+
+/// The load options of the block detector: the ONNX file whose initializers its
+/// package binds (the one weights path it takes), the preprocessing threads and the
+/// unpack cache. It reads no vocabulary.
+#[cfg(feature = "gpl-models")]
+pub fn detector_load_options(
+    onnx: &Path,
+    threads: u32,
+    unpack_cache: Option<&Path>,
+) -> LoadOptions {
+    LoadOptions {
+        tokenizer: String::new(),
+        threads,
+        weights: Some(vec![onnx.to_string_lossy().into_owned()]),
+        cache_dir: unpack_cache.map(|p| p.to_string_lossy().into_owned()),
+        ..LoadOptions::default()
+    }
 }
 
 /// The formats a recognizer runs in on catalog device `id`: the device's formats for
@@ -427,26 +626,42 @@ pub fn device_formats(
         .collect()
 }
 
-/// The formats device `id` runs for any recognizer engine here: the union over
-/// hayai-nova and paddle-manga of [`device_formats`], in `fp32, bf16, fp16` order.
-pub fn runnable_formats(
+/// The formats device `id` runs for any of `engines` (`has_package(engine, precision,
+/// targets)`, as [`device_formats`]): their union in `fp32, bf16, fp16` order, and, for
+/// each format that not every one of `engines` runs there, the engines that do (the
+/// catalog's `format_engines`: a nar-small package without hayai-nova's, hayai-nova's
+/// bf16). The map is built for GPUs only: the CPU's would only mislead, since the
+/// server counts fp32 as the CPU's for every engine.
+pub fn engine_formats(
     report: &DevicesReport,
     id: &str,
+    engines: &[&str],
     has_package: impl Fn(&str, &str, &[String]) -> bool,
-) -> Vec<String> {
-    let mut out: Vec<&str> = Vec::new();
-    for engine in [crate::models::HAYAI, crate::models::PADDLE] {
-        for f in device_formats(report, id, |p, t| has_package(engine, p, t)) {
-            if !out.contains(&f) {
-                out.push(f);
+) -> (Vec<String>, std::collections::BTreeMap<String, Vec<String>>) {
+    let per: Vec<(&str, Vec<&'static str>)> = engines
+        .iter()
+        .map(|e| (*e, device_formats(report, id, |p, t| has_package(e, p, t))))
+        .collect();
+    let all: Vec<String> = ["fp32", "bf16", "fp16"]
+        .into_iter()
+        .filter(|f| per.iter().any(|(_, fs)| fs.contains(f)))
+        .map(str::to_string)
+        .collect();
+    let mut only = std::collections::BTreeMap::new();
+    let gpu = report.devices.iter().any(|d| d.id == id && d.kind != "cpu");
+    if gpu {
+        for f in &all {
+            let serving: Vec<String> = per
+                .iter()
+                .filter(|(_, fs)| fs.contains(&f.as_str()))
+                .map(|(e, _)| e.to_string())
+                .collect();
+            if serving.len() < engines.len() {
+                only.insert(f.clone(), serving);
             }
         }
     }
-    ["fp32", "bf16", "fp16"]
-        .into_iter()
-        .filter(|f| out.contains(f))
-        .map(str::to_string)
-        .collect()
+    (all, only)
 }
 
 /// What the session and the sidecar know of a torch recognizer.
@@ -493,9 +708,49 @@ pub fn recognizer_info(
     }
 }
 
+/// A crop as the pack's reads take it: its bytes, width and height.
+pub(crate) type RawCrop<'a> = (&'a [u8], u32, u32);
+
+/// `crops` as the pack's reads take them (`Loaded::read`, `Loaded::read_chars`): the
+/// bytes and the size, refused when a side does not fit the C ABI's `u32`.
+pub(crate) fn raw_crops<'a>(crops: &[&'a bunko_vlm::Rgb]) -> Result<Vec<RawCrop<'a>>, String> {
+    crops
+        .iter()
+        .enumerate()
+        .map(
+            |(i, c)| match (u32::try_from(c.width), u32::try_from(c.height)) {
+                (Ok(w), Ok(h)) => Ok((c.data.as_slice(), w, h)),
+                _ => Err(format!("crop {i} is {}x{}: too large", c.width, c.height)),
+            },
+        )
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A crop's size goes to the pack as `u32`: one that does not fit is refused, not
+    /// truncated.
+    #[test]
+    fn raw_crops_refuse_a_size_beyond_u32() {
+        let ok = bunko_vlm::Rgb {
+            width: 2,
+            height: 1,
+            data: vec![0; 6],
+        };
+        assert_eq!(raw_crops(&[&ok]).unwrap(), [(&ok.data[..], 2, 1)]);
+        #[cfg(target_pointer_width = "64")]
+        {
+            let wide = bunko_vlm::Rgb {
+                width: u32::MAX as usize + 1,
+                height: 1,
+                data: Vec::new(),
+            };
+            let e = raw_crops(&[&ok, &wide]).unwrap_err();
+            assert!(e.starts_with("crop 1 is 4294967296x1"), "{e}");
+        }
+    }
 
     /// The refusals of the packs before 0.8.0 (their exact texts) ask for a pack update;
     /// anything else, the new packs' own budget check included, is left alone.
@@ -544,6 +799,60 @@ mod tests {
         let second = backend_in(&dirs, true).err().unwrap_or_default();
         assert_ne!(second, first, "looked again");
         assert!(forget_failure());
+    }
+
+    /// The block detector's package binds the ONNX file as its one weights path and
+    /// reads no vocabulary (the cdylib refuses any other weights count).
+    #[cfg(feature = "gpl-models")]
+    #[test]
+    fn detector_load_options_carry_the_onnx_file_alone() {
+        let o = detector_load_options(Path::new("/m/yolo.onnx"), 6, Some(Path::new("/u")));
+        assert_eq!(o.weights, Some(vec!["/m/yolo.onnx".to_string()]));
+        assert_eq!((o.tokenizer.as_str(), o.threads), ("", 6));
+        assert_eq!(o.cache_dir.as_deref(), Some("/u"));
+        assert_eq!(
+            (o.max_batch, o.patch_budget, o.pos_table, o.embeddings),
+            (None, None, None, None)
+        );
+        assert_eq!(
+            detector_load_options(Path::new("/m/yolo.onnx"), 6, None).cache_dir,
+            None
+        );
+    }
+
+    #[test]
+    fn text_box_load_options_carry_the_weights_and_the_vocabulary() {
+        let f = TorchFiles {
+            package: "/p/model".into(),
+            tokenizer: "/v.json".into(),
+            pos_table: None,
+            embeddings: None,
+            unpack_cache: Some("/u".into()),
+            weights: vec!["/w.safetensors".into()],
+        };
+        let o = textbox_load_options(&f, 4, Some(16));
+        assert_eq!(o.tokenizer, "/v.json");
+        assert_eq!(o.weights, Some(vec!["/w.safetensors".to_string()]));
+        assert_eq!(
+            (o.threads, o.max_batch, o.patch_budget),
+            (4, Some(16), None)
+        );
+        assert_eq!(o.cache_dir.as_deref(), Some("/u"));
+        assert_eq!(textbox_load_options(&f, 4, None).max_batch, None);
+        // Nothing of the recognizers' options.
+        assert_eq!(
+            (o.pos_table, o.embeddings, o.backend, o.vision),
+            (None, None, None, None)
+        );
+    }
+
+    #[test]
+    fn a_small_gpu_caps_the_text_box_batch() {
+        assert_eq!(textbox_max_batch(Some(3072)), Some(8));
+        assert_eq!(textbox_max_batch(Some(4095)), Some(8));
+        assert_eq!(textbox_max_batch(Some(4096)), None);
+        assert_eq!(textbox_max_batch(Some(24564)), None);
+        assert_eq!(textbox_max_batch(None), None);
     }
 
     fn entry(id: &str, kind: &str, arch: &str, isa: &[&str], formats: &[&str]) -> DeviceEntry {
@@ -598,9 +907,13 @@ mod tests {
                 || (engine == "paddle-manga" && p == "fp32" && t.contains(&os("cuda-sm_75")))
                 || (p == "fp32" && t.contains(&os("cpu-x86_64-v3")))
         };
-        assert_eq!(runnable_formats(&r, "gpu:0", has), vec!["fp32", "fp16"]);
-        assert_eq!(runnable_formats(&r, "cpu", has), vec!["fp32"]);
-        assert!(runnable_formats(&r, "gpu:0", |_, _, _| false).is_empty());
+        let recognizers = [crate::models::HAYAI, crate::models::PADDLE];
+        let formats = |id: &str, has: &dyn Fn(&str, &str, &[String]) -> bool| {
+            engine_formats(&r, id, &recognizers, has).0
+        };
+        assert_eq!(formats("gpu:0", &has), vec!["fp32", "fp16"]);
+        assert_eq!(formats("cpu", &has), vec!["fp32"]);
+        assert!(formats("gpu:0", &|_, _, _| false).is_empty());
     }
 
     #[test]
@@ -632,6 +945,81 @@ mod tests {
         let (p, why) = crate::runtime::place_runnable(Some("auto"), &devices, fmts);
         assert_eq!((p.device.as_str(), why), ("gpu:0", None));
         assert_eq!(device_formats(&r, "gpu:0", older), vec!["fp32", "fp16"]);
+    }
+
+    #[test]
+    fn format_engines_name_the_engines_a_format_serves() {
+        let r = report(vec![entry(
+            "gpu:0",
+            "rocm",
+            "gfx1201",
+            &[],
+            &["fp32", "bf16", "fp16"],
+        )]);
+        let (f, only) = engine_formats(&r, "gpu:0", &["hayai-nova", "nar-small"], |e, p, _| {
+            (e == "hayai-nova" && (p == "fp32" || p == "bf16")) || (e == "nar-small" && p == "fp32")
+        });
+        assert_eq!(f, ["fp32", "bf16"]);
+        assert_eq!(only.get("bf16"), Some(&vec!["hayai-nova".to_string()]));
+        assert!(!only.contains_key("fp32"));
+        let (f, only) = engine_formats(&r, "gpu:0", &["hayai-nova", "nar-small"], |e, p, _| {
+            e == "nar-small" && p == "fp32"
+        });
+        assert_eq!(f, ["fp32"]);
+        assert_eq!(only.get("fp32"), Some(&vec!["nar-small".to_string()]));
+        // the union over the engines asked about
+        let (f, _) = engine_formats(
+            &r,
+            "gpu:0",
+            &[crate::models::HAYAI, crate::models::PADDLE],
+            |e, p, _| e == "paddle-manga" && p == "fp16",
+        );
+        assert_eq!(f, ["fp16"]);
+    }
+
+    /// A GPU whose fp16 is nar-small's alone (hayai-nova has no fp16 package for it):
+    /// the catalog says so, so no hayai-nova row is sent there for fp16.
+    #[test]
+    fn fp16_for_nar_only_is_recorded_per_engine() {
+        let r = report(vec![entry(
+            "gpu:0",
+            "rocm",
+            "gfx1030",
+            &[],
+            &["fp32", "bf16", "fp16"],
+        )]);
+        let (_, only) = engine_formats(&r, "gpu:0", &["hayai-nova", "nar-small"], |e, p, _| {
+            p == "fp32" || (e == "nar-small" && p == "fp16")
+        });
+        assert_eq!(only.get("fp16"), Some(&vec!["nar-small".to_string()]));
+    }
+
+    #[test]
+    fn format_engines_are_for_gpus_only() {
+        let r = report(vec![
+            entry("cpu", "cpu", "x86_64", &["avx2"], &["fp32"]),
+            entry("gpu:0", "rocm", "gfx1201", &[], &["fp32", "bf16", "fp16"]),
+        ]);
+        // hayai has a CPU package, nar-small none: the CPU still lists fp32, with no map
+        let (f, only) = engine_formats(&r, "cpu", &["hayai-nova", "nar-small"], |e, p, _| {
+            e == "hayai-nova" && p == "fp32"
+        });
+        assert_eq!(f, ["fp32"]);
+        assert!(only.is_empty());
+        // the closure of a pack without bt_read_chars says no for nar: hayai alone serves fp32
+        let reads_chars = false;
+        let (f, only) = engine_formats(&r, "gpu:0", &["hayai-nova", "nar-small"], |e, p, _| {
+            if e == "nar-small" {
+                crate::textbox_gpu_formats("nar-small", reads_chars, &["fp32"], true).contains(&p)
+            } else {
+                p == "fp32"
+            }
+        });
+        assert_eq!(f, ["fp32"]);
+        assert_eq!(only.get("fp32"), Some(&vec!["hayai-nova".to_string()]));
+        // a device the report does not have: nothing
+        let (f, only) = engine_formats(&r, "gpu:7", &["hayai-nova"], |_, _, _| true);
+        assert!(f.is_empty() && only.is_empty());
     }
 
     /// Regression: during an automatic update the NEW release lists the packs of the old

@@ -7,11 +7,16 @@ use std::time::Instant;
 use bunko_vlm::Rgb;
 
 use crate::TorchError;
-use crate::abi::{BT_ABI_VERSION, DevicesReport, InitConfig, LoadInfo, LoadOptions};
+use crate::abi::{
+    BT_ABI_VERSION, CharsRead, DETECT_IO, DetectOut, DevicesReport, InitConfig, LoadInfo,
+    LoadOptions, TEXTBOX_IO,
+};
+use crate::animetext::{DETECTOR_ROLE, TorchAnimeText};
 use crate::aoti::{Placement, TPrec, set_threads};
 use crate::hayai::{HayaiFiles, PACKAGE_BUDGET, TorchHayai};
-use crate::package::{PackageSet, default_weight_files};
+use crate::package::{GraphSet, PackageSet, default_weight_files};
 use crate::paddle::{PaddleFiles, TorchPaddle};
+use crate::textbox::{CHARSPOT_DENSE, CHARSPOT_TAIL, NAR_ROLE, TorchCharspot, TorchNar};
 
 /// The libtorch this library was built against, e.g. `2.13.0+rocm7.1`.
 pub fn torch_version() -> &'static str {
@@ -41,6 +46,9 @@ pub fn init(cfg: &InitConfig) -> Result<(), TorchError> {
     }
     let r = crate::gpu::init(dir, cfg.cpu_only || gpu_off.is_some());
     let _ = INIT_WARNING.set(gpu_off.or(r.err()));
+    // fp32 graphs compute in fp32 on every card (libtorch lets cuDNN use TF32 on Ampere
+    // and newer by default), for every engine. Process-wide; a no-op on the CPU.
+    crate::aoti::tf32_off();
     Ok(())
 }
 
@@ -160,9 +168,12 @@ pub fn devices() -> DevicesReport {
 enum Engine {
     Hayai(TorchHayai),
     Paddle(TorchPaddle),
+    Nar(TorchNar),
+    Charspot(TorchCharspot),
+    Detector(TorchAnimeText),
 }
 
-/// A loaded recognizer. Shared by any number of threads.
+/// A loaded recognizer or block detector. Shared by any number of threads.
 pub struct Handle {
     engine: Engine,
     threads: u32,
@@ -199,9 +210,51 @@ fn need<'a>(v: &'a Option<String>, what: &str) -> Result<&'a Path, TorchError> {
         .ok_or_else(|| TorchError::Arg(format!("load options lack `{what}`")))
 }
 
-/// Loads `engine` (`hayai-nova` / `paddle-manga`) from the package set in `model_dir`
-/// (`{vision,prefill,step}.pt2`, or the paths in `opts`) at `precision` on `device`
-/// (`cpu` / `gpu:<n>`).
+/// `.pt2` zips unpacked for one load: once into the cache, then loaded in place
+/// (libtorch would extract them to the temp directory at every load and leave them there
+/// on failure).
+struct Unpacked {
+    cache: PathBuf,
+    dirs: Vec<PathBuf>,
+}
+
+impl Unpacked {
+    fn new(model_dir: &Path, opts: &LoadOptions) -> Self {
+        let cache = opts
+            .cache_dir
+            .as_ref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| model_dir.join(".unpacked"));
+        Self {
+            cache,
+            dirs: Vec::new(),
+        }
+    }
+
+    /// `p` itself when it is a directory, else its unpacked copy.
+    fn in_place(&mut self, p: PathBuf) -> Result<PathBuf, TorchError> {
+        if p.is_file() {
+            let d = crate::unpack::ensure_unpacked(&p, &self.cache)?;
+            self.dirs.push(d.clone());
+            Ok(d)
+        } else {
+            Ok(p)
+        }
+    }
+
+    /// Do not keep (or reuse) what failed to load.
+    fn discard(&self) {
+        for d in &self.dirs {
+            crate::unpack::discard(d);
+        }
+    }
+}
+
+/// Loads `engine` (`hayai-nova` / `paddle-manga` from the package set in `model_dir`,
+/// `{vision,prefill,step}.pt2` or the paths in `opts`; `nar-small` from
+/// `<model_dir>/model.pt2` and `charspot-small` from `<model_dir>/{dense,tail}.pt2`, both
+/// bound to `opts.weights`; `animetext-blocks` from `<model_dir>/detector.pt2` bound to the
+/// ONNX file in `opts.weights`) at `precision` on `device` (`cpu` / `gpu:<n>`).
 pub fn load(
     engine: &str,
     model_dir: &Path,
@@ -212,69 +265,32 @@ pub fn load(
     let t0 = Instant::now();
     let prec = TPrec::parse(precision)?;
     let at = Placement::parse(device)?;
-    if engine != "hayai-nova" && engine != "paddle-manga" {
+    if !matches!(
+        engine,
+        "hayai-nova" | "paddle-manga" | "nar-small" | "charspot-small" | "animetext-blocks"
+    ) {
         return Err(TorchError::Arg(format!(
-            "unknown engine {engine:?} (hayai-nova, paddle-manga)"
+            "unknown engine {engine:?} (hayai-nova, paddle-manga, nar-small, charspot-small, animetext-blocks)"
         )));
     }
-    let vision = graph(model_dir, &opts.vision, "vision");
-    let prefill = graph(model_dir, &opts.prefill, "prefill");
-    let step = graph(model_dir, &opts.step, "step");
-    let weight_files: Vec<PathBuf> = match &opts.weights {
-        Some(w) => w.iter().map(PathBuf::from).collect(),
-        None => default_weight_files(model_dir),
-    };
-    let tokenizer = Path::new(&opts.tokenizer);
     // Loading runs ATen ops too (casts, copies): give it this handle's width.
     set_threads_here(opts.threads);
-    // `.pt2` zips: unpacked once into the cache and loaded in place (libtorch would
-    // extract them to the temp directory at every load and leave them there on failure).
-    let cache = opts
-        .cache_dir
-        .as_ref()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| model_dir.join(".unpacked"));
-    let mut unpacked = Vec::new();
-    let mut in_place = |p: PathBuf| -> Result<PathBuf, TorchError> {
-        if p.is_file() {
-            let d = crate::unpack::ensure_unpacked(&p, &cache)?;
-            unpacked.push(d.clone());
-            Ok(d)
-        } else {
-            Ok(p)
-        }
-    };
-    let graphs = [in_place(vision)?, in_place(prefill)?, in_place(step)?];
-    let pkgs = match PackageSet::load([&graphs[0], &graphs[1], &graphs[2]], &weight_files, at) {
-        Ok(p) => p,
-        Err(e) => {
-            // Do not keep (or reuse) what failed to load.
-            for d in &unpacked {
-                crate::unpack::discard(d);
-            }
-            return Err(e);
-        }
-    };
-    register_exit_hook();
-    let (io, bound) = (pkgs.io, pkgs.weights.as_ref().map_or(0, |w| w.len()));
-    let (engine_, batch) = if engine == "hayai-nova" {
-        let files = HayaiFiles {
-            pos_table: need(&opts.pos_table, "pos_table")?,
-            token_embeddings: need(&opts.embeddings, "embeddings")?,
-            tokenizer,
-        };
-        let budget = opts.patch_budget.map_or(PACKAGE_BUDGET, |b| b as usize);
-        let h = TorchHayai::load(pkgs, &files, prec, at, budget)?;
-        let b = h.batch();
-        (Engine::Hayai(h), b)
+    let mut unpacked = Unpacked::new(model_dir, opts);
+    let (engine_, batch, io, bound) = if engine == "nar-small" {
+        let n = load_nar(model_dir, prec, at, opts, &mut unpacked)?;
+        let (b, w) = (n.batch(), n.bound());
+        (Engine::Nar(n), b, 0, w)
+    } else if engine == "charspot-small" {
+        let c = load_charspot(model_dir, prec, at, opts, &mut unpacked)?;
+        let (b, w) = (c.batch(), c.bound());
+        (Engine::Charspot(c), b, 0, w)
+    } else if engine == "animetext-blocks" {
+        let d = load_detector(model_dir, prec, at, opts, &mut unpacked)?;
+        let w = d.bound();
+        // One page a call (`bt_detect_blocks`); the graph batches canvases of one size.
+        (Engine::Detector(d), 1, 0, w)
     } else {
-        let files = PaddleFiles {
-            embeddings: opts.embeddings.as_deref().map(Path::new),
-            tokenizer,
-        };
-        let p = TorchPaddle::load(pkgs, &files, prec, at)?;
-        let b = p.batch();
-        (Engine::Paddle(p), b)
+        load_recognizer(engine, model_dir, prec, at, opts, &mut unpacked)?
     };
     Ok(Handle {
         engine: engine_,
@@ -292,6 +308,178 @@ pub fn load(
     })
 }
 
+/// hayai-nova or paddle-manga: (engine, batch, `bunko.io`, weights bound).
+fn load_recognizer(
+    engine: &str,
+    model_dir: &Path,
+    prec: TPrec,
+    at: Placement,
+    opts: &LoadOptions,
+    unpacked: &mut Unpacked,
+) -> Result<(Engine, usize, u32, usize), TorchError> {
+    let vision = graph(model_dir, &opts.vision, "vision");
+    let prefill = graph(model_dir, &opts.prefill, "prefill");
+    let step = graph(model_dir, &opts.step, "step");
+    let weight_files: Vec<PathBuf> = match &opts.weights {
+        Some(w) => w.iter().map(PathBuf::from).collect(),
+        None => default_weight_files(model_dir),
+    };
+    let tokenizer = Path::new(&opts.tokenizer);
+    let graphs = [
+        unpacked.in_place(vision)?,
+        unpacked.in_place(prefill)?,
+        unpacked.in_place(step)?,
+    ];
+    let pkgs = match PackageSet::load([&graphs[0], &graphs[1], &graphs[2]], &weight_files, at) {
+        Ok(p) => p,
+        Err(e) => {
+            unpacked.discard();
+            return Err(e);
+        }
+    };
+    register_exit_hook();
+    let (io, bound) = (pkgs.io, pkgs.weights.as_ref().map_or(0, |w| w.len()));
+    if engine == "hayai-nova" {
+        let files = HayaiFiles {
+            pos_table: need(&opts.pos_table, "pos_table")?,
+            token_embeddings: need(&opts.embeddings, "embeddings")?,
+            tokenizer,
+        };
+        let budget = opts.patch_budget.map_or(PACKAGE_BUDGET, |b| b as usize);
+        let h = TorchHayai::load(pkgs, &files, prec, at, budget)?;
+        let b = h.batch();
+        Ok((Engine::Hayai(h), b, io, bound))
+    } else {
+        let files = PaddleFiles {
+            embeddings: opts.embeddings.as_deref().map(Path::new),
+            tokenizer,
+        };
+        let p = TorchPaddle::load(pkgs, &files, prec, at)?;
+        let b = p.batch();
+        Ok((Engine::Paddle(p), b, io, bound))
+    }
+}
+
+/// nar-small: the graph `model` (`<model_dir>/model.pt2`, or the installer's unpacked
+/// `model/`), bound to the authors' `model.safetensors` (`opts.weights`, required), the
+/// vocabulary in `opts.tokenizer`.
+fn load_nar(
+    model_dir: &Path,
+    prec: TPrec,
+    at: Placement,
+    opts: &LoadOptions,
+    unpacked: &mut Unpacked,
+) -> Result<TorchNar, TorchError> {
+    // fp32, or fp16 (the authors' fp16 mode: a package that casts the weights at load,
+    // checked against the package below).
+    if prec == TPrec::Bf16 {
+        return Err(TorchError::Arg(
+            "nar-small runs at fp32 or fp16, not bf16".into(),
+        ));
+    }
+    let weight_files: Vec<PathBuf> = opts.weights.iter().flatten().map(PathBuf::from).collect();
+    if weight_files.is_empty() {
+        return Err(TorchError::Arg("nar-small needs its weights file".into()));
+    }
+    let model = unpacked.in_place(graph(model_dir, &None, NAR_ROLE))?;
+    let loaded = GraphSet::load(&[(NAR_ROLE, &model)], &weight_files, at, TEXTBOX_IO);
+    let set = match loaded.and_then(|s| {
+        let dtype = s.metadata("bunko.weights_dtype");
+        crate::graphmeta::nar_precision(prec.as_str(), dtype.as_deref())
+            .map_err(TorchError::Load)?;
+        Ok(s)
+    }) {
+        Ok(s) => s,
+        Err(e) => {
+            unpacked.discard();
+            return Err(e);
+        }
+    };
+    register_exit_hook();
+    Ok(
+        TorchNar::load(set, Path::new(&opts.tokenizer), at, opts.max_batch)?
+            .with_threads(opts.threads),
+    )
+}
+
+/// charspot-small: the graphs `dense` and `tail` (`<model_dir>/{dense,tail}.pt2`, or the
+/// installer's unpacked folders), bound to the authors' `model.safetensors`
+/// (`opts.weights`, required), the vocabulary in `opts.tokenizer`; fp32 only.
+fn load_charspot(
+    model_dir: &Path,
+    prec: TPrec,
+    at: Placement,
+    opts: &LoadOptions,
+    unpacked: &mut Unpacked,
+) -> Result<TorchCharspot, TorchError> {
+    if prec != TPrec::Fp32 {
+        return Err(TorchError::Arg(format!(
+            "charspot-small runs at fp32 only, not {}",
+            prec.as_str()
+        )));
+    }
+    let weight_files: Vec<PathBuf> = opts.weights.iter().flatten().map(PathBuf::from).collect();
+    if weight_files.is_empty() {
+        return Err(TorchError::Arg(
+            "charspot-small needs its weights file".into(),
+        ));
+    }
+    let dense = unpacked.in_place(graph(model_dir, &None, CHARSPOT_DENSE))?;
+    let tail = unpacked.in_place(graph(model_dir, &None, CHARSPOT_TAIL))?;
+    let set = match GraphSet::load(
+        &[(CHARSPOT_DENSE, &dense), (CHARSPOT_TAIL, &tail)],
+        &weight_files,
+        at,
+        TEXTBOX_IO,
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            unpacked.discard();
+            return Err(e);
+        }
+    };
+    register_exit_hook();
+    Ok(
+        TorchCharspot::load(set, Path::new(&opts.tokenizer), at, opts.max_batch)?
+            .with_threads(opts.threads),
+    )
+}
+
+/// animetext-blocks: the graph `detector` (`<model_dir>/detector.pt2`, or the installer's
+/// unpacked `detector/`), bound to the ONNX file the CPU route runs (`opts.weights`, one
+/// path, required). `opts.tokenizer` is not read.
+fn load_detector(
+    model_dir: &Path,
+    prec: TPrec,
+    at: Placement,
+    opts: &LoadOptions,
+    unpacked: &mut Unpacked,
+) -> Result<TorchAnimeText, TorchError> {
+    if prec != TPrec::Fp32 {
+        return Err(TorchError::Arg(format!(
+            "animetext-blocks runs at fp32, not {}",
+            prec.as_str()
+        )));
+    }
+    let weight_files: Vec<PathBuf> = opts.weights.iter().flatten().map(PathBuf::from).collect();
+    if weight_files.len() != 1 {
+        return Err(TorchError::Arg(format!(
+            "animetext-blocks needs its ONNX file as the one weights path ({} given)",
+            weight_files.len()
+        )));
+    }
+    let model = unpacked.in_place(graph(model_dir, &None, DETECTOR_ROLE))?;
+    let set = match GraphSet::load(&[(DETECTOR_ROLE, &model)], &weight_files, at, DETECT_IO) {
+        Ok(s) => s,
+        Err(e) => {
+            unpacked.discard();
+            return Err(e);
+        }
+    };
+    register_exit_hook();
+    Ok(TorchAnimeText::load(set, at)?.with_threads(opts.threads))
+}
+
 fn set_threads_here(n: u32) {
     if n > 0 && THREADS.with(Cell::get) != n {
         set_threads(n);
@@ -307,9 +495,61 @@ impl Handle {
         &self.info
     }
 
+    /// Reads text-box crops: one [`CharsRead`] per crop, in crop order. An empty crop
+    /// (zero width or height) reads `""` without a model call. Only the text-box engines
+    /// read characters.
+    pub fn read_chars(&self, crops: &[&Rgb]) -> Result<Vec<CharsRead>, TorchError> {
+        let refuse = || {
+            TorchError::Arg(format!(
+                "bt_read_chars: {} reads no characters",
+                self.info.engine
+            ))
+        };
+        if !matches!(self.engine, Engine::Nar(_) | Engine::Charspot(_)) {
+            return Err(refuse());
+        }
+        if crops.is_empty() {
+            return Ok(Vec::new());
+        }
+        let _running = InFlight::enter()?;
+        set_threads_here(self.threads);
+        match &self.engine {
+            Engine::Nar(n) => n.read_chars(crops),
+            Engine::Charspot(c) => c.read_chars(crops),
+            Engine::Hayai(_) | Engine::Paddle(_) | Engine::Detector(_) => Err(refuse()),
+        }
+    }
+
+    /// Finds the text-block candidates of letterboxed page canvases: one [`DetectOut`]
+    /// per canvas, in canvas order, scored `min_score` or more. Only the block detector
+    /// detects; a canvas whose sides are not multiples of 32 up to 640 is refused.
+    pub fn detect_blocks(
+        &self,
+        canvases: &[&Rgb],
+        min_score: f32,
+    ) -> Result<Vec<DetectOut>, TorchError> {
+        let Engine::Detector(d) = &self.engine else {
+            return Err(TorchError::Arg(format!(
+                "bt_detect_blocks: {} detects no blocks",
+                self.info.engine
+            )));
+        };
+        if canvases.is_empty() {
+            return Ok(Vec::new());
+        }
+        let _running = InFlight::enter()?;
+        set_threads_here(self.threads);
+        d.detect(canvases, min_score)
+    }
+
     /// Reads crops; one text per crop (Python `strip()`ed, no NFKC). `caps[i]` caps
-    /// crop i's generated tokens (paddle-manga; hayai-nova ignores caps).
+    /// crop i's generated tokens (paddle-manga; hayai-nova and nar-small ignore caps).
+    /// The block detector reads no text.
     pub fn read(&self, crops: &[&Rgb], caps: Option<&[u32]>) -> Result<Vec<String>, TorchError> {
+        let no_text = || TorchError::Arg(format!("bt_read: {} reads no text", self.info.engine));
+        if let Engine::Detector(_) = &self.engine {
+            return Err(no_text());
+        }
         if let Some(c) = caps
             && c.len() != crops.len()
         {
@@ -337,6 +577,22 @@ impl Handle {
                 };
                 p.read_crops(crops, caps)
             }
+            Engine::Nar(n) => Ok(n.read_chars(crops)?.into_iter().map(|c| c.text).collect()),
+            Engine::Charspot(c) => Ok(c.read_chars(crops)?.into_iter().map(|c| c.text).collect()),
+            Engine::Detector(_) => Err(no_text()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn init_turns_tf32_off() {
+        super::init(&crate::abi::InitConfig {
+            cpu_only: true,
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(crate::aoti::tf32_state(), 0);
     }
 }

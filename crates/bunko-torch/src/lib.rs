@@ -1,11 +1,13 @@
 //! hayai-nova and paddle-manga on **libtorch** (mokuro-bunko 0.7's recognizer backend;
-//! design: `docs/rust-port/TORCH-BACKEND.md`).
+//! design: `docs/rust-port/TORCH-BACKEND.md`), and the text-box recognizer nar-small
+//! (`docs/rust-port/TEXTBOX-GPU.md`).
 //!
 //! The recognizers run AOTInductor packages (`.pt2`: vision, decoder prefill, decoder
 //! step) compiled with the exact torch of the pack, through `tch` 0.26 (libtorch 2.13)
 //! and a small C++ shim over `AOTIModelPackageLoader`. Host preprocessing and the token
 //! loops are bunko-vlm's, so a crop reads the same text as on 0.5.2's torch at the same
-//! precision.
+//! precision. The AnimeText block detector (animetext-blocks) runs the same way, bound
+//! to the ONNX file its CPU route runs.
 //!
 //! This crate is built **per backend pack** (`--features libtorch`, against that pack's
 //! libtorch) as a cdylib that `mokuro-bunko` opens at run time; the binary itself never
@@ -14,7 +16,11 @@
 //! nothing.
 
 pub mod abi;
+pub mod graphmeta;
+pub mod onnx_weights;
 
+#[cfg(feature = "libtorch")]
+mod animetext;
 #[cfg(feature = "libtorch")]
 mod aoti;
 #[cfg(feature = "libtorch")]
@@ -31,6 +37,8 @@ mod paddle;
 mod par;
 #[cfg(feature = "libtorch")]
 mod runtime;
+#[cfg(feature = "libtorch")]
+mod textbox;
 #[cfg(feature = "libtorch")]
 mod unpack;
 

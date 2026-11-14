@@ -226,7 +226,7 @@ pub fn catalog(devices: Value) -> Value {
                 "own_detector": e.detector,
                 "patch_budget": e.patch_budget,
                 "precision": e.precision,
-                "precision_modes": if e.precision { engines::PRECISION_MODES.to_vec() } else { vec![] },
+                "precision_modes": engines::engine_modes(e.id),
                 "devices": if e.cpu_only() { json!(["cpu"]) } else { json!("any") },
                 "cpu_note": (!e.cpu_note.is_empty()).then_some(e.cpu_note),
             })
@@ -898,9 +898,10 @@ mod tests {
         for e in &c["engines"].as_array().unwrap()[3..] {
             assert_eq!(e["license"], json!("CC-BY-NC-SA-4.0"), "{e}");
             assert_eq!(e["license_class"], json!("non-commercial"), "{e}");
-            assert_eq!(e["devices"], json!(["cpu"]), "{e}");
-            assert_eq!(e["precision_modes"], json!([]), "{e}");
         }
+        // charspot-small and nar-small read on the CPU and on a GPU (the libtorch route).
+        assert_eq!(c["engines"][3]["devices"], json!("any"));
+        assert_eq!(c["engines"][4]["devices"], json!("any"));
         assert_eq!(c["detectors"][0]["license_class"], json!("permissive"));
         assert_eq!(c["detectors"][1]["license"], json!("GPL-3.0"));
         assert_eq!(c["detectors"][1]["license_class"], json!("gpl"));
@@ -908,6 +909,81 @@ mod tests {
         assert_eq!(c["engines"][2]["devices"], json!(["cpu"]));
         assert_eq!(c["engines"][0]["devices"], json!("any"));
         assert_eq!(c["name_pattern"], json!(NAME_PATTERN));
+    }
+
+    #[test]
+    fn nar_offers_no_bf16_mode() {
+        let c = catalog(default_devices());
+        let nar = c["engines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["id"] == "nar-small")
+            .unwrap();
+        assert_eq!(
+            nar["precision_modes"],
+            json!([
+                "auto-accuracy",
+                "auto-balanced",
+                "auto-speed",
+                "fp32",
+                "fp16"
+            ])
+        );
+        let cs = c["engines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["id"] == "charspot-small")
+            .unwrap();
+        assert_eq!(cs["precision_modes"], json!([]));
+    }
+
+    /// nar-small may be put on any device (its libtorch GPU route), with no CPU note.
+    #[test]
+    fn the_catalog_offers_nar_small_any_device() {
+        let c = catalog(default_devices());
+        let nar = c["engines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["id"] == "nar-small")
+            .unwrap();
+        assert_eq!(nar["devices"], json!("any"));
+        assert_eq!(nar["cpu_note"], Value::Null);
+    }
+
+    /// So may charspot-small (its libtorch GPU route), with no CPU note.
+    #[test]
+    fn the_catalog_offers_charspot_small_any_device() {
+        let c = catalog(default_devices());
+        let cs = c["engines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["id"] == "charspot-small")
+            .unwrap();
+        assert_eq!(cs["devices"], json!("any"));
+        assert_eq!(cs["cpu_note"], Value::Null); // an empty note is dropped
+    }
+
+    /// AnimeText may be put on any device (its libtorch GPU route); the line detectors
+    /// stay on the CPU.
+    #[test]
+    fn animetext_may_take_any_device() {
+        let c = catalog(default_devices());
+        let devices = |id: &str| {
+            c["detectors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|d| d["id"] == id)
+                .unwrap()["devices"]
+                .clone()
+        };
+        assert_eq!(devices("animetext-blocks"), json!("any"));
+        assert_eq!(devices("ppocr-manga"), json!(["cpu"]));
+        assert_eq!(devices("ctd-lines"), json!(["cpu"]));
     }
 
     #[test]

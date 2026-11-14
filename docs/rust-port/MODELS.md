@@ -117,10 +117,13 @@ What each licence means for us:
 - **muscgab's recognizers (weights CC BY-NC-SA 4.0).** Non-commercial use, attribution,
   share alike. We do not rehost the weights. The inference code they are published with
   is Apache-2.0 and `crates/bunko-engines/src/textbox.rs` follows its pre- and
-  post-processing. Their cards name AnimeText-OCR (CC BY-NC-SA 4.0) as real training data.
+  post-processing. `crates/bunko-vlm/src/textbox.rs` ports charspot-small's Apache-2.0
+  `core.py` (decode, NMS, reading-order chain) and `backends/cuda.py` (canvas batches,
+  tail parts) to Rust, with the attribution kept in its module header. Their cards name
+  AnimeText-OCR (CC BY-NC-SA 4.0) as real training data.
   nar-small's `r16` model is published as PyTorch weights only; the ONNX graph Bunko runs
   it with is ours, made from the author's Apache-2.0 model code, and holds no weights
-  (§2.3).
+  (§2.3). So do the compiled libtorch graphs of its GPU route (§2.4).
 - A build made with `xtask dist --permissive-models` has none of the rows of the last
   four lines and none of the code behind them.
 
@@ -205,6 +208,94 @@ gh release create textbox-graphs-v1 --repo Gnathonic/mokuro-bunko \
 ```
 
 A changed graph is a new asset name or a new release, never a replaced asset.
+
+### 2.4 The `textbox-torch-v1` release: nar-small and charspot-small on a GPU
+
+On an NVIDIA or AMD card with the libtorch backend pack, nar-small reads through a
+compiled AOTInductor package of the same `r16` network instead of the ONNX graph:
+`torch/nar-small/fp32/<target>/model.pt2`, one per GPU target, made by
+`tools/torch_export` (`python -m torch_export build -e nar-small -p fp32 -t <target>`). Like the
+ONNX graph it holds **no trained weights**: the exporter refuses to embed them, the
+package's 181 constants are bound at load from the author's own `model.safetensors`
+(the same file, at the same pin, the CPU route reads), and `verify` and
+`publish_textbox.sh` refuse any package whose constants live inside it. The cdylib reads
+a page's blocks in one batched call (`bt_read_chars`), with the same preprocessing code
+as the CPU route (`bunko_vlm::textbox`), at fp32 with TF32 off, and gives the same ids
+as the author's fp32 PyTorch code: a target ships only once all 7,929 JMangaBench_Read
+crops read the same text on a card of that target (or, for a target with no card to
+test, on its verified neighbours), otherwise that GPU keeps the CPU route.
+
+Beside it, `torch/nar-small/fp16/<target>/model.pt2` is the author's own fp16 mode
+(`net.to(torch.float16)`, as their `PyTorchBackend(fp16=True)` runs it), compiled the same
+way and bound to the **same** fp32 file: the package says `bunko.weights_dtype = "fp16"`
+and the cdylib casts the file's floating tensors to fp16 on the card as it loads them, so
+no fp16 copy of the weights exists anywhere. Every auto precision mode of a `nar-small`
+row reads with it on a card that has one; a row set to `fp32` reads with the fp32
+package; the CPU always reads at fp32. An fp16 package ships for a target only once its
+texts differ from the author's fp16 and from fp32 on at most 0.1% of the 7,929 crops and
+it shows no paired JMangaBench_Read loss against fp32. The details
+are in [TORCH-BACKEND.md](TORCH-BACKEND.md#single-graph-engines) and
+[TEXTBOX-GPU.md](TEXTBOX-GPU.md).
+
+charspot-small reads the same way through two packages per GPU target,
+`torch/charspot-small/fp32/<target>/dense.pt2` (the character heatmap, boxes and
+embeddings) and `tail.pt2` (the classes and the reading-order scores), made from the
+authors' Apache-2.0 model code. They hold no trained weights either: their constants
+are bound at load from the authors' `model.safetensors` (44 MB, from their repository
+at the pin), a file its CPU route never reads (the authors' ONNX file carries its own
+weights), so a card fetches the safetensors and not the ONNX file. The step between the
+two graphs (the centre threshold, the overlap suppression, the furigana drop) and the
+reading-order chain are a Rust port of the authors' `core.py` run on the host. A target
+ships only once every one of the 7,929 crops reads the same text with its boxes within
+half a pixel of the authors' ONNX model on the CPU. A block with more than 1,024
+characters, more than the tail graph takes, is read on the CPU.
+
+The packages are published once as the pre-release `textbox-torch-v1` with a `NOTICE.md`
+and the author's Apache-2.0 `LICENSE`; the compiled-in manifest
+(`crates/bunko-ocr/src/textbox_torch_models.json`) lists them, and a sidecar read on
+the GPU names `textbox-torch-v1` as its export set where one read on the CPU names
+`textbox-graphs-v1`. Neither changes the engine revision: at fp32 the ids are the same,
+and fp16 is recorded as `ocr_engine.precision = "fp16"`, which re-reads nothing.
+
+### 2.5 The `detector-torch-v1` release: AnimeText on a GPU
+
+On an NVIDIA or AMD card with the libtorch backend pack, the `animetext-blocks` detector
+runs through a compiled AOTInductor package of the YOLO12-x network instead of ONNX
+Runtime: `torch/animetext-blocks/fp32/<target>/detector.pt2`, one per GPU target, fp32
+only, made by `tools/torch_export` (`python -m torch_export build -e animetext-blocks -p
+fp32 -t <target>`). The exporter rebuilds the network with the pinned ultralytics
+(`detector.ULTRALYTICS_VERSION`, 8.4.212; installed from `requirements-detector.txt`,
+build time only) and one patch, an `A2C2f.forward` that takes its `gamma` as a
+`[1, C, 1, 1]` parameter, so that every one of the package's 425 constants is a FLOAT
+initializer of the ONNX file §2.2 mirrors (the gammas `model.6.gamma` and
+`model.8.gamma` are `onnx::Mul_2760` and `onnx::Mul_2777`). The package holds **no
+trained weights**: `bunko.weights_format = onnx` makes the cdylib read those
+initializers out of `animetext_yolo12x.onnx` at load (a small protobuf walker,
+`bunko_torch::onnx_weights`; the file's size is checked first, and a FLOAT16,
+external-data or truncated tensor is refused), the same file at the same pin the CPU
+route reads, and `verify` and `publish_detector.sh` refuse any package whose constants
+live inside it. The package holds no suppression either: the cdylib returns the raw
+candidates scored 0.3 or more (`bt_detect_blocks`), from the same letterboxed canvas as
+the CPU route (`bunko_vlm::animetext::canvas_chw`), and the host runs the one
+post-processing both routes share (`bunko_ocr::animetext::blocks_from_output`).
+
+A target ships only when its gate passes on a card of that target (or, for a target
+with no card to test, on its verified neighbours from the same exporter commit): the
+same block set as ONNX Runtime on the CPU on every one of at least 300 pages, every
+corner within 0.01 page px, and no crop edge moved. A target that fails is left out,
+and that GPU detects on the CPU.
+
+The package is compiled Ultralytics code, so it is **AGPL-3.0**, and it goes only in its
+own pre-release `detector-torch-v1` (never in `textbox-torch-v1`), with a `NOTICE.md`
+(the ultralytics version, `tools/torch_export/torch_export/detector.py` and the exporter
+commit every package records as `bunko.exporter_commit`, the `A2C2f` patch, the weights'
+source and sha256) and the AGPL-3.0 text as `LICENSE`. `publish_detector.sh` refuses a
+stage built from a modified tree or from more than one commit, and refuses to publish
+until that commit is public. Only builds with the `gpl-models` feature know the release
+(`crates/bunko-ocr/src/detector_torch_models.json`). A sidecar detected on the GPU names
+`detector-torch-v1` first in its export set (`detector-torch-v1+textbox-torch-v1` with
+nar-small on the GPU too); the detector has no revision, and the GPU route does not
+give it one: the blocks are the same.
 
 ## 3. The pipeline (`tools/onnx_export/`)
 

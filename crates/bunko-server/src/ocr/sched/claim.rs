@@ -62,8 +62,9 @@ pub struct EftOutcome {
 /// `supported_for(device)` on a processor's reported devices: what the row's model
 /// device computes in for a row asking `mode`, as the engines there will resolve it
 /// (`bunko_sched::precision::device_formats`: bf16 only where native for the auto
-/// modes, wherever it exists for a forced `bf16`). `auto` is the first GPU that can run
-/// a recognizer at all, else the CPU. `None`: the card is not reported.
+/// modes, wherever it exists for a forced `bf16`). `auto` is the first GPU when it runs
+/// the row's `engine` (any recognizer with `None`) in some format, else the CPU, as the
+/// engines place it. `None`: the card is not reported.
 pub fn supported_for(
     catalog: &bunko_proto::Catalog,
     device: &str,
@@ -93,15 +94,22 @@ pub fn supported_for(
     };
     match device {
         "cpu" => Some(cpu()),
-        // The engines place an automatic row on the first GPU with a package for it,
-        // else on the CPU (`runtime::place_runnable`).
+        // The engines place an automatic row on the first GPU when it runs the row's
+        // engine in some format, else on the CPU (`runtime::place_runnable`).
         "" | "auto" => Some(
-            catalog
-                .devices
-                .iter()
-                .find(|d| d.id.starts_with("gpu:") && !d.formats.is_empty())
-                .map(of)
-                .unwrap_or_else(cpu),
+            match catalog.devices.iter().find(|d| d.id.starts_with("gpu:")) {
+                Some(d)
+                    if !bunko_sched::precision::formats_for_engine(
+                        &d.formats,
+                        &d.format_engines,
+                        engine,
+                    )
+                    .is_empty() =>
+                {
+                    of(d)
+                }
+                _ => cpu(),
+            },
         ),
         id => catalog.devices.iter().find(|d| d.id == id).map(of),
     }
@@ -1552,5 +1560,88 @@ impl Scheduler {
             }
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod supported_for_tests {
+    use super::supported_for;
+    use bunko_proto::{Catalog, Device};
+    use std::collections::{BTreeMap, HashSet};
+
+    fn dev(id: &str, provider: &str, formats: &[&str], only: &[(&str, &[&str])]) -> Device {
+        Device {
+            id: id.into(),
+            label: id.into(),
+            formats: formats.iter().map(|f| f.to_string()).collect(),
+            format_engines: only
+                .iter()
+                .map(|(f, e)| (f.to_string(), e.iter().map(|x| x.to_string()).collect()))
+                .collect::<BTreeMap<_, _>>(),
+            provider: Some(provider.into()),
+            arch: Some(if id == "cpu" { "x86_64" } else { "gfx1201" }.into()),
+        }
+    }
+
+    fn set(f: &[&str]) -> HashSet<String> {
+        f.iter().map(|x| x.to_string()).collect()
+    }
+
+    /// `auto` matches the engines' placement (`runtime::place_runnable`): the first GPU
+    /// when it runs the row's engine in some format, else the CPU. A GPU whose formats
+    /// serve other engines only is the CPU for this one.
+    #[test]
+    fn auto_is_the_first_gpu_that_runs_the_engine_else_the_cpu() {
+        // A gfx with hayai-nova's packages and no nar-small one: fp32 is hayai's and paddle's.
+        let hayai_only = Catalog {
+            devices: vec![
+                dev("cpu", "cpu", &["fp32"], &[]),
+                dev(
+                    "gpu:0",
+                    "rocm",
+                    &["fp32", "fp16"],
+                    &[
+                        ("fp32", &["hayai-nova", "paddle-manga"]),
+                        ("fp16", &["hayai-nova", "paddle-manga"]),
+                    ],
+                ),
+            ],
+            ..Default::default()
+        };
+        let auto = |c: &Catalog, e: &str| supported_for(c, "auto", "auto-accuracy", Some(e));
+        assert_eq!(
+            auto(&hayai_only, "hayai-nova"),
+            Some(set(&["fp32", "fp16"]))
+        );
+        assert_eq!(auto(&hayai_only, "nar-small"), Some(set(&["fp32"])));
+        assert_eq!(
+            supported_for(&hayai_only, "", "auto-accuracy", Some("nar-small")),
+            Some(set(&["fp32"]))
+        );
+        // A gfx with only nar-small's package, on a host whose CPU has hayai-nova's bf16
+        // package: a hayai row reads on the CPU, so a forced bf16 is the CPU's to run.
+        let nar_only = Catalog {
+            devices: vec![
+                dev("cpu", "cpu", &["fp32", "bf16"], &[]),
+                dev("gpu:0", "rocm", &["fp32"], &[("fp32", &["nar-small"])]),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(auto(&nar_only, "nar-small"), Some(set(&["fp32"])));
+        assert_eq!(
+            supported_for(&nar_only, "auto", "bf16", Some("hayai-nova")),
+            Some(set(&["fp32", "bf16"]))
+        );
+        // The engines place `auto` on the first GPU only: a later GPU that could run the
+        // engine is not where the row goes.
+        let second = Catalog {
+            devices: vec![
+                dev("cpu", "cpu", &["fp32"], &[]),
+                dev("gpu:0", "rocm", &[], &[]),
+                dev("gpu:1", "rocm", &["fp32", "fp16"], &[]),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(auto(&second, "hayai-nova"), Some(set(&["fp32"])));
     }
 }

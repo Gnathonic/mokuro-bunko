@@ -127,8 +127,10 @@ pub struct Device {
     /// (`bunko_sched::precision::bf16_native`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arch: Option<String>,
-    /// A backend-qualified format (`fp32@webgpu`) that only some engines run on this
-    /// device → those engines; a format not listed runs every engine.
+    /// A format that only some engines run on this device → those engines: a
+    /// backend-qualified one (`fp32@webgpu`) or a plain one (`bf16` that only hayai-nova
+    /// has packages for, `fp32` on a GPU with no nar-small package). A format not listed
+    /// runs every engine.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub format_engines: BTreeMap<String, Vec<String>>,
 }
@@ -332,6 +334,11 @@ pub struct EngineWant {
     pub engine: String,
     /// The generation's precision mode (`auto-accuracy`, `fp32`, ...).
     pub precision: String,
+    /// The generation's detector when it is not the default one (0.8 addition,
+    /// optional): a block detector's compiled package is fetched ahead of work too.
+    /// Older processors ignore it; None from an older library.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detector: Option<String>,
 }
 
 /// `RegisterReply.version_mismatch`: the library's verdict on the processor's version.
@@ -915,6 +922,23 @@ mod tests {
         );
         assert_eq!(serde_json::from_str::<RegisterReply>(&text).unwrap(), reply);
     }
+    /// An engine want names its detector only when it is not the default one; an older
+    /// library's want (no detector) still reads.
+    #[test]
+    fn engine_want_detector_is_optional() {
+        let old: EngineWant =
+            serde_json::from_str(r#"{"engine":"nar-small","precision":"auto-accuracy"}"#).unwrap();
+        assert_eq!(old.detector, None);
+        assert!(!serde_json::to_string(&old).unwrap().contains("detector"));
+        let new = EngineWant {
+            detector: Some("animetext-blocks".into()),
+            ..old
+        };
+        let text = serde_json::to_string(&new).unwrap();
+        assert!(text.contains(r#""detector":"animetext-blocks""#), "{text}");
+        assert_eq!(serde_json::from_str::<EngineWant>(&text).unwrap(), new);
+    }
+
     /// A processor older than engine revisions announces none: each engine it lists
     /// counts as revision 1. A newer one's map round-trips; an empty map is not sent.
     #[test]

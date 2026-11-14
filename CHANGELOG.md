@@ -221,6 +221,17 @@
   `curated-<n>`.** Those names are readers' corrections now (see "OCR corrections have
   their own layer names" below). A config that already names a generation one of them
   fails to load, with an error naming that row, until it is renamed.
+- **0.8.0 needs its own OCR backend pack.** Packs of 0.7.x are not loaded. An
+  automatic update downloads it with the binary. Otherwise the server, the processor or
+  the Docker image installs it at the first start, before OCR uses the GPU: about
+  350 MB for CUDA and about 3 GB for ROCm, plus about 20 MB for the Vulkan pack. With
+  `MOKURO_OCR_AUTO_INSTALL=false`, run `mokuro-bunko install-ocr`. Backend packs are
+  now tied to the release: 0.8.0's packs add nar-small, charspot-small and the
+  AnimeText detector on a GPU and hayai-nova at patch budgets below 512, which no
+  0.7.x pack has, so a pack that does not match what the release expects is not loaded
+  and the release's own is installed in its place (the old one is removed). Until
+  then a machine with automatic installs off reads only with ppocr-manga and the
+  engines that run on ONNX Runtime on the CPU.
 
 ### Added
 - **Keep the library in a folder you choose** (`storage.library.backend: folder`,
@@ -279,9 +290,9 @@
   [manga-ocr-charspot-small](https://huggingface.co/muscgab/manga-ocr-charspot-small)
   finds and classifies every character and has no decoder;
   [manga-ocr-nar-small](https://huggingface.co/muscgab/manga-ocr-nar-small) (the model
-  of its `r16` branch) writes a text of up to 160 characters in one pass. Both run on
-  ONNX Runtime on the CPU and need no backend pack, and
-  both read a whole text block at once rather than a line: the layout's blocks on a
+  of its `r16` branch) writes a text of up to 160 characters in one pass. On the CPU
+  both run on ONNX Runtime and need no backend pack (both also read on a GPU, see
+  below), and both read a whole text block at once rather than a line: the layout's blocks on a
   line detector, the detector's own boxes on `animetext-blocks`. Their text stands as
   read; PP-OCR's read is used only where they read nothing. On a 16-core desktop CPU a
   12-page sample ran at 2.1 pages a second with `charspot-small` and 1.2 with
@@ -296,6 +307,47 @@
   of its own: `nar-small` 95.84 / 90.6% on the default detector and 96.73 / 92.1% on
   `animetext-blocks`, `charspot-small` 93.72 / 86.0% and 95.08 / 88.0%, against
   hayai-nova's 94.58 / 86.2% (docs/rust-port/MODELS.md §8).
+- **`nar-small` reads on an NVIDIA or AMD GPU** with the libtorch backend pack (at fp16
+  by default, see below; at fp32 with the same ids as on the CPU); elsewhere it reads on
+  the CPU as before. On a card it
+  reads all of a page's blocks in one call (in batches of up to 64, 8 on a card with
+  less than 4 GB), from a compiled graph of ours with no weights in it (the pre-release
+  `textbox-torch-v1`, about 4 MB per card type) bound to the same `model.safetensors`
+  of the author that the CPU route reads. A card the release has no package for, a
+  development backend pack without text-box reading, or a failed load leaves the row on the CPU,
+  with the reason in the log. `pools.stage_device.engine` may now name a card for a
+  `nar-small` row, and the benchmark tries its engine stage on the CPU too and keeps
+  the faster. The sidecar's `ocr_engine.weights` names the export set it was read with
+  (`textbox-torch-v1` on a card, `textbox-graphs-v1` on the CPU).
+- **nar-small reads at fp16 on a GPU in every auto mode**, the default `auto-accuracy`
+  included (`fp32` keeps full precision): on JMangaBench_Read fp16 scores the same as
+  fp32 (composite 96.16 vs 96.15), on two test volumes its text equals fp32's on all
+  752 lines, and on an RX 9070 XT the model reads about 17x faster (1,421 against 83
+  crops/s at batch 32; 16.3 against 7.3 pages/s end to end on `animetext-blocks`,
+  whose detection then sets the pace). The CPU reads at fp32. Sidecars record the
+  precision; nothing is re-read. The fp16 package is the author's own fp16 mode bound to the same fp32 `model.safetensors`, cast to
+  fp16 on the card as it loads; no fp16 copy of the weights is made or hosted. A card
+  whose fp16 package did not pass Bunko's fp16 check (at most 0.1% of JMangaBench_Read's
+  crops read differently from fp32, and no paired loss) has none and reads at fp32.
+  `nar-small` rows offer `auto-accuracy`, `auto-balanced`, `auto-speed`, `fp32` and
+  `fp16`; a row with `precision: bf16` is refused (`nar-small has no bf16; use fp16 or
+  an auto mode`), and a forced `fp16` row is never given to a machine without a card
+  that runs it.
+- **`charspot-small` reads on an NVIDIA or AMD GPU** too, with the libtorch backend
+  pack (fp32: the same characters, the same reading order and boxes within half a
+  pixel of the CPU's); elsewhere it reads on the CPU as before. On a card two compiled
+  graphs of ours with no weights in them (in the same `textbox-torch-v1` pre-release)
+  find the characters and read them, bound to the authors' own `model.safetensors`
+  (44 MB, fetched from their repository at the pinned revision; the CPU route reads
+  their ONNX file instead, which a card does not fetch), and the step between the two
+  graphs and the reading order run on the host. All of a page's blocks are read in one
+  call (at most 64 at a time, 8 on a card with less than 4 GB). A block with more than
+  1,024 characters is read on the CPU, with a line in the log. As for `nar-small`, a
+  card with no package, a development backend pack without it, a failed load, or a machine that cannot
+  download the safetensors (`MOKURO_MODELS_DOWNLOAD` off) leaves the row on the CPU;
+  `pools.stage_device.engine` may name a card for a `charspot-small` row, and the
+  benchmark tries its engine stage on the CPU too. The sidecar names
+  `textbox-torch-v1` as its export set when it was read on a card.
 - **Two more detectors: `ctd-lines` and `animetext-blocks`** (weights GPL-3.0).
   `ctd-lines` is the line map of
   [comic-text-detector](https://github.com/dmMaze/comic-text-detector): it boxes
@@ -307,6 +359,22 @@
   refused with the reason. Its repository is gated, so its file is fetched from this
   project's `upstream-models-v1` release. Neither is the `ctd` or `animetext` detector
   of 0.5: a row that still names one of those keeps reading with `ppocr-manga`.
+- **The AnimeText block detector runs on an NVIDIA or AMD GPU** with the libtorch
+  backend pack, with the same blocks as on the CPU (in testing about 22 pages/s on an
+  RX 9070 XT, 2.4x the CPU pool of a 16-core desktop, which leaves those cores to a
+  CPU engine pool). It runs at fp32 from a compiled graph with no weights in it (the
+  pre-release `detector-torch-v1`, one package per card type; AGPL-3.0, since it is
+  compiled Ultralytics code) bound to the same `animetext_yolo12x.onnx` the CPU route
+  reads; the suppression of overlapping boxes stays on the host, one code for both
+  routes. Its `detect` stage follows the engine's card, else goes to the first card
+  that has a package for it; a card with less than 4 GB of memory, a card the release
+  has no package for, a development backend pack without the detector, `ocr.backend: cpu`, or a
+  failed load keeps it on the CPU, with the reason in the log.
+  `pools.stage_device.detect` may now name a card for a row on `animetext-blocks` (the
+  line detectors stay CPU only), the planner sizes a detect stage on a card, and the
+  benchmark tries it on the CPU too and keeps the faster. The sidecar's
+  `ocr_engine.weights` names `detector-torch-v1` first in its export set when the
+  blocks were detected on a card. Only builds with GPL models (`gpl-models`) have it.
 - **Model licences are shown, and restricted ones can be built out.** The admin panel
   shows the licence beside an engine or detector whose weights are not Apache-2.0, and
   the catalog API carries `license` and `license_class` for each. The models above are
@@ -536,6 +604,10 @@
   first release's 213 MB ONNX file, which a store prune then removes. Its engine
   revision is now 2, so with upgrades on, `nar-small` layers written by a 0.8
   pre-release are read again once.
+- **fp32 on an NVIDIA Ampere or newer card now computes in full fp32 (TF32 off) for
+  every engine.** The libtorch backend pack turns TF32 off for convolutions and
+  matrix products when it starts, so hayai-nova and paddle-manga at fp32 on such a
+  card may read a little slower than before and their output may differ slightly.
 - **nar-small and charspot-small use the whole CPU on big hosts.** These engines read
   one text block at a time, too little work for one reader with many threads, so they
   kept only about 6 cores busy however big the host. Now many one-thread readers share
@@ -567,12 +639,6 @@
   redone; without it nothing is redone and new volumes simply get the new models. A
   processor still on an older release is offered no work until it is updated (the
   library tells it; `auto_update` does it).
-- **An update keeps the installed OCR backend.** This release opens the backend packs
-  of 0.7.4 and later (it builds the same packs), so updating from those (by hand, the
-  automatic update or a new Docker image) downloads no pack; a release whose pack
-  changes still fetches its own. The packs of 0.7.1 to 0.7.3 leak a libtorch model's
-  weights on every OCR session (fixed in 0.7.4), so an update from those fetches the
-  new pack.
 - **OCR corrections have their own layer names.** Edits never touch a volume's main
   OCR file. `<Volume>.edit.mokuro` (and `edit-2`, `edit-3`, …) are an account's own
   corrections: any account that can save progress, `registered` included, writes,
@@ -843,10 +909,11 @@
   crop is now resized for the row's budget and read in the graphs' 512 patches, the
   rest masked, as a small crop already was. At 512 the text is unchanged. The Vulkan
   self-test reads its goldens at 512 whatever the row's budget, and one verdict serves
-  every budget. A backend pack from before this release still reads 512 only: at 256
-  or 384 the session stops with `update the OCR backend pack` (`mokuro-bunko
-  install-ocr --force`) instead of trying the CPU, and the refusal is no verdict against
-  the Vulkan runtime on that card.
+  every budget. Backend packs from before this release read 512 only, so 0.8.0 does
+  not load them and installs its own (see "0.8.0 needs its own OCR backend pack"). A
+  development pack that still reads 512 only stops a session at 256 or 384 with
+  `update the OCR backend pack` (`mokuro-bunko install-ocr --force`) instead of trying
+  the CPU, and the refusal is no verdict against the Vulkan runtime on that card.
 - **A library folder never takes a volume Mokuro Reader is still writing.** The
   reader's Local Folder writes the way Chromium does: an empty file first, then the
   bytes into `<name>.crswap` beside it, renamed over the empty file at the end. Bunko

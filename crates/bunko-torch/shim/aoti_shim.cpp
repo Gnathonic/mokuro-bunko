@@ -78,8 +78,30 @@ struct RunnerPeek : torch::inductor::AOTIModelContainerRunner {
   }
 };
 
+// A dtype as safetensors spells it (`F32`, `F16`, `BF16`, ...), else torch's own name.
+static std::string dtype_name(c10::ScalarType t) {
+  switch (t) {
+    case c10::ScalarType::Float: return "F32";
+    case c10::ScalarType::Half: return "F16";
+    case c10::ScalarType::BFloat16: return "BF16";
+    case c10::ScalarType::Double: return "F64";
+    case c10::ScalarType::Long: return "I64";
+    case c10::ScalarType::Int: return "I32";
+    case c10::ScalarType::Short: return "I16";
+    case c10::ScalarType::Char: return "I8";
+    case c10::ScalarType::Byte: return "U8";
+    case c10::ScalarType::Bool: return "BOOL";
+    default: return c10::toString(t);
+  }
+}
+
 // Binds the package's constants to caller-owned tensors, given by original FQN (no copy:
 // the caller keeps them alive as long as the package). Returns 0, or -1 with `err`.
+//
+// Every tensor must have the dtype the package compiled its constant as: the model
+// library reads the bound memory as that dtype without checking (an F32 tensor bound to
+// an F16 constant, e.g. an fp16 package from a pack that does not cast the weights,
+// would read garbage), so a mismatch is refused here with the constant named.
 //
 // Through the model library's C-ABI `AOTInductorModelContainerUpdateUserManagedConstant
 // BufferPairs` (name -> AtenTensorHandle pairs, keyed by the container's internal constant
@@ -97,12 +119,26 @@ int bt_aoti_load_constants(void* h, const char** fqns, at::Tensor** tensors, int
     by_fqn.reserve(n);
     for (int i = 0; i < n; i++) by_fqn.emplace(fqns[i], tensors[i]);
     const auto names = runner->getConstantNamesToOriginalFQNs();
+    const auto dtypes = runner->getConstantNamesToDtypes();
     std::vector<AOTInductorConstantMapEntry> pairs;
     pairs.reserve(names.size());
     for (const auto& kv : names) {
       auto it = by_fqn.find(kv.second);
       if (it == by_fqn.end()) {
         *err = dup_err("no tensor for constant " + kv.second + " (" + kv.first + ")");
+        return -1;
+      }
+      auto want = dtypes.find(kv.first);
+      if (want == dtypes.end()) {
+        *err = dup_err("the package names no dtype for constant " + kv.second + " (" +
+                       kv.first + ")");
+        return -1;
+      }
+      const auto wanted = static_cast<c10::ScalarType>(want->second);
+      const auto got = it->second->scalar_type();
+      if (got != wanted) {
+        *err = dup_err("constant " + kv.second + " is " + dtype_name(got) +
+                       ", the package wants " + dtype_name(wanted));
         return -1;
       }
       // `names` outlives the call: its keys back the pairs' names.
@@ -152,6 +188,29 @@ void bt_tensor_release_storage(at::Tensor* t) {
   try {
     if (t && t->defined() && t->has_storage()) t->storage().unsafeGetStorageImpl()->reset();
   } catch (...) {
+  }
+}
+
+// Turns TF32 off for cuDNN convolutions and for matmuls (libtorch allows it for cuDNN by
+// default on Ampere and newer, which changes fp32 results). Process-wide; a no-op on the
+// CPU. The legacy setters: torch 2.13 keeps them, and they set the new per-backend
+// precisions too (cuBLAS: "highest").
+void bt_aoti_tf32_off() {
+  try {
+    auto& ctx = at::globalContext();
+    ctx.setAllowTF32CuDNN(false);
+    ctx.setAllowTF32CuBLAS(false);
+  } catch (...) {
+  }
+}
+
+// Which TF32 uses libtorch allows: bit 0 cuDNN, bit 1 matmul (cuBLAS); -1 on error.
+int bt_aoti_tf32_state() {
+  try {
+    auto& ctx = at::globalContext();
+    return (ctx.allowTF32CuDNN() ? 1 : 0) | (ctx.allowTF32CuBLAS() ? 2 : 0);
+  } catch (...) {
+    return -1;
   }
 }
 

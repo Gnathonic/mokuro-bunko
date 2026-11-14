@@ -14,7 +14,31 @@
 //!                  char **json_out, char **err);                  // ["text", ...], one per crop
 //! void     bt_free(void *handle);
 //! void     bt_free_str(char *s);
+//!
+//! // Optional (a pack may lack them; the loader looks each up by name).
+//! // Text-box engines:
+//! int32_t  bt_read_chars(void *handle, const BtCrop *crops, size_t n,
+//!                        char **json_out, char **err);            // [CharsRead, ...], one per crop
+//! // The block detector (animetext-blocks):
+//! int32_t  bt_detect_blocks(void *handle, const BtCrop *canvases, size_t n, float min_score,
+//!                           char **json_out, char **err);         // [DetectOut, ...], one per canvas
 //! ```
+//!
+//! `bt_read_chars` answers one [`CharsRead`] per crop, in crop order:
+//! `{"text":"...","chars":[["字",x0,y0,x1,y1,score], ...] | null}`, boxes in crop
+//! pixels, `chars` null for nar-small. charspot-small's `text` is its characters joined;
+//! its `chars` is null only for a crop the pack did not read (more characters than its
+//! tail graph takes, which a prepared crop never has): the caller reads that crop on
+//! its CPU route. A crop of zero width or height (its `data` may be null) reads `""`
+//! without a model call. On a hayai-nova or paddle-manga handle it is [`BT_ERR_ARG`].
+//! `bt_read` on a text-box handle returns the texts.
+//!
+//! `bt_detect_blocks` answers one [`DetectOut`] per canvas, in canvas order:
+//! `{"n":N,"cand":[[cx,cy,w,h,score], ...]}`, the network's `N` candidates scored
+//! `min_score` or more, in its output's index order, in canvas pixels. A canvas is the
+//! host's letterboxed page, RGB8, both sides positive multiples of 32 and at most 640;
+//! any other is [`BT_ERR_ARG`]. `bt_read` and `bt_read_chars` on a detector handle, and
+//! `bt_detect_blocks` on a recognizer handle, are [`BT_ERR_ARG`].
 //!
 //! Rules: no tensor crosses the boundary, only RGB8 crops in and UTF-8 JSON out. Every
 //! string the library hands out (`json_out`, `err`) is freed with `bt_free_str`. A
@@ -52,7 +76,61 @@ pub mod symbols {
     pub const READ: &[u8] = b"bt_read\0";
     pub const FREE: &[u8] = b"bt_free\0";
     pub const FREE_STR: &[u8] = b"bt_free_str\0";
+    /// Optional: packs before 0.8 lack it.
+    pub const READ_CHARS: &[u8] = b"bt_read_chars\0";
+    /// Optional: packs before 0.8 lack it.
+    pub const DETECT_BLOCKS: &[u8] = b"bt_detect_blocks\0";
 }
+
+/// `bt_read_chars`.
+pub type ReadCharsFn = unsafe extern "C" fn(
+    *mut std::ffi::c_void,
+    *const BtCrop,
+    usize,
+    *mut *mut std::ffi::c_char,
+    *mut *mut std::ffi::c_char,
+) -> i32;
+
+/// `bt_detect_blocks`.
+pub type DetectBlocksFn = unsafe extern "C" fn(
+    *mut std::ffi::c_void,
+    *const BtCrop,
+    usize,
+    f32,
+    *mut *mut std::ffi::c_char,
+    *mut *mut std::ffi::c_char,
+) -> i32;
+
+/// The package I/O id (`bunko.io`) of the block detector's graph (animetext-blocks).
+/// `bt_info` reports `io: 0` for its handles.
+pub const DETECT_IO: &str = "detect-1";
+
+/// One canvas's `bt_detect_blocks` result.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DetectOut {
+    /// The network's candidate count for this canvas (before the score filter).
+    pub n: usize,
+    /// The candidates scored `min_score` or more, in the output's index order:
+    /// `[cx, cy, w, h, score]` in canvas pixels.
+    pub cand: Vec<[f32; 5]>,
+}
+
+/// The package I/O id (`bunko.io`) of the text-box engines' graphs (nar-small,
+/// charspot-small). `bt_info` reports `io: 0` for their handles.
+pub const TEXTBOX_IO: &str = "textbox-1";
+
+/// One crop's `bt_read_chars` result.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CharsRead {
+    pub text: String,
+    /// Each character with its box in crop pixels; `None` for nar-small (no boxes), and
+    /// for a charspot-small crop this pack did not read (the caller's CPU route reads it).
+    pub chars: Option<Vec<CharEntry>>,
+}
+
+/// A character and its box in crop pixels: `(char, x0, y0, x1, y1, score)`, a JSON array.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CharEntry(pub String, pub f32, pub f32, pub f32, pub f32, pub f32);
 
 /// One crop: tightly packed RGB8 rows (`width * 3` bytes each), `height` rows.
 #[repr(C)]
@@ -177,6 +255,11 @@ pub struct LoadOptions {
     /// `weights-*.safetensors` in the parent of `model_dir` (`<engine>/<precision>/`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub weights: Option<Vec<String>>,
+    /// Text-box engines: the largest batch of one graph run, below the package's own
+    /// (`bunko.max_batch`) on small GPUs. `None`: the package's. Never serialised when
+    /// unset, so packs before it see the options they know.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_batch: Option<u32>,
 }
 
 /// `bt_info`: what a loaded handle is.
@@ -250,7 +333,14 @@ pub struct PackManifest {
 /// any change to those files until it is decided either way. Packs of 0.7.0 differ (0.7.1
 /// changed bunko-torch and the pack script); packs of 0.7.1 to 0.7.3 leak a libtorch
 /// recognizer's weights on every session (0.7.4 frees them when the recognizer is dropped).
-pub const OLDEST_PACK_RELEASE: &str = "0.7.4";
+///
+/// 0.8 adds the text-box and block-detector routes and hayai budgets below 512, which
+/// older packs lack: backend packs are tied to the release, so a 0.7.x pack is refused
+/// and the install paths (start-up, `install-ocr --if-needed`, an update's prefetch)
+/// bring this release's pack before OCR uses the backend. The floor is the workspace
+/// version of the commit that moved it, 0.8.0-beta.1, which was never published as a
+/// pack.
+pub const OLDEST_PACK_RELEASE: &str = "0.8.0-beta.1";
 
 /// Whether a build of mokuro-bunko `release` opens a pack built by `pack_version`: a
 /// release from [`OLDEST_PACK_RELEASE`] up to `release` itself (never a later one: an
@@ -916,6 +1006,40 @@ mod tests {
         assert!(text.contains("install-ocr"), "{text}");
     }
 
+    /// O3: packs are tied to the release. 0.8 refuses every 0.7.x pack; the floor is
+    /// the workspace version of the commit that moved it (L11).
+    #[test]
+    fn the_floor_is_0_8_0_beta_1() {
+        assert_eq!(OLDEST_PACK_RELEASE, "0.8.0-beta.1");
+        for release in ["0.8.0-beta.1", "0.8.0"] {
+            for old in ["0.7.4", "0.7.12"] {
+                assert!(!release_opens_pack(old, release), "{old} in {release}");
+            }
+            assert!(release_opens_pack("0.8.0-beta.1", release), "{release}");
+            assert!(release_opens_pack("v0.8.0-beta.1", release), "{release}");
+            assert!(
+                release_opens_pack("", release),
+                "a development pack in {release}"
+            );
+        }
+        assert!(release_opens_pack("0.8.0", "0.8.0"));
+        assert!(release_opens_pack("v0.8.0", "0.8.0"));
+        // Never a later release's pack: a 0.8.0-beta.1 build refuses 0.8.0's.
+        assert!(!release_opens_pack("0.8.0", "0.8.0-beta.1"));
+        assert!(!release_opens_pack("v0.8.0", "0.8.0-beta.1"));
+        assert!(release_opens_pack("0.8.0", "0.8.1"));
+        assert!(!release_opens_pack("0.8.1", "0.8.0"));
+        let e = PackError::Release {
+            found: "0.7.12".into(),
+            wanted: "0.8.0".into(),
+        }
+        .to_string();
+        assert!(
+            e.contains("opens the packs of 0.8.0-beta.1 to 0.8.0") && e.contains("install-ocr"),
+            "{e}"
+        );
+    }
+
     #[test]
     fn manifest_round_trips_and_checks() {
         let m = manifest();
@@ -1139,6 +1263,55 @@ mod tests {
         for bad in ["", "/abs", "\\abs", "a/../b", "..", "C:/x", "a//b"] {
             assert!(!safe_relative(bad), "{bad}");
         }
+    }
+
+    #[test]
+    fn chars_read_json_shape() {
+        let nar = CharsRead {
+            text: "字".into(),
+            chars: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&nar).unwrap(),
+            r#"{"text":"字","chars":null}"#
+        );
+        let cs = CharsRead {
+            text: "字".into(),
+            chars: Some(vec![CharEntry("字".into(), 1.0, 2.0, 3.0, 4.0, 0.5)]),
+        };
+        assert_eq!(
+            serde_json::to_string(&cs).unwrap(),
+            r#"{"text":"字","chars":[["字",1.0,2.0,3.0,4.0,0.5]]}"#
+        );
+        let back: Vec<CharsRead> =
+            serde_json::from_str(r#"[{"text":"字","chars":[["字",1.0,2.0,3.0,4.0,0.5]]}]"#)
+                .unwrap();
+        assert_eq!(back, vec![cs]);
+    }
+
+    #[test]
+    fn detect_out_json_shape() {
+        let d = DetectOut {
+            n: 5880,
+            cand: vec![[1.0, 2.0, 3.0, 4.0, 0.5]],
+        };
+        assert_eq!(
+            serde_json::to_string(&d).unwrap(),
+            r#"{"n":5880,"cand":[[1.0,2.0,3.0,4.0,0.5]]}"#
+        );
+        assert_eq!(DETECT_IO, "detect-1");
+    }
+
+    #[test]
+    fn old_packs_never_see_max_batch() {
+        let o = LoadOptions {
+            tokenizer: "v.json".into(),
+            ..Default::default()
+        };
+        assert!(!serde_json::to_string(&o).unwrap().contains("max_batch"));
+        let back: LoadOptions =
+            serde_json::from_str(r#"{"tokenizer":"v.json","max_batch":8}"#).unwrap();
+        assert_eq!(back.max_batch, Some(8));
     }
 
     #[test]

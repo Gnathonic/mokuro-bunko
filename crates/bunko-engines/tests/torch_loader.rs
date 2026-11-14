@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use bunko_engines::torch::{Pack, PackLoadError, discover};
-use bunko_torch::abi::{BT_ABI_VERSION, PACK_JSON, library_file_name};
+use bunko_torch::abi::{BT_ABI_VERSION, DetectOut, PACK_JSON, library_file_name};
 
 fn manifest(abi: u32, os: &str) -> serde_json::Value {
     serde_json::json!({
@@ -150,6 +150,282 @@ fn abi_mismatch_and_missing_symbols() {
         Err(PackLoadError::Symbol { symbol, .. }) => assert_eq!(symbol, "bt_init"),
         other => panic!("expected a missing symbol, got {other:?}"),
     }
+}
+
+/// Every ABI-1 entry point after `bt_abi_version`: `bt_init` succeeds, `bt_devices`
+/// reports a CPU, `bt_load` hands out a static handle, `bt_info` describes it, `bt_read`
+/// reads nothing, and `bt_free_str` frees what the others handed out.
+const ABI1_BODY: &str = r##"
+use std::ffi::{c_char, c_void, CString};
+
+static HANDLE: u8 = 0;
+
+fn give(out: *mut *mut c_char, s: &str) {
+    unsafe { *out = CString::new(s).unwrap().into_raw() }
+}
+
+#[unsafe(no_mangle)] pub extern "C" fn bt_init(_cfg: *const c_char, _e: *mut *mut c_char) -> i32 { 0 }
+
+#[unsafe(no_mangle)] pub extern "C" fn bt_devices(out: *mut *mut c_char, _e: *mut *mut c_char) -> i32 {
+    give(out, r#"{"abi":1,"torch":"2.13.0","devices":[{"id":"cpu","kind":"cpu","name":"cpu","arch":"x86_64","formats":["fp32"]}]}"#);
+    0
+}
+
+#[unsafe(no_mangle)] pub extern "C" fn bt_load(_engine: *const c_char, _dir: *const c_char, _prec: *const c_char, _dev: *const c_char, _opts: *const c_char, _e: *mut *mut c_char) -> *mut c_void {
+    &HANDLE as *const u8 as *mut c_void
+}
+
+#[unsafe(no_mangle)] pub extern "C" fn bt_info(_h: *mut c_void, out: *mut *mut c_char, _e: *mut *mut c_char) -> i32 {
+    give(out, r#"{"engine":"nar-small","precision":"fp32","device":"cpu","batch":64,"load_seconds":0.0,"torch":"2.13.0"}"#);
+    0
+}
+
+#[unsafe(no_mangle)] pub extern "C" fn bt_read(_h: *mut c_void, _c: *const u8, _n: usize, _caps: *const u32, out: *mut *mut c_char, _e: *mut *mut c_char) -> i32 {
+    give(out, "[]");
+    0
+}
+
+#[unsafe(no_mangle)] pub extern "C" fn bt_free(_h: *mut c_void) {}
+
+#[unsafe(no_mangle)] pub unsafe extern "C" fn bt_free_str(p: *mut c_char) {
+    if !p.is_null() {
+        drop(unsafe { CString::from_raw(p) });
+    }
+}
+"##;
+
+/// A library source exporting every ABI-1 entry point, `bt_abi_version` first, then
+/// `extra`.
+fn abi1_fixture(extra: &str) -> String {
+    let mut src = format!(
+        "#[unsafe(no_mangle)] pub extern \"C\" fn bt_abi_version() -> u32 {{ {BT_ABI_VERSION} }}\n"
+    );
+    src.push_str(ABI1_BODY);
+    src.push_str(extra);
+    src.push('\n');
+    src
+}
+
+/// `bt_read_chars` answering `count` (a Rust expression over `n`, the number of crops)
+/// entries of `{"text":"ab","chars":null}`.
+fn read_chars_fixture(count: &str) -> String {
+    let extra = r##"
+#[unsafe(no_mangle)] pub unsafe extern "C" fn bt_read_chars(_h: *mut std::ffi::c_void, _c: *const u8, n: usize, out: *mut *mut std::ffi::c_char, _e: *mut *mut std::ffi::c_char) -> i32 {
+    let one = r#"{"text":"ab","chars":null}"#;
+    let v = vec![one; COUNT].join(",");
+    unsafe { *out = std::ffi::CString::new(format!("[{v}]")).unwrap().into_raw() };
+    let _ = n;
+    0
+}
+"##;
+    abi1_fixture(&extra.replace("COUNT", count))
+}
+
+#[test]
+fn a_pack_without_bt_read_chars_reads_no_chars() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = pack_dir(tmp.path(), &manifest(BT_ABI_VERSION, std::env::consts::OS));
+    let src = abi1_fixture("");
+    assert!(src.contains(&format!(
+        "fn bt_abi_version() -> u32 {{ {BT_ABI_VERSION} }}"
+    )));
+    if !fixture_library(&dir, &src) {
+        return;
+    }
+    let pack = Pack::open(&dir, true).unwrap();
+    assert!(!pack.reads_chars());
+    let h = pack
+        .load("nar-small", tmp.path(), "fp32", "cpu", &Default::default())
+        .unwrap();
+    // The rest of ABI 1 still works on such a pack.
+    assert_eq!(h.info().unwrap().batch, 64);
+    let e = h.read_chars(&[(&[0u8; 3], 1, 1)]).unwrap_err();
+    assert!(e.contains("predates GPU text-box reading"), "{e}");
+}
+
+#[test]
+fn bt_read_chars_results_come_back_per_crop() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = pack_dir(tmp.path(), &manifest(BT_ABI_VERSION, std::env::consts::OS));
+    if !fixture_library(&dir, &read_chars_fixture("n")) {
+        return;
+    }
+    let pack = Pack::open(&dir, true).unwrap();
+    assert!(pack.reads_chars());
+    let h = pack
+        .load("nar-small", tmp.path(), "fp32", "cpu", &Default::default())
+        .unwrap();
+    let px = [0u8; 3];
+    let r = h.read_chars(&[(&px, 1, 1), (&px, 1, 1)]).unwrap();
+    assert_eq!(
+        r.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(),
+        ["ab", "ab"]
+    );
+    assert!(r.iter().all(|c| c.chars.is_none()));
+}
+
+#[test]
+fn a_wrong_result_count_is_an_error() {
+    // The fixture answers one entry whatever n is (Review Focus 3).
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = pack_dir(tmp.path(), &manifest(BT_ABI_VERSION, std::env::consts::OS));
+    if !fixture_library(&dir, &read_chars_fixture("1")) {
+        return;
+    }
+    let pack = Pack::open(&dir, true).unwrap();
+    assert!(pack.reads_chars());
+    let h = pack
+        .load("nar-small", tmp.path(), "fp32", "cpu", &Default::default())
+        .unwrap();
+    let px = [0u8; 3];
+    let e = h.read_chars(&[(&px, 1, 1), (&px, 1, 1)]).unwrap_err();
+    assert!(e.contains("1 results for 2 crops"), "{e}");
+}
+
+#[test]
+fn a_crop_whose_bytes_do_not_match_its_size_is_refused() {
+    // Both reads hand the crops' raw pointers to the pack, which reads width*height*3
+    // bytes of each: a shorter (or longer) slice is refused before the call.
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = pack_dir(tmp.path(), &manifest(BT_ABI_VERSION, std::env::consts::OS));
+    if !fixture_library(&dir, &read_chars_fixture("n")) {
+        return;
+    }
+    let pack = Pack::open(&dir, true).unwrap();
+    let h = pack
+        .load("nar-small", tmp.path(), "fp32", "cpu", &Default::default())
+        .unwrap();
+    let px = [0u8; 3];
+    let short = [0u8; 2];
+    let e = h.read_chars(&[(&px, 1, 1), (&short, 1, 1)]).unwrap_err();
+    assert!(e.contains("crop 1 has 2 bytes for 1x1"), "{e}");
+    let e = h.read(&[(&short, 1, 1)], None).unwrap_err();
+    assert!(e.contains("crop 0 has 2 bytes for 1x1"), "{e}");
+    let e = h.read_chars(&[(&px, 1, 2)]).unwrap_err();
+    assert!(e.contains("crop 0 has 3 bytes for 1x2"), "{e}");
+    // An empty crop (no width or no height) reads no bytes: it passes, as before.
+    let r = h.read_chars(&[(&[], 0, 7), (&px, 1, 1)]).unwrap();
+    assert_eq!(r.len(), 2);
+}
+
+/// `bt_detect_blocks` answering `count` (a Rust expression over `n`, the number of
+/// canvases) entries of `{"n":10,"cand":[[1,2,3,4,0.5]]}`.
+fn detect_blocks_fixture(count: &str) -> String {
+    let extra = r##"
+#[unsafe(no_mangle)] pub unsafe extern "C" fn bt_detect_blocks(_h: *mut std::ffi::c_void, _c: *const u8, n: usize, _min_score: f32, out: *mut *mut std::ffi::c_char, _e: *mut *mut std::ffi::c_char) -> i32 {
+    let one = r#"{"n":10,"cand":[[1,2,3,4,0.5]]}"#;
+    let v = vec![one; COUNT].join(",");
+    unsafe { *out = std::ffi::CString::new(format!("[{v}]")).unwrap().into_raw() };
+    let _ = n;
+    0
+}
+"##;
+    abi1_fixture(&extra.replace("COUNT", count))
+}
+
+#[test]
+fn a_pack_without_bt_detect_blocks_detects_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = pack_dir(tmp.path(), &manifest(BT_ABI_VERSION, std::env::consts::OS));
+    if !fixture_library(&dir, &abi1_fixture("")) {
+        return;
+    }
+    let pack = Pack::open(&dir, true).unwrap();
+    assert!(!pack.detects_blocks());
+    let h = pack
+        .load(
+            "animetext-blocks",
+            tmp.path(),
+            "fp32",
+            "cpu",
+            &Default::default(),
+        )
+        .unwrap();
+    let canvas = vec![114u8; 32 * 32 * 3];
+    let e = h.detect_blocks(&[(&canvas, 32, 32)], 0.3).unwrap_err();
+    assert_eq!(e, "the OCR backend pack predates GPU block detection");
+}
+
+#[test]
+fn bt_detect_blocks_results_come_back_per_canvas() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = pack_dir(tmp.path(), &manifest(BT_ABI_VERSION, std::env::consts::OS));
+    if !fixture_library(&dir, &detect_blocks_fixture("n")) {
+        return;
+    }
+    let pack = Pack::open(&dir, true).unwrap();
+    assert!(pack.detects_blocks());
+    // A pack with the detector need not read text boxes (each symbol is probed alone).
+    assert!(!pack.reads_chars());
+    let h = pack
+        .load(
+            "animetext-blocks",
+            tmp.path(),
+            "fp32",
+            "cpu",
+            &Default::default(),
+        )
+        .unwrap();
+    let canvas = vec![114u8; 32 * 64 * 3];
+    let r = h
+        .detect_blocks(&[(&canvas, 64, 32), (&canvas, 32, 64)], 0.3)
+        .unwrap();
+    let one = DetectOut {
+        n: 10,
+        cand: vec![[1.0, 2.0, 3.0, 4.0, 0.5]],
+    };
+    assert_eq!(r, [one.clone(), one]);
+}
+
+#[test]
+fn a_wrong_detect_blocks_count_is_an_error() {
+    // The fixture answers one entry whatever n is: results against the wrong pages.
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = pack_dir(tmp.path(), &manifest(BT_ABI_VERSION, std::env::consts::OS));
+    if !fixture_library(&dir, &detect_blocks_fixture("1")) {
+        return;
+    }
+    let pack = Pack::open(&dir, true).unwrap();
+    let h = pack
+        .load(
+            "animetext-blocks",
+            tmp.path(),
+            "fp32",
+            "cpu",
+            &Default::default(),
+        )
+        .unwrap();
+    let canvas = vec![114u8; 32 * 32 * 3];
+    let e = h
+        .detect_blocks(&[(&canvas, 32, 32), (&canvas, 32, 32)], 0.3)
+        .unwrap_err();
+    assert_eq!(e, "bt_detect_blocks returned 1 results for 2 canvases");
+}
+
+#[test]
+fn a_canvas_whose_bytes_do_not_match_its_size_is_refused() {
+    // The pack reads width*height*3 bytes of each canvas, as of a crop: a shorter slice
+    // is refused before the call.
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = pack_dir(tmp.path(), &manifest(BT_ABI_VERSION, std::env::consts::OS));
+    if !fixture_library(&dir, &detect_blocks_fixture("n")) {
+        return;
+    }
+    let pack = Pack::open(&dir, true).unwrap();
+    let h = pack
+        .load(
+            "animetext-blocks",
+            tmp.path(),
+            "fp32",
+            "cpu",
+            &Default::default(),
+        )
+        .unwrap();
+    let canvas = vec![114u8; 32 * 32 * 3];
+    let e = h
+        .detect_blocks(&[(&canvas, 32, 32), (&canvas[1..], 32, 32)], 0.3)
+        .unwrap_err();
+    assert_eq!(e, "canvas 1 has 3071 bytes for 32x32");
 }
 
 /// A real pack (`MOKURO_TORCH_PACK`) with fake libtorch libraries first on
@@ -324,4 +600,138 @@ fn vulkan_pack_reads_hayai_nova_at_every_patch_budget() {
     cfg.vulkan_backends =
         vec![std::env::var("MOKURO_TEST_RUNTIME").unwrap_or_else(|_| "ncnn".into())];
     budgets_read(&bunko_engines::EnginePipeline::new(cfg), &device);
+}
+
+/// charspot-small through a real pack's `bt_load` and `bt_read_chars` against the
+/// authors' ONNX model on the CPU: every crop of `MOKURO_CHARSPOT_PARITY_EXPECTED`
+/// (`tools/textbox_export/charspot_reference.py`'s rows, crops in
+/// `MOKURO_CHARSPOT_PARITY_CROPS`) must read the same text and characters, every box
+/// coordinate within 0.5 px. Also: an empty crop reads `""` with no characters, and a
+/// crop's text is its characters joined. The variables are this test's own:
+/// `MOKURO_TORCH_PACK`, `MOKURO_CHARSPOT_TORCH_PACKAGE` (the dir holding `dense.pt2` and
+/// `tail.pt2`), `MOKURO_CHARSPOT_WEIGHTS` (the authors' `model.safetensors`),
+/// `MOKURO_CHARSPOT_VOCAB`, and optionally `MOKURO_TEST_DEVICE` (default `gpu:0`) and
+/// `MOKURO_CHARSPOT_MAX_BATCH` (the canvas batch cap). Run it alone:
+/// `cargo test -p bunko-engines --features torch --release --test torch_loader -- --ignored --exact real_pack_reads_charspot_small --nocapture`.
+#[test]
+#[ignore = "needs a real backend pack, a charspot-small package, its weights and crops (env vars)"]
+fn real_pack_reads_charspot_small() {
+    let var =
+        |k: &str| PathBuf::from(std::env::var_os(k).unwrap_or_else(|| panic!("{k} is not set")));
+    let pack_dir = var("MOKURO_TORCH_PACK");
+    let package = var("MOKURO_CHARSPOT_TORCH_PACKAGE");
+    let crops = var("MOKURO_CHARSPOT_PARITY_CROPS");
+    let device = std::env::var("MOKURO_TEST_DEVICE").unwrap_or_else(|_| "gpu:0".into());
+    let max_batch = std::env::var("MOKURO_CHARSPOT_MAX_BATCH")
+        .ok()
+        .map(|v| v.parse::<u32>().expect("MOKURO_CHARSPOT_MAX_BATCH"));
+    let expected = std::fs::read_to_string(var("MOKURO_CHARSPOT_PARITY_EXPECTED")).unwrap();
+    let rows: Vec<serde_json::Value> = expected
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert!(!rows.is_empty(), "no expected rows");
+
+    let pack = Pack::open(&pack_dir, false).unwrap_or_else(|e| panic!("{e}"));
+    assert!(pack.reads_chars(), "the pack has no bt_read_chars");
+    let cache = tempfile::tempdir().unwrap();
+    let opts = bunko_torch::abi::LoadOptions {
+        tokenizer: var("MOKURO_CHARSPOT_VOCAB").to_string_lossy().into_owned(),
+        weights: Some(vec![
+            var("MOKURO_CHARSPOT_WEIGHTS")
+                .to_string_lossy()
+                .into_owned(),
+        ]),
+        cache_dir: Some(cache.path().to_string_lossy().into_owned()),
+        max_batch,
+        threads: 8,
+        ..Default::default()
+    };
+    let h = pack
+        .load("charspot-small", &package, "fp32", &device, &opts)
+        .unwrap_or_else(|e| panic!("{e}"));
+    let info = h.info().unwrap();
+    eprintln!("{info:?}");
+    assert!(info.batch >= 1 && info.weights > 0, "{info:?}");
+
+    // An empty crop between two real ones keeps its place and reads nothing.
+    let img = |file: &str| {
+        image::open(crops.join(file))
+            .unwrap_or_else(|e| panic!("{file}: {e}"))
+            .to_rgb8()
+    };
+    let file = |r: &serde_json::Value| r["file"].as_str().unwrap().to_string();
+    let (a, b) = (img(&file(&rows[0])), img(&file(&rows[rows.len() - 1])));
+    let r = h
+        .read_chars(&[
+            (a.as_raw(), a.width(), a.height()),
+            (&[], 0, 7),
+            (b.as_raw(), b.width(), b.height()),
+        ])
+        .unwrap();
+    assert_eq!(r.len(), 3);
+    assert_eq!(
+        (r[1].text.as_str(), r[1].chars.as_deref()),
+        ("", Some(&[][..]))
+    );
+    assert_eq!(r[0].text, rows[0]["text"].as_str().unwrap());
+
+    let (mut same, mut differ, mut worst) = (0usize, Vec::new(), 0f64);
+    let t0 = std::time::Instant::now();
+    for chunk in rows.chunks(64) {
+        let images: Vec<_> = chunk.iter().map(|r| img(&file(r))).collect();
+        let raw: Vec<(&[u8], u32, u32)> = images
+            .iter()
+            .map(|i| (i.as_raw().as_slice(), i.width(), i.height()))
+            .collect();
+        let got = h.read_chars(&raw).unwrap();
+        assert_eq!(got.len(), chunk.len(), "one result per crop");
+        for (want, read) in chunk.iter().zip(&got) {
+            let chars = read.chars.as_ref().expect("charspot answers characters");
+            let joined: String = chars.iter().map(|c| c.0.as_str()).collect();
+            assert_eq!(
+                read.text,
+                joined,
+                "{}: text is the characters joined",
+                file(want)
+            );
+            let wc = want["chars"].as_array().unwrap();
+            let mut ok = read.text == want["text"].as_str().unwrap() && chars.len() == wc.len();
+            if ok {
+                for (c, w) in chars.iter().zip(wc) {
+                    ok &= c.0 == w[0].as_str().unwrap();
+                    for (g, k) in [c.1, c.2, c.3, c.4].into_iter().zip(1..5) {
+                        let d = (f64::from(g) - w[k].as_f64().unwrap()).abs();
+                        worst = worst.max(d);
+                        ok &= d <= 0.5;
+                    }
+                }
+            }
+            if ok {
+                same += 1;
+            } else {
+                differ.push(format!(
+                    "{}: {:?} ({} chars) != {:?} ({} chars)",
+                    file(want),
+                    read.text,
+                    chars.len(),
+                    want["text"],
+                    wc.len()
+                ));
+            }
+        }
+    }
+    eprintln!(
+        "charspot-small on {device} (batch {}): {same} of {} crops the same, largest box move {worst:.2e} px, {:.1}s",
+        info.batch,
+        rows.len(),
+        t0.elapsed().as_secs_f64()
+    );
+    assert!(
+        differ.is_empty(),
+        "{same} of {} the same; {} differ: {differ:#?}",
+        rows.len(),
+        differ.len()
+    );
 }

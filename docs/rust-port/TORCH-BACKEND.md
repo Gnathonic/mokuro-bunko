@@ -127,6 +127,19 @@ weights key; `{}` = weights inside), `bunko.engine/role/precision/target/torch/t
 `bunko.special` (hayai), `bunko.prompt` (paddle), `bunko.fused`. The decoder blob's
 safetensors metadata `bunko.alias.host.embed_tokens` names paddle's input-embedding table.
 
+**Load-time cast (`bunko.weights_dtype`).** Every package above binds weights already in its
+own precision (hayai-nova's are pre-cast at build time, step 1 below). The one exception is
+nar-small fp16 ([Single-graph engines](#single-graph-engines)): it binds the authors' own
+fp32 `model.safetensors`, which Bunko does not rewrite or host, so its package says
+`bunko.weights_dtype = "fp16"` and the cdylib casts each floating tensor of the file (F64,
+F32, BF16) to F16 on the device as it loads it (`Weights::load`; integer and bool tensors
+are bound as stored, an F16 tensor without a copy). Every graph of a set must give the
+same `bunko.weights_dtype` (absent = bind as stored); any value but `fp16` is refused.
+Independently, the C++ shim refuses to bind any constant whose tensor's dtype is not the
+one the package compiled it as (`constant <fqn> is F32, the package wants F16`), so a pack
+that does not cast, or a hand-made package directory, fails to load instead of reading
+the memory as the wrong type.
+
 **Windows.** A Linux package does not load on Windows (ELF vs PE). `windows-cuda-*` targets are
 cross-compiled on Linux (torch's `cross_target_platform="windows"`, llvm-mingw, the Windows
 torch/CUDA wheels' import libraries; no Windows machine, no GPU) and are weightless like
@@ -408,6 +421,114 @@ random inputs: in bf16 the step's argmax can tie-flip between eager and compiled
 * Windows wrappers are `*.wrapper.pyd`; strip the archive's top `<role>/` folder when extracting
   into `unpack_to`, which then contains `data/aotinductor/model/`.
 
+## Single-graph engines
+
+0.8 adds the text-box recognizer nar-small (muscgab's `r16` model) to the libtorch route,
+on NVIDIA and AMD cards; everywhere else it keeps reading on the CPU with ONNX Runtime.
+Unlike hayai-nova and paddle-manga it is **one graph** with no generation loop: a batch
+of preprocessed crops in, 161 ids per crop out. The design is
+[TEXTBOX-GPU.md](TEXTBOX-GPU.md); this is the record of what was built.
+
+**Package.** `torch/nar-small/<precision>/<target>/model.pt2` (`fp32` or `fp16`; no
+bf16), role `model`, unpacked to `torch/nar-small/<precision>/<target>/model/`. Metadata: `bunko.io = "textbox-1"` (a string, not
+the recognizers' integer), `bunko.max_batch = "64"` (the graph's dynamic batch is 1..64),
+`bunko.weights` mapping each of its 181 constants to a key of the author's
+`model.safetensors` (pinned: `muscgab/manga-ocr-nar-small` @ `8cc14c15…`, sha256
+`bc7418e2…20a3`, 217,035,140 B; the fp32 and fp16 packages bind the same file). The fp16
+package is the authors' own fp16 mode (`net.to(torch.float16)`, what their
+`PyTorchBackend(fp16=True)` runs), compiled with F16 constants under the authors' keys and
+marked `bunko.weights_dtype = "fp16"`: the cdylib casts the file at load (see "Load-time
+cast" above), and no fp16 copy of the weights is written anywhere. The package holds
+**no weights**: the exporter
+(`python -m torch_export build -e nar-small -p fp32|fp16 -t <target>`) refuses `TORCH_EXPORT_WIN_EMBED`
+and `TORCH_EXPORT_CPU_EMBED` for it, drops the non-persistent buffers the graph recomputes,
+and `python -m torch_export refuse-embedded`, `verify` and `publish_textbox.sh` refuse a
+`.pt2` whose constants live inside it. The preprocessing (`bunko_vlm::textbox`: canvas,
+patches, the 14 px grid under a 324-patch budget) is the same Rust code on both routes,
+so the GPU route gets bit-identical inputs.
+
+**Release.** `textbox-torch-v1` (`bunko_ocr::models::torch_release_name_for`), its rows in
+`crates/bunko-ocr/src/textbox_torch_models.json`, built with
+`python -m torch_export textbox-manifest` and published with `publish_textbox.sh` (which
+checks every asset's sha256 after the upload). A target enters the manifest only when
+`verify` reads all 7,929 JMangaBench_Read crops with the same ids as the author's fp32
+PyTorch on a card of that target; a target with no card to test enters only when its
+verified neighbours pass from the same exporter commit. A target that fails is left out,
+so that GPU reads on the CPU; there is no looser tolerance and no revision bump. An fp16
+package has its own gate (TEXTBOX-GPU.md §11, §20.4): on the same 7,929 crops its texts
+differ from the authors' fp16 and from fp32 on at most `floor(0.001 × n)` crops each, and
+`paired.py` shows no JMangaBench_Read loss against fp32. A target whose fp16 package fails
+it is shipped with fp32 only, so its GPU reads nar at fp32. `textbox-manifest` refuses a
+package whose `bunko.weights_dtype` disagrees with its precision directory.
+
+**Gate tooling** (`tools/torch_export/torch_export/gate.py`). `python -m torch_export
+gate-bundle` stages one self-contained directory per target for a test machine: the
+package, the crops, the two expected files, the exporter's sources at the build commit,
+`run.sh` and a `SHA256SUMS` (never the authors' weights: the test machine fetches them, and
+`verify` checks their pin). `run.sh` checks the sums before and after the run, reads every
+crop at batch 1, 8 and 32 (`verify --reads`, one process each) and checks the batch-32
+read against the authors' output at that precision and against fp32, and each pair of
+batch sizes, each within `floor(0.001 × n)`; `results/summary.json` holds the counts and
+crops/s. `compare-reads A B` compares any two reads files (`verify --reads`, the Rust
+`nar_torch_parity*` tests' `MOKURO_NAR_PARITY_READS`, `check_parity.py --expected`), and
+`block-preds` joins crop texts per page into `paired.py`'s input.
+
+**cdylib.** `GraphSet` (`package.rs`) loads a set of graphs of any roles, checks that
+they agree on `bunko.io`, `bunko.weights_dtype` and `bunko.weights_format`, and binds
+the weight files given in `LoadOptions.weights` (for nar: the author's file), cast when
+the set says `bunko.weights_dtype`. `bt_load` takes `nar-small` at fp32 or fp16 (bf16 is
+refused) and `LoadOptions.tokenizer` the vocabulary; it refuses a package whose
+`bunko.weights_dtype` is not the precision asked for (fp32 needs none, fp16 needs `fp16`),
+so a session never runs at another precision than it reports. A pack from before the cast
+cannot load an fp16 package (the shim's dtype check), and the host falls back as below.
+The optional entry point `bt_read_chars(handle, crops, n, out_json, err_out)` returns
+`[{"text", "chars"}]`, one entry per crop: an empty crop reads `""` without a model call,
+and the crops are split into batches of at most the handle's batch, in crop order. The
+ABI stays 1; the host looks the symbol up and a pack without it leaves the
+text-box engines on the CPU, with the reason logged once. 0.8.0 loads no 0.7.x pack
+(backend packs are tied to the release, `OLDEST_PACK_RELEASE` 0.8.0-beta.1, and
+`install-ocr` installs 0.8.0's own before OCR uses the backend), so only a development
+pack, or a local 0.8.0-beta.1 pack built before the symbol, can lack it. `bt_init` turns TF32 off for
+cuDNN and matmul on every pack, so fp32 is fp32 on Ampere and later.
+
+**Batch on small cards.** `LoadOptions.max_batch` caps the batch below the package's.
+The host sets it from the device's reported memory (`DeviceEntry.vram_mb`): a card under
+`TEXTBOX_SMALL_VRAM_MB` (4,096 MB) reads at most `TEXTBOX_SMALL_BATCH` (8) crops a call;
+any other card, or one that reports no memory, reads at the package's 64. The rule comes
+from the peak memory per batch measured on gfx1201 (the spike peaked at 2.2 GiB with two
+packages and two reference models loaded), so that a small card keeps room for the
+detector beside it. `Some(0)` is treated as 1; a cap above the package's is the
+package's.
+
+**Precision.** nar-small is a precision engine with the formats fp32 and fp16. The
+text-box arm of `open_session` resolves the row's mode over the formats the placed device
+can run (`bunko_sched::precision`, as for hayai-nova): every auto mode prefers fp16, so on
+a GPU with an fp16 package `auto-accuracy` reads at fp16 and `auto-balanced`/`auto-speed`
+keep fp16 unless the precision benchmark finds fp32 more than 5% faster; the CPU reads at
+fp32. With an auto mode a failed GPU load reads on the CPU at fp32; a forced `fp16` that
+fails on the GPU reports both errors (`gpu_then_cpu_error`). The resolved precision is
+the session's and the sidecar's `ocr_engine.precision`; it is provenance, not identity
+(the revision stays 2, nothing is re-read). The prefetch fetches the packages the row's
+mode can resolve to on that GPU (fp16 for `auto-accuracy`, fp16 and fp32 for the benchmarked
+modes).
+
+**Host.** `TorchBackend::textbox` loads the handle (shared while anyone holds it); the
+`TextboxRecognizer` reads a page's blocks in one `bt_read_chars` call and refuses an
+answer with the wrong number of entries. `open_session` places the engine stage with
+`place_runnable` over the formats a GPU can run for it (a pack with `bt_read_chars`, a
+package for its target, the host files obtainable) and falls back to the CPU pool on any
+of: no pack, a pack without the symbol, no package for the card, a failed load (a
+`warn!`), `ocr.backend: cpu`, or `stage_device.engine: cpu`. The sidecar names the
+export set it read with: `textbox-torch-v1` on the card, `textbox-graphs-v1` on the CPU.
+
+**Benchmark.** For a text-box row whose engine stage was placed on a card without being
+pinned there, the benchmark runs one trial with the engine on the card and one with it
+on the CPU (`stage_device.engine = cpu`) and keeps the faster; the card keeps a tie
+within 5%. fp32 nar on a weak card can be slower than the CPU pool of a many-core host,
+and at fp32 the text is the same either way.
+
+**Verified targets.** Recorded here once the gates have run.
+
 ## Work and owners (parallel agents, shared worktree)
 
 | stream | owns | deliverable |
@@ -510,7 +631,8 @@ A handle is shared by any number of threads (device work is serialised inside).
   existing manifest. `bunko.special` / `bunko.prompt` are checked against the code's
   constants. hayai-nova packages: a static axis of 512 patches; a patch budget from 1 to
   512 resizes each crop for it and masks the rest of the axis (packs before 0.8.0 refuse
-  any budget but 512, and the host asks for a pack update).
+  any budget but 512; 0.8.0 loads none of them, and for a development pack that does the
+  host asks for a pack update).
 * Layout **(changed: B's target names)**:
   `<storage>/models/torch/<engine>/<precision>/{weights-*.safetensors, <target>/{vision,prefill,step}.pt2}`,
   targets `<os>-cuda-sm_NN` (a device tries its own arch, then every older one: PTX),
@@ -617,7 +739,7 @@ library / newer system (`abi::explain_load_error`, with libloading's source chai
 
 **Catalog and benchmarks (2026-10-03).** `describe()` lists per device only the formats a
 recognizer can run here (compute formats ∩ packages on disk or downloadable,
-`torch::runnable_formats`: a Turing card lists fp32/fp16, not bf16). The host's CPU string
+`torch::engine_formats`: a Turing card lists fp32/fp16, not bf16). The host's CPU string
 carries 0.5.2's core count (`"… (8 cores)"`, `runtime::cpu_label`). `EngineRunner` answers
 `VolumeRunner::width_ceilings` from the planner (`plan::width_ceilings`: pooled stages up
 to the budget and the road's cap, a GPU engine up to 8 threads within the budget, a CPU

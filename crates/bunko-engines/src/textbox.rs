@@ -38,12 +38,16 @@
 //! border.
 
 use std::path::Path;
+#[cfg(feature = "torch")]
+use std::sync::Arc;
 
 use bunko_layout::difflib::SequenceMatcher;
 use bunko_ocr::models::NAR_WEIGHTS_LOCATION;
 use bunko_ocr::runtime::{ExternalFile, Model, RuntimeOptions, TensorBuf};
+#[cfg(feature = "torch")]
+use bunko_torch::abi::{CharEntry, CharsRead};
 use bunko_vlm::crop::paddle_quad_crop;
-use bunko_vlm::resample::{Filter, resize};
+use bunko_vlm::textbox::*;
 use bunko_vlm::{
     Bgr, BlockCrop, BlockReader, CropSet, Device, LineRead, Precision, Quad, Recognizer,
     RecognizerInfo, Rgb, VlmError, read_flat,
@@ -52,102 +56,6 @@ use bunko_vlm::{
 /// How far a line's crop reaches past its quad, in line thicknesses: the models were
 /// trained on tight text boxes.
 pub const LINE_MARGIN_EM: f64 = 0.1;
-
-/// charspot: the side of a grid cell in pixels, and how many cells a crop may take.
-pub const CHARSPOT_CELL: usize = 16;
-pub const CHARSPOT_BUDGET: usize = 256;
-/// charspot's classes: the vocabulary padded to this many, then the `!?` glyphs.
-const CHARSPOT_CLASSES: usize = 6818;
-/// nar-small: the side of a patch, how many patches a crop may take, and the output
-/// positions (the last may be the end mark).
-pub const NAR_PATCH: usize = 14;
-pub const NAR_BUDGET: usize = 324;
-pub const NAR_SLOTS: usize = 161;
-/// The normalisation, digit for digit as the model's package writes it.
-const NAR_MEAN: [f32; 3] = [0.481_454_66, 0.457_827_5, 0.408_210_73];
-#[allow(clippy::excessive_precision)]
-const NAR_STD: [f32; 3] = [0.268_629_54, 0.261_302_58, 0.275_777_11];
-
-fn asset(what: &str, path: &Path, e: impl std::fmt::Display) -> VlmError {
-    VlmError::Asset(format!("{what} {}: {e}", path.display()))
-}
-
-/// The `characters` list of a vocabulary file.
-fn load_characters(path: &Path) -> Result<Vec<String>, VlmError> {
-    let text =
-        std::fs::read_to_string(path).map_err(|e| VlmError::Io(path.display().to_string(), e))?;
-    let value: serde_json::Value =
-        serde_json::from_str(&text).map_err(|e| asset("vocabulary", path, e))?;
-    let chars: Option<Vec<String>> = value["characters"].as_array().map(|a| {
-        a.iter()
-            .map(|c| c.as_str().unwrap_or_default().to_string())
-            .collect()
-    });
-    chars
-        .filter(|c| !c.is_empty())
-        .ok_or_else(|| asset("vocabulary", path, "no characters"))
-}
-
-/// The largest scale at which a `height` x `width` crop, cut into 14 px cells, takes
-/// no more than `budget` cells: `(scale, rows, columns)`. Both models size their input
-/// with this search (charspot then draws 16 px cells).
-pub fn fit_grid(height: usize, width: usize, budget: usize) -> (f64, usize, usize) {
-    let cells = |v: usize, s: f64| (v as f64 * s / 14.0).ceil() as usize;
-    let (mut lo, mut hi) = (1e-4f64, 1000.0f64);
-    for _ in 0..60 {
-        let mid = (lo + hi) / 2.0;
-        if cells(height, mid) * cells(width, mid) <= budget {
-            lo = mid;
-        } else {
-            hi = mid;
-        }
-    }
-    (lo, cells(height, lo), cells(width, lo))
-}
-
-/// Scale `crop` to `scaled` and put it in the top-left corner of a `canvas` sized
-/// image filled with the median colour of the scaled crop's border.
-fn on_canvas(crop: &Rgb, scaled: (usize, usize), canvas: (usize, usize)) -> Rgb {
-    let (rw, rh) = scaled;
-    let small = resize(crop, rw, rh, Filter::Bicubic);
-    // The top and bottom rows and the left and right columns, corners twice.
-    let mut fill = [0u8; 3];
-    for (c, out) in fill.iter_mut().enumerate() {
-        let mut border: Vec<u8> = Vec::with_capacity(2 * (rw + rh));
-        for y in [0, rh - 1] {
-            border.extend((0..rw).map(|x| small.data[(y * rw + x) * 3 + c]));
-        }
-        for x in [0, rw - 1] {
-            border.extend((0..rh).map(|y| small.data[(y * rw + x) * 3 + c]));
-        }
-        border.sort_unstable();
-        // An even count: the mean of the two middle values, cut to a whole number.
-        let mid = border.len() / 2;
-        *out = ((u16::from(border[mid - 1]) + u16::from(border[mid])) / 2) as u8;
-    }
-    let (cw, ch) = canvas;
-    let mut data = Vec::with_capacity(cw * ch * 3);
-    for _ in 0..cw * ch {
-        data.extend_from_slice(&fill);
-    }
-    for y in 0..rh {
-        let row = &small.data[y * rw * 3..(y + 1) * rw * 3];
-        data[y * cw * 3..y * cw * 3 + rw * 3].copy_from_slice(row);
-    }
-    Rgb {
-        width: cw,
-        height: ch,
-        data,
-    }
-}
-
-fn round(x: f64) -> usize {
-    x.round_ties_even().max(0.0) as usize
-}
-
-fn empty(crop: &Rgb) -> bool {
-    crop.width == 0 || crop.height == 0
-}
 
 // --- charspot ----------------------------------------------------------------
 
@@ -189,46 +97,10 @@ impl std::fmt::Debug for Charspot {
     }
 }
 
-/// charspot's input for a crop: the canvas, and the factors that take canvas pixels
-/// back to crop pixels (`x`, `y`).
-fn charspot_canvas(crop: &Rgb) -> (Rgb, (f32, f32)) {
-    let (s, rows, cols) = fit_grid(crop.height, crop.width, CHARSPOT_BUDGET);
-    let s = s * CHARSPOT_CELL as f64 / 14.0;
-    let rw = round(crop.width as f64 * s).clamp(1, cols * CHARSPOT_CELL);
-    let rh = round(crop.height as f64 * s).clamp(1, rows * CHARSPOT_CELL);
-    let canvas = on_canvas(crop, (rw, rh), (cols * CHARSPOT_CELL, rows * CHARSPOT_CELL));
-    let back = (
-        (crop.width as f64 / rw as f64) as f32,
-        (crop.height as f64 / rh as f64) as f32,
-    );
-    (canvas, back)
-}
-
 impl Charspot {
     pub fn load(model: &Path, vocabulary: &Path, opts: &RuntimeOptions) -> Result<Self, VlmError> {
-        let mut classes = load_characters(vocabulary)?;
-        if classes.len() > CHARSPOT_CLASSES {
-            return Err(asset(
-                "vocabulary",
-                vocabulary,
-                format!("{} characters, more than {CHARSPOT_CLASSES}", classes.len()),
-            ));
-        }
-        classes.resize(CHARSPOT_CLASSES, String::new());
-        // The tate-chu-yoko glyphs: every pair, then every triple, of `!` and `?`.
-        let marks = ['!', '?'];
-        for a in marks {
-            for b in marks {
-                classes.push([a, b].iter().collect());
-            }
-        }
-        for a in marks {
-            for b in marks {
-                for c in marks {
-                    classes.push([a, b, c].iter().collect());
-                }
-            }
-        }
+        let classes = charspot_classes(load_characters(vocabulary)?)
+            .map_err(|e| VlmError::Asset(format!("vocabulary {}: {e}", vocabulary.display())))?;
         let model = Model::load(model, opts).map_err(|e| VlmError::Runtime(e.to_string()))?;
         Ok(Self { model, classes })
     }
@@ -305,57 +177,6 @@ impl std::fmt::Debug for NarSmall {
     }
 }
 
-/// nar-small's inputs for a crop: the patches `[324, 588]` (each a 14 x 14 patch, red
-/// plane first, normalised), which of them are crop (`V`), their rows and columns, and
-/// the grid's size.
-struct NarInput {
-    patches: Vec<f32>,
-    valid: Vec<f32>,
-    rows: Vec<i32>,
-    cols: Vec<i32>,
-    grid: (usize, usize),
-}
-
-fn nar_input(crop: &Rgb) -> NarInput {
-    let (s, rows, cols) = fit_grid(crop.height, crop.width, NAR_BUDGET);
-    let rw = round(crop.width as f64 * s).clamp(1, cols * NAR_PATCH);
-    let rh = round(crop.height as f64 * s).clamp(1, rows * NAR_PATCH);
-    let canvas = on_canvas(crop, (rw, rh), (cols * NAR_PATCH, rows * NAR_PATCH));
-    let feat = 3 * NAR_PATCH * NAR_PATCH;
-    let mut patches = vec![0.0f32; NAR_BUDGET * feat];
-    let (mut valid, mut prow, mut pcol) = (
-        vec![0.0f32; NAR_BUDGET],
-        vec![0i32; NAR_BUDGET],
-        vec![0i32; NAR_BUDGET],
-    );
-    for r in 0..rows {
-        for c in 0..cols {
-            let n = r * cols + c;
-            valid[n] = 1.0;
-            prow[n] = r as i32;
-            pcol[n] = c as i32;
-            let patch = &mut patches[n * feat..(n + 1) * feat];
-            for ch in 0..3 {
-                for py in 0..NAR_PATCH {
-                    for px in 0..NAR_PATCH {
-                        let v = canvas.data
-                            [((r * NAR_PATCH + py) * canvas.width + c * NAR_PATCH + px) * 3 + ch];
-                        patch[(ch * NAR_PATCH + py) * NAR_PATCH + px] =
-                            (f32::from(v) / 255.0 - NAR_MEAN[ch]) / NAR_STD[ch];
-                    }
-                }
-            }
-        }
-    }
-    NarInput {
-        patches,
-        valid,
-        rows: prow,
-        cols: pcol,
-        grid: (rows, cols),
-    }
-}
-
 impl NarSmall {
     /// `model` is the weightless graph, `weights` the author's `model.safetensors` (any
     /// name, any folder: it reaches ONNX Runtime from memory).
@@ -380,15 +201,7 @@ impl NarSmall {
         if empty(crop) {
             return Ok(String::new());
         }
-        let ids = self.ids(crop)?;
-        // The end mark is the id after the last character; the text stops there.
-        let end = self.characters.len() as i64;
-        Ok(ids
-            .iter()
-            .take_while(|&&i| i != end)
-            .filter_map(|&i| usize::try_from(i).ok().and_then(|i| self.characters.get(i)))
-            .map(String::as_str)
-            .collect())
+        Ok(nar_text(&self.ids(crop)?, &self.characters))
     }
 
     /// The model's output for one crop: an id per output slot.
@@ -632,42 +445,153 @@ pub fn lines_of(read: &CharRead) -> Vec<LineRead> {
         .collect()
 }
 
+/// nar-small's text read from a whole crop: one line, the whole crop (it knows no
+/// positions); no line when it read nothing.
+fn whole_crop_line(text: String, crop: &Rgb) -> Vec<LineRead> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+    vec![LineRead {
+        text,
+        bbox: [0.0, 0.0, crop.width as f32, crop.height as f32],
+        vertical: crop.height >= crop.width,
+        confs: Vec::new(),
+    }]
+}
+
 impl BlockReader for TextboxRecognizer {
     fn read_lines(&self, crops: &[Rgb]) -> Result<Vec<Vec<LineRead>>, VlmError> {
+        #[cfg(feature = "torch")]
+        if let Reader::Torch(r) = &self.reader {
+            let reads = self.read_all(r.as_ref(), &crops.iter().collect::<Vec<_>>())?;
+            return Ok(reads
+                .into_iter()
+                .zip(crops)
+                .map(|(read, crop)| match read.chars {
+                    None => whole_crop_line(read.text, crop),
+                    Some(_) => lines_of(&char_read(&read)),
+                })
+                .collect());
+        }
         crops
             .iter()
             .map(|crop| {
                 Ok(match &self.reader {
                     Reader::Charspot(m) => lines_of(&m.read(crop)?),
-                    // No character boxes: the text is one line, the whole crop.
-                    Reader::Nar(m) => {
-                        let text = m.read(crop)?;
-                        if text.is_empty() {
-                            Vec::new()
-                        } else {
-                            vec![LineRead {
-                                text,
-                                bbox: [0.0, 0.0, crop.width as f32, crop.height as f32],
-                                vertical: crop.height >= crop.width,
-                                confs: Vec::new(),
-                            }]
-                        }
-                    }
+                    Reader::Nar(m) => whole_crop_line(m.read(crop)?, crop),
+                    #[cfg(feature = "torch")]
+                    Reader::Torch(_) => unreachable!("read in one call above"),
                 })
             })
             .collect()
     }
 
     fn read_blocks(&self, blocks: &[BlockCrop]) -> Result<Vec<Vec<String>>, VlmError> {
+        #[cfg(feature = "torch")]
+        if let Reader::Torch(r) = &self.reader {
+            let images: Vec<&Rgb> = blocks.iter().map(|b| &b.image).collect();
+            let reads = self.read_all(r.as_ref(), &images)?;
+            return Ok(reads
+                .into_iter()
+                .zip(blocks)
+                .map(|(read, block)| match read.chars {
+                    None => share_text(&read.text, &block.hints),
+                    Some(_) => share_characters(&char_read(&read), &block.lines),
+                })
+                .collect());
+        }
         blocks
             .iter()
             .map(|block| {
                 Ok(match &self.reader {
                     Reader::Charspot(m) => share_characters(&m.read(&block.image)?, &block.lines),
                     Reader::Nar(m) => share_text(&m.read(&block.image)?, &block.hints),
+                    #[cfg(feature = "torch")]
+                    Reader::Torch(_) => unreachable!("read in one call above"),
                 })
             })
             .collect()
+    }
+}
+
+// --- the GPU back-end ----------------------------------------------------------
+
+/// A back-end that reads many whole text-box crops in one call and answers one
+/// [`CharsRead`] per crop, in crop order: the libtorch pack's `bt_read_chars`
+/// ([`crate::torch::TorchTextbox`]). It splits the crops into batches itself and reads
+/// `""` for an empty crop.
+#[cfg(feature = "torch")]
+pub trait CharsReader: Send + Sync {
+    fn read_chars(&self, crops: &[&Rgb]) -> Result<Vec<CharsRead>, VlmError>;
+}
+
+#[cfg(feature = "torch")]
+impl CharsReader for crate::torch::TorchTextbox {
+    fn read_chars(&self, crops: &[&Rgb]) -> Result<Vec<CharsRead>, VlmError> {
+        crate::torch::TorchTextbox::read_chars(self, crops)
+    }
+}
+
+/// The characters of a crop the pack read, as charspot's ONNX route gives them: each
+/// `(c, x0, y0, x1, y1, score)` a [`CharBox`]. No characters (nar-small) is no box.
+#[cfg(feature = "torch")]
+fn char_read(r: &CharsRead) -> CharRead {
+    CharRead {
+        chars: r
+            .chars
+            .iter()
+            .flatten()
+            .map(|CharEntry(c, x0, y0, x1, y1, s)| CharBox {
+                text: c.clone(),
+                bbox: [*x0, *y0, *x1, *y1],
+                score: *s,
+            })
+            .collect(),
+    }
+}
+
+/// charspot-small's CPU route for the crops the GPU route leaves unread (L12): the
+/// characters of one upright crop.
+#[cfg(feature = "torch")]
+pub type CpuRoute = Box<dyn Fn(&Rgb) -> Result<CharRead, VlmError> + Send + Sync>;
+
+/// A [`CpuRoute`] that loads its [`Charspot`] with `load` on first use and keeps it. A
+/// failed load is the read's error and is tried again on the next crop that needs it.
+#[cfg(feature = "torch")]
+pub fn lazy_cpu_route(
+    load: impl Fn() -> Result<Charspot, VlmError> + Send + Sync + 'static,
+) -> CpuRoute {
+    let loaded: std::sync::Mutex<Option<Arc<Charspot>>> = std::sync::Mutex::new(None);
+    Box::new(move |crop: &Rgb| {
+        let model = {
+            let mut slot = loaded.lock().unwrap_or_else(|e| e.into_inner());
+            match slot.as_ref() {
+                Some(m) => m.clone(),
+                None => {
+                    let m = Arc::new(load()?);
+                    *slot = Some(m.clone());
+                    m
+                }
+            }
+        };
+        model.read(crop)
+    })
+}
+
+/// A crop's [`CharRead`] as the pack would have answered it.
+#[cfg(feature = "torch")]
+fn chars_read(r: &CharRead) -> CharsRead {
+    CharsRead {
+        text: r.text(),
+        chars: Some(
+            r.chars
+                .iter()
+                .map(|c| {
+                    let [x0, y0, x1, y1] = c.bbox;
+                    CharEntry(c.text.clone(), x0, y0, x1, y1, c.score)
+                })
+                .collect(),
+        ),
     }
 }
 
@@ -676,6 +600,9 @@ impl BlockReader for TextboxRecognizer {
 enum Reader {
     Charspot(Charspot),
     Nar(NarSmall),
+    /// The GPU route: a page's crops in one call.
+    #[cfg(feature = "torch")]
+    Torch(Arc<dyn CharsReader>),
 }
 
 /// A text-box recognizer behind the pipeline's [`Recognizer`] seam. The pipeline reads
@@ -684,6 +611,9 @@ enum Reader {
 pub struct TextboxRecognizer {
     reader: Reader,
     info: RecognizerInfo,
+    /// charspot-small on the GPU route: where the crops the pack leaves unread go.
+    #[cfg(feature = "torch")]
+    cpu: Option<CpuRoute>,
 }
 
 impl TextboxRecognizer {
@@ -736,13 +666,92 @@ impl TextboxRecognizer {
                 batch: 1,
                 patch_budget: None,
             },
+            #[cfg(feature = "torch")]
+            cpu: None,
         })
     }
 
-    fn read_crop(&self, crop: &Rgb) -> Result<String, VlmError> {
+    /// A text-box recognizer on a back-end that reads a page's crops in one call (the
+    /// libtorch pack). `engine` is `charspot-small` or `nar-small`: it names the engine
+    /// in `info` and in errors; the rest of `info` (device, precision, batch) is the
+    /// caller's.
+    #[cfg(feature = "torch")]
+    pub fn with_reader(
+        engine: &'static str,
+        reader: Arc<dyn CharsReader>,
+        info: RecognizerInfo,
+    ) -> TextboxRecognizer {
+        Self {
+            reader: Reader::Torch(reader),
+            info: RecognizerInfo { engine, ..info },
+            cpu: None,
+        }
+    }
+
+    /// charspot-small's CPU route for the crops the GPU route leaves unread: more
+    /// characters than its tail graph holds (L12). Without one such a crop is an error.
+    #[cfg(feature = "torch")]
+    pub fn with_cpu_route(self, cpu: CpuRoute) -> TextboxRecognizer {
+        Self {
+            cpu: Some(cpu),
+            ..self
+        }
+    }
+
+    /// One [`CharsRead`] per crop from the back-end, or an error naming both counts: a
+    /// pack that answers too few or too many would put texts on the wrong blocks.
+    #[cfg(feature = "torch")]
+    fn read_all(&self, r: &dyn CharsReader, crops: &[&Rgb]) -> Result<Vec<CharsRead>, VlmError> {
+        if crops.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut reads = r.read_chars(crops)?;
+        if reads.len() != crops.len() {
+            return Err(VlmError::Runtime(format!(
+                "{}: the back-end returned {} results for {} crops",
+                self.info.engine,
+                reads.len(),
+                crops.len()
+            )));
+        }
+        // charspot-small answers characters for every crop it read: one without is a
+        // crop it left to the CPU route (L12). nar-small never answers characters.
+        if self.info.engine == "charspot-small" {
+            for (read, crop) in reads.iter_mut().zip(crops) {
+                if read.chars.is_some() {
+                    continue;
+                }
+                let cpu = self.cpu.as_ref().ok_or_else(|| {
+                    VlmError::Runtime(format!(
+                        "charspot-small: the pack left a {}x{} crop to the CPU route, and \
+                         there is none",
+                        crop.width, crop.height
+                    ))
+                })?;
+                tracing::info!(
+                    "charspot-small: a {}x{} crop holds more characters than the GPU \
+                     route reads at once; reading it on the CPU",
+                    crop.width,
+                    crop.height
+                );
+                *read = chars_read(&cpu(crop)?);
+            }
+        }
+        Ok(reads)
+    }
+
+    /// The text of each upright crop, in order: one call on the GPU back-end, a crop at a
+    /// time on ONNX Runtime.
+    fn read_crops(&self, crops: &[&Rgb]) -> Result<Vec<String>, VlmError> {
         match &self.reader {
-            Reader::Charspot(m) => m.read(crop).map(|r| r.text()),
-            Reader::Nar(m) => m.read(crop),
+            Reader::Charspot(m) => crops.iter().map(|c| m.read(c).map(|r| r.text())).collect(),
+            Reader::Nar(m) => crops.iter().map(|c| m.read(c)).collect(),
+            #[cfg(feature = "torch")]
+            Reader::Torch(r) => Ok(self
+                .read_all(r.as_ref(), crops)?
+                .into_iter()
+                .map(|read| read.text)
+                .collect()),
         }
     }
 }
@@ -769,9 +778,7 @@ impl Recognizer for TextboxRecognizer {
     }
 
     fn read(&self, lines: &[CropSet], _caps: Option<&[u32]>) -> Result<Vec<String>, VlmError> {
-        read_flat(lines, None, 0, |crops, _| {
-            crops.iter().map(|c| self.read_crop(c)).collect()
-        })
+        read_flat(lines, None, 0, |crops, _| self.read_crops(crops))
     }
 }
 
@@ -901,58 +908,287 @@ mod tests {
         assert_eq!(share_text("", &hints(&["あ", "い"])), ["", ""]);
     }
 
-    #[test]
-    fn the_grid_is_the_largest_that_fits_the_budget() {
-        // A square crop fills the budget exactly: 16 x 16 cells, 18 x 18 patches.
-        let (_, rows, cols) = fit_grid(100, 100, CHARSPOT_BUDGET);
-        assert_eq!((rows, cols), (16, 16));
-        let (_, rows, cols) = fit_grid(100, 100, NAR_BUDGET);
-        assert_eq!((rows, cols), (18, 18));
-        // A column four times as tall as wide.
-        let (s, rows, cols) = fit_grid(400, 100, CHARSPOT_BUDGET);
-        assert!(
-            rows * cols <= CHARSPOT_BUDGET && rows > 3 * cols,
-            "{rows}x{cols}"
-        );
-        // One step further would not fit.
-        let cells = |v: usize, s: f64| (v as f64 * s / 14.0).ceil() as usize;
-        assert!(cells(400, s * 1.01) * cells(100, s * 1.01) > CHARSPOT_BUDGET);
-    }
+    #[cfg(feature = "torch")]
+    mod torch_back_end {
+        use super::*;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
-    #[test]
-    fn the_canvas_holds_the_crop_in_the_corner_on_its_border_median() {
-        // 4 x 2, all border: red 10/20/30/40 on top, 50/60/70/80 below.
-        let mut data = Vec::new();
-        for v in [10u8, 20, 30, 40, 50, 60, 70, 80] {
-            data.extend_from_slice(&[v, 0, 255]);
+        /// A back-end that counts its calls and answers `out(i)` for the `i`th crop.
+        struct Fake {
+            calls: AtomicUsize,
+            out: fn(usize) -> CharsRead,
         }
-        let crop = Rgb {
-            width: 4,
-            height: 2,
-            data,
-        };
-        let canvas = on_canvas(&crop, (4, 2), (6, 3));
-        assert_eq!((canvas.width, canvas.height), (6, 3));
-        assert_eq!(canvas.px(0, 0), [10, 0, 255]);
-        assert_eq!(canvas.px(3, 1), [80, 0, 255]);
-        // Rows 10..40 and 50..80, columns 10,50 and 40,80: the two middle values of the
-        // twelve are 40 and 50.
-        assert_eq!(canvas.px(5, 0), [45, 0, 255]);
-        assert_eq!(canvas.px(0, 2), [45, 0, 255]);
-    }
 
-    #[test]
-    fn charspot_boxes_come_back_in_crop_pixels() {
-        let crop = Rgb::new(300, 600);
-        let (canvas, (fx, fy)) = charspot_canvas(&crop);
-        assert_eq!(canvas.width % CHARSPOT_CELL, 0);
-        assert_eq!(canvas.height % CHARSPOT_CELL, 0);
-        assert!(canvas.width / CHARSPOT_CELL * (canvas.height / CHARSPOT_CELL) <= CHARSPOT_BUDGET);
-        // The crop keeps its shape and lies inside the canvas: a canvas pixel is the
-        // same number of crop pixels both ways, within the rounding of the scaled size.
-        assert!((fx / fy - 1.0).abs() < 0.02, "{fx} {fy}");
-        assert!(300.0 / fx <= canvas.width as f32 + 0.5);
-        assert!(600.0 / fy <= canvas.height as f32 + 0.5);
+        impl CharsReader for Fake {
+            fn read_chars(&self, crops: &[&Rgb]) -> Result<Vec<CharsRead>, VlmError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok((0..crops.len()).map(self.out).collect())
+            }
+        }
+
+        /// A back-end that answers one entry too few: a mismatched pack.
+        struct Short;
+
+        impl CharsReader for Short {
+            fn read_chars(&self, crops: &[&Rgb]) -> Result<Vec<CharsRead>, VlmError> {
+                Ok(vec![
+                    CharsRead {
+                        text: "x".into(),
+                        chars: None
+                    };
+                    crops.len().saturating_sub(1)
+                ])
+            }
+        }
+
+        fn crop(w: usize, h: usize) -> Rgb {
+            Rgb {
+                width: w,
+                height: h,
+                data: vec![9; w * h * 3],
+            }
+        }
+
+        fn test_info() -> RecognizerInfo {
+            RecognizerInfo {
+                engine: "nar-small",
+                recognizer: "muscgab/manga-ocr-nar-small",
+                repos: Vec::new(),
+                precision: Precision::Fp32,
+                device: Device::Gpu(0),
+                token_caps: false,
+                second_read: false,
+                default_max_tokens: 0,
+                batch: 64,
+                patch_budget: None,
+            }
+        }
+
+        fn fake(out: fn(usize) -> CharsRead) -> Arc<Fake> {
+            Arc::new(Fake {
+                calls: 0.into(),
+                out,
+            })
+        }
+
+        #[test]
+        fn a_page_is_one_call_on_the_torch_back_end() {
+            let fake = fake(|i| CharsRead {
+                text: format!("t{i}"),
+                chars: None,
+            });
+            let r = TextboxRecognizer::with_reader("nar-small", fake.clone(), test_info());
+            let lines = r
+                .read_lines(&[crop(10, 40), crop(30, 10), crop(5, 5)])
+                .unwrap();
+            assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
+            assert_eq!(lines.len(), 3);
+            assert_eq!(lines[1][0].text, "t1");
+            assert_eq!(lines[1][0].bbox, [0.0, 0.0, 30.0, 10.0]);
+            assert!(!lines[1][0].vertical);
+            assert!(lines[0][0].vertical);
+            assert_eq!(r.info().device, Device::Gpu(0));
+        }
+
+        #[test]
+        fn results_keep_crop_order_across_chunks() {
+            let fake = fake(|i| CharsRead {
+                text: i.to_string(),
+                chars: None,
+            });
+            let r = TextboxRecognizer::with_reader("nar-small", fake, test_info());
+            let crops: Vec<Rgb> = (0..130).map(|_| crop(8, 8)).collect();
+            let lines = r.read_lines(&crops).unwrap();
+            assert_eq!(lines.len(), 130);
+            assert_eq!(lines[129][0].text, "129");
+            assert_eq!(lines[64][0].text, "64");
+        }
+
+        #[test]
+        fn an_empty_text_is_no_line() {
+            let fake = fake(|_| CharsRead {
+                text: String::new(),
+                chars: None,
+            });
+            let r = TextboxRecognizer::with_reader("nar-small", fake, test_info());
+            assert!(r.read_lines(&[crop(10, 10)]).unwrap()[0].is_empty());
+        }
+
+        #[test]
+        fn a_blocks_text_is_shared_out_in_one_call() {
+            let fake = fake(|i| CharsRead {
+                text: if i == 0 {
+                    "今日はいい天気".into()
+                } else {
+                    "あ".into()
+                },
+                chars: None,
+            });
+            let r = TextboxRecognizer::with_reader("nar-small", fake.clone(), test_info());
+            let block = |hints: &[&str]| BlockCrop {
+                image: crop(20, 40),
+                lines: vec![column(0.0, 10.0); hints.len()],
+                hints: hints.iter().map(|h| h.to_string()).collect(),
+            };
+            let out = r
+                .read_blocks(&[block(&["今日は", "いい天気"]), block(&["x"])])
+                .unwrap();
+            assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
+            assert_eq!(out, [vec!["今日は", "いい天気"], vec!["あ"]]);
+        }
+
+        #[test]
+        fn characters_from_the_pack_make_lines_and_share_out() {
+            // charspot's answer: two characters down a column, boxes in crop pixels.
+            let fake = fake(|_| CharsRead {
+                text: "今日".into(),
+                chars: Some(vec![
+                    CharEntry("今".into(), 65.0, 5.0, 75.0, 15.0, 0.9),
+                    CharEntry("日".into(), 65.0, 25.0, 75.0, 35.0, 0.8),
+                ]),
+            });
+            let r = TextboxRecognizer::with_reader("charspot-small", fake, test_info());
+            assert_eq!(r.info().engine, "charspot-small");
+            let lines = r.read_lines(&[crop(80, 40)]).unwrap();
+            assert_eq!(lines[0].len(), 1);
+            assert_eq!(lines[0][0].text, "今日");
+            assert_eq!(lines[0][0].bbox, [65.0, 5.0, 75.0, 35.0]);
+            assert_eq!(lines[0][0].confs, [0.9, 0.8]);
+            let block = BlockCrop {
+                image: crop(80, 40),
+                lines: vec![column(60.0, 80.0), column(20.0, 40.0)],
+                hints: vec![String::new(), String::new()],
+            };
+            assert_eq!(r.read_blocks(&[block]).unwrap(), [vec!["今日", ""]]);
+        }
+
+        /// L12: a charspot crop the pack leaves unread (`chars: None`: more characters
+        /// than its tail graph holds) is read on the CPU route, and only that crop.
+        #[test]
+        fn a_charspot_crop_the_pack_leaves_is_read_on_the_cpu() {
+            let pack = fake(|i| CharsRead {
+                text: if i == 1 { String::new() } else { "今".into() },
+                chars: (i != 1).then(|| vec![CharEntry("今".into(), 0.0, 0.0, 8.0, 8.0, 0.9)]),
+            });
+            let cpu_calls = Arc::new(AtomicUsize::new(0));
+            let counted = cpu_calls.clone();
+            let r = TextboxRecognizer::with_reader("charspot-small", pack.clone(), test_info())
+                .with_cpu_route(Box::new(move |c: &Rgb| {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!((c.width, c.height), (30, 90));
+                    Ok(CharRead {
+                        chars: vec![
+                            CharBox {
+                                text: "日".into(),
+                                bbox: [10.0, 5.0, 20.0, 15.0],
+                                score: 0.8,
+                            },
+                            CharBox {
+                                text: "本".into(),
+                                bbox: [10.0, 25.0, 20.0, 35.0],
+                                score: 0.7,
+                            },
+                        ],
+                    })
+                }));
+            let crops = [crop(10, 10), crop(30, 90), crop(10, 10)];
+            let lines = r.read_lines(&crops).unwrap();
+            assert_eq!(pack.calls.load(Ordering::SeqCst), 1);
+            assert_eq!(cpu_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(lines[0][0].text, "今");
+            assert_eq!(lines[1][0].text, "日本");
+            assert_eq!(lines[1][0].bbox, [10.0, 5.0, 20.0, 35.0]);
+            assert_eq!(lines[1][0].confs, [0.8, 0.7]);
+            assert_eq!(lines[2][0].text, "今");
+            // The line methods and the blocks take the CPU's read as well.
+            let sets: Vec<CropSet> = crops.iter().cloned().map(CropSet::one).collect();
+            assert_eq!(r.read(&sets, None).unwrap(), ["今", "日本", "今"]);
+            let block = BlockCrop {
+                image: crop(30, 90),
+                lines: vec![column(0.0, 30.0)],
+                hints: vec![String::new()],
+            };
+            let one = TextboxRecognizer::with_reader(
+                "charspot-small",
+                fake(|_| CharsRead {
+                    text: String::new(),
+                    chars: None,
+                }),
+                test_info(),
+            )
+            .with_cpu_route(Box::new(|_: &Rgb| {
+                Ok(CharRead {
+                    chars: vec![CharBox {
+                        text: "日".into(),
+                        bbox: [10.0, 5.0, 20.0, 15.0],
+                        score: 0.8,
+                    }],
+                })
+            }));
+            assert_eq!(one.read_blocks(&[block]).unwrap(), [vec!["日"]]);
+        }
+
+        /// Without a CPU route such a crop is an error, never text silently dropped;
+        /// nar-small's `chars: None` is its whole read and needs none.
+        #[test]
+        fn a_charspot_crop_left_unread_with_no_cpu_route_is_an_error() {
+            let none = |_| CharsRead {
+                text: String::new(),
+                chars: None,
+            };
+            let r = TextboxRecognizer::with_reader("charspot-small", fake(none), test_info());
+            let e = r.read_lines(&[crop(10, 10)]).unwrap_err();
+            assert!(e.to_string().contains("CPU route"), "{e}");
+            let nar = TextboxRecognizer::with_reader("nar-small", fake(none), test_info())
+                .with_cpu_route(Box::new(|_: &Rgb| panic!("nar-small has no CPU re-read")));
+            assert!(nar.read_lines(&[crop(10, 10)]).unwrap()[0].is_empty());
+        }
+
+        #[test]
+        fn the_line_methods_read_every_crop_in_one_call() {
+            let fake = fake(|i| CharsRead {
+                text: format!("l{i}"),
+                chars: None,
+            });
+            let r = TextboxRecognizer::with_reader("nar-small", fake.clone(), test_info());
+            let sets = [CropSet::one(crop(4, 4)), CropSet::one(crop(6, 6))];
+            assert_eq!(r.read(&sets, None).unwrap(), ["l0", "l1"]);
+            assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
+        }
+
+        #[test]
+        fn a_short_answer_is_an_error_naming_both_counts() {
+            let r = TextboxRecognizer::with_reader("nar-small", Arc::new(Short), test_info());
+            let e = r.read_lines(&[crop(4, 4), crop(4, 4)]).unwrap_err();
+            assert!(e.to_string().contains("1 results for 2 crops"), "{e}");
+            assert!(r.read(&[CropSet::one(crop(4, 4))], None).is_err());
+        }
+
+        #[test]
+        fn a_pack_character_is_a_char_box() {
+            let read = CharsRead {
+                text: "!?".into(),
+                chars: Some(vec![CharEntry("!?".into(), 1.0, 2.0, 3.0, 4.0, 0.5)]),
+            };
+            assert_eq!(
+                char_read(&read),
+                CharRead {
+                    chars: vec![CharBox {
+                        text: "!?".into(),
+                        bbox: [1.0, 2.0, 3.0, 4.0],
+                        score: 0.5,
+                    }]
+                }
+            );
+            assert_eq!(
+                char_read(&CharsRead {
+                    text: String::new(),
+                    chars: None
+                }),
+                CharRead::default()
+            );
+        }
     }
 
     /// The r16 graph with the author's weights gives the ids the author's PyTorch code
@@ -1012,31 +1248,5 @@ mod tests {
         }
         assert!(same > 0, "no crops");
         assert!(differ.is_empty(), "{same} identical; differ: {differ:?}");
-    }
-
-    #[test]
-    fn nar_patches_are_laid_out_row_by_row_and_padded() {
-        let crop = Rgb::new(140, 70);
-        let input = nar_input(&crop);
-        let (rows, cols) = input.grid;
-        assert!(
-            rows * cols <= NAR_BUDGET && cols == 2 * rows,
-            "{rows}x{cols}"
-        );
-        let n = rows * cols;
-        assert_eq!(input.valid[..n], vec![1.0; n][..]);
-        assert!(input.valid[n..].iter().all(|v| *v == 0.0));
-        assert_eq!((input.rows[cols], input.cols[cols]), (1, 0));
-        assert_eq!(
-            (input.rows[cols - 1], input.cols[cols - 1]),
-            (0, cols as i32 - 1)
-        );
-        // A black pixel, normalised, red first.
-        assert!((input.patches[0] - (0.0 - NAR_MEAN[0]) / NAR_STD[0]).abs() < 1e-6);
-        assert!(
-            (input.patches[2 * NAR_PATCH * NAR_PATCH] - (0.0 - NAR_MEAN[2]) / NAR_STD[2]).abs()
-                < 1e-6
-        );
-        assert!(input.patches[n * 588..].iter().all(|v| *v == 0.0));
     }
 }
