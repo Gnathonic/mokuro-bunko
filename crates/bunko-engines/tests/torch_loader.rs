@@ -152,6 +152,136 @@ fn abi_mismatch_and_missing_symbols() {
     }
 }
 
+/// Every ABI-1 entry point after `bt_abi_version`: `bt_init` succeeds, `bt_devices`
+/// reports a CPU, `bt_load` hands out a static handle, `bt_info` describes it, `bt_read`
+/// reads nothing, and `bt_free_str` frees what the others handed out.
+const ABI1_BODY: &str = r##"
+use std::ffi::{c_char, c_void, CString};
+
+static HANDLE: u8 = 0;
+
+fn give(out: *mut *mut c_char, s: &str) {
+    unsafe { *out = CString::new(s).unwrap().into_raw() }
+}
+
+#[unsafe(no_mangle)] pub extern "C" fn bt_init(_cfg: *const c_char, _e: *mut *mut c_char) -> i32 { 0 }
+
+#[unsafe(no_mangle)] pub extern "C" fn bt_devices(out: *mut *mut c_char, _e: *mut *mut c_char) -> i32 {
+    give(out, r#"{"abi":1,"torch":"2.13.0","devices":[{"id":"cpu","kind":"cpu","name":"cpu","arch":"x86_64","formats":["fp32"]}]}"#);
+    0
+}
+
+#[unsafe(no_mangle)] pub extern "C" fn bt_load(_engine: *const c_char, _dir: *const c_char, _prec: *const c_char, _dev: *const c_char, _opts: *const c_char, _e: *mut *mut c_char) -> *mut c_void {
+    &HANDLE as *const u8 as *mut c_void
+}
+
+#[unsafe(no_mangle)] pub extern "C" fn bt_info(_h: *mut c_void, out: *mut *mut c_char, _e: *mut *mut c_char) -> i32 {
+    give(out, r#"{"engine":"nar-small","precision":"fp32","device":"cpu","batch":64,"load_seconds":0.0,"torch":"2.13.0"}"#);
+    0
+}
+
+#[unsafe(no_mangle)] pub extern "C" fn bt_read(_h: *mut c_void, _c: *const u8, _n: usize, _caps: *const u32, out: *mut *mut c_char, _e: *mut *mut c_char) -> i32 {
+    give(out, "[]");
+    0
+}
+
+#[unsafe(no_mangle)] pub extern "C" fn bt_free(_h: *mut c_void) {}
+
+#[unsafe(no_mangle)] pub unsafe extern "C" fn bt_free_str(p: *mut c_char) {
+    if !p.is_null() {
+        drop(unsafe { CString::from_raw(p) });
+    }
+}
+"##;
+
+/// A library source exporting every ABI-1 entry point, `bt_abi_version` first, then
+/// `extra`.
+fn abi1_fixture(extra: &str) -> String {
+    let mut src = format!(
+        "#[unsafe(no_mangle)] pub extern \"C\" fn bt_abi_version() -> u32 {{ {BT_ABI_VERSION} }}\n"
+    );
+    src.push_str(ABI1_BODY);
+    src.push_str(extra);
+    src.push('\n');
+    src
+}
+
+/// `bt_read_chars` answering `count` (a Rust expression over `n`, the number of crops)
+/// entries of `{"text":"ab","chars":null}`.
+fn read_chars_fixture(count: &str) -> String {
+    let extra = r##"
+#[unsafe(no_mangle)] pub unsafe extern "C" fn bt_read_chars(_h: *mut std::ffi::c_void, _c: *const u8, n: usize, out: *mut *mut std::ffi::c_char, _e: *mut *mut std::ffi::c_char) -> i32 {
+    let one = r#"{"text":"ab","chars":null}"#;
+    let v = vec![one; COUNT].join(",");
+    unsafe { *out = std::ffi::CString::new(format!("[{v}]")).unwrap().into_raw() };
+    let _ = n;
+    0
+}
+"##;
+    abi1_fixture(&extra.replace("COUNT", count))
+}
+
+#[test]
+fn a_pack_without_bt_read_chars_reads_no_chars() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = pack_dir(tmp.path(), &manifest(BT_ABI_VERSION, std::env::consts::OS));
+    let src = abi1_fixture("");
+    assert!(src.contains(&format!(
+        "fn bt_abi_version() -> u32 {{ {BT_ABI_VERSION} }}"
+    )));
+    if !fixture_library(&dir, &src) {
+        return;
+    }
+    let pack = Pack::open(&dir, true).unwrap();
+    assert!(!pack.reads_chars());
+    let h = pack
+        .load("nar-small", tmp.path(), "fp32", "cpu", &Default::default())
+        .unwrap();
+    // The rest of ABI 1 still works on such a pack.
+    assert_eq!(h.info().unwrap().batch, 64);
+    let e = h.read_chars(&[(&[0u8; 3], 1, 1)]).unwrap_err();
+    assert!(e.contains("predates GPU text-box reading"), "{e}");
+}
+
+#[test]
+fn bt_read_chars_results_come_back_per_crop() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = pack_dir(tmp.path(), &manifest(BT_ABI_VERSION, std::env::consts::OS));
+    if !fixture_library(&dir, &read_chars_fixture("n")) {
+        return;
+    }
+    let pack = Pack::open(&dir, true).unwrap();
+    assert!(pack.reads_chars());
+    let h = pack
+        .load("nar-small", tmp.path(), "fp32", "cpu", &Default::default())
+        .unwrap();
+    let px = [0u8; 3];
+    let r = h.read_chars(&[(&px, 1, 1), (&px, 1, 1)]).unwrap();
+    assert_eq!(
+        r.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(),
+        ["ab", "ab"]
+    );
+    assert!(r.iter().all(|c| c.chars.is_none()));
+}
+
+#[test]
+fn a_wrong_result_count_is_an_error() {
+    // The fixture answers one entry whatever n is (Review Focus 3).
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = pack_dir(tmp.path(), &manifest(BT_ABI_VERSION, std::env::consts::OS));
+    if !fixture_library(&dir, &read_chars_fixture("1")) {
+        return;
+    }
+    let pack = Pack::open(&dir, true).unwrap();
+    assert!(pack.reads_chars());
+    let h = pack
+        .load("nar-small", tmp.path(), "fp32", "cpu", &Default::default())
+        .unwrap();
+    let px = [0u8; 3];
+    let e = h.read_chars(&[(&px, 1, 1), (&px, 1, 1)]).unwrap_err();
+    assert!(e.contains("1 results for 2 crops"), "{e}");
+}
+
 /// A real pack (`MOKURO_TORCH_PACK`) with fake libtorch libraries first on
 /// `LD_LIBRARY_PATH`: the loader must bind the pack's own. Run with
 /// `MOKURO_TORCH_PACK=<pack> cargo test -p bunko-engines --test torch_loader -- --ignored`.

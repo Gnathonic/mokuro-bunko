@@ -7,8 +7,8 @@ use std::mem::ManuallyDrop;
 use std::path::{Path, PathBuf};
 
 use bunko_torch::abi::{
-    self, BT_ABI_VERSION, BT_OK, BtCrop, DevicesReport, InitConfig, LoadInfo, LoadOptions,
-    PACK_JSON, PackManifest,
+    self, BT_ABI_VERSION, BT_OK, BtCrop, CharsRead, DevicesReport, InitConfig, LoadInfo,
+    LoadOptions, PACK_JSON, PackManifest, ReadCharsFn,
 };
 
 /// Why a pack could not be used.
@@ -67,6 +67,8 @@ struct Api {
     read: ReadFn,
     free: FreeFn,
     free_str: FreeStrFn,
+    /// `bt_read_chars`, optional: packs before 0.8 lack it.
+    read_chars: Option<ReadCharsFn>,
 }
 
 /// An opened backend pack.
@@ -276,6 +278,10 @@ impl Pack {
                 free_str: std::mem::transmute::<*const c_void, FreeStrFn>(sym(
                     abi::symbols::FREE_STR,
                 )?),
+                // Optional: absent, the pack reads no text boxes on the GPU.
+                read_chars: sym(abi::symbols::READ_CHARS)
+                    .ok()
+                    .map(|p| std::mem::transmute::<*const c_void, ReadCharsFn>(p)),
             }
         };
         let gpu_archs = manifest.requires.gpu_archs.clone();
@@ -302,6 +308,12 @@ impl Pack {
             return Err(PackLoadError::Init(msg));
         }
         Ok(pack)
+    }
+
+    /// Whether the pack's library exports `bt_read_chars` (a 0.8 pack): the text-box
+    /// engines run on it only then.
+    pub fn reads_chars(&self) -> bool {
+        self.api.read_chars.is_some()
     }
 
     /// An optional entry point of the pack's library (beyond the ABI's).
@@ -451,5 +463,43 @@ impl Loaded {
             ));
         }
         Ok(texts)
+    }
+
+    /// `bt_read_chars`: each crop's text (and, for an engine that has them, its
+    /// characters' boxes). `crops` are `(rgb bytes, width, height)`; an empty crop reads
+    /// `""` in its place.
+    pub fn read_chars(&self, crops: &[(&[u8], u32, u32)]) -> Result<Vec<CharsRead>, String> {
+        let Some(read_chars) = self.api.read_chars else {
+            return Err("the OCR backend pack predates GPU text-box reading".into());
+        };
+        let raw: Vec<BtCrop> = crops
+            .iter()
+            .map(|(data, w, h)| BtCrop {
+                data: data.as_ptr(),
+                width: *w,
+                height: *h,
+            })
+            .collect();
+        let (mut out, mut err) = (std::ptr::null_mut(), std::ptr::null_mut());
+        // SAFETY: `raw` holds `crops.len()` entries and outlives the call; each crop's
+        // bytes are width*height*3 (checked by the caller's Rgb).
+        let status =
+            unsafe { read_chars(self.handle, raw.as_ptr(), raw.len(), &mut out, &mut err) };
+        let out = take(self.api.free_str, out);
+        let err = take(self.api.free_str, err);
+        if status != BT_OK {
+            return Err(err.unwrap_or_else(|| format!("bt_read_chars: status {status}")));
+        }
+        let read: Vec<CharsRead> = serde_json::from_str(&out.unwrap_or_default())
+            .map_err(|e| format!("bt_read_chars: {e}"))?;
+        // A pack that answers another count would put texts against the wrong blocks.
+        if read.len() != crops.len() {
+            return Err(format!(
+                "bt_read_chars returned {} results for {} crops",
+                read.len(),
+                crops.len()
+            ));
+        }
+        Ok(read)
     }
 }
