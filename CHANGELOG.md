@@ -321,9 +321,11 @@
   (`textbox-torch-v1` on a card, `textbox-graphs-v1` on the CPU).
 - **nar-small reads at fp16 on a GPU in every auto mode**, the default `auto-accuracy`
   included (`fp32` keeps full precision): on JMangaBench_Read fp16 scores the same as
-  fp32 (composite 96.16 vs 96.15) and runs about 17x faster on an RX 9070 XT. The CPU
-  reads at fp32. Sidecars record the precision; nothing is re-read. The fp16 package
-  is the author's own fp16 mode bound to the same fp32 `model.safetensors`, cast to
+  fp32 (composite 96.16 vs 96.15), on two test volumes its text equals fp32's on all
+  752 lines, and on an RX 9070 XT the model reads about 17x faster (1,421 against 83
+  crops/s at batch 32; 16.3 against 7.3 pages/s end to end on `animetext-blocks`,
+  whose detection then sets the pace). The CPU reads at fp32. Sidecars record the
+  precision; nothing is re-read. The fp16 package is the author's own fp16 mode bound to the same fp32 `model.safetensors`, cast to
   fp16 on the card as it loads; no fp16 copy of the weights is made or hosted. A card
   whose fp16 package did not pass Bunko's fp16 check (at most 0.1% of JMangaBench_Read's
   crops read differently from fp32, and no paired loss) has none and reads at fp32.
