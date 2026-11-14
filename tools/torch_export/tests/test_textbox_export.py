@@ -52,3 +52,77 @@ def test_meta():
         "source": "muscgab/manga-ocr-nar-small@8cc14c152ccb21da3aa88fa51a92766537c12da2",
         "weights_sha256": "bc7418e27d476f86bb5984b45974d69cf9f7623eff6b9b57012df2c8fc9920a3",
         "weights_size": "217035140", "max_batch": "64"}
+
+
+# --- verify and manifest (Task 3) ---
+
+from torch_export import manifest, verify  # noqa: E402
+
+
+def _package(path, role, size=2):
+    """A .pt2 as the exporter writes it: a stored zip with one top folder ``<role>/``."""
+    import zipfile
+
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr(f"{role}/data/aotinductor/model/x.wrapper.so", b"\0" * size)
+    return path
+
+
+def test_ids_compare_stops_at_the_end_id():
+    assert verify.same_ids([5, 6817, 3], [5, 6817, 9], 6817)
+    assert not verify.same_ids([5, 4, 6817], [5, 6817, 4], 6817)
+    assert verify.same_ids([1, 2], [1, 2], 6817)
+
+
+def test_textbox_manifest_rows(tmp_path):
+    d = tmp_path / "nar-small" / "fp32" / "linux-rocm-gfx1201"
+    d.mkdir(parents=True)
+    _package(d / "model.pt2", "model")
+    (d / "build.json").write_text('{"graphs": {"model": {"file": "model.pt2"}}}')
+    m = manifest.build_textbox_manifest(tmp_path, "textbox-torch-v1", ("nar-small",),
+                                        {"nar-small": T.NAR_PIN}, "Apache-2.0")
+    assert m["release"] == "textbox-torch-v1"
+    [row] = m["files"]
+    assert row["id"] == "torch/nar-small/fp32/linux-rocm-gfx1201/model.pt2"
+    assert row["role"] == "model" and "requires" not in row
+    assert row["licence"] == "Apache-2.0"
+    assert row["sources"] == [{"repo": "muscgab/manga-ocr-nar-small", "revision": "8cc14c152ccb21da3aa88fa51a92766537c12da2"}]
+
+
+def test_detector_manifest_rows(tmp_path):
+    # the same builder writes detector-torch-v1 (plan 04): its own pin and licence
+    import types
+
+    d = tmp_path / "animetext-blocks" / "fp32" / "linux-cuda-sm_80"
+    d.mkdir(parents=True)
+    _package(d / "detector.pt2", "detector")
+    (d / "build.json").write_text('{"graphs": {"detector": {"file": "detector.pt2"}}}')
+    pin = types.SimpleNamespace(repo="deepghs/AnimeText_yolo", revision="a180c191bfdb9f0e31b57e7de567e7b6bac50f84")
+    m = manifest.build_textbox_manifest(tmp_path, "detector-torch-v1", ("animetext-blocks",),
+                                        {"animetext-blocks": pin}, "AGPL-3.0")
+    [row] = m["files"]
+    assert m["release"] == "detector-torch-v1"
+    assert row["file"] == "animetext-blocks_fp32_linux-cuda-sm_80_detector.pt2"
+    assert row["licence"] == "AGPL-3.0"
+    assert row["sources"] == [{"repo": "deepghs/AnimeText_yolo", "revision": "a180c191bfdb9f0e31b57e7de567e7b6bac50f84"}]
+    with pytest.raises(SystemExit, match="animetext-blocks"):
+        manifest.build_textbox_manifest(tmp_path, "detector-torch-v1", ("animetext-blocks",), {}, "AGPL-3.0")
+
+
+def test_weights_inside_is_refused(tmp_path):
+    import zipfile
+
+    def pkg(name, size):
+        p = tmp_path / name
+        with zipfile.ZipFile(p, "w") as z:
+            z.writestr("m/data/aotinductor/model/x.wrapper.so", b"\0" * size)
+        return p
+
+    assert not verify.weights_inside(pkg("thin.pt2", 40), 1000)
+    assert verify.weights_inside(pkg("fat.pt2", 300), 1000)
+    with pytest.raises(SystemExit, match="fat.pt2"):
+        verify.refuse_embedded(tmp_path, lambda engine: 1000)
+    (tmp_path / "fat.pt2").unlink()
+    pkg("nar_embed.pt2", 10)  # the spike's naming: refused whatever its size
+    with pytest.raises(SystemExit, match="nar_embed.pt2"):
+        verify.refuse_embedded(tmp_path, lambda engine: 1000)

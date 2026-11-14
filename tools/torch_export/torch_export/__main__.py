@@ -11,6 +11,14 @@
                                   or $TORCH_EXPORT_VENV_<VARIANT>); skips finished ones
   manifest [--out DIR] [--tag TAG] [--base-url URL] [--flat DIR]
                                   torch-models.json over everything under --out
+  textbox-manifest -e E1,E2 [--out DIR] [--tag TAG] [--licence L] [--base-url URL] [--flat DIR]
+                                  <tag>.json of the packages that bind their authors'
+                                  weights (textbox-torch-v1): rows of those engines only
+  verify OUT ENGINE PREC TARGET [...]
+                                  python -m torch_export.verify (text-box engines:
+                                  --crops DIR --expected FILE, the crop-level gate)
+  refuse-embedded DIR...          exit 1 on the first .pt2 with its weights inside
+                                  (*_embed.pt2, or an entry > pinned weights / 4)
   fetch-windows-cross             download the pinned Windows wheels + llvm-mingw used to
                                   cross-compile windows-cuda-* targets on Linux
   check-isa PATH...               AVX-512 (zmm) instruction count of each .pt2's
@@ -143,6 +151,24 @@ def cmd_manifest(a) -> int:
     return 0
 
 
+def cmd_textbox_manifest(a) -> int:
+    from .manifest import build_textbox_manifest
+    from .textbox import PINS
+
+    build_textbox_manifest(Path(a.out), a.tag, tuple(a.engine.split(",")), PINS, a.licence, a.base_url,
+                           Path(a.flat) if a.flat else None)
+    return 0
+
+
+def cmd_refuse_embedded(a) -> int:
+    from .verify import pinned_size, refuse_embedded
+
+    for d in a.dirs:
+        n = refuse_embedded(Path(d), pinned_size)
+        print(f"{d}: {n} packages, none with weights inside")
+    return 0
+
+
 def cmd_check_isa(a) -> int:
     from .checks import zmm_count
 
@@ -158,6 +184,11 @@ def main(argv=None) -> int:
     from . import IO_VERSION
     from .toolchain import WORK
 
+    argv = sys.argv[1:] if argv is None else list(argv)
+    if argv[:1] == ["verify"]:
+        from .verify import main as verify_main
+
+        return verify_main(argv[1:])
     ap = argparse.ArgumentParser(prog="torch_export", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("targets").set_defaults(fn=cmd_targets)
@@ -181,6 +212,18 @@ def main(argv=None) -> int:
     s.add_argument("--base-url", default=None)
     s.add_argument("--flat", default=None, help="also hard-link every asset under its flat release name into DIR")
     s.set_defaults(fn=cmd_manifest)
+    s = sub.add_parser("textbox-manifest")
+    s.add_argument("-e", "--engine", required=True, help="comma-separated, e.g. nar-small,charspot-small")
+    s.add_argument("--out", default=str(WORK / "out"))
+    s.add_argument("--tag", default="textbox-torch-v1")
+    s.add_argument("--licence", default="Apache-2.0")
+    s.add_argument("--base-url", default=None)
+    s.add_argument("--flat", default=None, help="also hard-link every asset under its flat release name into DIR")
+    s.set_defaults(fn=cmd_textbox_manifest)
+    s = sub.add_parser("refuse-embedded")
+    s.add_argument("dirs", nargs="+")
+    s.set_defaults(fn=cmd_refuse_embedded)
+    sub.add_parser("verify", add_help=False)  # listed for --help; main() hands it to verify.main
     sub.add_parser("fetch-windows-cross").set_defaults(fn=cmd_fetch_windows_cross)
     s = sub.add_parser("check-isa")
     s.add_argument("paths", nargs="+")
