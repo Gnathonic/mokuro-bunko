@@ -391,6 +391,23 @@ only in the cubins' debug line tables (2 bytes per kernel; same code) — set
 random inputs: in bf16 the step's argmax can tie-flip between eager and compiled, so its
 "ids_equal: false" for bf16 step is not a failure (the crop gates are the parity test).
 
+#### Verified targets of the text-box packages (`textbox-torch-v1`)
+
+nar-small and charspot-small, fp32 and fp16. "Verified" means the package read all 7,929
+JMangaBench_Read crops as the reference does, on a card of that target.
+
+| target | status | cards |
+|---|---|---|
+| `linux-rocm-gfx1201` | verified | RDNA4 (gfx1201) |
+| `linux-rocm-gfx1030` | verified | RDNA2 (gfx1030), and a gfx1032 card through the `gfx1030` HSA override |
+| `linux-cuda-sm_80` | verified | Ampere-class and newer (an sm_89 card) |
+| `windows-cuda-sm_80` | verified | an sm_86 card |
+| `linux-rocm-gfx1100`, `gfx1101`, `gfx1102`, `gfx1200` | built, unverified | none; shipped because the verified neighbours passed |
+| `linux-cuda-sm_75`, `windows-cuda-sm_75` | built, unverified | none; exercised only through PTX JIT on newer cards |
+
+The AnimeText detector (`detector-torch-v1`) has no target list yet. It waits on a decision
+about the parity tolerance. A target without a package detects on the CPU.
+
 #### Runtime libraries the packages need (for the packs, stream C)
 
 * Linux GPU packages `NEED`: `libtorch.so`, `libtorch_cpu.so`, `libtorch_cuda.so` |

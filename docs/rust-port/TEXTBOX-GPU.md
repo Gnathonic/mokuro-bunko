@@ -190,14 +190,14 @@ tiny-tile fp32 GEMMs (`Cijk_…_S_…_MT8x8x8/8x8x16`); the authors' eager fp32 
 a page that is about 8.5 pages/s for fp32 and about 140 for fp16. NVIDIA is unmeasured.
 Peak GPU memory was 2.2 GiB with both packages and two reference models loaded.
 
-**charspot-small** (two graphs; `dense` 131 constants, `tail` 77, all `"dense."` /
+**charspot-small** (two graphs; `dense` 134 constants, `tail` 80, all `"dense."` /
 `"tail." + key`; decode on the CPU in Python), 100 crops: texts 100/100 equal to the authors'
 ONNX at b1, b8 and b32 (the authors' fp16 differs on 3/100); pipeline 161 / 248 / 250
 crops/s at b1 / b8 / b32 against 35.9 for the authors' ONNX on 8 CPU threads; packages
 3,466,705 B (dense) and 2,345,443 B (tail).
 
 **AnimeText YOLO12-x** (ultralytics `DetectionModel("yolo12x.yaml", nc=1)`, fused; with A2C2f's
-`gamma` kept as a `[1,C,1,1]` parameter, all 422 package constants are ONNX initializers of
+`gamma` kept as a `[1,C,1,1]` parameter, all 425 package constants are ONNX initializers of
 the mirrored file, byte for byte):
 
 | check | result |
@@ -653,7 +653,7 @@ Text-box engines go through `runtime::place_runnable` with a text-box arm in `fo
 ## 12. Planner and benchmark
 
 - **`stage_seconds` GPU arms** for text-box engines: nar-small 0.12 s a page (fp32 on gfx1201:
-  80 crops/s at 9.4 blocks a page) and charspot-small 0.04 (248 crops/s). The planner keeps one
+  80 crops/s at 9.4 blocks a page) and charspot-small 0.1 (248 crops/s). The planner keeps one
   figure per engine; fp16 nar is faster, but with AnimeText on the CPU the detect width is at
   its ceiling either way. The lead replaces these with NVIDIA figures after the measurement
   in §20.5.

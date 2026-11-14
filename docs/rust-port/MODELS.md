@@ -257,6 +257,11 @@ the GPU names `textbox-torch-v1` as its export set where one read on the CPU nam
 `textbox-graphs-v1`. Neither changes the engine revision: at fp32 the ids are the same,
 and fp16 is recorded as `ocr_engine.precision = "fp16"`, which re-reads nothing.
 
+Which targets carry these packages, and which of them were verified on a card, is the
+table in [TORCH-BACKEND.md](TORCH-BACKEND.md#verified-targets-of-the-text-box-packages-textbox-torch-v1).
+The detector's target list is not settled (§2.5): it waits on a decision about the parity
+tolerance, and a target without a detector package detects on the CPU.
+
 ### 2.5 The `detector-torch-v1` release: AnimeText on a GPU
 
 On an NVIDIA or AMD card with the libtorch backend pack, the `animetext-blocks` detector
