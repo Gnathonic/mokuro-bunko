@@ -184,16 +184,66 @@ pub fn nar_input(crop: &Rgb) -> NarInput {
     }
 }
 
-/// nar-small's inputs for a list of crops: the indices of the non-empty crops, in order,
-/// and their inputs. Empty crops get none: they read `""` without a model call, and
-/// keep their place through the indices.
-pub fn nar_inputs(crops: &[&Rgb]) -> (Vec<usize>, Vec<NarInput>) {
-    crops
-        .iter()
-        .enumerate()
-        .filter(|(_, c)| !empty(c))
-        .map(|(i, c)| (i, nar_input(c)))
-        .unzip()
+/// A page's crops through nar-small in batches: the non-empty crops (`kept`, crop
+/// indices in order) cut into runs of at most a package's largest batch, and each
+/// crop's text. Empty crops get no input and no model call: they read `""` in their
+/// place. The libtorch route feeds the kept crops' inputs in order, runs a batch when
+/// [`chunk_ending_at`](Self::chunk_ending_at) says one is complete, and hands its ids
+/// to [`fill`](Self::fill).
+#[derive(Clone, Debug)]
+pub struct NarBatches {
+    /// The indices of the non-empty crops, in order.
+    pub kept: Vec<usize>,
+    chunks: Vec<Range<usize>>,
+    texts: Vec<String>,
+}
+
+impl NarBatches {
+    /// The plan for `crops` in batches of at most `max` (0 counts as 1).
+    pub fn new(crops: &[&Rgb], max: usize) -> Self {
+        let kept: Vec<usize> = (0..crops.len()).filter(|&i| !empty(crops[i])).collect();
+        Self {
+            chunks: batches(kept.len(), max),
+            texts: vec![String::new(); crops.len()],
+            kept,
+        }
+    }
+
+    /// The batch (a range of positions in `kept`) that kept crop `k` completes, if any.
+    pub fn chunk_ending_at(&self, k: usize) -> Option<Range<usize>> {
+        self.chunks.iter().find(|r| r.end == k + 1).cloned()
+    }
+
+    /// Write batch `chunk`'s texts from its ids (`NAR_SLOTS` per crop, in the batch's
+    /// order) into the crops it covers. Ids of another length are an error.
+    pub fn fill(
+        &mut self,
+        chunk: Range<usize>,
+        ids: &[i64],
+        characters: &[String],
+    ) -> Result<(), String> {
+        let slots = self
+            .kept
+            .get(chunk.clone())
+            .ok_or_else(|| format!("no batch {chunk:?} among {} crops", self.kept.len()))?;
+        if ids.len() != slots.len() * NAR_SLOTS {
+            return Err(format!(
+                "nar-small returned {} ids for {} crops, not {} each",
+                ids.len(),
+                slots.len(),
+                NAR_SLOTS
+            ));
+        }
+        for (&slot, row) in slots.iter().zip(ids.chunks(NAR_SLOTS)) {
+            self.texts[slot] = nar_text(row, characters);
+        }
+        Ok(())
+    }
+
+    /// One text per crop, in crop order.
+    pub fn into_texts(self) -> Vec<String> {
+        self.texts
+    }
 }
 
 /// A batch of nar-small inputs, row-major: `patches` `[len, 324, 588]`, `valid`,
@@ -271,11 +321,19 @@ mod tests {
         assert!(batches(0, 64).is_empty());
     }
 
+    /// Empty crops get no input and read `""` in their place; the rest are read in
+    /// batches of the package's largest size, each text landing on its own crop.
     #[test]
-    fn nar_batch_skips_empty_crops() {
+    fn nar_batches_skip_empty_crops_and_keep_crop_order() {
         let blank = Rgb {
             width: 0,
             height: 0,
+            data: vec![],
+        };
+        // A box of zero width (or height) only is empty too.
+        let line = Rgb {
+            width: 0,
+            height: 5,
             data: vec![],
         };
         let ink = Rgb {
@@ -283,19 +341,43 @@ mod tests {
             height: 40,
             data: vec![30; 20 * 40 * 3],
         };
-        assert!(empty(&blank));
+        assert!(empty(&blank) && empty(&line));
         assert!(!empty(&ink));
-        let (kept, ins) = nar_inputs(&[&blank, &ink, &blank]);
-        assert_eq!(kept, vec![1]);
-        assert_eq!(ins.len(), 1);
-        assert_eq!(ins[0], nar_input(&ink));
-        // A box of zero width (or height) only is empty too.
-        let line = Rgb {
-            width: 0,
-            height: 5,
-            data: vec![],
-        };
-        assert_eq!(nar_inputs(&[&line, &ink]).0, vec![1]);
+        let crops = [&blank, &ink, &line, &ink, &ink, &blank, &ink];
+        let chars: Vec<String> = ["a", "b", "c", "d", "e", "f", "g"]
+            .map(String::from)
+            .to_vec();
+        let mut plan = NarBatches::new(&crops, 2);
+        assert_eq!(plan.kept, vec![1, 3, 4, 6]);
+        // The run the libtorch route makes: one batch per complete chunk of kept crops,
+        // each crop's ids naming its own index (and the end mark after it).
+        let mut runs = Vec::new();
+        for k in 0..plan.kept.len() {
+            let Some(chunk) = plan.chunk_ending_at(k) else {
+                continue;
+            };
+            let mut ids = Vec::new();
+            for &i in &plan.kept[chunk.clone()] {
+                let mut row = vec![chars.len() as i64; NAR_SLOTS];
+                row[0] = i as i64;
+                ids.extend(row);
+            }
+            runs.push(chunk.clone());
+            plan.fill(chunk, &ids, &chars).unwrap();
+        }
+        assert_eq!(runs, vec![0..2, 2..4]);
+        assert_eq!(plan.into_texts(), ["", "b", "", "d", "e", "", "g"]);
+
+        // Only empty crops: no batch at all.
+        let none = NarBatches::new(&[&blank, &line], 64);
+        assert!(none.kept.is_empty() && none.chunk_ending_at(0).is_none());
+        assert_eq!(none.into_texts(), ["", ""]);
+
+        // Ids of the wrong length for the batch are refused.
+        let mut plan = NarBatches::new(&[&ink, &ink], 64);
+        let chunk = plan.chunk_ending_at(1).unwrap();
+        assert!(plan.fill(chunk.clone(), &[0; NAR_SLOTS], &chars).is_err());
+        assert!(plan.fill(5..6, &[0; NAR_SLOTS], &chars).is_err());
     }
 
     #[test]

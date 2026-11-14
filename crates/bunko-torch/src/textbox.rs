@@ -10,8 +10,7 @@ use std::sync::Mutex;
 
 use bunko_vlm::Rgb;
 use bunko_vlm::textbox::{
-    NAR_BUDGET, NAR_PATCH, NAR_SLOTS, NarInput, batches, empty, load_characters, nar_batch,
-    nar_input, nar_text,
+    NAR_BUDGET, NAR_PATCH, NAR_SLOTS, NarBatches, NarInput, load_characters, nar_batch, nar_input,
 };
 use tch::Kind;
 
@@ -97,17 +96,8 @@ impl TorchNar {
     /// threads while the device runs the batches before them, and cut into batches of
     /// at most [`TorchNar::batch`].
     pub fn read_chars(&self, crops: &[&Rgb]) -> Result<Vec<CharsRead>, TorchError> {
-        let mut out: Vec<CharsRead> = crops
-            .iter()
-            .map(|_| CharsRead {
-                text: String::new(),
-                chars: None,
-            })
-            .collect();
-        let kept: Vec<usize> = (0..crops.len()).filter(|&i| !empty(crops[i])).collect();
-        let chunks = batches(kept.len(), self.batch);
-        let mut chunk = chunks.iter();
-        let mut current = chunk.next();
+        let mut plan = NarBatches::new(crops, self.batch);
+        let kept = plan.kept.clone();
         let mut pending: Vec<NarInput> = Vec::with_capacity(self.batch.min(kept.len()));
         crate::par::map_ordered(
             &kept,
@@ -115,7 +105,7 @@ impl TorchNar {
             |&i| nar_input(crops[i]),
             |k, input| {
                 pending.push(input);
-                let Some(range) = current.filter(|r| r.end == k + 1) else {
+                let Some(chunk) = plan.chunk_ending_at(k) else {
                     return Ok(());
                 };
                 if crate::runtime::shutting_down() {
@@ -123,15 +113,17 @@ impl TorchNar {
                 }
                 let refs: Vec<&NarInput> = pending.iter().collect();
                 let ids = self.run(&refs)?;
-                for (slot, row) in kept[range.clone()].iter().zip(ids.chunks(NAR_SLOTS)) {
-                    out[*slot].text = nar_text(row, &self.characters);
-                }
+                plan.fill(chunk, &ids, &self.characters)
+                    .map_err(TorchError::Run)?;
                 pending.clear();
-                current = chunk.next();
                 Ok::<(), TorchError>(())
             },
         )?;
-        Ok(out)
+        Ok(plan
+            .into_texts()
+            .into_iter()
+            .map(|text| CharsRead { text, chars: None })
+            .collect())
     }
 
     /// One graph run: the ids of `inputs`, row after row (`NAR_SLOTS` each).
