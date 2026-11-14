@@ -175,10 +175,11 @@ pub const ENGINES: &[EngineSpec] = &[
         blocks: false,
     },
     // The text-box recognizers (muscgab): small networks without a decoder loop. On the
-    // CPU they run on ONNX Runtime; nar-small also runs on a GPU through the libtorch
-    // backend pack (the authors' weights bound to a weightless graph of ours), with the
-    // CPU as its fallback; there it reads at fp32 or fp16 (the authors' fp32 weights
-    // cast at load), never bf16. Code Apache-2.0, weights CC BY-NC-SA 4.0.
+    // CPU they run on ONNX Runtime; both also run on a GPU through the libtorch backend
+    // pack (the authors' weights bound to weightless graphs of ours), with the CPU as
+    // their fallback; there nar-small reads at fp32 or fp16 (the authors' fp32 weights
+    // cast at load), charspot-small at fp32, never bf16. Code Apache-2.0, weights
+    // CC BY-NC-SA 4.0.
     EngineSpec {
         id: "charspot-small",
         label: "manga-ocr-charspot-small (muscgab)",
@@ -189,7 +190,7 @@ pub const ENGINES: &[EngineSpec] = &[
         class: LicenseClass::NonCommercial,
         detector: None,
         patch_budget: false,
-        cpu_only_reason: "manga-ocr-charspot-small runs on the CPU",
+        cpu_only_reason: "",
         cpu_note: "",
         precision: false,
         precision_formats: &[],
@@ -512,12 +513,20 @@ mod tests {
     }
 
     /// nar-small may leave the CPU (the libtorch GPU route), with no caution when the
-    /// CPU is picked for it; charspot-small stays on the CPU until its route ships.
+    /// CPU is picked for it.
     #[test]
     fn nar_small_may_run_on_a_gpu() {
         let nar = engine("nar-small").unwrap();
         assert!(!nar.cpu_only());
         assert_eq!(nar.cpu_note, "");
-        assert!(engine("charspot-small").unwrap().cpu_only());
+    }
+
+    /// charspot-small may leave the CPU too (its libtorch GPU route), with no caution
+    /// when the CPU is picked for it (Q27).
+    #[test]
+    fn charspot_small_may_run_on_a_gpu() {
+        let c = engine("charspot-small").unwrap();
+        assert!(!c.cpu_only());
+        assert_eq!(c.cpu_note, "");
     }
 }

@@ -168,4 +168,149 @@ mod tests {
             differ.len()
         );
     }
+
+    /// charspot-small's GPU route against the authors' ONNX model on the CPU
+    /// (TEXTBOX-GPU.md §20.3): every crop of `MOKURO_CHARSPOT_PARITY_CROPS` read on `gpu:0`
+    /// through the pack's `bt_read_chars`, 64 crops a call, must have its row's `text` in
+    /// `MOKURO_CHARSPOT_PARITY_EXPECTED` (`tools/textbox_export/charspot_reference.py`'s
+    /// `{"file","text","chars"}` lines), the same characters in the same order, and every
+    /// box coordinate within 0.5 px (`verify.same_chars`). A crop the pack leaves to the
+    /// CPU route (`chars: None`, over 1,024 characters) fails here: no gate crop has that
+    /// many. The variables are this test's own: `MOKURO_TORCH_PACK` (a pack with
+    /// `bt_read_chars`), `MOKURO_CHARSPOT_TORCH_PACKAGE` (the dir holding `dense.pt2` and
+    /// `tail.pt2`), `MOKURO_CHARSPOT_WEIGHTS` (the authors' `model.safetensors`) and
+    /// `MOKURO_CHARSPOT_VOCAB` (their `vocab.json`). Run it alone (one pack per process):
+    /// `cargo test -p bunko-engines --features nc-models --release --lib -- --ignored --exact torch::textbox::tests::charspot_torch_parity --nocapture`.
+    #[test]
+    #[ignore = "needs a backend pack with bt_read_chars, a charspot-small package, its weights and crops (env vars)"]
+    fn charspot_torch_parity() {
+        const TOLERANCE_PX: f64 = 0.5;
+        let var = |k: &str| {
+            PathBuf::from(std::env::var_os(k).unwrap_or_else(|| panic!("{k} is not set")))
+        };
+        let pack = var(PACK_ENV);
+        let cache = tempfile::tempdir().unwrap();
+        let files = TorchFiles {
+            package: var("MOKURO_CHARSPOT_TORCH_PACKAGE"),
+            tokenizer: var("MOKURO_CHARSPOT_VOCAB"),
+            pos_table: None,
+            embeddings: None,
+            unpack_cache: Some(cache.path().to_path_buf()),
+            weights: vec![var("MOKURO_CHARSPOT_WEIGHTS")],
+        };
+        let crops = var("MOKURO_CHARSPOT_PARITY_CROPS");
+        let expected = std::fs::read_to_string(var("MOKURO_CHARSPOT_PARITY_EXPECTED")).unwrap();
+        let rows: Vec<serde_json::Value> = expected
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert!(!rows.is_empty(), "no expected rows");
+        let file = |r: &serde_json::Value| {
+            r["file"]
+                .as_str()
+                .unwrap_or_else(|| panic!("a row without file: {r}"))
+                .to_string()
+        };
+
+        let backend = backend_in(&[], false).unwrap_or_else(|e| panic!("{}: {e}", pack.display()));
+        assert!(
+            backend.device("gpu:0").is_some(),
+            "the pack in {} reports no gpu:0 (opened CPU-only by an earlier test in this process?)",
+            pack.display()
+        );
+        let charspot = backend
+            .textbox(
+                crate::models::CHARSPOT,
+                Precision::Fp32,
+                "gpu:0",
+                &files,
+                8,
+                None,
+            )
+            .unwrap();
+        assert!(
+            charspot.info.batch >= 1 && charspot.info.weights > 0,
+            "{:?}",
+            charspot.info
+        );
+
+        let decode = |file: &str| -> Rgb {
+            let img = image::open(crops.join(file))
+                .unwrap_or_else(|e| panic!("{file}: {e}"))
+                .to_rgb8();
+            Rgb {
+                width: img.width() as usize,
+                height: img.height() as usize,
+                data: img.into_raw(),
+            }
+        };
+        let (mut same, mut differ, mut worst) = (0usize, Vec::new(), 0f64);
+        let t0 = std::time::Instant::now();
+        for chunk in rows.chunks(64) {
+            let images: Vec<Rgb> = chunk.iter().map(|r| decode(&file(r))).collect();
+            let refs: Vec<&Rgb> = images.iter().collect();
+            let got = charspot.read_chars(&refs).unwrap();
+            assert_eq!(got.len(), chunk.len(), "one result per crop");
+            for (want, read) in chunk.iter().zip(&got) {
+                let name = file(want);
+                let wtext = want["text"].as_str().unwrap_or_default();
+                let wc = want["chars"]
+                    .as_array()
+                    .unwrap_or_else(|| panic!("{name}: a row without chars"));
+                let Some(chars) = read.chars.as_ref() else {
+                    differ.push(format!("{name}: left to the CPU route (chars: None)"));
+                    continue;
+                };
+                let joined: String = chars.iter().map(|c| c.0.as_str()).collect();
+                assert_eq!(read.text, joined, "{name}: text is the characters joined");
+                let mut why = None;
+                if read.text != wtext || chars.len() != wc.len() {
+                    why = Some(format!(
+                        "{:?} ({} chars) != {wtext:?} ({} chars)",
+                        read.text,
+                        chars.len(),
+                        wc.len()
+                    ));
+                }
+                for (k, (c, w)) in chars.iter().zip(wc).enumerate() {
+                    if why.is_some() {
+                        break;
+                    }
+                    if Some(c.0.as_str()) != w[0].as_str() {
+                        why = Some(format!("character {k}: {:?} != {}", c.0, w[0]));
+                        break;
+                    }
+                    for (g, i) in [c.1, c.2, c.3, c.4].into_iter().zip(1..5) {
+                        let d = (f64::from(g) - w[i].as_f64().unwrap_or(f64::NAN)).abs();
+                        worst = worst.max(d);
+                        // a NaN on either side fails, as verify.same_chars does
+                        if d.is_nan() || d > TOLERANCE_PX {
+                            why = Some(format!(
+                                "character {k} {:?}: box ({}, {}, {}, {}) != ({}, {}, {}, {})",
+                                c.0, c.1, c.2, c.3, c.4, w[1], w[2], w[3], w[4]
+                            ));
+                            break;
+                        }
+                    }
+                }
+                match why {
+                    None => same += 1,
+                    Some(why) => differ.push(format!("{name}: {why}")),
+                }
+            }
+        }
+        eprintln!(
+            "charspot-small on gpu:0 (batch {}): {same} of {} crops the same, largest box move {worst:.2e} px, {:.1}s",
+            charspot.info.batch,
+            rows.len(),
+            t0.elapsed().as_secs_f64()
+        );
+        assert!(
+            differ.is_empty(),
+            "{same} of {} the same; {} differ: {differ:#?}",
+            rows.len(),
+            differ.len()
+        );
+    }
 }

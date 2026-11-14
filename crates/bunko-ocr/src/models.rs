@@ -162,6 +162,11 @@ pub const CHARSPOT_SOURCE: (&str, &str) = (
 pub const CHARSPOT_MODEL: &str = "charspot-small/model";
 #[cfg(feature = "nc-models")]
 pub const CHARSPOT_VOCABULARY: &str = "charspot-small/vocabulary";
+/// The authors' `model.safetensors`: the weights charspot-small's GPU route binds to
+/// its weightless compiled graphs (`textbox-torch-v1`). The CPU route reads the ONNX
+/// file, which carries its own weights.
+#[cfg(feature = "nc-models")]
+pub const CHARSPOT_WEIGHTS: &str = "charspot-small/weights";
 /// nar-small is the model of the repo's `r16` branch (161 output slots). Its author
 /// publishes it as `model.safetensors` and PyTorch code only, so the graph is ours
 /// (`tools/textbox_export`): an ONNX graph holding no trained weights, whose weight
@@ -210,7 +215,7 @@ struct TextboxFile {
 }
 
 #[cfg(feature = "nc-models")]
-const TEXTBOX_FILES: [TextboxFile; 5] = [
+const TEXTBOX_FILES: [TextboxFile; 6] = [
     TextboxFile {
         id: CHARSPOT_MODEL,
         engine: "charspot-small",
@@ -233,6 +238,19 @@ const TEXTBOX_FILES: [TextboxFile; 5] = [
         flat: "charspot-small_vocab.json",
         sha256: "9f72fc7852b1432bcb61b3b94b2e4cd8abef52b01e9051550a6a3070e2b314d5",
         size: 62_244,
+        ours: false,
+        requires: None,
+        part_of: None,
+    },
+    TextboxFile {
+        id: CHARSPOT_WEIGHTS,
+        engine: "charspot-small",
+        role: "weights",
+        file: "model.safetensors",
+        stored: "model.safetensors",
+        flat: "charspot-small_model.safetensors",
+        sha256: "3dec28460e10353b8a12d0e6d252bff9b892ec2d12ffb7a3d81ae02532963286",
+        size: 43_860_012,
         ours: false,
         requires: None,
         part_of: None,
@@ -2063,6 +2081,30 @@ mod tests {
         unique.sort_unstable();
         unique.dedup();
         assert_eq!(unique.len(), flats.len());
+    }
+
+    /// charspot-small's GPU route binds the authors' own `model.safetensors`, fetched
+    /// from their repo at the pin like the ONNX file, never rehosted.
+    #[cfg(feature = "nc-models")]
+    #[test]
+    fn charspot_weights_come_from_the_authors() {
+        let m = Manifest::builtin();
+        let w = m.get(CHARSPOT_WEIGHTS).unwrap();
+        assert_eq!(
+            (w.size, w.sha256.as_str()),
+            (
+                43_860_012,
+                "3dec28460e10353b8a12d0e6d252bff9b892ec2d12ffb7a3d81ae02532963286"
+            )
+        );
+        assert!(w.url.starts_with(
+            "https://huggingface.co/muscgab/manga-ocr-charspot-small/resolve/72ca29202673880ca9c67b1c02c107535be4472b/"
+        ));
+        assert!(w.url.ends_with("/model.safetensors"), "{}", w.url);
+        assert_eq!(w.path, "charspot-small/model.safetensors");
+        assert_eq!(w.role, "weights");
+        assert_eq!(w.license, "CC-BY-NC-SA-4.0");
+        assert!(w.part_of.is_none() && w.requires.is_empty());
     }
 
     #[cfg(feature = "nc-models")]

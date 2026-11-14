@@ -379,3 +379,73 @@ def test_gate_run_checks_reference_fp32_and_batch_pairs(tmp_path):
     assert not s["passed"]
     assert {k: v["passed"] for k, v in s["checks"]["batches"].items()} == {"b1-b8": False, "b1-b32": True,
                                                                           "b8-b32": False}
+
+
+# --- charspot-small (plan 03 Task 3) ---
+
+
+def test_charspot_pin_and_roles():
+    assert T.CHARSPOT_PIN.prefix == {"dense": "dense.", "tail": "tail."}
+    assert T.PINS["charspot-small"] is T.CHARSPOT_PIN
+    assert graphs.BUILDERS["charspot-small"] is not None
+    assert verify.pinned_size("charspot-small") == 43_860_012
+    with pytest.raises(SystemExit, match="fp32"):
+        T.charspot_small("fp16", torch.device("cpu"), 0)
+
+
+def test_same_chars():
+    a = {"text": "あい", "chars": [["あ", 0, 0, 10, 10, .9], ["い", 0, 10, 10, 20, .8]]}
+    b = {"text": "あい", "chars": [["あ", .4, 0, 10, 10, .9], ["い", 0, 10, 10.3, 20, .7]]}
+    assert verify.same_chars(a, b)
+    b["chars"][0][1] = 0.6
+    assert not verify.same_chars(a, b)
+    # same text, another character count or order: not the same
+    assert not verify.same_chars(a, {"text": "あい", "chars": a["chars"][:1]})
+    assert not verify.same_chars(a, {"text": "あい", "chars": a["chars"][::-1]})
+    assert not verify.same_chars(a, {"text": "あう", "chars": a["chars"]})
+    assert verify.same_chars({"text": "", "chars": []}, {"text": "", "chars": []})
+
+
+def test_charspot_manifest_rows(tmp_path):
+    d = tmp_path / "charspot-small" / "fp32" / "linux-rocm-gfx1201"
+    d.mkdir(parents=True)
+    for role in ("dense", "tail"):
+        _package(d / f"{role}.pt2", role)
+    (d / "build.json").write_text('{"graphs": {"dense": {"file": "dense.pt2"}, "tail": {"file": "tail.pt2"}}}')
+    m = manifest.build_textbox_manifest(tmp_path, "textbox-torch-v1", ("charspot-small",),
+                                        {"charspot-small": T.CHARSPOT_PIN}, "Apache-2.0")
+    assert [r["id"] for r in m["files"]] == ["torch/charspot-small/fp32/linux-rocm-gfx1201/dense.pt2",
+                                             "torch/charspot-small/fp32/linux-rocm-gfx1201/tail.pt2"]
+    assert all(r["licence"] == "Apache-2.0" and "requires" not in r for r in m["files"])
+    assert m["files"][0]["sources"] == [{"repo": "muscgab/manga-ocr-charspot-small",
+                                         "revision": "72ca29202673880ca9c67b1c02c107535be4472b"}]
+
+
+def test_charspot_weights_inside_is_refused(tmp_path):
+    import zipfile
+
+    d = tmp_path / "charspot-small" / "fp32" / "linux-rocm-gfx1201"
+    d.mkdir(parents=True)
+    with zipfile.ZipFile(d / "dense.pt2", "w") as z:  # the spike's dense with weights inside: 31,187,272 B
+        z.writestr("m/data/aotinductor/model/x.wrapper.so", b"\0" * (T.CHARSPOT_PIN.size // 4 + 1))
+    with pytest.raises(SystemExit, match="dense.pt2"):
+        verify.refuse_embedded(tmp_path, lambda engine: T.CHARSPOT_PIN.size if engine == "charspot-small" else 0)
+    # and through the CLI's own size lookup
+    with pytest.raises(SystemExit, match="dense.pt2"):
+        verify.refuse_embedded(tmp_path, verify.pinned_size)
+
+
+def test_charspot_tail_parts_as_the_rust_port():
+    # the cases of bunko_vlm::textbox's tail_parts tests
+    assert T.charspot_tail_parts([3, 10, 0, 5], 1 << 18, 512) == [[1, 3, 0]]
+    assert T.charspot_tail_parts([3, 10, 0, 5], 250, 512) == [[1, 3], [0]]
+    assert T.charspot_tail_parts([0, 0]) == []
+    assert T.charspot_tail_parts([3, 600]) == [[1], [0]]
+    assert T.charspot_tail_parts([362, 362]) == [[0, 1]]
+    assert T.charspot_tail_parts([363, 363]) == [[0], [1]]
+    assert [len(p) for p in T.charspot_tail_parts([1] * 513)] == [512, 1]
+
+
+def test_charspot_result_is_unrounded():
+    r = T.charspot_result([1, 0], [2, 0], [[0, 0, 8, 8], [8.25, 0, 16, 8]], [0.9, 0.123456], (0.5, 2.0), ["x", "y", "z"])
+    assert r == {"text": "xz", "chars": [["x", 4.125, 0.0, 8.0, 16.0, 0.123456], ["z", 0.0, 0.0, 4.0, 16.0, 0.9]]}

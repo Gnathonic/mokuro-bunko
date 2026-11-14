@@ -16,9 +16,10 @@ are the same bytes for every target, GPU or CPU (the build checks it).
 (oneDNN/MKL-prepacked weights folded into the graph) with its weights inside, as
 ``TORCH_EXPORT_WIN_EMBED=1`` does for cross-built Windows GPU targets.
 
-Engines that bind the authors' own weights file (``textbox.PINS``: nar-small) write no
-weights files: ``bunko.weights`` maps each constant to its key in the authors' pinned
-file, which must hold every constant with the same shape and dtype, and both embed
+Engines that bind the authors' own weights file (``textbox.PINS``: nar-small,
+charspot-small) write no weights files: ``bunko.weights`` maps each constant to its key in
+the authors' pinned file, which must hold every constant with the same shape and dtype,
+no constant is written into the code (``always_keep_tensor_constants``), and both embed
 switches are refused.
 
 Weight groups: ``vision`` (the vision graph's weights) and ``decoder`` (prefill+step,
@@ -312,6 +313,12 @@ def build(engine: str, precision: str, t: Target, out: Path, io: int = IO_VERSIO
             # AOTInductorModelContainerUpdateUserManagedConstantBufferPairs instead
             meta["bunko.bind"] = "pairs"
         opts = inductor_options(t, g.role, meta)
+        if gs.authors_weights:
+            # inductor otherwise writes a 1-D constant of <= 8 values (charspot's heat, box,
+            # ruby, pout, start and end biases) into the code as numbers: a weight inside the
+            # package, and under fake tensors (GPU targets) no values to write at all. Kept,
+            # every constant is bound from the authors' file at load (bunko.weights).
+            opts["always_keep_tensor_constants"] = True
         t1 = time.time()
         # the archive's internal folder is named after the file: build as <role>.pt2 in a
         # scratch dir so packages unpack to <role>/... (not <role>.tmp/...)

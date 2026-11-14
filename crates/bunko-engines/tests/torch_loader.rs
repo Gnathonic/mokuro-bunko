@@ -481,3 +481,137 @@ fn vulkan_pack_reads_hayai_nova_at_every_patch_budget() {
         vec![std::env::var("MOKURO_TEST_RUNTIME").unwrap_or_else(|_| "ncnn".into())];
     budgets_read(&bunko_engines::EnginePipeline::new(cfg), &device);
 }
+
+/// charspot-small through a real pack's `bt_load` and `bt_read_chars` against the
+/// authors' ONNX model on the CPU: every crop of `MOKURO_CHARSPOT_PARITY_EXPECTED`
+/// (`tools/textbox_export/charspot_reference.py`'s rows, crops in
+/// `MOKURO_CHARSPOT_PARITY_CROPS`) must read the same text and characters, every box
+/// coordinate within 0.5 px. Also: an empty crop reads `""` with no characters, and a
+/// crop's text is its characters joined. The variables are this test's own:
+/// `MOKURO_TORCH_PACK`, `MOKURO_CHARSPOT_TORCH_PACKAGE` (the dir holding `dense.pt2` and
+/// `tail.pt2`), `MOKURO_CHARSPOT_WEIGHTS` (the authors' `model.safetensors`),
+/// `MOKURO_CHARSPOT_VOCAB`, and optionally `MOKURO_TEST_DEVICE` (default `gpu:0`) and
+/// `MOKURO_CHARSPOT_MAX_BATCH` (the canvas batch cap). Run it alone:
+/// `cargo test -p bunko-engines --features torch --release --test torch_loader -- --ignored --exact real_pack_reads_charspot_small --nocapture`.
+#[test]
+#[ignore = "needs a real backend pack, a charspot-small package, its weights and crops (env vars)"]
+fn real_pack_reads_charspot_small() {
+    let var =
+        |k: &str| PathBuf::from(std::env::var_os(k).unwrap_or_else(|| panic!("{k} is not set")));
+    let pack_dir = var("MOKURO_TORCH_PACK");
+    let package = var("MOKURO_CHARSPOT_TORCH_PACKAGE");
+    let crops = var("MOKURO_CHARSPOT_PARITY_CROPS");
+    let device = std::env::var("MOKURO_TEST_DEVICE").unwrap_or_else(|_| "gpu:0".into());
+    let max_batch = std::env::var("MOKURO_CHARSPOT_MAX_BATCH")
+        .ok()
+        .map(|v| v.parse::<u32>().expect("MOKURO_CHARSPOT_MAX_BATCH"));
+    let expected = std::fs::read_to_string(var("MOKURO_CHARSPOT_PARITY_EXPECTED")).unwrap();
+    let rows: Vec<serde_json::Value> = expected
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert!(!rows.is_empty(), "no expected rows");
+
+    let pack = Pack::open(&pack_dir, false).unwrap_or_else(|e| panic!("{e}"));
+    assert!(pack.reads_chars(), "the pack has no bt_read_chars");
+    let cache = tempfile::tempdir().unwrap();
+    let opts = bunko_torch::abi::LoadOptions {
+        tokenizer: var("MOKURO_CHARSPOT_VOCAB").to_string_lossy().into_owned(),
+        weights: Some(vec![
+            var("MOKURO_CHARSPOT_WEIGHTS")
+                .to_string_lossy()
+                .into_owned(),
+        ]),
+        cache_dir: Some(cache.path().to_string_lossy().into_owned()),
+        max_batch,
+        threads: 8,
+        ..Default::default()
+    };
+    let h = pack
+        .load("charspot-small", &package, "fp32", &device, &opts)
+        .unwrap_or_else(|e| panic!("{e}"));
+    let info = h.info().unwrap();
+    eprintln!("{info:?}");
+    assert!(info.batch >= 1 && info.weights > 0, "{info:?}");
+
+    // An empty crop between two real ones keeps its place and reads nothing.
+    let img = |file: &str| {
+        image::open(crops.join(file))
+            .unwrap_or_else(|e| panic!("{file}: {e}"))
+            .to_rgb8()
+    };
+    let file = |r: &serde_json::Value| r["file"].as_str().unwrap().to_string();
+    let (a, b) = (img(&file(&rows[0])), img(&file(&rows[rows.len() - 1])));
+    let r = h
+        .read_chars(&[
+            (a.as_raw(), a.width(), a.height()),
+            (&[], 0, 7),
+            (b.as_raw(), b.width(), b.height()),
+        ])
+        .unwrap();
+    assert_eq!(r.len(), 3);
+    assert_eq!(
+        (r[1].text.as_str(), r[1].chars.as_deref()),
+        ("", Some(&[][..]))
+    );
+    assert_eq!(r[0].text, rows[0]["text"].as_str().unwrap());
+
+    let (mut same, mut differ, mut worst) = (0usize, Vec::new(), 0f64);
+    let t0 = std::time::Instant::now();
+    for chunk in rows.chunks(64) {
+        let images: Vec<_> = chunk.iter().map(|r| img(&file(r))).collect();
+        let raw: Vec<(&[u8], u32, u32)> = images
+            .iter()
+            .map(|i| (i.as_raw().as_slice(), i.width(), i.height()))
+            .collect();
+        let got = h.read_chars(&raw).unwrap();
+        assert_eq!(got.len(), chunk.len(), "one result per crop");
+        for (want, read) in chunk.iter().zip(&got) {
+            let chars = read.chars.as_ref().expect("charspot answers characters");
+            let joined: String = chars.iter().map(|c| c.0.as_str()).collect();
+            assert_eq!(
+                read.text,
+                joined,
+                "{}: text is the characters joined",
+                file(want)
+            );
+            let wc = want["chars"].as_array().unwrap();
+            let mut ok = read.text == want["text"].as_str().unwrap() && chars.len() == wc.len();
+            if ok {
+                for (c, w) in chars.iter().zip(wc) {
+                    ok &= c.0 == w[0].as_str().unwrap();
+                    for (g, k) in [c.1, c.2, c.3, c.4].into_iter().zip(1..5) {
+                        let d = (f64::from(g) - w[k].as_f64().unwrap()).abs();
+                        worst = worst.max(d);
+                        ok &= d <= 0.5;
+                    }
+                }
+            }
+            if ok {
+                same += 1;
+            } else {
+                differ.push(format!(
+                    "{}: {:?} ({} chars) != {:?} ({} chars)",
+                    file(want),
+                    read.text,
+                    chars.len(),
+                    want["text"],
+                    wc.len()
+                ));
+            }
+        }
+    }
+    eprintln!(
+        "charspot-small on {device} (batch {}): {same} of {} crops the same, largest box move {worst:.2e} px, {:.1}s",
+        info.batch,
+        rows.len(),
+        t0.elapsed().as_secs_f64()
+    );
+    assert!(
+        differ.is_empty(),
+        "{same} of {} the same; {} differ: {differ:#?}",
+        rows.len(),
+        differ.len()
+    );
+}

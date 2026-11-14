@@ -1303,7 +1303,7 @@ mod tests {
         parse_generation_list(&rows).map(|p| p.rows[1].pools.clone())
     }
 
-    /// nar-small's engine stage may be pinned to a GPU; charspot-small's may not yet.
+    /// nar-small's engine stage may be pinned to a GPU.
     #[test]
     fn a_nar_row_may_pin_its_engine_to_a_gpu() {
         let pools = layer_pools("nar-small", json!({"stage_device": {"engine": "gpu:0"}})).unwrap();
@@ -1311,14 +1311,19 @@ mod tests {
             pools.stage_device.get("engine").map(String::as_str),
             Some("gpu:0")
         );
-        let err = layer_pools(
+    }
+
+    /// So may charspot-small's, now that it has a GPU route.
+    #[test]
+    fn a_charspot_row_may_pin_its_engine_to_a_gpu() {
+        let pools = layer_pools(
             "charspot-small",
             json!({"stage_device": {"engine": "gpu:0"}}),
         )
-        .unwrap_err();
-        assert!(
-            format!("{err:?}").contains("that stage runs on the CPU"),
-            "{err:?}"
+        .unwrap();
+        assert_eq!(
+            pools.stage_device.get("engine").map(String::as_str),
+            Some("gpu:0")
         );
     }
 }

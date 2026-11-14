@@ -14,7 +14,7 @@ use crate::aoti::{Placement, TPrec, set_threads};
 use crate::hayai::{HayaiFiles, PACKAGE_BUDGET, TorchHayai};
 use crate::package::{GraphSet, PackageSet, default_weight_files};
 use crate::paddle::{PaddleFiles, TorchPaddle};
-use crate::textbox::{NAR_ROLE, TorchNar};
+use crate::textbox::{CHARSPOT_DENSE, CHARSPOT_TAIL, NAR_ROLE, TorchCharspot, TorchNar};
 
 /// The libtorch this library was built against, e.g. `2.13.0+rocm7.1`.
 pub fn torch_version() -> &'static str {
@@ -167,6 +167,7 @@ enum Engine {
     Hayai(TorchHayai),
     Paddle(TorchPaddle),
     Nar(TorchNar),
+    Charspot(TorchCharspot),
 }
 
 /// A loaded recognizer. Shared by any number of threads.
@@ -248,8 +249,8 @@ impl Unpacked {
 
 /// Loads `engine` (`hayai-nova` / `paddle-manga` from the package set in `model_dir`,
 /// `{vision,prefill,step}.pt2` or the paths in `opts`; `nar-small` from
-/// `<model_dir>/model.pt2` bound to `opts.weights`) at `precision` on `device`
-/// (`cpu` / `gpu:<n>`).
+/// `<model_dir>/model.pt2` and `charspot-small` from `<model_dir>/{dense,tail}.pt2`, both
+/// bound to `opts.weights`) at `precision` on `device` (`cpu` / `gpu:<n>`).
 pub fn load(
     engine: &str,
     model_dir: &Path,
@@ -260,9 +261,12 @@ pub fn load(
     let t0 = Instant::now();
     let prec = TPrec::parse(precision)?;
     let at = Placement::parse(device)?;
-    if !matches!(engine, "hayai-nova" | "paddle-manga" | "nar-small") {
+    if !matches!(
+        engine,
+        "hayai-nova" | "paddle-manga" | "nar-small" | "charspot-small"
+    ) {
         return Err(TorchError::Arg(format!(
-            "unknown engine {engine:?} (hayai-nova, paddle-manga, nar-small)"
+            "unknown engine {engine:?} (hayai-nova, paddle-manga, nar-small, charspot-small)"
         )));
     }
     // Loading runs ATen ops too (casts, copies): give it this handle's width.
@@ -272,6 +276,10 @@ pub fn load(
         let n = load_nar(model_dir, prec, at, opts, &mut unpacked)?;
         let (b, w) = (n.batch(), n.bound());
         (Engine::Nar(n), b, 0, w)
+    } else if engine == "charspot-small" {
+        let c = load_charspot(model_dir, prec, at, opts, &mut unpacked)?;
+        let (b, w) = (c.batch(), c.bound());
+        (Engine::Charspot(c), b, 0, w)
     } else {
         load_recognizer(engine, model_dir, prec, at, opts, &mut unpacked)?
     };
@@ -385,6 +393,49 @@ fn load_nar(
     )
 }
 
+/// charspot-small: the graphs `dense` and `tail` (`<model_dir>/{dense,tail}.pt2`, or the
+/// installer's unpacked folders), bound to the authors' `model.safetensors`
+/// (`opts.weights`, required), the vocabulary in `opts.tokenizer`; fp32 only.
+fn load_charspot(
+    model_dir: &Path,
+    prec: TPrec,
+    at: Placement,
+    opts: &LoadOptions,
+    unpacked: &mut Unpacked,
+) -> Result<TorchCharspot, TorchError> {
+    if prec != TPrec::Fp32 {
+        return Err(TorchError::Arg(format!(
+            "charspot-small runs at fp32 only, not {}",
+            prec.as_str()
+        )));
+    }
+    let weight_files: Vec<PathBuf> = opts.weights.iter().flatten().map(PathBuf::from).collect();
+    if weight_files.is_empty() {
+        return Err(TorchError::Arg(
+            "charspot-small needs its weights file".into(),
+        ));
+    }
+    let dense = unpacked.in_place(graph(model_dir, &None, CHARSPOT_DENSE))?;
+    let tail = unpacked.in_place(graph(model_dir, &None, CHARSPOT_TAIL))?;
+    let set = match GraphSet::load(
+        &[(CHARSPOT_DENSE, &dense), (CHARSPOT_TAIL, &tail)],
+        &weight_files,
+        at,
+        TEXTBOX_IO,
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            unpacked.discard();
+            return Err(e);
+        }
+    };
+    register_exit_hook();
+    Ok(
+        TorchCharspot::load(set, Path::new(&opts.tokenizer), at, opts.max_batch)?
+            .with_threads(opts.threads),
+    )
+}
+
 fn set_threads_here(n: u32) {
     if n > 0 && THREADS.with(Cell::get) != n {
         set_threads(n);
@@ -404,18 +455,25 @@ impl Handle {
     /// (zero width or height) reads `""` without a model call. Only the text-box engines
     /// read characters.
     pub fn read_chars(&self, crops: &[&Rgb]) -> Result<Vec<CharsRead>, TorchError> {
-        let Engine::Nar(n) = &self.engine else {
-            return Err(TorchError::Arg(format!(
+        let refuse = || {
+            TorchError::Arg(format!(
                 "bt_read_chars: {} reads no characters",
                 self.info.engine
-            )));
+            ))
         };
+        if !matches!(self.engine, Engine::Nar(_) | Engine::Charspot(_)) {
+            return Err(refuse());
+        }
         if crops.is_empty() {
             return Ok(Vec::new());
         }
         let _running = InFlight::enter()?;
         set_threads_here(self.threads);
-        n.read_chars(crops)
+        match &self.engine {
+            Engine::Nar(n) => n.read_chars(crops),
+            Engine::Charspot(c) => c.read_chars(crops),
+            Engine::Hayai(_) | Engine::Paddle(_) => Err(refuse()),
+        }
     }
 
     /// Reads crops; one text per crop (Python `strip()`ed, no NFKC). `caps[i]` caps
@@ -449,6 +507,7 @@ impl Handle {
                 p.read_crops(crops, caps)
             }
             Engine::Nar(n) => Ok(n.read_chars(crops)?.into_iter().map(|c| c.text).collect()),
+            Engine::Charspot(c) => Ok(c.read_chars(crops)?.into_iter().map(|c| c.text).collect()),
         }
     }
 }

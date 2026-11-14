@@ -12,7 +12,8 @@ reports the process's peak resident memory -- for comparing two builds of one ta
 one machine (e.g. weightless vs ``TORCH_EXPORT_CPU_EMBED=1``) where no OCR run is possible.
 The crop-level parity gate is the Rust harness (ltbench) on the real crop sets.
 
-Text-box engines (``textbox.PINS``: nar-small) take the crop-level gate here instead:
+Text-box engines (``textbox.PINS``: nar-small, charspot-small) take the crop-level gate
+here instead:
 
     python -m torch_export.verify <out> nar-small fp32|fp16 <target> --crops DIR --expected FILE [--n N] [--batch B]
                                   [--reads FILE]
@@ -30,6 +31,13 @@ read at one batch size is another's ``--expected`` and ``python -m torch_export
 compare-reads`` pairs any two (``gate.py``). Any package whose constants live
 inside it is refused before it is loaded (``weights_inside``), and
 ``python -m torch_export refuse-embedded DIR`` checks a whole build or staging tree.
+
+charspot-small (roles ``dense`` and ``tail``) takes the same command with ``--expected``
+the JSON lines ``tools/textbox_export/charspot_reference.py`` writes (the authors' ONNX
+model on the CPU) and ``--batch`` the canvas batch (default 32, at most 64): both packages
+bound to the authors' ``model.safetensors``, the authors' ``core.detect`` / ``core.chain``
+between them (``charspot_read``), and every crop must be ``same_chars`` (same text and
+order, boxes within 0.5 px). Exit 0 only when every crop is.
 """
 
 from __future__ import annotations
@@ -95,6 +103,19 @@ def check_textbox_meta(meta: dict, precision: str, pin, where) -> None:
 def texts_gate(differ: int, crops: int, limit: float = 0.001) -> bool:
     """fp16's crop gate: at most ``floor(crops x limit)`` texts differ (7 of 7,929)."""
     return differ <= int(crops * limit)
+
+
+def same_chars(got: dict, want: dict, tol: float = 0.5) -> bool:
+    """charspot's gate: the same text, the same characters in the same order, and every box
+    coordinate within ``tol`` px (``chars``: ``[[c, x0, y0, x1, y1, score], ...]``, the
+    score is not compared)."""
+    if got["text"] != want["text"] or len(got["chars"]) != len(want["chars"]):
+        return False
+    for g, w in zip(got["chars"], want["chars"]):
+        # written so that a NaN coordinate fails
+        if g[0] != w[0] or not all(abs(float(a) - float(b)) <= tol for a, b in zip(g[1:5], w[1:5])):
+            return False
+    return True
 
 
 def weights_inside(pt2: Path, weights_size: int) -> bool:
@@ -233,6 +254,10 @@ def _verify_textbox(out: Path, engine: str, precision: str, target: str, crops: 
     pin = TB.PINS.get(engine)
     if pin is None:
         raise SystemExit(f"{engine}: not a text-box engine (those are {sorted(TB.PINS)})")
+    if G.ROLES[engine] == ("dense", "tail"):
+        if reads is not None:
+            raise SystemExit(f"{engine}: --reads writes ids, which {engine} has none of")
+        return _verify_charspot(out, precision, target, crops, expected, device, n, batch)
     if G.ROLES[engine] != ("model",):
         raise SystemExit(f"{engine}: no crop gate for the roles {G.ROLES[engine]} yet")
     pkg = Path(out) / engine / precision / target / "model.pt2"
@@ -317,6 +342,166 @@ def _verify_textbox(out: Path, engine: str, precision: str, target: str, crops: 
     return res, [m, weights]
 
 
+def charspot_batches(shapes: list[tuple[int, int]], max_batch: int, snap: Path) -> list[tuple[list[int], tuple[int, int]]]:
+    """The authors' canvas batches (``CudaBackend.batches`` at the pin, without CUDA graph
+    canvases): ``[(crop indices, (H, W) px)]``."""
+    if str(snap) not in sys.path:
+        sys.path.insert(0, str(snap))
+    from manga_ocr_charspot_small.backends.cuda import CudaBackend
+
+    cb = CudaBackend.__new__(CudaBackend)  # batches() reads only these two
+    cb.graphs, cb.max_batch = False, max_batch
+    return cb.batches(shapes)
+
+
+def charspot_read(paths: list[Path], dense, tail, core, out_str: list[str], device, max_batch: int,
+                  snap: Path) -> list[dict]:
+    """charspot-small through two graphs (packages or the eager ``DenseGraph`` /
+    ``TailGraph``) with the authors' decode between them, as Bunko's ``TorchCharspot``
+    runs it: crops prepared by ``core.preprocess``, canvas batches of at most
+    ``max_batch``, ``dense`` per batch, ``core.detect`` per crop on the host, the batch's
+    rows in the authors' tail parts, each padded to ``max(2, n0)`` characters (geo 1, mask
+    false), ``tail`` per part, ``core.chain`` per crop. A canvas side under
+    ``CHARSPOT_MIN_CELLS`` cells is widened to it. -> ``textbox.charspot_result`` per
+    crop, in order."""
+    import numpy as np
+    import torch
+
+    from . import textbox as TB
+
+    pre = [core.preprocess(core.to_rgb(p)) for p in paths]  # (uint8 [3, H, W], (fx, fy))
+    out: list[dict | None] = [None] * len(paths)
+    least = 16 * TB.CHARSPOT_MIN_CELLS
+    for idx, (H, W) in charspot_batches([tuple(x.shape[1:]) for x, _ in pre], max_batch, snap):
+        H, W = max(H, least), max(W, least)  # the dense graph's smallest canvas side
+        x = torch.zeros(len(idx), 3, H, W, dtype=torch.float32)
+        hw = torch.empty(len(idx), 2, dtype=torch.int64)
+        for r, i in enumerate(idx):
+            a = pre[i][0]
+            x[r, :, :a.shape[1], :a.shape[2]] = torch.from_numpy(a)
+            hw[r, 0], hw[r, 1] = a.shape[1], a.shape[2]
+        heat, box, ruby, emb = dense(x.to(device), hw.to(device))
+        maps = torch.cat((heat, box, ruby), 1).cpu().numpy()
+        dets = []
+        for r in range(len(idx)):
+            m = maps[r, :, :int(hw[r, 0]) // 8, :int(hw[r, 1]) // 8]
+            dets.append(core.detect(m[0:1], m[1:5], m[5:6]))
+        nk = [0 if d is None else len(d[0]) for d in dets]
+        for r, i in enumerate(idx):
+            if nk[r] == 0:
+                out[i] = {"text": "", "chars": []}
+        for part in TB.charspot_tail_parts(nk):
+            n0 = nk[part[0]]
+            if n0 > TB.CHARSPOT_MAX_CHARS:
+                # cannot happen for a prepared crop (256 cells hold 1,024 centres); Bunko
+                # reads such a crop on the CPU route
+                raise SystemExit(f"{paths[idx[part[0]]]}: {n0} characters, more than the tail graph's {TB.CHARSPOT_MAX_CHARS}")
+            width = max(2, n0)
+            kb = np.zeros((len(part), width, 4), np.float32)
+            geo = np.ones((len(part), width, 4), np.float32)
+            mask = np.zeros((len(part), width), bool)
+            for p, r in enumerate(part):
+                kb[p, :nk[r]], _, geo[p, :nk[r]] = dets[r]
+                mask[p, :nk[r]] = True
+            rows = torch.tensor(part, dtype=torch.int64, device=emb.device)
+            ids, pair, st, en = (t.cpu().numpy() for t in tail(emb.index_select(0, rows), *(
+                torch.from_numpy(a).to(device) for a in (kb, geo, mask))))
+            for p, r in enumerate(part):
+                n = nk[r]
+                seq = core.chain(pair[p, :n, :n], st[p, :n], en[p, :n])
+                kb_r, sc_r, _ = dets[r]
+                out[idx[r]] = TB.charspot_result(seq, ids[p, :n], kb_r, sc_r, pre[idx[r]][1], out_str)
+    return out
+
+
+def read_expected_chars(expected: Path) -> dict[str, dict]:
+    """``tools/textbox_export/charspot_reference.py``'s JSON lines, by file name."""
+    want = {}
+    with open(expected, encoding="utf-8") as f:
+        for line in f:
+            if line.strip():
+                r = json.loads(line)
+                want[r["file"]] = r
+    return want
+
+
+def _verify_charspot(out: Path, precision: str, target: str, crops: Path, expected: Path, device: str,
+                     n: int | None = None, batch: int = 32):
+    """charspot-small's crop gate: both packages bound to the authors' pinned weights,
+    ``charspot_read`` over the crops, every crop ``same_chars`` as the authors' ONNX model
+    on the CPU (``--expected``: ``charspot_reference.py``'s output)."""
+    import torch
+    from safetensors import safe_open
+
+    from . import textbox as TB
+
+    pin = TB.CHARSPOT_PIN
+    tdir = Path(out) / "charspot-small" / precision / target
+    pkgs = {role: tdir / f"{role}.pt2" for role in ("dense", "tail")}
+    for p in pkgs.values():  # both refused before either is loaded
+        if not p.is_file():
+            raise SystemExit(f"{p}: no such package")
+        if weights_inside(p, pin.size):
+            raise SystemExit(f"{p}: weights inside the package")
+    want = read_expected_chars(expected)
+    files = sorted(p for p in Path(crops).iterdir() if p.suffix.lower() in IMAGE_SUFFIXES)
+    files = files[:n] if n else files
+    if not files:
+        raise SystemExit(f"no crops in {crops}")
+    missing = [p.name for p in files if p.name not in want]
+    if missing:
+        raise SystemExit(f"{expected}: no expected characters for {len(missing)} crops, first {missing[:3]}")
+
+    snap = TB.charspot_snapshot()
+    TB.check_charspot(snap, [pin.file, "config.json", "vocab.json", "manga_ocr_charspot_small/core.py",
+                             "manga_ocr_charspot_small/backends/cuda.py"])
+    core, _ = TB.charspot_modules(snap)
+    cfg = json.loads((snap / "config.json").read_text(encoding="utf-8"))
+    out_str = core.load_vocab(snap / cfg["vocab"], cfg["n_cls"])
+    dev = torch.device(device, 0) if device == "cuda" else torch.device("cpu")
+    weights = {}
+    with safe_open(str(snap / pin.file), "pt") as s:
+        for k in s.keys():
+            weights[k] = s.get_tensor(k).to(dev)
+    held = []
+    for role, p in pkgs.items():
+        m, meta = load_pkg(p, weights, dev.index if dev.type == "cuda" else -1)
+        held.append(m)
+        for key, value in (("bunko.io", TB.IO), ("bunko.weights_sha256", pin.sha256), ("bunko.role", role)):
+            if meta.get(key) != value:
+                raise SystemExit(f"{p}: {key} is {meta.get(key)!r}, not {value!r}")
+        if not json.loads(meta.get("bunko.weights", "{}")):
+            raise SystemExit(f"{p}: no bunko.weights map: its constants are not bound to the authors' {pin.file}")
+    if dev.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(dev)
+    t0 = time.time()
+    with torch.no_grad():
+        got = charspot_read(files, held[0], held[1], core, out_str, dev, batch, snap)
+    took = time.time() - t0
+    identical, differ, moved = 0, [], 0.0
+    for p, g in zip(files, got):
+        if same_chars(g, want[p.name]):
+            identical += 1
+            moved = max([moved, *(abs(float(a) - float(b)) for gc, wc in zip(g["chars"], want[p.name]["chars"])
+                                  for a, b in zip(gc[1:5], wc[1:5]))])
+        else:
+            differ.append(p.name)
+    print(f"{len(files)} crops in {took:.1f}s, canvas batch {batch}", file=sys.stderr)
+    by_name = {p.name: g for p, g in zip(files, got)}
+    for name in differ[:5]:
+        print(f"  {name}: {by_name[name]['text']!r} / expected {want[name]['text']!r}", file=sys.stderr)
+    res = {"crops": len(files), "identical": identical, "differ": differ, "batch": batch,
+           "passed": identical == len(files),
+           # the whole loop: crops decoded and prepared on the CPU, both graphs, the decode
+           "crops_per_s": round(len(files) / took, 1) if took > 0 else None,
+           # over the crops that read the same
+           "largest_move_px": moved,
+           # torch's caching allocator during the read (the bound weights included)
+           "torch_peak_reserved_mb": round(torch.cuda.max_memory_reserved(dev) / 2**20) if dev.type == "cuda"
+           else None}
+    return res, [*held, weights]
+
+
 def verify_textbox(out: Path, engine: str, precision: str, target: str, crops: Path, expected: Path,
                    device: str, n: int | None = None, batch: int = 32, reads: Path | None = None) -> dict:
     """A text-box package against the authors' output, crop by crop:
@@ -370,9 +555,10 @@ def main(argv=None) -> int:
     ap.add_argument("--crops", type=Path, help="text-box engines: a directory of crop images")
     ap.add_argument("--expected", type=Path, help="text-box engines: check_parity.py --expected JSON lines")
     ap.add_argument("--n", type=int, default=None, help="text-box engines: only the first N crops by name")
-    ap.add_argument("--batch", type=int, default=32, help="text-box engines: crops per call")
+    ap.add_argument("--batch", type=int, default=32,
+                    help="text-box engines: crops per call (charspot: the canvas batch, at most 64)")
     ap.add_argument("--reads", type=Path, default=None,
-                    help="text-box engines: write what the package read here ({file, ids, text} lines)")
+                    help="nar-small: write what the package read here ({file, ids, text} lines)")
     a = ap.parse_args(argv)
     from .__main__ import _imports
 

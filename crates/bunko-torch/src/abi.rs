@@ -22,9 +22,12 @@
 //!
 //! `bt_read_chars` answers one [`CharsRead`] per crop, in crop order:
 //! `{"text":"...","chars":[["字",x0,y0,x1,y1,score], ...] | null}`, boxes in crop
-//! pixels, `chars` null for nar-small. A crop of zero width or height (its `data` may be
-//! null) reads `""` without a model call. On a hayai-nova or paddle-manga handle it is
-//! [`BT_ERR_ARG`]. `bt_read` on a text-box handle returns the texts.
+//! pixels, `chars` null for nar-small. charspot-small's `text` is its characters joined;
+//! its `chars` is null only for a crop the pack did not read (more characters than its
+//! tail graph takes, which a prepared crop never has): the caller reads that crop on
+//! its CPU route. A crop of zero width or height (its `data` may be null) reads `""`
+//! without a model call. On a hayai-nova or paddle-manga handle it is [`BT_ERR_ARG`].
+//! `bt_read` on a text-box handle returns the texts.
 //!
 //! Rules: no tensor crosses the boundary, only RGB8 crops in and UTF-8 JSON out. Every
 //! string the library hands out (`json_out`, `err`) is freed with `bt_free_str`. A
@@ -83,7 +86,8 @@ pub const TEXTBOX_IO: &str = "textbox-1";
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CharsRead {
     pub text: String,
-    /// Each character with its box in crop pixels; `None` for nar-small (no boxes).
+    /// Each character with its box in crop pixels; `None` for nar-small (no boxes), and
+    /// for a charspot-small crop this pack did not read (the caller's CPU route reads it).
     pub chars: Option<Vec<CharEntry>>,
 }
 

@@ -899,8 +899,8 @@ mod tests {
             assert_eq!(e["license"], json!("CC-BY-NC-SA-4.0"), "{e}");
             assert_eq!(e["license_class"], json!("non-commercial"), "{e}");
         }
-        // charspot-small reads on the CPU; nar-small also on a GPU (the libtorch route).
-        assert_eq!(c["engines"][3]["devices"], json!(["cpu"]));
+        // charspot-small and nar-small read on the CPU and on a GPU (the libtorch route).
+        assert_eq!(c["engines"][3]["devices"], json!("any"));
         assert_eq!(c["engines"][4]["devices"], json!("any"));
         assert_eq!(c["detectors"][0]["license_class"], json!("permissive"));
         assert_eq!(c["detectors"][1]["license"], json!("GPL-3.0"));
@@ -951,6 +951,20 @@ mod tests {
             .unwrap();
         assert_eq!(nar["devices"], json!("any"));
         assert_eq!(nar["cpu_note"], Value::Null);
+    }
+
+    /// So may charspot-small (its libtorch GPU route), with no CPU note.
+    #[test]
+    fn the_catalog_offers_charspot_small_any_device() {
+        let c = catalog(default_devices());
+        let cs = c["engines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["id"] == "charspot-small")
+            .unwrap();
+        assert_eq!(cs["devices"], json!("any"));
+        assert_eq!(cs["cpu_note"], Value::Null); // an empty note is dropped
     }
 
     #[test]

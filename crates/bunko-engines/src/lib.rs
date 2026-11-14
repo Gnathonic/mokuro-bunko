@@ -802,9 +802,24 @@ impl EnginePipeline {
             batch: reader.info.batch as usize,
             patch_budget: None,
         };
-        let rec: Arc<dyn Recognizer> = Arc::new(textbox::TextboxRecognizer::with_reader(
-            engine, reader, info,
-        ));
+        let mut rec = textbox::TextboxRecognizer::with_reader(engine, reader, info);
+        // L12: a charspot-small crop with more characters than its tail graph holds is
+        // left to the CPU route, loaded (and its ONNX file fetched) on first need.
+        if engine == models::CHARSPOT {
+            let store = self.store.clone();
+            rec = rec.with_cpu_route(textbox::lazy_cpu_route(move || {
+                let files = models::ensure_all(&store, &models::textbox_ids(models::CHARSPOT))
+                    .map_err(bunko_vlm::VlmError::Asset)?;
+                let opts = RuntimeOptions {
+                    intra_threads: threads as usize,
+                    targets: vec![ExecutionTarget::Cpu],
+                    copies: 1,
+                    spinning: false,
+                };
+                textbox::Charspot::load(&files[0].path, &files[1].path, &opts)
+            }));
+        }
+        let rec: Arc<dyn Recognizer> = Arc::new(rec);
         Ok((rec, bunko_ocr::models::torch_release_name_for(engine)))
     }
 
@@ -1152,11 +1167,13 @@ impl EnginePipeline {
 
     /// [`prefetch_rows`](Self::prefetch_rows) of a text-box row in precision `mode`. On a
     /// GPU: the package for its targets at the precision it resolves to, the GPU route's
-    /// host files and the ONNX files (the CPU route, the fallback when the GPU cannot
-    /// start, is then free), and the packages of the other formats the mode can resolve
-    /// to there ([`textbox_prefetch_formats`]: a benchmarked mode tries fp16 and fp32),
-    /// whose failure is only logged; on the CPU: the ONNX files, the graph reported as the
-    /// package.
+    /// host files, the CPU route's files that are cheap beside them
+    /// ([`models::textbox_fallback_ids`]: nar-small's, so its fallback when the GPU
+    /// cannot start is free; none of charspot-small's, whose ONNX file the CPU route
+    /// fetches when it is reached, L12), and the packages of the other formats the mode
+    /// can resolve to there ([`textbox_prefetch_formats`]: a benchmarked mode tries fp16
+    /// and fp32), whose failure is only logged; on the CPU: the ONNX files, the graph
+    /// reported as the package.
     #[cfg(feature = "torch")]
     fn prefetch_textbox(
         &self,
@@ -1189,9 +1206,9 @@ impl EnginePipeline {
             }
             let files =
                 models::torch_host_files(&self.store, engine, need.precision, pkg.dir.clone())?;
-            // The CPU route's files are fetched by the download plan too: a failure
-            // here is that route's, not the GPU's.
-            if let Err(e) = models::ensure_all(&self.store, &models::textbox_ids(engine)) {
+            // A failure here is the CPU route's, not the GPU's.
+            let fallback = models::textbox_fallback_ids(engine);
+            if let Err(e) = models::ensure_all(&self.store, &fallback) {
                 warn!("{engine}: the CPU route's files: {e}");
             }
             return Ok(Prefetched {
@@ -2495,6 +2512,17 @@ mod backends_dirs_tests {
         );
     }
 
+    /// Review Focus 5: charspot-small runs on a GPU only with its GPU route's host
+    /// files (the authors' safetensors and vocabulary) here or downloadable.
+    #[test]
+    fn charspot_gpu_needs_its_weights_file() {
+        assert!(textbox_gpu_formats("charspot-small", true, &["fp32"], false).is_empty());
+        assert_eq!(
+            textbox_gpu_formats("charspot-small", true, &["fp32", "bf16", "fp16"], true),
+            ["fp32"]
+        );
+    }
+
     /// Q21, O2: a text-box row prefetches the packages its mode can resolve to on the
     /// device: fp16 for auto-accuracy on a GPU with an fp16 package, both for the
     /// benchmarked modes, fp32 where there is no fp16 package, nothing for a forced
@@ -2526,6 +2554,48 @@ mod backends_dirs_tests {
         assert!(textbox_prefetch_formats("nar-small", "fp16", &["fp32"]).is_empty());
         assert_eq!(
             textbox_prefetch_formats("charspot-small", "auto-accuracy", &["fp32"]),
+            ["fp32"]
+        );
+    }
+
+    /// The same through a model store: offline, with the ONNX file and the vocabulary
+    /// but not the safetensors, the GPU route's host files are not obtainable (so a
+    /// package on disk is not enough) while the CPU route is; with the safetensors
+    /// here they are.
+    #[cfg(feature = "nc-models")]
+    #[test]
+    fn an_offline_host_without_charspot_safetensors_reads_it_on_the_cpu() {
+        use bunko_ocr::models::{Manifest, ModelStore, StoreOptions};
+        let tmp = tempfile::tempdir().unwrap();
+        let over = tmp.path().join("over");
+        std::fs::create_dir_all(&over).unwrap();
+        for f in ["charspot-small_model.onnx", "charspot-small_vocab.json"] {
+            std::fs::write(over.join(f), b"x").unwrap();
+        }
+        let store = ModelStore::new(
+            StoreOptions {
+                root: tmp.path().join("models"),
+                override_dir: Some(over.clone()),
+                download: false,
+            },
+            Manifest::builtin(),
+        );
+        let gpu = || {
+            models::obtainable(
+                &store,
+                &models::torch_host_ids(models::CHARSPOT, Precision::Fp32),
+            )
+        };
+        assert!(models::obtainable(
+            &store,
+            &models::textbox_ids(models::CHARSPOT)
+        ));
+        assert!(!gpu());
+        assert!(textbox_gpu_formats(models::CHARSPOT, true, &["fp32"], gpu()).is_empty());
+        std::fs::write(over.join("charspot-small_model.safetensors"), b"x").unwrap();
+        assert!(gpu());
+        assert_eq!(
+            textbox_gpu_formats(models::CHARSPOT, true, &["fp32"], gpu()),
             ["fp32"]
         );
     }
