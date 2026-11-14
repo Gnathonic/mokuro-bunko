@@ -524,6 +524,15 @@
   are test builds, never offered as an update.
 
 ### Changed
+- **nar-small and charspot-small use the whole CPU on big hosts.** These engines read
+  one text block at a time, too little work for one reader with many threads, so they
+  kept only about 6 cores busy however big the host. Now many one-thread readers share
+  the loaded model, sized from the physical cores and split with the detect stage. On a
+  24-core host, nar-small on AnimeText blocks reads about 3x as many pages a second
+  (1.8 to 5.8 on a test volume); on a 16-core desktop, 1.5 to 2.7. The text is the
+  same. The startup benchmark now widens or narrows that stage instead of calling it
+  impossible to widen, and `pools.stage_workers.engine` sets its width. hayai-nova and
+  paddle-manga are unchanged.
 - **A generation's upgrades run at that generation's place in the queue.** An upgrade
   replaces OCR a volume already has: an older main `.mokuro`, or a layer Bunko wrote
   at an older engine revision. Upgrades now run right after their generation's missing
