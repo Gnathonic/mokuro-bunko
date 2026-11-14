@@ -1090,8 +1090,10 @@ impl EnginePipeline {
     /// enabled generations (so an opt-in engine, such as the non-commercial text-box
     /// ones, is fetched only for a row that uses it). Per row: the host files, the
     /// compiled package (unpacked) and its shared weights, for the device and precision
-    /// [`need_for`](Self::need_for) picks; other precisions and devices are fetched when
-    /// a session first needs them. Rows of engines without a recognizer are skipped.
+    /// [`need_for`](Self::need_for) picks, and a text-box row's other formats its mode
+    /// can resolve to there (a benchmarked mode's fp16 and fp32 packages); other
+    /// precisions and devices are fetched when a session first needs them. Rows of
+    /// engines without a recognizer are skipped.
     #[cfg(feature = "torch")]
     pub fn prefetch_rows(
         &self,
