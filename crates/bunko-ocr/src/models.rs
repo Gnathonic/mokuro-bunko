@@ -390,6 +390,8 @@ impl Manifest {
             });
         }
         files.extend(torch_release_files());
+        #[cfg(feature = "nc-models")]
+        files.extend(textbox_torch_release_files());
         files.extend(vulkan_release_files());
         #[cfg(feature = "gpl-models")]
         files.push(ModelFile {
@@ -1224,6 +1226,18 @@ pub const TORCH_MODELS_DIR_ENV: &str = "MOKURO_TORCH_MODELS_DIR";
 /// unpacked into a directory of the same name (loaded in place, nothing extracted).
 pub const TORCH_GRAPHS: [&str; 3] = ["vision.pt2", "prefill.pt2", "step.pt2"];
 
+/// The graphs of one engine's package (docs/rust-port/TEXTBOX-GPU.md §8): hayai's and
+/// paddle's [`TORCH_GRAPHS`], nar-small's one `model.pt2`, charspot-small's `dense.pt2`
+/// and `tail.pt2`, AnimeText's one `detector.pt2`. Any other engine has the three.
+pub fn torch_graphs(engine: &str) -> &'static [&'static str] {
+    match engine {
+        "nar-small" => &["model.pt2"],
+        "charspot-small" => &["dense.pt2", "tail.pt2"],
+        "animetext-blocks" => &["detector.pt2"],
+        _ => &TORCH_GRAPHS,
+    }
+}
+
 /// `tools/torch_export`'s `torch-models.json` of the release this build uses (the
 /// compiled libtorch packages and their shared weights), compiled in like
 /// [`crate::models_release`]. Refresh it with each `torch-models-*` release.
@@ -1276,6 +1290,35 @@ pub fn torch_release_name() -> String {
     torch_release().map_or_else(|| "unknown".into(), |r| r.release)
 }
 
+/// The release of the text-box engines' libtorch packages (weightless graphs that bind
+/// the authors' weights, fetched from the authors' repos as host files).
+#[cfg(feature = "nc-models")]
+pub const TEXTBOX_TORCH_RELEASE: &str = "textbox-torch-v1";
+
+/// `tools/torch_export`'s manifest of [`TEXTBOX_TORCH_RELEASE`], with the
+/// `torch_models.json` schema. Its rows carry no `requires`: the weights are the base
+/// manifest's host files.
+#[cfg(feature = "nc-models")]
+const TEXTBOX_TORCH_MODELS_JSON: &str = include_str!("textbox_torch_models.json");
+
+/// The engines whose packages come from [`TEXTBOX_TORCH_RELEASE`].
+#[cfg(feature = "nc-models")]
+const TEXTBOX_TORCH_ENGINES: [&str; 2] = ["nar-small", "charspot-small"];
+
+/// The torch package release `engine`'s packages come from, for provenance: the
+/// text-box release for the text-box engines, [`torch_release_name`] for the others.
+pub fn torch_release_name_for(engine: &str) -> String {
+    #[cfg(feature = "nc-models")]
+    if TEXTBOX_TORCH_ENGINES.contains(&engine) {
+        return serde_json::from_str::<TorchRelease>(TEXTBOX_TORCH_MODELS_JSON)
+            .map_or_else(|_| "unknown".into(), |r| r.release);
+    }
+    // Without `nc-models` there are no text-box packages: every engine is the base release's.
+    #[cfg(not(feature = "nc-models"))]
+    let _ = engine;
+    torch_release_name()
+}
+
 /// A mirror of the `models-v1` release (and the PP-OCR files under their release
 /// names), tried first: a base URL, or a directory holding the release assets under
 /// their flat names (air-gapped hosts, an offline package).
@@ -1318,6 +1361,16 @@ fn torch_release_files() -> Vec<ModelFile> {
 /// never silently loses the weights it binds.
 fn torch_release_files_from(json: &str) -> std::result::Result<Vec<ModelFile>, String> {
     release_files_from(json, TORCH_MIRROR_ENV)
+}
+
+/// The compiled-in text-box packages as manifest entries, mirrored like the torch
+/// release (`MOKURO_TORCH_MODELS_MIRROR`). Empty when it does not load, logged.
+#[cfg(feature = "nc-models")]
+fn textbox_torch_release_files() -> Vec<ModelFile> {
+    release_files_from(TEXTBOX_TORCH_MODELS_JSON, TORCH_MIRROR_ENV).unwrap_or_else(|e| {
+        tracing::error!("the compiled-in text-box torch package release does not load: {e}");
+        Vec::new()
+    })
 }
 
 /// The files of a `tools/*` release json (`torch-models.json`, `vulkan-models.json`: the
@@ -1610,8 +1663,9 @@ pub fn tree_size(dir: &Path) -> u64 {
     total
 }
 
-fn has_graphs(dir: &Path) -> bool {
-    TORCH_GRAPHS
+/// Whether `dir` holds every graph of `engine`'s package ([`torch_graphs`]).
+fn has_graphs(dir: &Path, engine: &str) -> bool {
+    torch_graphs(engine)
         .iter()
         .all(|g| torch_graph_path(dir, g).is_some())
 }
@@ -1640,7 +1694,7 @@ impl ModelStore {
         names
     }
 
-    /// Whether `dir` holds a whole package: its three graphs, and the shared weights
+    /// Whether `dir` holds a whole package: its graphs, and the shared weights
     /// the release binds to it beside it (`<engine>/<precision>/weights-*`, where the
     /// loader looks).
     fn torch_package_complete(
@@ -1650,7 +1704,7 @@ impl ModelStore {
         precision: &str,
         target: &str,
     ) -> bool {
-        has_graphs(dir)
+        has_graphs(dir, engine)
             && dir.parent().is_some_and(|p| {
                 self.torch_bound_weights(engine, precision, target)
                     .iter()
@@ -1689,14 +1743,14 @@ impl ModelStore {
         None
     }
 
-    /// The manifest entries of one package's graphs, when the manifest has all three.
+    /// The manifest entries of one package's graphs, when the manifest has all of them.
     fn torch_manifest_graphs(
         &self,
         engine: &str,
         precision: &str,
         target: &str,
     ) -> Option<Vec<&ModelFile>> {
-        TORCH_GRAPHS
+        torch_graphs(engine)
             .iter()
             .map(|g| {
                 self.manifest
@@ -1705,7 +1759,7 @@ impl ModelStore {
             .collect()
     }
 
-    /// The manifest ids of one release package: its three graphs and the shared weights
+    /// The manifest ids of one release package: its graphs and the shared weights
     /// they bind (each once), what [`ensure_torch_package`](Self::ensure_torch_package)
     /// fetches for `target`. None when the release has no such package.
     pub fn torch_package_ids(
@@ -1836,7 +1890,7 @@ impl ModelStore {
                 "no compiled {engine} {precision} package for this device (looked for {}) in {} or the {} release",
                 targets.join(", "),
                 self.opts.root.join(TORCH_DIR).display(),
-                torch_release_name()
+                torch_release_name_for(engine)
             ),
         })
     }
@@ -2388,6 +2442,123 @@ mod tests {
                 .dir,
             dir
         );
+    }
+
+    #[test]
+    fn graphs_per_engine() {
+        assert_eq!(torch_graphs("hayai-nova"), TORCH_GRAPHS.as_slice());
+        assert_eq!(torch_graphs("paddle-manga"), TORCH_GRAPHS.as_slice());
+        assert_eq!(torch_graphs("nar-small"), ["model.pt2"].as_slice());
+        assert_eq!(
+            torch_graphs("charspot-small"),
+            ["dense.pt2", "tail.pt2"].as_slice()
+        );
+        assert_eq!(
+            torch_graphs("animetext-blocks"),
+            ["detector.pt2"].as_slice()
+        );
+        assert_eq!(torch_graphs("some-engine"), TORCH_GRAPHS.as_slice());
+    }
+
+    #[cfg(feature = "nc-models")]
+    #[test]
+    fn a_single_graph_package_on_disk_is_complete() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ModelStore::new(
+            StoreOptions {
+                root: tmp.path().join("models"),
+                override_dir: None,
+                download: false,
+            },
+            Manifest { files: Vec::new() },
+        );
+        let d = store.torch_package_dir("nar-small", "fp32", "linux-rocm-gfx1201");
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join("model.pt2"), b"pk").unwrap();
+        let t = vec!["linux-rocm-gfx1201".to_string()];
+        assert_eq!(
+            store
+                .locate_torch_package("nar-small", "fp32", &t)
+                .unwrap()
+                .dir,
+            d
+        );
+        assert_eq!(
+            store
+                .torch_package_present("nar-small", "fp32", &t)
+                .unwrap()
+                .dir,
+            d
+        );
+        // one graph is not hayai's three
+        let h = store.torch_package_dir("hayai-nova", "fp32", "linux-rocm-gfx1201");
+        fs::create_dir_all(&h).unwrap();
+        fs::write(h.join("model.pt2"), b"pk").unwrap();
+        assert!(
+            store
+                .locate_torch_package("hayai-nova", "fp32", &t)
+                .is_none()
+        );
+        // charspot needs both of its graphs
+        let c = store.torch_package_dir("charspot-small", "fp32", "linux-rocm-gfx1201");
+        fs::create_dir_all(&c).unwrap();
+        fs::write(c.join("dense.pt2"), b"pk").unwrap();
+        assert!(
+            store
+                .locate_torch_package("charspot-small", "fp32", &t)
+                .is_none()
+        );
+        fs::write(c.join("tail.pt2"), b"pk").unwrap();
+        assert!(
+            store
+                .locate_torch_package("charspot-small", "fp32", &t)
+                .is_some()
+        );
+    }
+
+    #[cfg(feature = "nc-models")]
+    #[test]
+    fn text_box_rows_load_without_requires() {
+        let json = r#"{"release":"textbox-torch-v1","files":[{"engine":"nar-small","file":"nar-small_fp32_linux-rocm-gfx1201_model.pt2",
+          "url":"https://example.com/x","size":2,"sha256":"00","role":"model","precision":"fp32",
+          "id":"torch/nar-small/fp32/linux-rocm-gfx1201/model.pt2","path":"torch/nar-small/fp32/linux-rocm-gfx1201/model.pt2",
+          "target":"linux-rocm-gfx1201","unpack_to":"torch/nar-small/fp32/linux-rocm-gfx1201/model/"}]}"#;
+        let files = release_files_from(json, TORCH_MIRROR_ENV).unwrap();
+        assert!(files[0].requires.is_empty());
+        assert_eq!(torch_release_name_for("nar-small"), "textbox-torch-v1");
+        assert_eq!(torch_release_name_for("charspot-small"), "textbox-torch-v1");
+        assert_eq!(torch_release_name_for("hayai-nova"), torch_release_name());
+    }
+
+    /// The compiled-in text-box torch release loads, is the one the constant names, and
+    /// its rows (none until `textbox-torch-v1` is published) are packages of the text-box
+    /// engines' graphs that bind nothing of the release.
+    #[cfg(feature = "nc-models")]
+    #[test]
+    fn the_text_box_torch_release_is_pinned() {
+        let files = release_files_from(TEXTBOX_TORCH_MODELS_JSON, TORCH_MIRROR_ENV).unwrap();
+        assert_eq!(
+            serde_json::from_str::<TorchRelease>(TEXTBOX_TORCH_MODELS_JSON)
+                .unwrap()
+                .release,
+            TEXTBOX_TORCH_RELEASE
+        );
+        let m = Manifest::builtin();
+        for f in &files {
+            assert!(
+                TEXTBOX_TORCH_ENGINES.contains(&f.engine.as_str()),
+                "{}",
+                f.id
+            );
+            assert!(f.requires.is_empty(), "{} requires {:?}", f.id, f.requires);
+            let file = f.id.rsplit('/').next().unwrap();
+            assert!(torch_graphs(&f.engine).contains(&file), "{}", f.id);
+            assert!(
+                m.get(&f.id).is_some(),
+                "{} is in the builtin manifest",
+                f.id
+            );
+        }
     }
 
     #[test]
