@@ -27,6 +27,7 @@ pub mod pyfmt;
 pub mod resample;
 #[cfg(feature = "onnx-vlm")]
 pub mod runtime;
+pub mod textbox;
 pub mod warp;
 
 #[cfg(feature = "onnx-vlm")]

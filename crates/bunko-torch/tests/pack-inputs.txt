@@ -66,7 +66,7 @@ c536a4bcc34a13437bcbea912a8b8c8fe2b4a737f7a0494f013a31dc429bd878  crates/bunko-v
 27a67d58f4cf9ae5456e493d1336fba4236ce9b3f1563307c00b959b8f913e99  crates/bunko-vlm/src/hayai/gpu.rs
 793db3ad03d70fa79e4b4f7378150b1e3a70c23af460818c926370c396db870f  crates/bunko-vlm/src/hayai/onnx.rs
 0012b5a8e4f80232a669966970920b99e5c53bf20900b580cd7b979ed296c096  crates/bunko-vlm/src/image.rs
-c4d5b365a5576bf516842bcc3a0e61a796ae84d998f86a0532c46ab21b79c899  crates/bunko-vlm/src/lib.rs
+2f15dfb3c0c52475e26a20a751c256cf631ba67877487dcb31f28e93d0bd8f5c  crates/bunko-vlm/src/lib.rs
 5faddb4b51fa76e0f9558abf200945e10c213a2f0538fa8d7284fdad12d1eb67  crates/bunko-vlm/src/npy.rs
 e9b5749ebc117fbf68b185724134aa98b549f3beb0031280884ea0da3e0b6c88  crates/bunko-vlm/src/paddle.rs
 8af000a6844fd225eddda372bbd8c485f68ad33afaca2dab0b449371eadbdb21  crates/bunko-vlm/src/paddle/gpu.rs
@@ -75,6 +75,7 @@ d5552f91e67d18846aa737008e06ea1325ac61119520a150299f722bf7aed713  crates/bunko-v
 a6befe101708482073b42aaddcab29971f92c27d1576281e1446b06d1e2a9512  crates/bunko-vlm/src/resample.rs
 1df174c50c42a329be09efd2204d5271aad538f0e453c426b70cec2202ef7e4d  crates/bunko-vlm/src/runtime.rs
 631c2e9e18e25bdbb94679568c1154930a7a1f3c64221446dca1499bb4799a8a  crates/bunko-vlm/src/tensor.rs
+5504b8b362ee3d2b7e8158e5b35b3fd73b73d37b61c6b294dec7cf74e7388bfe  crates/bunko-vlm/src/textbox.rs
 eda788365c50831987426b80b8594be8286d46e2b28ef5a11cb68d18f910251a  crates/bunko-vlm/src/warp.rs
 38b0e494315cf58ff2f49fad0bf9e549bdd2995ff0ca3285aadaef9d7ddc674e  crates/bunko-vulkan/Cargo.toml
 68e729c195d66e43515cc8e6f9e37e22db7a139b06bae133660da138bd7b4700  crates/bunko-vulkan/build.rs
