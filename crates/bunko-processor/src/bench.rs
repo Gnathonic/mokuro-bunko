@@ -1055,44 +1055,16 @@ impl<'a> BenchRun<'a> {
         Ok((baseline, best, widths))
     }
 
-    /// The formats the model's device runs the row's mode at, as this machine reports
-    /// it (`policy::device_formats`: bf16 only where native for the auto modes — the
-    /// rule the engines resolve with and the library judges with).
-    fn device_formats(&self, device: Option<&str>) -> BTreeSet<String> {
-        let device = device.unwrap_or("cpu");
-        match self.catalog.devices.iter().find(|d| d.id == device) {
-            Some(d) => policy::device_formats(
-                self.mode,
-                &policy::formats_for_engine(
-                    &d.formats,
-                    &d.format_engines,
-                    Some(self.op.spec.engine.as_str()),
-                ),
-                d.provider.as_deref().or(Some("cpu")),
-                d.arch.as_deref(),
-            ),
-            None => BTreeSet::from([policy::FP32.to_string()]),
-        }
-    }
-
-    /// The candidates a balanced/speed row tries here (empty: nothing to try).
+    /// The candidates a balanced/speed row tries here (empty: nothing to try), on the
+    /// device its engine stage ran on in the baseline ([`row_precision_candidates`]).
     fn precision_candidates(&self) -> Vec<String> {
-        let engine = self.op.spec.engine.as_str();
-        if !policy::is_precision_engine(engine) {
-            return Vec::new();
-        }
         let device = self
             .current
             .as_ref()
             .and_then(|l| l.ready.stage_device.get("engine"))
-            .map(String::as_str);
-        let formats = self.device_formats(device);
-        let usable = policy::resolve_mode(engine, self.mode, Some(&formats), None, "").usable;
-        if policy::needs_bench(self.mode, &usable) {
-            usable
-        } else {
-            Vec::new()
-        }
+            .map_or("cpu", String::as_str);
+        let device = self.catalog.devices.iter().find(|d| d.id == device);
+        row_precision_candidates(&self.op.spec.engine, self.mode, device)
     }
 
     /// `precision_phase(widths)`: one trial per candidate; the winning trial's index.
@@ -1579,6 +1551,48 @@ fn apply_format(spec: &mut RowSpec, fmt: &str) {
     }
 }
 
+/// The formats `device` (a catalog entry; None: a device the catalog does not list,
+/// fp32 only) runs a row of `engine` in precision `mode` at, as the machine reports it
+/// (`policy::device_formats`: bf16 only where native for the auto modes — the rule the
+/// engines resolve with and the library judges with; a format only some engines run
+/// there counts for those only).
+fn row_device_formats(
+    engine: &str,
+    mode: &str,
+    device: Option<&bunko_proto::Device>,
+) -> BTreeSet<String> {
+    match device {
+        Some(d) => policy::device_formats(
+            mode,
+            &policy::formats_for_engine(&d.formats, &d.format_engines, Some(engine)),
+            d.provider.as_deref().or(Some("cpu")),
+            d.arch.as_deref(),
+        ),
+        None => BTreeSet::from([policy::FP32.to_string()]),
+    }
+}
+
+/// The precision candidates a row of `engine` in precision `mode` tries on `device`
+/// (empty: nothing to try): what its mode can resolve to there, when that needs a
+/// benchmark (balanced/speed with more than one, or another backend of the format).
+fn row_precision_candidates(
+    engine: &str,
+    mode: &str,
+    device: Option<&bunko_proto::Device>,
+) -> Vec<String> {
+    if !policy::is_precision_engine(engine) {
+        return Vec::new();
+    }
+    let mode = policy::normalize_mode(Some(mode)).unwrap_or(policy::DEFAULT_MODE);
+    let formats = row_device_formats(engine, mode, device);
+    let usable = policy::resolve_mode(engine, mode, Some(&formats), None, "").usable;
+    if policy::needs_bench(mode, &usable) {
+        usable
+    } else {
+        Vec::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -1745,5 +1759,38 @@ mod tests {
         let warm = dir.path().join("w.cbz");
         write_prefix(&sample, &pages[..2], &warm).unwrap();
         assert_eq!(sample_pages(&warm).unwrap(), ["0001_a.jpg", "0002_a.png"]);
+    }
+
+    /// `row_precision_candidates` over a one-device catalog entry (`gpu:0` on ROCm, or
+    /// the CPU) with `formats`.
+    fn candidates_on(engine: &str, mode: &str, device: &str, formats: &[&str]) -> Vec<String> {
+        let device = bunko_proto::Device {
+            id: device.into(),
+            formats: formats.iter().map(|f| f.to_string()).collect(),
+            provider: Some(if device == "cpu" { "cpu" } else { "rocm" }.into()),
+            arch: Some("gfx1201".into()),
+            ..Default::default()
+        };
+        row_precision_candidates(engine, mode, Some(&device))
+    }
+
+    /// O2: a nar-small row's balanced and speed modes try fp16 and fp32 on a GPU; its
+    /// accuracy mode is fp16 there without a trial; the CPU and charspot-small try
+    /// nothing.
+    #[test]
+    fn nar_precision_trials_on_a_gpu() {
+        assert_eq!(
+            candidates_on("nar-small", "auto-balanced", "gpu:0", &["fp32", "fp16"]),
+            ["fp16", "fp32"]
+        );
+        assert_eq!(
+            candidates_on("nar-small", "auto-speed", "gpu:0", &["fp32", "fp16"]),
+            ["fp16", "fp32"]
+        );
+        assert!(candidates_on("nar-small", "auto-accuracy", "gpu:0", &["fp32", "fp16"]).is_empty());
+        assert!(candidates_on("nar-small", "auto-speed", "cpu", &["fp32"]).is_empty());
+        assert!(
+            candidates_on("charspot-small", "auto-speed", "gpu:0", &["fp32", "fp16"]).is_empty()
+        );
     }
 }

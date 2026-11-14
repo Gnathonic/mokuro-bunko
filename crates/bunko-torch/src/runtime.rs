@@ -353,18 +353,25 @@ fn load_nar(
     opts: &LoadOptions,
     unpacked: &mut Unpacked,
 ) -> Result<TorchNar, TorchError> {
-    if prec != TPrec::Fp32 {
-        return Err(TorchError::Arg(format!(
-            "nar-small runs at fp32 in this pack, not {}",
-            prec.as_str()
-        )));
+    // fp32, or fp16 (the authors' fp16 mode: a package that casts the weights at load,
+    // checked against the package below).
+    if prec == TPrec::Bf16 {
+        return Err(TorchError::Arg(
+            "nar-small runs at fp32 or fp16, not bf16".into(),
+        ));
     }
     let weight_files: Vec<PathBuf> = opts.weights.iter().flatten().map(PathBuf::from).collect();
     if weight_files.is_empty() {
         return Err(TorchError::Arg("nar-small needs its weights file".into()));
     }
     let model = unpacked.in_place(graph(model_dir, &None, NAR_ROLE))?;
-    let set = match GraphSet::load(&[(NAR_ROLE, &model)], &weight_files, at, TEXTBOX_IO) {
+    let loaded = GraphSet::load(&[(NAR_ROLE, &model)], &weight_files, at, TEXTBOX_IO);
+    let set = match loaded.and_then(|s| {
+        let dtype = s.metadata("bunko.weights_dtype");
+        crate::graphmeta::nar_precision(prec.as_str(), dtype.as_deref())
+            .map_err(TorchError::Load)?;
+        Ok(s)
+    }) {
         Ok(s) => s,
         Err(e) => {
             unpacked.discard();

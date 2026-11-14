@@ -841,6 +841,23 @@ mod tests {
         );
     }
 
+    /// A GPU whose fp16 is nar-small's alone (hayai-nova has no fp16 package for it):
+    /// the catalog says so, so no hayai-nova row is sent there for fp16.
+    #[test]
+    fn fp16_for_nar_only_is_recorded_per_engine() {
+        let r = report(vec![entry(
+            "gpu:0",
+            "rocm",
+            "gfx1030",
+            &[],
+            &["fp32", "bf16", "fp16"],
+        )]);
+        let (_, only) = engine_formats(&r, "gpu:0", &["hayai-nova", "nar-small"], |e, p, _| {
+            p == "fp32" || (e == "nar-small" && p == "fp16")
+        });
+        assert_eq!(only.get("fp16"), Some(&vec!["nar-small".to_string()]));
+    }
+
     #[test]
     fn format_engines_are_for_gpus_only() {
         let r = report(vec![

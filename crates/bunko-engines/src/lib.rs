@@ -717,14 +717,17 @@ impl EnginePipeline {
         info!("{engine}: reading on the CPU: {why}");
     }
 
-    /// nar-small or charspot-small on a libtorch GPU at fp32: the package for the
-    /// device's targets, the authors' weights and vocabulary, one `bt_read_chars` per
-    /// page. Also the export set its package comes from (the sidecar's provenance).
+    /// nar-small or charspot-small on a libtorch GPU at `precision` (fp32, or nar-small's
+    /// fp16): the package for the device's targets, the authors' weights and vocabulary
+    /// (the same fp32 file at either precision: an fp16 package casts it at load), one
+    /// `bt_read_chars` per page. Also the export set its package comes from (the sidecar's
+    /// provenance).
     #[cfg(all(feature = "torch", feature = "nc-models"))]
     fn torch_textbox(
         &self,
         engine: &str,
         placement: &Placement,
+        precision: Precision,
     ) -> Result<(Arc<dyn Recognizer>, String), String> {
         let engine: &'static str = match engine {
             models::NAR => models::NAR,
@@ -734,7 +737,6 @@ impl EnginePipeline {
         let (repo, _) = models::textbox_source(engine)
             .ok_or_else(|| format!("{engine} has no pinned source"))?;
         let tb = self.torch()?;
-        let precision = Precision::Fp32;
         let targets = Self::torch_targets(&tb, &placement.device, precision);
         let pkg = self
             .store
@@ -1016,10 +1018,12 @@ impl EnginePipeline {
     }
 
     /// [`need_for`](Self::need_for) of a text-box engine: the GPU its placement picks
-    /// over [`textbox_formats`](Self::textbox_formats) at fp32 with that device's
-    /// package targets, else the CPU (the ONNX route, no targets). With no libtorch pack
-    /// the CPU is the need and `fallback` says why; a pack without `bt_read_chars` says
-    /// [`torch::TEXTBOX_PACK_REASON`].
+    /// over [`textbox_formats`](Self::textbox_formats) at the precision `mode` resolves
+    /// to there (nar-small: fp16 in every auto mode on a GPU with an fp16 package, O2)
+    /// with that device's package targets, else the CPU (the ONNX route, fp32, no
+    /// targets). With no libtorch pack the CPU is the need and `fallback` says why; a
+    /// pack without `bt_read_chars` says [`torch::TEXTBOX_PACK_REASON`]. A forced format
+    /// the device cannot run is the precision refusal.
     #[cfg(feature = "torch")]
     fn textbox_need(&self, engine: &str, mode: &str) -> Result<EngineNeed, String> {
         let engine: &'static str = models::ENGINES
@@ -1027,8 +1031,6 @@ impl EnginePipeline {
             .copied()
             .find(|e| *e == engine)
             .ok_or_else(|| format!("{engine} has no recognizer"))?;
-        // One format (fp32) in this release: every mode resolves to it.
-        let _ = mode;
         let devices = self.devices();
         let (placement, mut fallback) =
             runtime::place_runnable(None, &devices, |pl| self.textbox_formats(engine, pl));
@@ -1046,12 +1048,15 @@ impl EnginePipeline {
             .iter()
             .find(|d| d.id == placement.device)
             .map_or_else(|| placement.device.clone(), |d| d.label.clone());
-        if self.textbox_formats(engine, &placement).is_empty() {
+        let formats = self.textbox_formats(engine, &placement);
+        if formats.is_empty() {
             return Err(format!(
                 "{engine}'s files are not here and downloads are off (MOKURO_MODELS_DOWNLOAD)"
             ));
         }
-        let precision = Precision::Fp32;
+        let formats = precision::auto_formats(mode, formats, false);
+        let precision = precision::resolve(engine, mode, &formats, None, "")?
+            .map_or(Precision::Fp32, |r| r.precision);
         let targets = match &tb {
             Ok(tb) if placement.is_gpu() => Self::torch_targets(tb, &placement.device, precision),
             _ => Vec::new(),
@@ -1099,7 +1104,7 @@ impl EnginePipeline {
             {
                 let r = self
                     .need_for(e, mode)
-                    .and_then(|need| self.prefetch_textbox(e, need));
+                    .and_then(|need| self.prefetch_textbox(e, mode, need));
                 out.push((e, r));
                 continue;
             }
@@ -1143,14 +1148,18 @@ impl EnginePipeline {
         out
     }
 
-    /// [`prefetch_rows`](Self::prefetch_rows) of a text-box row. On a GPU: the package
-    /// for its targets, the GPU route's host files and the ONNX files (the CPU route, the
-    /// fallback when the GPU cannot start, is then free); on the CPU: the ONNX files,
-    /// the graph reported as the package.
+    /// [`prefetch_rows`](Self::prefetch_rows) of a text-box row in precision `mode`. On a
+    /// GPU: the package for its targets at the precision it resolves to, the GPU route's
+    /// host files and the ONNX files (the CPU route, the fallback when the GPU cannot
+    /// start, is then free), and the packages of the other formats the mode can resolve
+    /// to there ([`textbox_prefetch_formats`]: a benchmarked mode tries fp16 and fp32),
+    /// whose failure is only logged; on the CPU: the ONNX files, the graph reported as the
+    /// package.
     #[cfg(feature = "torch")]
     fn prefetch_textbox(
         &self,
         engine: &'static str,
+        mode: &str,
         need: EngineNeed,
     ) -> Result<Prefetched, String> {
         if need.device != Placement::cpu().device {
@@ -1158,6 +1167,24 @@ impl EnginePipeline {
                 .store
                 .ensure_torch_package(engine, need.precision.as_str(), &need.targets)
                 .map_err(|err| err.to_string())?;
+            let placement = runtime::place(Some(&need.device), &self.devices()).0;
+            let formats = self.textbox_formats(engine, &placement);
+            for f in textbox_prefetch_formats(engine, mode, &formats) {
+                if f == need.precision.as_str() {
+                    continue;
+                }
+                let targets = self.torch().ok().and_then(|tb| {
+                    tb.device(&need.device)
+                        .map(|d| bunko_ocr::models::torch_targets(&d.kind, &d.arch, &d.isa, &f))
+                });
+                if let Err(e) = self.store.ensure_torch_package(
+                    engine,
+                    &f,
+                    targets.as_deref().unwrap_or_default(),
+                ) {
+                    warn!("{engine}: the {f} package for {}: {e}", need.device);
+                }
+            }
             let files =
                 models::torch_host_files(&self.store, engine, need.precision, pkg.dir.clone())?;
             // The CPU route's files are fetched by the download plan too: a failure
@@ -1929,19 +1956,50 @@ impl EnginePipeline {
                 self.note_textbox_on_cpu(engine, &why);
             }
             placement = p;
+            // The row's precision there (nar-small; charspot-small fixes its own): on a
+            // GPU every auto mode takes fp16 where it has an fp16 package (O2), on the CPU
+            // (an fp32-only route, whose missing files are its loader's error) fp32. A
+            // forced format the device cannot run is the precision refusal. Never through
+            // `resolved`: the text-box engines stay off the generic recognizer path.
+            let resolve_on = |pl: &Placement| {
+                let formats = if pl.is_gpu() {
+                    self.textbox_formats(engine, pl)
+                } else {
+                    vec!["fp32"]
+                };
+                precision::resolve(
+                    engine,
+                    &spec.precision,
+                    &precision::auto_formats(&spec.precision, formats, false),
+                    spec.precision_pick.as_deref(),
+                    &spec.precision_why,
+                )
+            };
+            #[allow(unused_mut)]
+            let mut textbox_precision = resolve_on(&placement)?;
             #[cfg(feature = "torch")]
             if placement.is_gpu() {
-                match self.torch_textbox(engine, &placement) {
+                let at = textbox_precision
+                    .as_ref()
+                    .map_or(Precision::Fp32, |r| r.precision);
+                match self.torch_textbox(engine, &placement, at) {
                     Ok((rec, release)) => {
                         recognizer = Some(rec);
                         textbox_release = Some(release);
                     }
                     Err(e) => {
-                        let gpu = &placement.device;
+                        let gpu = placement.device.clone();
                         warn!("{engine} could not start on {gpu} ({e}); reading on the CPU");
                         placement = Placement::cpu();
+                        // An auto mode reads at fp32 there; a forced fp16 cannot, and the
+                        // GPU's error is the one to fix: say both, the GPU's first.
+                        textbox_precision = resolve_on(&placement)
+                            .map_err(|cpu| gpu_then_cpu_error(engine, &gpu, &e, &cpu))?;
                     }
                 }
+            }
+            if let Some(r) = &textbox_precision {
+                info!("{engine} precision: {} ({})", r.precision, r.why);
             }
             if recognizer.is_none() {
                 // The ONNX pool on the CPU: the session's threads follow the engine
@@ -2196,14 +2254,37 @@ fn add_vulkan_formats(
     }
 }
 
-/// The formats a text-box engine's libtorch packages are built in (never bf16): fp32
-/// for both in this build. Empty for any other engine.
+/// The formats a text-box engine's libtorch packages are built in (never bf16):
+/// nar-small fp32 and fp16 (the authors' fp16 mode, bound to their fp32 weights cast at
+/// load), charspot-small fp32. Empty for any other engine.
 #[cfg_attr(not(feature = "torch"), allow(dead_code))]
 pub(crate) fn textbox_precisions(engine: &str) -> &'static [&'static str] {
     match engine {
-        "nar-small" | "charspot-small" => &["fp32"],
+        "nar-small" => &["fp32", "fp16"],
+        "charspot-small" => &["fp32"],
         _ => &[],
     }
+}
+
+/// The formats a text-box row of `engine` in precision `mode` can resolve to on a device
+/// that runs it in `device_formats` ([`EnginePipeline::textbox_formats`]): the packages
+/// its prefetch fetches (Q21). What `bunko_sched::precision::resolve_mode` finds usable
+/// there (an `auto-accuracy` row one format, a benchmarked mode each candidate), empty
+/// when the row cannot run there; fp32 for an engine with a fixed precision
+/// (charspot-small).
+#[cfg_attr(not(feature = "torch"), allow(dead_code))]
+pub(crate) fn textbox_prefetch_formats(
+    engine: &str,
+    mode: &str,
+    device_formats: &[&str],
+) -> Vec<String> {
+    if !precision::is_precision_engine(engine) {
+        return vec!["fp32".to_string()];
+    }
+    let set: std::collections::BTreeSet<String> =
+        device_formats.iter().map(|f| f.to_string()).collect();
+    let r = bunko_sched::precision::resolve_mode(engine, mode, Some(&set), None, "");
+    if r.eligible { r.usable } else { Vec::new() }
 }
 
 /// The formats a text-box engine runs in on a libtorch GPU: none unless the pack reads
@@ -2263,13 +2344,13 @@ mod backends_dirs_tests {
 
     /// A text-box engine runs on a GPU only through a pack that has `bt_read_chars`,
     /// with its host files obtainable, and only in the formats it has packages for and
-    /// computes in (fp32 in this build; never bf16).
+    /// computes in (nar-small fp32 and fp16, charspot-small fp32; never bf16).
     #[test]
     fn textbox_gpu_formats_need_read_chars() {
         assert!(textbox_gpu_formats("nar-small", false, &["fp32", "fp16"], true).is_empty());
         assert!(textbox_gpu_formats("nar-small", true, &["fp32"], false).is_empty());
         assert_eq!(
-            textbox_gpu_formats("nar-small", true, &["fp32", "bf16", "fp16"], true),
+            textbox_gpu_formats("nar-small", true, &["fp32"], true),
             ["fp32"]
         );
         assert_eq!(
@@ -2277,8 +2358,57 @@ mod backends_dirs_tests {
             ["fp32"]
         );
         assert!(textbox_gpu_formats("hayai-nova", true, &["fp32"], true).is_empty());
-        assert_eq!(textbox_precisions("nar-small"), ["fp32"]);
+        assert_eq!(textbox_precisions("nar-small"), ["fp32", "fp16"]);
         assert!(textbox_precisions("paddle-manga").is_empty());
+    }
+
+    /// nar-small runs at fp16 on a GPU with an fp16 package; charspot-small has fp32
+    /// only.
+    #[test]
+    fn nar_takes_fp16_on_a_gpu_and_charspot_does_not() {
+        assert_eq!(
+            textbox_gpu_formats("nar-small", true, &["fp32", "bf16", "fp16"], true),
+            ["fp32", "fp16"]
+        );
+        assert_eq!(
+            textbox_gpu_formats("charspot-small", true, &["fp32", "bf16", "fp16"], true),
+            ["fp32"]
+        );
+    }
+
+    /// Q21, O2: a text-box row prefetches the packages its mode can resolve to on the
+    /// device: fp16 for auto-accuracy on a GPU with an fp16 package, both for the
+    /// benchmarked modes, fp32 where there is no fp16 package, nothing for a forced
+    /// format the device cannot run.
+    #[test]
+    fn textbox_prefetch_takes_what_the_mode_can_resolve_to() {
+        let both = ["fp32", "fp16"];
+        assert_eq!(
+            textbox_prefetch_formats("nar-small", "auto-accuracy", &both),
+            ["fp16"]
+        );
+        assert_eq!(
+            textbox_prefetch_formats("nar-small", "auto-balanced", &both),
+            ["fp16", "fp32"]
+        );
+        assert_eq!(
+            textbox_prefetch_formats("nar-small", "auto-speed", &both),
+            ["fp16", "fp32"]
+        );
+        assert_eq!(
+            textbox_prefetch_formats("nar-small", "fp32", &both),
+            ["fp32"]
+        );
+        // no fp16 package there
+        assert_eq!(
+            textbox_prefetch_formats("nar-small", "auto-accuracy", &["fp32"]),
+            ["fp32"]
+        );
+        assert!(textbox_prefetch_formats("nar-small", "fp16", &["fp32"]).is_empty());
+        assert_eq!(
+            textbox_prefetch_formats("charspot-small", "auto-accuracy", &["fp32"]),
+            ["fp32"]
+        );
     }
 
     /// The Vulkan formats in the catalog: a GPU only the Vulkan pack drives runs no

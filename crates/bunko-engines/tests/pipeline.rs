@@ -351,9 +351,9 @@ fn nar_without_a_pack_reads_on_the_cpu() {
 }
 
 /// With a backend pack that reads text boxes and a nar-small package for the GPU
-/// (`MOKURO_TORCH_PACK`, `MOKURO_TORCH_MODELS_DIR`), nar-small opens on the GPU, the
-/// sidecar names the text-box torch release, and a volume reads the same text as the
-/// CPU route (the engine stage forced to the CPU in the same process).
+/// (`MOKURO_TORCH_PACK`, `MOKURO_TORCH_MODELS_DIR`), an `fp32` nar-small row opens on the
+/// GPU, the sidecar names the text-box torch release, and a volume reads the same text as
+/// the CPU route (the engine stage forced to the CPU in the same process).
 #[cfg(feature = "nc-models")]
 #[test]
 #[ignore = "needs a backend pack with bt_read_chars, a nar-small GPU package, the model files and a sample archive"]
@@ -374,7 +374,7 @@ fn nar_on_a_gpu_reads_as_the_cpu_does() {
         eprintln!("the backend pack of this process sees no GPU; skipped (run this test alone)");
         return;
     }
-    let gpu = p.open(&spec("nar-small", "auto-accuracy")).unwrap();
+    let gpu = p.open(&spec("nar-small", "fp32")).unwrap();
     let ready = gpu.ready();
     assert_eq!(
         ready.stage_device.get("engine").map(String::as_str),
@@ -429,6 +429,34 @@ fn nar_on_a_gpu_reads_as_the_cpu_does() {
     assert!(g.len() > 20, "{} lines", g.len());
     assert_eq!(g, c);
     eprintln!("{} lines read alike on the GPU and the CPU", g.len());
+
+    // O2: with an fp16 package for the GPU, the default row reads there at fp16, and
+    // its sidecar says so; its text may differ from fp32's on a few lines (the fp16
+    // gate bounds it per crop), never on most.
+    let fp16 = p.open(&spec("nar-small", "auto-accuracy")).unwrap();
+    let ready = fp16.ready();
+    if ready.precision.as_deref() != Some("fp16") {
+        eprintln!("no nar-small fp16 package for this GPU ({ready:?}); fp16 not checked");
+        return;
+    }
+    assert_eq!(
+        ready.stage_device.get("engine").map(String::as_str),
+        Some("gpu:0"),
+        "{ready:?}"
+    );
+    let h = texts(&*fp16, "fp16.mokuro");
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(tmp.path().join("fp16.mokuro")).unwrap())
+            .unwrap();
+    assert_eq!(v["ocr_engine"]["precision"], "fp16", "{}", v["ocr_engine"]);
+    assert_eq!(h.len(), g.len());
+    let differ = h.iter().zip(&g).filter(|(a, b)| a != b).count();
+    assert!(
+        differ * 10 <= g.len(),
+        "{differ} of {} lines differ",
+        g.len()
+    );
+    eprintln!("fp16: {differ} of {} lines differ from fp32", g.len());
 }
 
 #[test]
@@ -453,6 +481,26 @@ fn refusals_before_loading() {
     let mut s = spec("ppocr-manga", "auto");
     s.detector = Some("ctd".into());
     assert!(p.open(&s).err().unwrap().contains("unknown detector ctd"));
+}
+
+/// Review Focus 1: a nar-small row forced to fp16 on a machine without a GPU route is
+/// refused as a precision this machine cannot run (the library then holds the row here),
+/// before anything loads; it never reads at fp32.
+#[cfg(feature = "nc-models")]
+#[test]
+fn forced_fp16_nar_on_the_cpu_is_refused() {
+    if std::env::var_os("MOKURO_TORCH_PACK").is_some()
+        || std::env::var_os(bunko_engines::BACKENDS_DIR_ENV).is_some()
+    {
+        eprintln!("a backend pack is configured: the CPU-only refusal is not checked");
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let err = pipeline(tmp.path())
+        .open(&spec("nar-small", "fp16"))
+        .err()
+        .unwrap();
+    assert!(err.starts_with("precision not available here"), "{err}");
 }
 
 /// No backend pack: a nar-small row's need is the CPU (its ONNX route) at fp32, with no

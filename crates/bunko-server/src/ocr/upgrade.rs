@@ -1746,4 +1746,21 @@ mod tests {
         let ids: Vec<Option<String>> = layers.iter().map(|l| Upgrade::layer_id(l)).collect();
         assert_eq!(ids, [Some("2024".into()), Some("gcv".into())]);
     }
+
+    /// Review Focus 5 (O2): precision is provenance, never identity. A nar-small sidecar
+    /// read at fp16 (a row switched to fp16, or an `auto-accuracy` row on a GPU) is as
+    /// current as one read at fp32: nothing is re-read.
+    #[test]
+    fn fp16_is_provenance_not_identity() {
+        let tmp = tempfile::tempdir().unwrap();
+        for p in ["fp32", "fp16"] {
+            let f = tmp.path().join(format!("{p}.mokuro"));
+            std::fs::write(&f, format!(r#"{{"version":"0.2.1","ocr_engine":{{"id":"nar-small","revision":2,"detector":"animetext-blocks","precision":"{p}"}},"pages":[]}}"#)).unwrap();
+            let r = classify(&f, None);
+            assert!(
+                r.is_current(&("nar-small".into(), "animetext-blocks".into(), None), 2),
+                "{p}"
+            );
+        }
+    }
 }
