@@ -460,6 +460,13 @@ fn refusals_before_loading() {
 #[cfg(all(feature = "nc-models", feature = "torch"))]
 #[test]
 fn a_text_box_need_without_a_pack_is_the_cpu() {
+    // A backend pack set for the GPU tests in this file opens here too.
+    if std::env::var_os("MOKURO_TORCH_PACK").is_some()
+        || std::env::var_os(bunko_engines::BACKENDS_DIR_ENV).is_some()
+    {
+        eprintln!("a backend pack is configured: the no-pack need is not checked");
+        return;
+    }
     let tmp = tempfile::tempdir().unwrap();
     let p = pipeline(tmp.path());
     let need = p.need_for("nar-small", "auto-accuracy").unwrap();
