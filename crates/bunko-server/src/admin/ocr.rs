@@ -226,7 +226,7 @@ pub fn catalog(devices: Value) -> Value {
                 "own_detector": e.detector,
                 "patch_budget": e.patch_budget,
                 "precision": e.precision,
-                "precision_modes": if e.precision { engines::PRECISION_MODES.to_vec() } else { vec![] },
+                "precision_modes": engines::engine_modes(e.id),
                 "devices": if e.cpu_only() { json!(["cpu"]) } else { json!("any") },
                 "cpu_note": (!e.cpu_note.is_empty()).then_some(e.cpu_note),
             })
@@ -898,7 +898,6 @@ mod tests {
         for e in &c["engines"].as_array().unwrap()[3..] {
             assert_eq!(e["license"], json!("CC-BY-NC-SA-4.0"), "{e}");
             assert_eq!(e["license_class"], json!("non-commercial"), "{e}");
-            assert_eq!(e["precision_modes"], json!([]), "{e}");
         }
         // charspot-small reads on the CPU; nar-small also on a GPU (the libtorch route).
         assert_eq!(c["engines"][3]["devices"], json!(["cpu"]));
@@ -910,6 +909,34 @@ mod tests {
         assert_eq!(c["engines"][2]["devices"], json!(["cpu"]));
         assert_eq!(c["engines"][0]["devices"], json!("any"));
         assert_eq!(c["name_pattern"], json!(NAME_PATTERN));
+    }
+
+    #[test]
+    fn nar_offers_no_bf16_mode() {
+        let c = catalog(default_devices());
+        let nar = c["engines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["id"] == "nar-small")
+            .unwrap();
+        assert_eq!(
+            nar["precision_modes"],
+            json!([
+                "auto-accuracy",
+                "auto-balanced",
+                "auto-speed",
+                "fp32",
+                "fp16"
+            ])
+        );
+        let cs = c["engines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["id"] == "charspot-small")
+            .unwrap();
+        assert_eq!(cs["precision_modes"], json!([]));
     }
 
     /// nar-small may be put on any device (its libtorch GPU route), with no CPU note.

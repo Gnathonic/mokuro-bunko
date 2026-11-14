@@ -741,10 +741,30 @@ fn parse_row(
         .to_string();
     if !spec.precision {
         precision = engines::DEFAULT_PRECISION_MODE.to_string();
+    } else if engines::is_forced_precision(&precision)
+        && !spec.precision_formats.contains(&precision.as_str())
+    {
+        // The fastest format it has (fp16 for nar-small).
+        let alternative = spec
+            .precision_formats
+            .last()
+            .copied()
+            .unwrap_or(engines::PRECISION_FP32);
+        return Err(row_err(
+            index,
+            "precision",
+            format!(
+                "{} has no {precision}; use {alternative} or an auto mode",
+                spec.id
+            ),
+        ));
     }
 
+    // A pick the engine cannot run (a bf16 pick left on a nar-small row) is dropped.
     let pick = value_str(row.get("precision_pick"));
-    let (precision_pick, precision_why) = if engines::PRECISIONS.contains(&pick.as_str()) {
+    let (precision_pick, precision_why) = if engines::PRECISIONS.contains(&pick.as_str())
+        && spec.precision_formats.contains(&pick.as_str())
+    {
         (Some(pick), value_str(row.get("precision_why")))
     } else {
         (None, String::new())
@@ -1074,6 +1094,69 @@ mod tests {
         let hayai = p.rows.iter().find(|g| g.engine == "hayai-nova").unwrap();
         assert!(hayai.primary);
         assert_eq!(hayai.detector.as_deref(), Some("ppocr-manga"));
+    }
+
+    /// nar-small offers fp32 and fp16, never bf16: a row that forces bf16 is an error
+    /// naming what it offers.
+    #[test]
+    fn a_nar_row_with_bf16_is_an_error() {
+        let e = precision_layer("nar-small", "bf16").unwrap_err();
+        assert!(
+            e.to_string()
+                .contains("nar-small has no bf16; use fp16 or an auto mode"),
+            "{e}"
+        );
+        assert_eq!(e.field, Some("precision"));
+        assert_eq!(
+            precision_layer("nar-small", "fp16").unwrap().precision,
+            "fp16"
+        );
+        assert_eq!(
+            precision_layer("nar-small", "auto-speed")
+                .unwrap()
+                .precision,
+            "auto-speed"
+        );
+        assert_eq!(
+            precision_layer("hayai-nova", "bf16").unwrap().precision,
+            "bf16"
+        );
+    }
+
+    /// A benchmark pick the engine cannot run (bf16 on a nar-small row) is dropped with
+    /// its reason; one it can run stays.
+    #[test]
+    fn a_pick_the_engine_cannot_run_is_dropped() {
+        let pick_of = |engine: &str, pick: &str| {
+            let p = parse_generation_list(&json!([
+                {"name": "main", "engine": "hayai-nova", "primary": true},
+                {"name": "layer", "engine": engine, "precision": "auto-speed",
+                 "precision_pick": pick, "precision_why": "benchmark"}
+            ]))
+            .unwrap();
+            (
+                p.rows[1].precision_pick.clone(),
+                p.rows[1].precision_why.clone(),
+            )
+        };
+        assert_eq!(pick_of("nar-small", "bf16"), (None, String::new()));
+        assert_eq!(
+            pick_of("nar-small", "fp16"),
+            (Some("fp16".into()), "benchmark".into())
+        );
+        assert_eq!(
+            pick_of("hayai-nova", "bf16"),
+            (Some("bf16".into()), "benchmark".into())
+        );
+    }
+
+    /// A layer row of `engine` asking `precision`, as the list parse leaves it.
+    fn precision_layer(engine: &str, precision: &str) -> Result<Generation, GenerationError> {
+        let p = parse_generation_list(&json!([
+            {"name": "main", "engine": "hayai-nova", "primary": true},
+            {"name": "layer", "engine": engine, "precision": precision}
+        ]))?;
+        Ok(p.rows[1].clone())
     }
 
     /// The detectors that came back in 0.8 are choices of their own: a line detector
