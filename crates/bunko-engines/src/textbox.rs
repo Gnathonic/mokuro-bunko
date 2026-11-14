@@ -38,10 +38,14 @@
 //! border.
 
 use std::path::Path;
+#[cfg(feature = "torch")]
+use std::sync::Arc;
 
 use bunko_layout::difflib::SequenceMatcher;
 use bunko_ocr::models::NAR_WEIGHTS_LOCATION;
 use bunko_ocr::runtime::{ExternalFile, Model, RuntimeOptions, TensorBuf};
+#[cfg(feature = "torch")]
+use bunko_torch::abi::{CharEntry, CharsRead};
 use bunko_vlm::crop::paddle_quad_crop;
 use bunko_vlm::textbox::*;
 use bunko_vlm::{
@@ -462,42 +466,108 @@ pub fn lines_of(read: &CharRead) -> Vec<LineRead> {
         .collect()
 }
 
+/// nar-small's text read from a whole crop: one line, the whole crop (it knows no
+/// positions); no line when it read nothing.
+fn whole_crop_line(text: String, crop: &Rgb) -> Vec<LineRead> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+    vec![LineRead {
+        text,
+        bbox: [0.0, 0.0, crop.width as f32, crop.height as f32],
+        vertical: crop.height >= crop.width,
+        confs: Vec::new(),
+    }]
+}
+
 impl BlockReader for TextboxRecognizer {
     fn read_lines(&self, crops: &[Rgb]) -> Result<Vec<Vec<LineRead>>, VlmError> {
+        #[cfg(feature = "torch")]
+        if let Reader::Torch(r) = &self.reader {
+            let reads = self.read_all(r.as_ref(), &crops.iter().collect::<Vec<_>>())?;
+            return Ok(reads
+                .into_iter()
+                .zip(crops)
+                .map(|(read, crop)| match read.chars {
+                    None => whole_crop_line(read.text, crop),
+                    Some(_) => lines_of(&char_read(&read)),
+                })
+                .collect());
+        }
         crops
             .iter()
             .map(|crop| {
                 Ok(match &self.reader {
                     Reader::Charspot(m) => lines_of(&m.read(crop)?),
-                    // No character boxes: the text is one line, the whole crop.
-                    Reader::Nar(m) => {
-                        let text = m.read(crop)?;
-                        if text.is_empty() {
-                            Vec::new()
-                        } else {
-                            vec![LineRead {
-                                text,
-                                bbox: [0.0, 0.0, crop.width as f32, crop.height as f32],
-                                vertical: crop.height >= crop.width,
-                                confs: Vec::new(),
-                            }]
-                        }
-                    }
+                    Reader::Nar(m) => whole_crop_line(m.read(crop)?, crop),
+                    #[cfg(feature = "torch")]
+                    Reader::Torch(_) => unreachable!("read in one call above"),
                 })
             })
             .collect()
     }
 
     fn read_blocks(&self, blocks: &[BlockCrop]) -> Result<Vec<Vec<String>>, VlmError> {
+        #[cfg(feature = "torch")]
+        if let Reader::Torch(r) = &self.reader {
+            let images: Vec<&Rgb> = blocks.iter().map(|b| &b.image).collect();
+            let reads = self.read_all(r.as_ref(), &images)?;
+            return Ok(reads
+                .into_iter()
+                .zip(blocks)
+                .map(|(read, block)| match read.chars {
+                    None => share_text(&read.text, &block.hints),
+                    Some(_) => share_characters(&char_read(&read), &block.lines),
+                })
+                .collect());
+        }
         blocks
             .iter()
             .map(|block| {
                 Ok(match &self.reader {
                     Reader::Charspot(m) => share_characters(&m.read(&block.image)?, &block.lines),
                     Reader::Nar(m) => share_text(&m.read(&block.image)?, &block.hints),
+                    #[cfg(feature = "torch")]
+                    Reader::Torch(_) => unreachable!("read in one call above"),
                 })
             })
             .collect()
+    }
+}
+
+// --- the GPU back-end ----------------------------------------------------------
+
+/// A back-end that reads many whole text-box crops in one call and answers one
+/// [`CharsRead`] per crop, in crop order: the libtorch pack's `bt_read_chars`
+/// ([`crate::torch::TorchTextbox`]). It splits the crops into batches itself and reads
+/// `""` for an empty crop.
+#[cfg(feature = "torch")]
+pub trait CharsReader: Send + Sync {
+    fn read_chars(&self, crops: &[&Rgb]) -> Result<Vec<CharsRead>, VlmError>;
+}
+
+#[cfg(feature = "torch")]
+impl CharsReader for crate::torch::TorchTextbox {
+    fn read_chars(&self, crops: &[&Rgb]) -> Result<Vec<CharsRead>, VlmError> {
+        crate::torch::TorchTextbox::read_chars(self, crops)
+    }
+}
+
+/// The characters of a crop the pack read, as charspot's ONNX route gives them: each
+/// `(c, x0, y0, x1, y1, score)` a [`CharBox`]. No characters (nar-small) is no box.
+#[cfg(feature = "torch")]
+fn char_read(r: &CharsRead) -> CharRead {
+    CharRead {
+        chars: r
+            .chars
+            .iter()
+            .flatten()
+            .map(|CharEntry(c, x0, y0, x1, y1, s)| CharBox {
+                text: c.clone(),
+                bbox: [*x0, *y0, *x1, *y1],
+                score: *s,
+            })
+            .collect(),
     }
 }
 
@@ -506,6 +576,9 @@ impl BlockReader for TextboxRecognizer {
 enum Reader {
     Charspot(Charspot),
     Nar(NarSmall),
+    /// The GPU route: a page's crops in one call.
+    #[cfg(feature = "torch")]
+    Torch(Arc<dyn CharsReader>),
 }
 
 /// A text-box recognizer behind the pipeline's [`Recognizer`] seam. The pipeline reads
@@ -569,10 +642,53 @@ impl TextboxRecognizer {
         })
     }
 
-    fn read_crop(&self, crop: &Rgb) -> Result<String, VlmError> {
+    /// A text-box recognizer on a back-end that reads a page's crops in one call (the
+    /// libtorch pack). `engine` is `charspot-small` or `nar-small`: it names the engine
+    /// in `info` and in errors; the rest of `info` (device, precision, batch) is the
+    /// caller's.
+    #[cfg(feature = "torch")]
+    pub fn with_reader(
+        engine: &'static str,
+        reader: Arc<dyn CharsReader>,
+        info: RecognizerInfo,
+    ) -> TextboxRecognizer {
+        Self {
+            reader: Reader::Torch(reader),
+            info: RecognizerInfo { engine, ..info },
+        }
+    }
+
+    /// One [`CharsRead`] per crop from the back-end, or an error naming both counts: a
+    /// pack that answers too few or too many would put texts on the wrong blocks.
+    #[cfg(feature = "torch")]
+    fn read_all(&self, r: &dyn CharsReader, crops: &[&Rgb]) -> Result<Vec<CharsRead>, VlmError> {
+        if crops.is_empty() {
+            return Ok(Vec::new());
+        }
+        let reads = r.read_chars(crops)?;
+        if reads.len() != crops.len() {
+            return Err(VlmError::Runtime(format!(
+                "{}: the back-end returned {} results for {} crops",
+                self.info.engine,
+                reads.len(),
+                crops.len()
+            )));
+        }
+        Ok(reads)
+    }
+
+    /// The text of each upright crop, in order: one call on the GPU back-end, a crop at a
+    /// time on ONNX Runtime.
+    fn read_crops(&self, crops: &[&Rgb]) -> Result<Vec<String>, VlmError> {
         match &self.reader {
-            Reader::Charspot(m) => m.read(crop).map(|r| r.text()),
-            Reader::Nar(m) => m.read(crop),
+            Reader::Charspot(m) => crops.iter().map(|c| m.read(c).map(|r| r.text())).collect(),
+            Reader::Nar(m) => crops.iter().map(|c| m.read(c)).collect(),
+            #[cfg(feature = "torch")]
+            Reader::Torch(r) => Ok(self
+                .read_all(r.as_ref(), crops)?
+                .into_iter()
+                .map(|read| read.text)
+                .collect()),
         }
     }
 }
@@ -599,9 +715,7 @@ impl Recognizer for TextboxRecognizer {
     }
 
     fn read(&self, lines: &[CropSet], _caps: Option<&[u32]>) -> Result<Vec<String>, VlmError> {
-        read_flat(lines, None, 0, |crops, _| {
-            crops.iter().map(|c| self.read_crop(c)).collect()
-        })
+        read_flat(lines, None, 0, |crops, _| self.read_crops(crops))
     }
 }
 
@@ -729,6 +843,207 @@ mod tests {
         assert_eq!(share_text("あいう", &hints(&["", ""])), ["あいう", ""]);
         assert!(share_text("あいう", &[]).is_empty());
         assert_eq!(share_text("", &hints(&["あ", "い"])), ["", ""]);
+    }
+
+    #[cfg(feature = "torch")]
+    mod torch_back_end {
+        use super::*;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        /// A back-end that counts its calls and answers `out(i)` for the `i`th crop.
+        struct Fake {
+            calls: AtomicUsize,
+            out: fn(usize) -> CharsRead,
+        }
+
+        impl CharsReader for Fake {
+            fn read_chars(&self, crops: &[&Rgb]) -> Result<Vec<CharsRead>, VlmError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok((0..crops.len()).map(self.out).collect())
+            }
+        }
+
+        /// A back-end that answers one entry too few: a mismatched pack.
+        struct Short;
+
+        impl CharsReader for Short {
+            fn read_chars(&self, crops: &[&Rgb]) -> Result<Vec<CharsRead>, VlmError> {
+                Ok(vec![
+                    CharsRead {
+                        text: "x".into(),
+                        chars: None
+                    };
+                    crops.len().saturating_sub(1)
+                ])
+            }
+        }
+
+        fn crop(w: usize, h: usize) -> Rgb {
+            Rgb {
+                width: w,
+                height: h,
+                data: vec![9; w * h * 3],
+            }
+        }
+
+        fn test_info() -> RecognizerInfo {
+            RecognizerInfo {
+                engine: "nar-small",
+                recognizer: "muscgab/manga-ocr-nar-small",
+                repos: Vec::new(),
+                precision: Precision::Fp32,
+                device: Device::Gpu(0),
+                token_caps: false,
+                second_read: false,
+                default_max_tokens: 0,
+                batch: 64,
+                patch_budget: None,
+            }
+        }
+
+        fn fake(out: fn(usize) -> CharsRead) -> Arc<Fake> {
+            Arc::new(Fake {
+                calls: 0.into(),
+                out,
+            })
+        }
+
+        #[test]
+        fn a_page_is_one_call_on_the_torch_back_end() {
+            let fake = fake(|i| CharsRead {
+                text: format!("t{i}"),
+                chars: None,
+            });
+            let r = TextboxRecognizer::with_reader("nar-small", fake.clone(), test_info());
+            let lines = r
+                .read_lines(&[crop(10, 40), crop(30, 10), crop(5, 5)])
+                .unwrap();
+            assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
+            assert_eq!(lines.len(), 3);
+            assert_eq!(lines[1][0].text, "t1");
+            assert_eq!(lines[1][0].bbox, [0.0, 0.0, 30.0, 10.0]);
+            assert!(!lines[1][0].vertical);
+            assert!(lines[0][0].vertical);
+            assert_eq!(r.info().device, Device::Gpu(0));
+        }
+
+        #[test]
+        fn results_keep_crop_order_across_chunks() {
+            let fake = fake(|i| CharsRead {
+                text: i.to_string(),
+                chars: None,
+            });
+            let r = TextboxRecognizer::with_reader("nar-small", fake, test_info());
+            let crops: Vec<Rgb> = (0..130).map(|_| crop(8, 8)).collect();
+            let lines = r.read_lines(&crops).unwrap();
+            assert_eq!(lines.len(), 130);
+            assert_eq!(lines[129][0].text, "129");
+            assert_eq!(lines[64][0].text, "64");
+        }
+
+        #[test]
+        fn an_empty_text_is_no_line() {
+            let fake = fake(|_| CharsRead {
+                text: String::new(),
+                chars: None,
+            });
+            let r = TextboxRecognizer::with_reader("nar-small", fake, test_info());
+            assert!(r.read_lines(&[crop(10, 10)]).unwrap()[0].is_empty());
+        }
+
+        #[test]
+        fn a_blocks_text_is_shared_out_in_one_call() {
+            let fake = fake(|i| CharsRead {
+                text: if i == 0 {
+                    "今日はいい天気".into()
+                } else {
+                    "あ".into()
+                },
+                chars: None,
+            });
+            let r = TextboxRecognizer::with_reader("nar-small", fake.clone(), test_info());
+            let block = |hints: &[&str]| BlockCrop {
+                image: crop(20, 40),
+                lines: vec![column(0.0, 10.0); hints.len()],
+                hints: hints.iter().map(|h| h.to_string()).collect(),
+            };
+            let out = r
+                .read_blocks(&[block(&["今日は", "いい天気"]), block(&["x"])])
+                .unwrap();
+            assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
+            assert_eq!(out, [vec!["今日は", "いい天気"], vec!["あ"]]);
+        }
+
+        #[test]
+        fn characters_from_the_pack_make_lines_and_share_out() {
+            // charspot's answer: two characters down a column, boxes in crop pixels.
+            let fake = fake(|_| CharsRead {
+                text: "今日".into(),
+                chars: Some(vec![
+                    CharEntry("今".into(), 65.0, 5.0, 75.0, 15.0, 0.9),
+                    CharEntry("日".into(), 65.0, 25.0, 75.0, 35.0, 0.8),
+                ]),
+            });
+            let r = TextboxRecognizer::with_reader("charspot-small", fake, test_info());
+            assert_eq!(r.info().engine, "charspot-small");
+            let lines = r.read_lines(&[crop(80, 40)]).unwrap();
+            assert_eq!(lines[0].len(), 1);
+            assert_eq!(lines[0][0].text, "今日");
+            assert_eq!(lines[0][0].bbox, [65.0, 5.0, 75.0, 35.0]);
+            assert_eq!(lines[0][0].confs, [0.9, 0.8]);
+            let block = BlockCrop {
+                image: crop(80, 40),
+                lines: vec![column(60.0, 80.0), column(20.0, 40.0)],
+                hints: vec![String::new(), String::new()],
+            };
+            assert_eq!(r.read_blocks(&[block]).unwrap(), [vec!["今日", ""]]);
+        }
+
+        #[test]
+        fn the_line_methods_read_every_crop_in_one_call() {
+            let fake = fake(|i| CharsRead {
+                text: format!("l{i}"),
+                chars: None,
+            });
+            let r = TextboxRecognizer::with_reader("nar-small", fake.clone(), test_info());
+            let sets = [CropSet::one(crop(4, 4)), CropSet::one(crop(6, 6))];
+            assert_eq!(r.read(&sets, None).unwrap(), ["l0", "l1"]);
+            assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
+        }
+
+        #[test]
+        fn a_short_answer_is_an_error_naming_both_counts() {
+            let r = TextboxRecognizer::with_reader("nar-small", Arc::new(Short), test_info());
+            let e = r.read_lines(&[crop(4, 4), crop(4, 4)]).unwrap_err();
+            assert!(e.to_string().contains("1 results for 2 crops"), "{e}");
+            assert!(r.read(&[CropSet::one(crop(4, 4))], None).is_err());
+        }
+
+        #[test]
+        fn a_pack_character_is_a_char_box() {
+            let read = CharsRead {
+                text: "!?".into(),
+                chars: Some(vec![CharEntry("!?".into(), 1.0, 2.0, 3.0, 4.0, 0.5)]),
+            };
+            assert_eq!(
+                char_read(&read),
+                CharRead {
+                    chars: vec![CharBox {
+                        text: "!?".into(),
+                        bbox: [1.0, 2.0, 3.0, 4.0],
+                        score: 0.5,
+                    }]
+                }
+            );
+            assert_eq!(
+                char_read(&CharsRead {
+                    text: String::new(),
+                    chars: None
+                }),
+                CharRead::default()
+            );
+        }
     }
 
     /// The r16 graph with the author's weights gives the ids the author's PyTorch code
