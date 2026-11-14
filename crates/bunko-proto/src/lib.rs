@@ -127,8 +127,10 @@ pub struct Device {
     /// (`bunko_sched::precision::bf16_native`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arch: Option<String>,
-    /// A backend-qualified format (`fp32@webgpu`) that only some engines run on this
-    /// device → those engines; a format not listed runs every engine.
+    /// A format that only some engines run on this device → those engines: a
+    /// backend-qualified one (`fp32@webgpu`) or a plain one (`bf16` that only hayai-nova
+    /// has packages for, `fp32` on a GPU with no nar-small package). A format not listed
+    /// runs every engine.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub format_engines: BTreeMap<String, Vec<String>>,
 }

@@ -547,19 +547,51 @@ pub fn runnable_formats(
     id: &str,
     has_package: impl Fn(&str, &str, &[String]) -> bool,
 ) -> Vec<String> {
-    let mut out: Vec<&str> = Vec::new();
-    for engine in [crate::models::HAYAI, crate::models::PADDLE] {
-        for f in device_formats(report, id, |p, t| has_package(engine, p, t)) {
-            if !out.contains(&f) {
-                out.push(f);
+    engine_formats(
+        report,
+        id,
+        &[crate::models::HAYAI, crate::models::PADDLE],
+        has_package,
+    )
+    .0
+}
+
+/// The formats device `id` runs for any of `engines` (`has_package(engine, precision,
+/// targets)`, as [`device_formats`]): their union in `fp32, bf16, fp16` order, and, for
+/// each format that not every one of `engines` runs there, the engines that do (the
+/// catalog's `format_engines`: a nar-small package without hayai-nova's, hayai-nova's
+/// bf16). The map is built for GPUs only: the CPU's would only mislead, since the
+/// server counts fp32 as the CPU's for every engine.
+pub fn engine_formats(
+    report: &DevicesReport,
+    id: &str,
+    engines: &[&str],
+    has_package: impl Fn(&str, &str, &[String]) -> bool,
+) -> (Vec<String>, std::collections::BTreeMap<String, Vec<String>>) {
+    let per: Vec<(&str, Vec<&'static str>)> = engines
+        .iter()
+        .map(|e| (*e, device_formats(report, id, |p, t| has_package(e, p, t))))
+        .collect();
+    let all: Vec<String> = ["fp32", "bf16", "fp16"]
+        .into_iter()
+        .filter(|f| per.iter().any(|(_, fs)| fs.contains(f)))
+        .map(str::to_string)
+        .collect();
+    let mut only = std::collections::BTreeMap::new();
+    let gpu = report.devices.iter().any(|d| d.id == id && d.kind != "cpu");
+    if gpu {
+        for f in &all {
+            let serving: Vec<String> = per
+                .iter()
+                .filter(|(_, fs)| fs.contains(&f.as_str()))
+                .map(|(e, _)| e.to_string())
+                .collect();
+            if serving.len() < engines.len() {
+                only.insert(f.clone(), serving);
             }
         }
     }
-    ["fp32", "bf16", "fp16"]
-        .into_iter()
-        .filter(|f| out.contains(f))
-        .map(str::to_string)
-        .collect()
+    (all, only)
 }
 
 /// What the session and the sidecar know of a torch recognizer.
@@ -780,6 +812,61 @@ mod tests {
         let (p, why) = crate::runtime::place_runnable(Some("auto"), &devices, fmts);
         assert_eq!((p.device.as_str(), why), ("gpu:0", None));
         assert_eq!(device_formats(&r, "gpu:0", older), vec!["fp32", "fp16"]);
+    }
+
+    #[test]
+    fn format_engines_name_the_engines_a_format_serves() {
+        let r = report(vec![entry(
+            "gpu:0",
+            "rocm",
+            "gfx1201",
+            &[],
+            &["fp32", "bf16", "fp16"],
+        )]);
+        let (f, only) = engine_formats(&r, "gpu:0", &["hayai-nova", "nar-small"], |e, p, _| {
+            (e == "hayai-nova" && (p == "fp32" || p == "bf16")) || (e == "nar-small" && p == "fp32")
+        });
+        assert_eq!(f, ["fp32", "bf16"]);
+        assert_eq!(only.get("bf16"), Some(&vec!["hayai-nova".to_string()]));
+        assert!(!only.contains_key("fp32"));
+        let (f, only) = engine_formats(&r, "gpu:0", &["hayai-nova", "nar-small"], |e, p, _| {
+            e == "nar-small" && p == "fp32"
+        });
+        assert_eq!(f, ["fp32"]);
+        assert_eq!(only.get("fp32"), Some(&vec!["nar-small".to_string()]));
+        // runnable_formats is the union over hayai-nova and paddle-manga, as before
+        assert_eq!(
+            runnable_formats(&r, "gpu:0", |e, p, _| e == "paddle-manga" && p == "fp16"),
+            ["fp16"]
+        );
+    }
+
+    #[test]
+    fn format_engines_are_for_gpus_only() {
+        let r = report(vec![
+            entry("cpu", "cpu", "x86_64", &["avx2"], &["fp32"]),
+            entry("gpu:0", "rocm", "gfx1201", &[], &["fp32", "bf16", "fp16"]),
+        ]);
+        // hayai has a CPU package, nar-small none: the CPU still lists fp32, with no map
+        let (f, only) = engine_formats(&r, "cpu", &["hayai-nova", "nar-small"], |e, p, _| {
+            e == "hayai-nova" && p == "fp32"
+        });
+        assert_eq!(f, ["fp32"]);
+        assert!(only.is_empty());
+        // the closure of a pack without bt_read_chars says no for nar: hayai alone serves fp32
+        let reads_chars = false;
+        let (f, only) = engine_formats(&r, "gpu:0", &["hayai-nova", "nar-small"], |e, p, _| {
+            if e == "nar-small" {
+                crate::textbox_gpu_formats("nar-small", reads_chars, &["fp32"], true).contains(&p)
+            } else {
+                p == "fp32"
+            }
+        });
+        assert_eq!(f, ["fp32"]);
+        assert_eq!(only.get("fp32"), Some(&vec!["hayai-nova".to_string()]));
+        // a device the report does not have: nothing
+        let (f, only) = engine_formats(&r, "gpu:7", &["hayai-nova"], |_, _, _| true);
+        assert!(f.is_empty() && only.is_empty());
     }
 
     /// Regression: during an automatic update the NEW release lists the packs of the old

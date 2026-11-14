@@ -144,6 +144,20 @@ pub fn detector_ids(detector: &str) -> Vec<&'static str> {
 /// The `ocr_engine.weights` entry naming the ONNX export set: `{repo: release tag}`.
 pub const EXPORT_REPO: &str = "Gnathonic/mokuro-bunko";
 
+/// The one `ocr_engine.weights` entry for our export sets (the sidecar keeps one value
+/// per repo): `(EXPORT_REPO, "<detector release>+<recognizer release>")`, skipping a
+/// side that runs no file of ours. None when neither does.
+pub fn export_entry(
+    detector_release: Option<&str>,
+    recognizer_release: Option<&str>,
+) -> Option<(String, String)> {
+    let sets: Vec<&str> = [detector_release, recognizer_release]
+        .into_iter()
+        .flatten()
+        .collect();
+    (!sets.is_empty()).then(|| (EXPORT_REPO.to_string(), sets.join("+")))
+}
+
 /// Manifest ids of the PP-OCR files (every engine reads lines with them).
 pub fn ppocr_ids() -> Vec<&'static str> {
     vec![PPOCR_DETECTOR, PPOCR_RECOGNIZER, PPOCR_DICTIONARY]
@@ -588,6 +602,27 @@ mod tests {
         for id in torch_host_ids(NAR, Precision::Fp32) {
             assert!(m.get(id).is_some(), "{id}");
         }
+    }
+
+    /// Our export sets go in one `Gnathonic/mokuro-bunko` entry (the sidecar keeps one
+    /// value per repo): the detector's release first, then the recognizer's.
+    #[test]
+    fn one_export_entry_for_our_sets() {
+        assert_eq!(
+            export_entry(None, Some("textbox-graphs-v1")),
+            Some((EXPORT_REPO.to_string(), "textbox-graphs-v1".to_string()))
+        );
+        assert_eq!(
+            export_entry(Some("detector-torch-v1"), Some("textbox-torch-v1"))
+                .unwrap()
+                .1,
+            "detector-torch-v1+textbox-torch-v1"
+        );
+        assert_eq!(
+            export_entry(Some("detector-torch-v1"), None).unwrap().1,
+            "detector-torch-v1"
+        );
+        assert_eq!(export_entry(None, None), None);
     }
 
     #[test]

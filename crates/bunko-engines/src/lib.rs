@@ -563,23 +563,58 @@ impl EnginePipeline {
 
     /// The devices for the catalog: with the libtorch backend each device lists only the
     /// formats a recognizer can run on it here (its compute formats with a package on
-    /// disk or downloadable for hayai-nova or paddle-manga), not every format it computes
-    /// in (a Turing card computes bf16 but no bf16 package exists for it).
+    /// disk or downloadable for one of the recognizer engines), not every format it
+    /// computes in (a Turing card computes bf16 but no bf16 package exists for it). A
+    /// GPU's format that only some engines run there (hayai-nova's bf16, a gfx with
+    /// hayai-nova packages and no nar-small one, a Vulkan runtime) lists those engines
+    /// in `format_engines`. A text-box engine counts on a GPU only by the whole test of
+    /// its placement ([`textbox_gpu_formats`]): an old pack without `bt_read_chars`
+    /// offers it no GPU format.
     pub fn catalog_devices(&self) -> Vec<Device> {
         #[cfg_attr(not(feature = "torch"), allow(unused_mut))]
         let mut devices = self.devices();
         #[cfg(feature = "torch")]
+        let recognizers: Vec<&'static str> = models::ENGINES
+            .iter()
+            .copied()
+            .filter(|e| *e != models::PPOCR)
+            .collect();
+        #[cfg(feature = "torch")]
         if let Ok(tb) = self.torch() {
+            let reads_chars = tb.pack.reads_chars();
+            let host_files = |e: &str| {
+                models::obtainable(&self.store, &models::torch_host_ids(e, Precision::Fp32))
+            };
             for d in devices
                 .iter_mut()
                 .filter(|d| d.provider.as_deref() != Some("vulkan"))
             {
-                d.formats = torch::runnable_formats(&tb.report, &d.id, |engine, p, targets| {
-                    self.store.torch_package_obtainable(engine, p, targets)
-                });
+                let cpu = d.id == "cpu";
+                let (formats, only) =
+                    torch::engine_formats(&tb.report, &d.id, &recognizers, |engine, p, targets| {
+                        if !models::textbox_engine(engine) {
+                            return self.store.torch_package_obtainable(engine, p, targets);
+                        }
+                        // The text-box engines read on the CPU with ONNX Runtime.
+                        if cpu {
+                            return p == "fp32"
+                                && models::obtainable(&self.store, &models::textbox_ids(engine));
+                        }
+                        let packaged: Vec<&'static str> = ["fp32", "bf16", "fp16"]
+                            .into_iter()
+                            .filter(|f| {
+                                *f == p && self.store.torch_package_obtainable(engine, p, targets)
+                            })
+                            .collect();
+                        !textbox_gpu_formats(engine, reads_chars, &packaged, host_files(engine))
+                            .is_empty()
+                    });
+                d.formats = formats;
+                d.format_engines.extend(only);
             }
         }
-        // The Vulkan runtimes' formats (either engine), after the device's own.
+        // The Vulkan runtimes' formats (hayai-nova and paddle-manga), after the device's
+        // own.
         #[cfg(feature = "torch")]
         for d in &mut devices {
             if d.id == "cpu" {
@@ -589,19 +624,10 @@ impl EnginePipeline {
             let mut by: std::collections::BTreeMap<&'static str, Vec<String>> = Default::default();
             for engine in [models::HAYAI, models::PADDLE] {
                 for f in self.vulkan_formats(engine, &pl) {
-                    if !d.formats.iter().any(|x| x == f) {
-                        d.formats.push(f.to_string());
-                    }
                     by.entry(f).or_default().push(engine.to_string());
                 }
             }
-            // A Vulkan format only some engines run here (WebGPU has no paddle-manga):
-            // the library and the benchmark offer it to those engines only.
-            for (f, engines) in by {
-                if f.contains('@') && engines.len() < 2 {
-                    d.format_engines.insert(f.to_string(), engines);
-                }
-            }
+            add_vulkan_formats(d, by, &recognizers);
         }
         devices
     }
@@ -617,6 +643,9 @@ impl EnginePipeline {
     /// The formats `engine` can run in on `placement`: what the device computes in
     /// and what this machine has (or may download) the files for.
     fn formats(&self, engine: &str, placement: &runtime::Placement) -> Vec<&'static str> {
+        if models::textbox_engine(engine) {
+            return self.textbox_formats(engine, placement);
+        }
         if placement.provider == "vulkan" {
             #[cfg(feature = "torch")]
             return self.vulkan_formats(engine, placement);
@@ -635,6 +664,133 @@ impl EnginePipeline {
         }
         let _ = engine;
         precision::supported(placement.is_gpu()).to_vec()
+    }
+
+    /// The formats text-box `engine` runs in on `placement`: on the CPU, fp32 when its
+    /// ONNX files are here or downloadable; on a libtorch GPU, [`textbox_gpu_formats`]
+    /// over the device's formats with a package here or in the release; on a Vulkan GPU
+    /// (or with no libtorch pack) none.
+    fn textbox_formats(&self, engine: &str, placement: &Placement) -> Vec<&'static str> {
+        if !placement.is_gpu() {
+            return if models::obtainable(&self.store, &models::textbox_ids(engine)) {
+                vec!["fp32"]
+            } else {
+                Vec::new()
+            };
+        }
+        if placement.provider == "vulkan" {
+            return Vec::new();
+        }
+        #[cfg(feature = "torch")]
+        if let Ok(tb) = self.torch() {
+            let packaged = torch::device_formats(&tb.report, &placement.device, |p, targets| {
+                self.store.torch_package_obtainable(engine, p, targets)
+            });
+            let host_files = models::obtainable(
+                &self.store,
+                &models::torch_host_ids(engine, Precision::Fp32),
+            );
+            return textbox_gpu_formats(engine, tb.pack.reads_chars(), &packaged, host_files);
+        }
+        Vec::new()
+    }
+
+    /// Log why a text-box row reads on the CPU although a GPU was asked for or is here
+    /// (`why`, from [`runtime::place_runnable`]). A pack without `bt_read_chars` is a
+    /// reason to note once per process, not a warning: the row runs, on the CPU; with no
+    /// libtorch pack the CPU is this machine's only text-box route. Anything else (a GPU
+    /// with no package for the engine) is warned about, as for hayai-nova.
+    #[cfg(feature = "nc-models")]
+    fn note_textbox_on_cpu(&self, engine: &str, why: &str) {
+        #[cfg(feature = "torch")]
+        if let Ok(tb) = self.torch() {
+            if tb.pack.reads_chars() {
+                warn!("{engine}: running on the CPU: {why}");
+            } else if !TEXTBOX_PACK_NOTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                info!(
+                    "{engine}: reading on the CPU: {}",
+                    torch::TEXTBOX_PACK_REASON
+                );
+            }
+            return;
+        }
+        info!("{engine}: reading on the CPU: {why}");
+    }
+
+    /// nar-small or charspot-small on a libtorch GPU at fp32: the package for the
+    /// device's targets, the authors' weights and vocabulary, one `bt_read_chars` per
+    /// page. Also the export set its package comes from (the sidecar's provenance).
+    #[cfg(all(feature = "torch", feature = "nc-models"))]
+    fn torch_textbox(
+        &self,
+        engine: &str,
+        placement: &Placement,
+    ) -> Result<(Arc<dyn Recognizer>, String), String> {
+        let engine: &'static str = match engine {
+            models::NAR => models::NAR,
+            models::CHARSPOT => models::CHARSPOT,
+            other => return Err(format!("{other} is no text-box recognizer")),
+        };
+        let (repo, _) = models::textbox_source(engine)
+            .ok_or_else(|| format!("{engine} has no pinned source"))?;
+        let tb = self.torch()?;
+        let precision = Precision::Fp32;
+        let targets = Self::torch_targets(&tb, &placement.device, precision);
+        let pkg = self
+            .store
+            .ensure_torch_package(engine, precision.as_str(), &targets)
+            .map_err(|e| e.to_string())?;
+        // The sidecar names the authors' pin only when their files are the pinned ones.
+        let pinned = models::ensure_all(&self.store, &models::torch_host_ids(engine, precision))?
+            .iter()
+            .all(|f| f.verified);
+        let mut files = models::torch_host_files(&self.store, engine, precision, pkg.dir)?;
+        files.unpack_cache = Some(
+            self.store
+                .options()
+                .root
+                .join(bunko_ocr::models::TORCH_DIR)
+                .join(".unpacked"),
+        );
+        // The pack's preprocessing pool (the crops are cut and resized on the host).
+        let threads = plan::cpu_engine_threads(
+            plan::physical_cpu_count(),
+            plan::performance_core_count(),
+            self.config.jobs,
+        ) as u32;
+        let max_batch =
+            torch::textbox_max_batch(tb.device(&placement.device).and_then(|d| d.vram_mb));
+        let reader = tb.textbox(
+            engine,
+            precision,
+            &placement.device,
+            &files,
+            threads,
+            max_batch,
+        )?;
+        let device: bunko_vlm::Device = placement
+            .device
+            .parse()
+            .map_err(|e: bunko_vlm::VlmError| e.to_string())?;
+        let info = bunko_vlm::RecognizerInfo {
+            engine,
+            recognizer: repo,
+            repos: models::textbox_source(engine)
+                .filter(|_| pinned)
+                .into_iter()
+                .collect(),
+            precision,
+            device,
+            token_caps: false,
+            second_read: false,
+            default_max_tokens: 0,
+            batch: reader.info.batch as usize,
+            patch_budget: None,
+        };
+        let rec: Arc<dyn Recognizer> = Arc::new(textbox::TextboxRecognizer::with_reader(
+            engine, reader, info,
+        ));
+        Ok((rec, bunko_ocr::models::torch_release_name_for(engine)))
     }
 
     /// The error of a row whose engine has no compiled package for `placement`'s device
@@ -1572,8 +1728,8 @@ impl EnginePipeline {
         // Where the recognizer runs, and in which format.
         let mut placement = Placement::cpu();
         let mut resolved = None;
-        // The text-box recognizers run on the CPU in one format: nothing to place or
-        // to resolve, and no backend pack involved.
+        // The text-box recognizers place, load and fall back in their own arm below (a
+        // GPU through the pack, else the ONNX pool on the CPU), in one format each.
         let textbox = models::textbox_engine(engine);
         if road == Road::Reconciled && !textbox {
             // No recognizer backend: nothing here knows the GPUs (unless `ocr.backend:
@@ -1614,15 +1770,50 @@ impl EnginePipeline {
             fast_gpu: placement.is_gpu() && self.bf16_native(placement),
         };
         let mut recognizer = None;
+        // The export set of a text-box recognizer's files (provenance), when they are ours.
+        #[allow(unused_mut)]
+        let mut textbox_release: Option<String> = None;
         #[cfg(feature = "nc-models")]
         if textbox {
-            // The session's threads follow the engine stage's planned width.
-            let host = host_of(&placement);
-            let workers = plan::plan(engine, road, &placement.device, &spec.pools, &host)
-                .iter()
-                .find(|s| s.key == plan::STAGE_ENGINE)
-                .map_or(1, |s| s.workers);
-            recognizer = Some(self.textbox_recognizer(engine, workers)?);
+            let (p, why) = runtime::place_runnable(
+                spec.pools
+                    .stage_device
+                    .get(plan::STAGE_ENGINE)
+                    .map(String::as_str),
+                &devices,
+                |pl| self.textbox_formats(engine, pl),
+            );
+            if let Some(why) = why {
+                self.note_textbox_on_cpu(engine, &why);
+            }
+            placement = p;
+            #[cfg(feature = "torch")]
+            if placement.is_gpu() {
+                match self.torch_textbox(engine, &placement) {
+                    Ok((rec, release)) => {
+                        recognizer = Some(rec);
+                        textbox_release = Some(release);
+                    }
+                    Err(e) => {
+                        let gpu = &placement.device;
+                        warn!("{engine} could not start on {gpu} ({e}); reading on the CPU");
+                        placement = Placement::cpu();
+                    }
+                }
+            }
+            if recognizer.is_none() {
+                // The ONNX pool on the CPU: the session's threads follow the engine
+                // stage's planned width.
+                let host = host_of(&placement);
+                let workers = plan::plan(engine, road, &placement.device, &spec.pools, &host)
+                    .iter()
+                    .find(|s| s.key == plan::STAGE_ENGINE)
+                    .map_or(1, |s| s.workers);
+                recognizer = Some(self.textbox_recognizer(engine, workers)?);
+                // nar-small's CPU graph is ours; charspot-small runs its authors' own.
+                textbox_release =
+                    (engine == models::NAR).then(|| bunko_ocr::models::TEXTBOX_RELEASE.to_string());
+            }
         }
         if let Some(r) = &resolved {
             match self.recognizer(spec, &placement, r.precision, r.backend.as_deref()) {
@@ -1698,20 +1889,24 @@ impl EnginePipeline {
                 weights.push((repo.to_string(), rev.to_string()));
             }
             // The export set the recognizer's files come from: the torch package release
-            // for the libtorch recognizers, models-v1 for the ONNX ones. The text-box
-            // recognizers run their authors' own files: no export set.
-            if !textbox {
+            // for the libtorch recognizers, models-v1 for the ONNX ones; for a text-box
+            // recognizer its arm's (`textbox-torch-v1` on a GPU, `textbox-graphs-v1` for
+            // nar-small on the CPU, none for charspot-small's own files). One entry for
+            // our sets (spec §14).
+            let recognizer_release = if textbox {
+                textbox_release.clone()
+            } else {
                 let vulkan = placement.provider == "vulkan"
                     || resolved.as_ref().is_some_and(|r| r.backend.is_some());
-                let release = if vulkan {
+                Some(if vulkan {
                     bunko_ocr::models::vulkan_release_name()
                 } else if self.torch_loaded() {
                     bunko_ocr::models::torch_release_name()
                 } else {
                     bunko_ocr::models_release::RELEASE.to_string()
-                };
-                weights.push((models::EXPORT_REPO.to_string(), release));
-            }
+                })
+            };
+            weights.extend(models::export_entry(None, recognizer_release.as_deref()));
         }
         let (stage_workers, queue_capacity) = plan::tables(&stages);
         let pipeline = plan::graph_line(&stages);
@@ -1820,6 +2015,84 @@ fn gpu_then_cpu_error(engine: &str, gpu: &str, on_gpu: &str, on_cpu: &str) -> St
     format!("{engine} could not start on {gpu}: {on_gpu}; nor on the CPU: {on_cpu}")
 }
 
+/// Add the Vulkan runtimes' formats of a GPU (`by`: format → the engines a runtime
+/// runs in it there) to its catalog entry, after its own. A format only some of
+/// `recognizers` run there (WebGPU has no paddle-manga; the text-box engines have no
+/// Vulkan runtime) lists those engines in `format_engines`, so the library and the
+/// benchmark offer it to them only. A format libtorch runs too on that GPU also serves
+/// libtorch's engines there; a GPU only the Vulkan pack drives (provider `vulkan`) has
+/// no libtorch format: its listed `fp32` is the runtimes'.
+#[cfg_attr(not(feature = "torch"), allow(dead_code))]
+fn add_vulkan_formats(
+    d: &mut Device,
+    by: std::collections::BTreeMap<&'static str, Vec<String>>,
+    recognizers: &[&str],
+) {
+    let libtorch = d.provider.as_deref() != Some("vulkan");
+    for (f, engines) in by {
+        let mut serving: Vec<String> = match d.format_engines.get(f) {
+            Some(only) => only.clone(),
+            None if libtorch && d.formats.iter().any(|x| x == f) => {
+                recognizers.iter().map(|e| e.to_string()).collect()
+            }
+            None => Vec::new(),
+        };
+        for e in engines {
+            if !serving.contains(&e) {
+                serving.push(e);
+            }
+        }
+        if !d.formats.iter().any(|x| x == f) {
+            d.formats.push(f.to_string());
+        }
+        if serving.len() < recognizers.len() {
+            serving.sort_by_key(|e| recognizers.iter().position(|r| r == e));
+            d.format_engines.insert(f.to_string(), serving);
+        } else {
+            d.format_engines.remove(f);
+        }
+    }
+}
+
+/// The formats a text-box engine's libtorch packages are built in (never bf16): fp32
+/// for both in this build. Empty for any other engine.
+#[cfg_attr(not(feature = "torch"), allow(dead_code))]
+pub(crate) fn textbox_precisions(engine: &str) -> &'static [&'static str] {
+    match engine {
+        "nar-small" | "charspot-small" => &["fp32"],
+        _ => &[],
+    }
+}
+
+/// The formats a text-box engine runs in on a libtorch GPU: none unless the pack reads
+/// text boxes (`bt_read_chars`, `reads_chars`) and the host files are here or
+/// downloadable (`host_files`); else the formats with a package for the device
+/// (`packaged`, as [`torch::device_formats`] lists them) that the engine is built in
+/// ([`textbox_precisions`]), in `packaged` order.
+#[cfg_attr(not(feature = "torch"), allow(dead_code))]
+pub(crate) fn textbox_gpu_formats(
+    engine: &str,
+    reads_chars: bool,
+    packaged: &[&'static str],
+    host_files: bool,
+) -> Vec<&'static str> {
+    if !(reads_chars && host_files) {
+        return Vec::new();
+    }
+    let built = textbox_precisions(engine);
+    packaged
+        .iter()
+        .copied()
+        .filter(|p| built.contains(p))
+        .collect()
+}
+
+/// Whether the reason a text-box row reads on the CPU (a pack without
+/// `bt_read_chars`) has been logged in this process: once is enough.
+#[cfg(all(feature = "torch", feature = "nc-models"))]
+static TEXTBOX_PACK_NOTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 #[cfg(test)]
 mod backends_dirs_tests {
     use super::*;
@@ -1839,6 +2112,104 @@ mod backends_dirs_tests {
             "{msg}"
         );
         assert!(msg.contains(precision::PRECISION_REFUSAL), "{msg}");
+    }
+
+    /// A text-box engine runs on a GPU only through a pack that has `bt_read_chars`,
+    /// with its host files obtainable, and only in the formats it has packages for and
+    /// computes in (fp32 in this build; never bf16).
+    #[test]
+    fn textbox_gpu_formats_need_read_chars() {
+        assert!(textbox_gpu_formats("nar-small", false, &["fp32", "fp16"], true).is_empty());
+        assert!(textbox_gpu_formats("nar-small", true, &["fp32"], false).is_empty());
+        assert_eq!(
+            textbox_gpu_formats("nar-small", true, &["fp32", "bf16", "fp16"], true),
+            ["fp32"]
+        );
+        assert_eq!(
+            textbox_gpu_formats("charspot-small", true, &["fp32"], true),
+            ["fp32"]
+        );
+        assert!(textbox_gpu_formats("hayai-nova", true, &["fp32"], true).is_empty());
+        assert_eq!(textbox_precisions("nar-small"), ["fp32"]);
+        assert!(textbox_precisions("paddle-manga").is_empty());
+    }
+
+    /// The Vulkan formats in the catalog: a GPU only the Vulkan pack drives runs no
+    /// text-box engine, a qualified format beside libtorch serves its runtimes' engines
+    /// only, and a libtorch format the runtimes also run keeps libtorch's engines.
+    #[test]
+    fn vulkan_formats_name_their_engines() {
+        let all = ["hayai-nova", "paddle-manga", "charspot-small", "nar-small"];
+        let two = |a: &str, b: &str| vec![a.to_string(), b.to_string()];
+        let by = |pairs: &[(&'static str, &[&str])]| -> std::collections::BTreeMap<&'static str, Vec<String>> {
+            pairs
+                .iter()
+                .map(|(f, e)| (*f, e.iter().map(|x| x.to_string()).collect()))
+                .collect()
+        };
+        // A GPU only the Vulkan pack drives: its fp32 is hayai's and paddle's.
+        let mut d = Device {
+            id: "gpu:1".into(),
+            formats: vec!["fp32".into()],
+            provider: Some("vulkan".into()),
+            ..Default::default()
+        };
+        add_vulkan_formats(
+            &mut d,
+            by(&[
+                ("fp32", &["hayai-nova", "paddle-manga"]),
+                ("fp32@webgpu", &["hayai-nova"]),
+            ]),
+            &all,
+        );
+        assert_eq!(d.formats, ["fp32", "fp32@webgpu"]);
+        assert_eq!(
+            d.format_engines.get("fp32"),
+            Some(&two("hayai-nova", "paddle-manga"))
+        );
+        assert_eq!(
+            d.format_engines.get("fp32@webgpu"),
+            Some(&vec!["hayai-nova".to_string()])
+        );
+        // Without the text-box engines in the build, both engines are every engine.
+        let mut d = Device {
+            id: "gpu:1".into(),
+            provider: Some("vulkan".into()),
+            ..Default::default()
+        };
+        add_vulkan_formats(
+            &mut d,
+            by(&[("fp32", &["hayai-nova", "paddle-manga"])]),
+            &["hayai-nova", "paddle-manga"],
+        );
+        assert_eq!(d.formats, ["fp32"]);
+        assert!(d.format_engines.is_empty());
+        // Beside libtorch: fp32 (every engine there) stays unlisted; nar-only fp16
+        // gains nothing; the qualified format is the runtime's engines'.
+        let mut d = Device {
+            id: "gpu:0".into(),
+            formats: vec!["fp32".into(), "fp16".into()],
+            provider: Some("rocm".into()),
+            format_engines: [("fp16".to_string(), vec!["nar-small".to_string()])]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        add_vulkan_formats(
+            &mut d,
+            by(&[("fp32@ncnn", &["hayai-nova", "paddle-manga"])]),
+            &all,
+        );
+        assert_eq!(d.formats, ["fp32", "fp16", "fp32@ncnn"]);
+        assert!(!d.format_engines.contains_key("fp32"));
+        assert_eq!(
+            d.format_engines.get("fp32@ncnn"),
+            Some(&two("hayai-nova", "paddle-manga"))
+        );
+        assert_eq!(
+            d.format_engines.get("fp16"),
+            Some(&vec!["nar-small".to_string()])
+        );
     }
 
     #[test]

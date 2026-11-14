@@ -319,6 +319,118 @@ fn ppocr_volume_with_bad_pages() {
     assert_eq!(pages_of("A.mokuro"), v["pages"]);
 }
 
+/// No backend pack: nar-small opens on the CPU (its ONNX graph) and the sidecar names
+/// our export set of that graph.
+#[cfg(feature = "nc-models")]
+#[test]
+#[ignore = "needs the nar-small model files (MOKURO_MODELS_DIR)"]
+fn nar_without_a_pack_reads_on_the_cpu() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = pipeline(tmp.path());
+    let runner = p.open(&spec("nar-small", "auto-accuracy")).unwrap();
+    let ready = runner.ready();
+    assert_eq!(
+        ready.stage_device.get("engine").map(String::as_str),
+        Some("cpu")
+    );
+    assert_eq!(
+        ready
+            .weights
+            .get("Gnathonic/mokuro-bunko")
+            .map(String::as_str),
+        Some("textbox-graphs-v1")
+    );
+    assert_eq!(
+        ready
+            .weights
+            .get("muscgab/manga-ocr-nar-small")
+            .map(String::as_str),
+        Some("8cc14c152ccb21da3aa88fa51a92766537c12da2")
+    );
+    assert_eq!(ready.precision.as_deref(), Some("fp32"));
+}
+
+/// With a backend pack that reads text boxes and a nar-small package for the GPU
+/// (`MOKURO_TORCH_PACK`, `MOKURO_TORCH_MODELS_DIR`), nar-small opens on the GPU, the
+/// sidecar names the text-box torch release, and a volume reads the same text as the
+/// CPU route (the engine stage forced to the CPU in the same process).
+#[cfg(feature = "nc-models")]
+#[test]
+#[ignore = "needs a backend pack with bt_read_chars, a nar-small GPU package, the model files and a sample archive"]
+fn nar_on_a_gpu_reads_as_the_cpu_does() {
+    let Some(src) = sample() else {
+        eprintln!("no sample archive; skipped");
+        return;
+    };
+    if std::env::var_os("MOKURO_TORCH_PACK").is_none() {
+        eprintln!("no MOKURO_TORCH_PACK; skipped");
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let p = EnginePipeline::new(EngineConfig::new(tmp.path().join("models"), Backend::Auto));
+    // A process opens one pack: a test of `Backend::Cpu` that ran first opened it for
+    // the CPU only. Run this one alone (`-- --ignored nar_on_a_gpu`).
+    if !p.devices().iter().any(|d| d.id == "gpu:0") {
+        eprintln!("the backend pack of this process sees no GPU; skipped (run this test alone)");
+        return;
+    }
+    let gpu = p.open(&spec("nar-small", "auto-accuracy")).unwrap();
+    let ready = gpu.ready();
+    assert_eq!(
+        ready.stage_device.get("engine").map(String::as_str),
+        Some("gpu:0"),
+        "{ready:?}"
+    );
+    assert_eq!(
+        ready
+            .weights
+            .get("Gnathonic/mokuro-bunko")
+            .map(String::as_str),
+        Some("textbox-torch-v1")
+    );
+    assert_eq!(ready.precision.as_deref(), Some("fp32"));
+    let mut on_cpu = spec("nar-small", "auto-accuracy");
+    on_cpu
+        .pools
+        .stage_device
+        .insert("engine".into(), "cpu".into());
+    let cpu = p.open(&on_cpu).unwrap();
+    assert_eq!(
+        cpu.ready().stage_device.get("engine").map(String::as_str),
+        Some("cpu")
+    );
+    assert_eq!(
+        cpu.ready()
+            .weights
+            .get("Gnathonic/mokuro-bunko")
+            .map(String::as_str),
+        Some("textbox-graphs-v1")
+    );
+
+    let cbz = tmp.path().join("Vol.cbz");
+    write_cbz(&cbz, &real_pages(&src, 4));
+    let texts = |runner: &dyn bunko_processor::VolumeRunner, name: &str| -> Vec<String> {
+        let out = tmp.path().join(name);
+        runner
+            .run_volume(&cbz, &meta("Vol"), &out, &|_| {}, &CancelToken::new())
+            .unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+        v["pages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|p| p["blocks"].as_array().unwrap().clone())
+            .flat_map(|b| b["lines"].as_array().unwrap().clone())
+            .map(|l| l.as_str().unwrap().to_string())
+            .collect()
+    };
+    let (g, c) = (texts(&*gpu, "gpu.mokuro"), texts(&*cpu, "cpu.mokuro"));
+    assert!(g.len() > 20, "{} lines", g.len());
+    assert_eq!(g, c);
+    eprintln!("{} lines read alike on the GPU and the CPU", g.len());
+}
+
 #[test]
 #[ignore = "needs the model files"]
 fn refusals_before_loading() {
