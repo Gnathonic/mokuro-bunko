@@ -168,6 +168,10 @@ pub fn ppocr_ids() -> Vec<&'static str> {
 /// a package without them (an older or hand-made one) also needs [`paddle_embed_id`].
 /// nar-small's package holds no weights: it binds the authors' `model.safetensors`
 /// (the file its CPU graph reads too) and reads its vocabulary on the host.
+/// charspot-small's two graphs (`dense`, `tail`) hold none either: they bind the
+/// authors' `model.safetensors`, which its CPU route (the ONNX file, weights inside)
+/// never reads, and the decode reads the vocabulary on the host. So a charspot package
+/// on disk runs on a GPU only with these files here or downloadable.
 pub fn torch_host_ids(engine: &str, _precision: Precision) -> Vec<&'static str> {
     match engine {
         HAYAI => vec![
@@ -181,6 +185,24 @@ pub fn torch_host_ids(engine: &str, _precision: Precision) -> Vec<&'static str> 
             bunko_ocr::models::NAR_VOCABULARY,
             bunko_ocr::models::NAR_WEIGHTS,
         ],
+        #[cfg(feature = "nc-models")]
+        CHARSPOT => vec![
+            bunko_ocr::models::CHARSPOT_VOCABULARY,
+            bunko_ocr::models::CHARSPOT_WEIGHTS,
+        ],
+        _ => Vec::new(),
+    }
+}
+
+/// The CPU route's files a GPU prefetch of text-box `engine` fetches too, so its
+/// fallback costs nothing: nar-small's (its graph is 0.7 MB beside the weights both
+/// routes read). None for charspot-small: its 44 MB ONNX file is fetched only when
+/// its CPU route is reached (a failed GPU load, or a crop with more characters than
+/// the GPU route reads at once), L12.
+pub fn textbox_fallback_ids(engine: &str) -> Vec<&'static str> {
+    match engine {
+        #[cfg(feature = "nc-models")]
+        NAR => textbox_ids(NAR),
         _ => Vec::new(),
     }
 }
@@ -324,8 +346,9 @@ pub fn torch_host_files(
                 weights: Vec::new(),
             }
         }
+        // The package directory holds charspot-small's `dense.pt2` and `tail.pt2`.
         #[cfg(feature = "nc-models")]
-        NAR => crate::torch::TorchFiles {
+        NAR | CHARSPOT => crate::torch::TorchFiles {
             package,
             tokenizer: r[0].path.clone(),
             pos_table: None,
@@ -626,6 +649,47 @@ mod tests {
         for id in torch_host_ids(NAR, Precision::Fp32) {
             assert!(m.get(id).is_some(), "{id}");
         }
+    }
+
+    /// charspot-small's GPU route binds the authors' `model.safetensors` and reads the
+    /// vocabulary on the host; its CPU route reads the ONNX file, never the safetensors.
+    #[cfg(feature = "nc-models")]
+    #[test]
+    fn each_charspot_route_reads_its_own_weights() {
+        assert_eq!(
+            torch_host_ids(CHARSPOT, Precision::Fp32),
+            vec![
+                bunko_ocr::models::CHARSPOT_VOCABULARY,
+                bunko_ocr::models::CHARSPOT_WEIGHTS
+            ]
+        );
+        assert!(!textbox_ids(CHARSPOT).contains(&bunko_ocr::models::CHARSPOT_WEIGHTS));
+        let m = Manifest::builtin();
+        for id in torch_host_ids(CHARSPOT, Precision::Fp32) {
+            assert!(m.get(id).is_some(), "{id}");
+        }
+    }
+
+    /// L12: a GPU prefetch of charspot-small does not fetch its 44 MB ONNX file (the CPU
+    /// route fetches it if it is ever reached); nar-small's CPU graph comes along, as
+    /// it reads the same weights as the GPU route.
+    #[cfg(feature = "nc-models")]
+    #[test]
+    fn a_gpu_prefetch_of_charspot_leaves_the_onnx_file() {
+        assert!(textbox_fallback_ids(CHARSPOT).is_empty());
+        assert_eq!(textbox_fallback_ids(NAR), textbox_ids(NAR));
+        assert!(textbox_fallback_ids(PPOCR).is_empty());
+    }
+
+    /// The GPU plan holds charspot's safetensors once (Q21); the CPU plan does not.
+    #[cfg(all(feature = "nc-models", feature = "torch"))]
+    #[test]
+    fn a_gpu_plan_holds_charspot_weights() {
+        let w = bunko_ocr::models::CHARSPOT_WEIGHTS;
+        let ids = recognizer_ids(CHARSPOT, Precision::Fp32);
+        assert_eq!(ids.iter().filter(|id| **id == w).count(), 1, "{ids:?}");
+        assert!(download_plan(Some(CHARSPOT), true).contains(&w));
+        assert!(!download_plan(Some(CHARSPOT), false).contains(&w));
     }
 
     /// Our export sets go in one `Gnathonic/mokuro-bunko` entry (the sidecar keeps one

@@ -550,6 +550,51 @@ fn char_read(r: &CharsRead) -> CharRead {
     }
 }
 
+/// charspot-small's CPU route for the crops the GPU route leaves unread (L12): the
+/// characters of one upright crop.
+#[cfg(feature = "torch")]
+pub type CpuRoute = Box<dyn Fn(&Rgb) -> Result<CharRead, VlmError> + Send + Sync>;
+
+/// A [`CpuRoute`] that loads its [`Charspot`] with `load` on first use and keeps it. A
+/// failed load is the read's error and is tried again on the next crop that needs it.
+#[cfg(feature = "torch")]
+pub fn lazy_cpu_route(
+    load: impl Fn() -> Result<Charspot, VlmError> + Send + Sync + 'static,
+) -> CpuRoute {
+    let loaded: std::sync::Mutex<Option<Arc<Charspot>>> = std::sync::Mutex::new(None);
+    Box::new(move |crop: &Rgb| {
+        let model = {
+            let mut slot = loaded.lock().unwrap_or_else(|e| e.into_inner());
+            match slot.as_ref() {
+                Some(m) => m.clone(),
+                None => {
+                    let m = Arc::new(load()?);
+                    *slot = Some(m.clone());
+                    m
+                }
+            }
+        };
+        model.read(crop)
+    })
+}
+
+/// A crop's [`CharRead`] as the pack would have answered it.
+#[cfg(feature = "torch")]
+fn chars_read(r: &CharRead) -> CharsRead {
+    CharsRead {
+        text: r.text(),
+        chars: Some(
+            r.chars
+                .iter()
+                .map(|c| {
+                    let [x0, y0, x1, y1] = c.bbox;
+                    CharEntry(c.text.clone(), x0, y0, x1, y1, c.score)
+                })
+                .collect(),
+        ),
+    }
+}
+
 // --- the recognizer seam -----------------------------------------------------
 
 enum Reader {
@@ -566,6 +611,9 @@ enum Reader {
 pub struct TextboxRecognizer {
     reader: Reader,
     info: RecognizerInfo,
+    /// charspot-small on the GPU route: where the crops the pack leaves unread go.
+    #[cfg(feature = "torch")]
+    cpu: Option<CpuRoute>,
 }
 
 impl TextboxRecognizer {
@@ -618,6 +666,8 @@ impl TextboxRecognizer {
                 batch: 1,
                 patch_budget: None,
             },
+            #[cfg(feature = "torch")]
+            cpu: None,
         })
     }
 
@@ -634,6 +684,17 @@ impl TextboxRecognizer {
         Self {
             reader: Reader::Torch(reader),
             info: RecognizerInfo { engine, ..info },
+            cpu: None,
+        }
+    }
+
+    /// charspot-small's CPU route for the crops the GPU route leaves unread: more
+    /// characters than its tail graph holds (L12). Without one such a crop is an error.
+    #[cfg(feature = "torch")]
+    pub fn with_cpu_route(self, cpu: CpuRoute) -> TextboxRecognizer {
+        Self {
+            cpu: Some(cpu),
+            ..self
         }
     }
 
@@ -644,7 +705,7 @@ impl TextboxRecognizer {
         if crops.is_empty() {
             return Ok(Vec::new());
         }
-        let reads = r.read_chars(crops)?;
+        let mut reads = r.read_chars(crops)?;
         if reads.len() != crops.len() {
             return Err(VlmError::Runtime(format!(
                 "{}: the back-end returned {} results for {} crops",
@@ -652,6 +713,29 @@ impl TextboxRecognizer {
                 reads.len(),
                 crops.len()
             )));
+        }
+        // charspot-small answers characters for every crop it read: one without is a
+        // crop it left to the CPU route (L12). nar-small never answers characters.
+        if self.info.engine == "charspot-small" {
+            for (read, crop) in reads.iter_mut().zip(crops) {
+                if read.chars.is_some() {
+                    continue;
+                }
+                let cpu = self.cpu.as_ref().ok_or_else(|| {
+                    VlmError::Runtime(format!(
+                        "charspot-small: the pack left a {}x{} crop to the CPU route, and \
+                         there is none",
+                        crop.width, crop.height
+                    ))
+                })?;
+                tracing::info!(
+                    "charspot-small: a {}x{} crop holds more characters than the GPU \
+                     route reads at once; reading it on the CPU",
+                    crop.width,
+                    crop.height
+                );
+                *read = chars_read(&cpu(crop)?);
+            }
         }
         Ok(reads)
     }
@@ -977,6 +1061,88 @@ mod tests {
                 hints: vec![String::new(), String::new()],
             };
             assert_eq!(r.read_blocks(&[block]).unwrap(), [vec!["今日", ""]]);
+        }
+
+        /// L12: a charspot crop the pack leaves unread (`chars: None`: more characters
+        /// than its tail graph holds) is read on the CPU route, and only that crop.
+        #[test]
+        fn a_charspot_crop_the_pack_leaves_is_read_on_the_cpu() {
+            let pack = fake(|i| CharsRead {
+                text: if i == 1 { String::new() } else { "今".into() },
+                chars: (i != 1).then(|| vec![CharEntry("今".into(), 0.0, 0.0, 8.0, 8.0, 0.9)]),
+            });
+            let cpu_calls = Arc::new(AtomicUsize::new(0));
+            let counted = cpu_calls.clone();
+            let r = TextboxRecognizer::with_reader("charspot-small", pack.clone(), test_info())
+                .with_cpu_route(Box::new(move |c: &Rgb| {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!((c.width, c.height), (30, 90));
+                    Ok(CharRead {
+                        chars: vec![
+                            CharBox {
+                                text: "日".into(),
+                                bbox: [10.0, 5.0, 20.0, 15.0],
+                                score: 0.8,
+                            },
+                            CharBox {
+                                text: "本".into(),
+                                bbox: [10.0, 25.0, 20.0, 35.0],
+                                score: 0.7,
+                            },
+                        ],
+                    })
+                }));
+            let crops = [crop(10, 10), crop(30, 90), crop(10, 10)];
+            let lines = r.read_lines(&crops).unwrap();
+            assert_eq!(pack.calls.load(Ordering::SeqCst), 1);
+            assert_eq!(cpu_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(lines[0][0].text, "今");
+            assert_eq!(lines[1][0].text, "日本");
+            assert_eq!(lines[1][0].bbox, [10.0, 5.0, 20.0, 35.0]);
+            assert_eq!(lines[1][0].confs, [0.8, 0.7]);
+            assert_eq!(lines[2][0].text, "今");
+            // The line methods and the blocks take the CPU's read as well.
+            let sets: Vec<CropSet> = crops.iter().cloned().map(CropSet::one).collect();
+            assert_eq!(r.read(&sets, None).unwrap(), ["今", "日本", "今"]);
+            let block = BlockCrop {
+                image: crop(30, 90),
+                lines: vec![column(0.0, 30.0)],
+                hints: vec![String::new()],
+            };
+            let one = TextboxRecognizer::with_reader(
+                "charspot-small",
+                fake(|_| CharsRead {
+                    text: String::new(),
+                    chars: None,
+                }),
+                test_info(),
+            )
+            .with_cpu_route(Box::new(|_: &Rgb| {
+                Ok(CharRead {
+                    chars: vec![CharBox {
+                        text: "日".into(),
+                        bbox: [10.0, 5.0, 20.0, 15.0],
+                        score: 0.8,
+                    }],
+                })
+            }));
+            assert_eq!(one.read_blocks(&[block]).unwrap(), [vec!["日"]]);
+        }
+
+        /// Without a CPU route such a crop is an error, never text silently dropped;
+        /// nar-small's `chars: None` is its whole read and needs none.
+        #[test]
+        fn a_charspot_crop_left_unread_with_no_cpu_route_is_an_error() {
+            let none = |_| CharsRead {
+                text: String::new(),
+                chars: None,
+            };
+            let r = TextboxRecognizer::with_reader("charspot-small", fake(none), test_info());
+            let e = r.read_lines(&[crop(10, 10)]).unwrap_err();
+            assert!(e.to_string().contains("CPU route"), "{e}");
+            let nar = TextboxRecognizer::with_reader("nar-small", fake(none), test_info())
+                .with_cpu_route(Box::new(|_: &Rgb| panic!("nar-small has no CPU re-read")));
+            assert!(nar.read_lines(&[crop(10, 10)]).unwrap()[0].is_empty());
         }
 
         #[test]

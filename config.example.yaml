@@ -287,7 +287,11 @@ ocr:
   #                Opt-in, with weights under other licences (downloaded only
   #                when a row uses them; not in a build made without them):
   #                - charspot-small: manga-ocr-charspot-small (weights CC
-  #                                BY-NC-SA 4.0, non-commercial); CPU, fast
+  #                                BY-NC-SA 4.0, non-commercial); fast on
+  #                                the CPU. Reads on an NVIDIA or AMD card
+  #                                with the libtorch backend pack (fp32,
+  #                                the same text as on the CPU), else on
+  #                                the CPU
   #                - nar-small:    manga-ocr-nar-small r16 (weights CC
   #                                BY-NC-SA 4.0, non-commercial); the most
   #                                accurate on JMangaBench_Read. Reads on an
@@ -334,8 +338,7 @@ ocr:
   #                  queue_capacity how many may wait in the queue it fills
   #                  stage_device   WHERE that stage's model runs: cpu or
   #                                 gpu:<n>; absent = auto. The detect
-  #                                 stage and charspot-small's engine
-  #                                 stage are CPU only.
+  #                                 stage is CPU only.
   #
   # See docs/configuration.md for the full reference and docs/ocr-internals.md
   # for how it works. Renaming a row other than the primary means its files

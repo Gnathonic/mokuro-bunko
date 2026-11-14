@@ -280,8 +280,8 @@
   finds and classifies every character and has no decoder;
   [manga-ocr-nar-small](https://huggingface.co/muscgab/manga-ocr-nar-small) (the model
   of its `r16` branch) writes a text of up to 160 characters in one pass. On the CPU
-  both run on ONNX Runtime and need no backend pack (`nar-small` also reads on a GPU,
-  see below), and both read a whole text block at once rather than a line: the layout's blocks on a
+  both run on ONNX Runtime and need no backend pack (both also read on a GPU, see
+  below), and both read a whole text block at once rather than a line: the layout's blocks on a
   line detector, the detector's own boxes on `animetext-blocks`. Their text stands as
   read; PP-OCR's read is used only where they read nothing. On a 16-core desktop CPU a
   12-page sample ran at 2.1 pages a second with `charspot-small` and 1.2 with
@@ -307,6 +307,21 @@
   `nar-small` row, and the benchmark tries its engine stage on the CPU too and keeps
   the faster. The sidecar's `ocr_engine.weights` names the export set it was read with
   (`textbox-torch-v1` on a card, `textbox-graphs-v1` on the CPU).
+- **`charspot-small` reads on an NVIDIA or AMD GPU** too, with the libtorch backend
+  pack (fp32: the same characters, the same reading order and boxes within half a
+  pixel of the CPU's); elsewhere it reads on the CPU as before. On a card two compiled
+  graphs of ours with no weights in them (in the same `textbox-torch-v1` pre-release)
+  find the characters and read them, bound to the authors' own `model.safetensors`
+  (44 MB, fetched from their repository at the pinned revision; the CPU route reads
+  their ONNX file instead, which a card does not fetch), and the step between the two
+  graphs and the reading order run on the host. All of a page's blocks are read in one
+  call (at most 64 at a time, 8 on a card with less than 4 GB). A block with more than
+  1,024 characters is read on the CPU, with a line in the log. As for `nar-small`, a
+  card with no package, an older backend pack, a failed load, or a machine that cannot
+  download the safetensors (`MOKURO_MODELS_DOWNLOAD` off) leaves the row on the CPU;
+  `pools.stage_device.engine` may name a card for a `charspot-small` row, and the
+  benchmark tries its engine stage on the CPU too. The sidecar names
+  `textbox-torch-v1` as its export set when it was read on a card.
 - **Two more detectors: `ctd-lines` and `animetext-blocks`** (weights GPL-3.0).
   `ctd-lines` is the line map of
   [comic-text-detector](https://github.com/dmMaze/comic-text-detector): it boxes

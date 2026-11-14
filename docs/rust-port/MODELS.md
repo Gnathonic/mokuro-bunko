@@ -209,7 +209,7 @@ gh release create textbox-graphs-v1 --repo Gnathonic/mokuro-bunko \
 
 A changed graph is a new asset name or a new release, never a replaced asset.
 
-### 2.4 The `textbox-torch-v1` release: nar-small on a GPU
+### 2.4 The `textbox-torch-v1` release: nar-small and charspot-small on a GPU
 
 On an NVIDIA or AMD card with the libtorch backend pack, nar-small reads through a
 compiled AOTInductor package of the same `r16` network instead of the ONNX graph:
@@ -226,6 +226,19 @@ crops read the same text on a card of that target (or, for a target with no card
 test, on its verified neighbours), otherwise that GPU keeps the CPU route. The details
 are in [TORCH-BACKEND.md](TORCH-BACKEND.md#single-graph-engines) and
 [TEXTBOX-GPU.md](TEXTBOX-GPU.md).
+
+charspot-small reads the same way through two packages per GPU target,
+`torch/charspot-small/fp32/<target>/dense.pt2` (the character heatmap, boxes and
+embeddings) and `tail.pt2` (the classes and the reading-order scores), made from the
+authors' Apache-2.0 model code. They hold no trained weights either: their constants
+are bound at load from the authors' `model.safetensors` (44 MB, from their repository
+at the pin), a file its CPU route never reads (the authors' ONNX file carries its own
+weights), so a card fetches the safetensors and not the ONNX file. The step between the
+two graphs (the centre threshold, the overlap suppression, the furigana drop) and the
+reading-order chain are a Rust port of the authors' `core.py` run on the host. A target
+ships only once every one of the 7,929 crops reads the same text with its boxes within
+half a pixel of the authors' ONNX model on the CPU. A block with more than 1,024
+characters, more than the tail graph takes, is read on the CPU.
 
 The packages are published once as the pre-release `textbox-torch-v1` with a `NOTICE.md`
 and the author's Apache-2.0 `LICENSE`; the compiled-in manifest

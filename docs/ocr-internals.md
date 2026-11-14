@@ -14,7 +14,7 @@ what they do. The design documents it summarises are in
 |---|---|---|
 | Scheduler | the server process (all builds) | One actor that owns every piece of OCR state: it keeps an index of what is owed, claims `(volume, generation)` jobs for each lane, collects sidecars, records failures. Its state is mutated one message at a time, with no locks around scheduling. |
 | Processor | the server process (full build, "local") or another machine (`mokuro-bunko processor serve`) | Receives open-session and volume operations, runs the OCR pipeline, answers with events and the finished sidecar. The local processor is the same code as a remote one, wired over in-process channels, and the scheduler treats it as a machine named `local`. |
-| Engines | inside a processor (full build only) | `hayai-nova` and `paddle-manga` on libtorch (the backend pack `install-ocr` installs), `nar-small` on libtorch on a card that has a package for it and on ONNX Runtime on the CPU elsewhere, `ppocr-manga`, `charspot-small` and the detectors on ONNX Runtime on the CPU, plus the layout step that turns reads into the sidecar. |
+| Engines | inside a processor (full build only) | `hayai-nova` and `paddle-manga` on libtorch (the backend pack `install-ocr` installs), `nar-small` and `charspot-small` on libtorch on a card that has a package for them and on ONNX Runtime on the CPU elsewhere, `ppocr-manga` and the detectors on ONNX Runtime on the CPU, plus the layout step that turns reads into the sidecar. |
 
 The lite build has no engines: `ocr.local_processing` is forced off, the
 queue holds with "no processor" until a remote processor connects, and the
@@ -231,12 +231,15 @@ one loaded model of one thread each, taking the job's physical cores in
 proportion to what a page costs it next to the detect stage (about 15 of 24
 for `nar-small`, 7 of 24 for `charspot-small`; a core counts once, SMT
 threads aside), the detect stage sized to the rest of that default split.
-On a card, `nar-small`'s engine stage is like any other recognizer's: one
-loaded model, a page's blocks read in one call (split into the package's
-batches, at most 64 blocks, or 8 on a card with less than 4 GB), with the
-same text as the CPU pool. Where it cannot run on the card (no backend pack,
-a pack without text-box reading, no package for that card, a failed load) it
-falls back to the CPU pool and logs why.
+On a card, the engine stage of `nar-small` and `charspot-small` is like any
+other recognizer's: one loaded model, a page's blocks read in one call (split
+into the package's batches, at most 64 blocks, or 8 on a card with less than
+4 GB), with the same text as the CPU pool. Where it cannot run on the card (no
+backend pack, a pack without text-box reading, no package for that card, its
+host files missing with downloads off, a failed load) it falls back to the
+CPU pool and logs why. A `charspot-small` block with more than 1,024
+characters, more than its second graph reads at once, is read on the CPU
+alone (its ONNX file is fetched then if it is not here) and logged.
 The other stages get pools sized from the host. Widths and queue depths only
 change speed. Moving the engine to another device can change the sidecar:
 under an automatic precision mode, a device without native bf16 can resolve

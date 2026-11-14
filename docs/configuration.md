@@ -1067,11 +1067,11 @@ covers what you set.
 
 #### OCR backends
 
-The recognizers (hayai-nova, paddle-manga, and nar-small on a card) run on **libtorch** —
+The recognizers (hayai-nova, paddle-manga, and nar-small and charspot-small on a card) run on **libtorch** —
 the torch 0.5.2 used, without Python — from a *backend pack* that `mokuro-bunko
 install-ocr` installs into `<storage>/backends/`: `cu130` (NVIDIA, Linux and Windows),
 `rocm7.1` (AMD, Linux) or `cpu`. ppocr-manga and the PP-OCR text detector run on ONNX
-Runtime on the CPU, as in 0.5.2, and so do charspot-small, and nar-small wherever it
+Runtime on the CPU, as in 0.5.2, and so do nar-small and charspot-small wherever they
 cannot use a card. `serve` and `processor serve` install the pack themselves when local OCR needs
 it and it is missing, **in the background**: they serve at once, show the progress (log,
 admin panel, dashboard, tray, `/control/status`) and start local OCR when it is done
@@ -1311,9 +1311,9 @@ volume now).
 
 #### OCR engines
 
-hayai-nova and paddle-manga run on libtorch (the backend pack). nar-small runs on
-libtorch on an NVIDIA or AMD card when the backend pack has a package for that card, and
-on ONNX Runtime on the CPU everywhere else. The other engines run on ONNX Runtime on the
+hayai-nova and paddle-manga run on libtorch (the backend pack). nar-small and
+charspot-small run on libtorch on an NVIDIA or AMD card when the backend pack has a
+package for that card, and on ONNX Runtime on the CPU everywhere else. The other engines run on ONNX Runtime on the
 CPU. Nothing that runs on ONNX Runtime needs a backend pack.
 
 | Engine | What it is | Runs on | Use it for |
@@ -1321,7 +1321,7 @@ CPU. Nothing that runs on ONNX Runtime needs a backend pack.
 | `hayai-nova` | [hayai-ocr v2.5 "Nova"](https://huggingface.co/JustANormalTinkerer/hayai-ocr-v2.5-nova) | card or CPU | The default. Better text than 0.5's mokuro engine, especially display lettering, sound effects and colour pages. Reads at the row's `patch_budget`. Needs a detector. |
 | `paddle-manga` | [PaddleOCR-VL 1.6 + manga LoRA](https://huggingface.co/sorryhyun/paddleocr-vl-1.6-manga-lora) | card recommended | The most accurate and the slowest; about 1.8 GB of model files in bf16/fp16, 3.6 GB in fp32, which the CPU and the default `auto-accuracy` mode run. Needs a detector. On the CPU about 40 s a page on 16 threads: there hayai-nova is the engine of choice. |
 | `ppocr-manga` | [PP-OCRv6 manga](https://huggingface.co/Kellenok/PP-OCRv6_manga) line detector + CTC recognizer, 23 MB | CPU only | Reads lines rather than bubbles, removes furigana, and reads scanned **novel** pages (as do the other engines on the `ppocr-manga` detector). Brings its own detector. |
-| `charspot-small` | [manga-ocr-charspot-small](https://huggingface.co/muscgab/manga-ocr-charspot-small), 44 MB | CPU only | Detects and classifies each character of a text block; no decoder, so it is fast on a CPU (about five times hayai-nova there), and it leaves furigana out by itself. Japanese only. Needs a detector, a line or a block one. Weights CC BY-NC-SA 4.0. |
+| `charspot-small` | [manga-ocr-charspot-small](https://huggingface.co/muscgab/manga-ocr-charspot-small), 44 MB | card or CPU | Detects and classifies each character of a text block; no decoder, so it is fast on a CPU (about five times hayai-nova there), and it leaves furigana out by itself. Japanese only. On an NVIDIA or AMD card with the libtorch backend pack it reads in fp32 with the same characters and reading order as on the CPU, all of a page's blocks in one call, from two compiled graphs of this project's `textbox-torch-v1` release (no weights in them) bound to the authors' 44 MB `model.safetensors`, which a card fetches instead of the ONNX file; a block with more than 1,024 characters is read on the CPU. Elsewhere it reads on the CPU. Needs a detector, a line or a block one. Weights CC BY-NC-SA 4.0. |
 | `nar-small` | [manga-ocr-nar-small](https://huggingface.co/muscgab/manga-ocr-nar-small) `r16`: the author's 217 MB weights and a 0.7 MB graph from this project's `textbox-graphs-v1` release | card or CPU | Writes a text block in one pass (at most 160 characters). Japanese only. On an NVIDIA or AMD card with the libtorch backend pack it reads in fp32 with the same text as on the CPU, all of a page's blocks in one call, from a compiled graph of this project's `textbox-torch-v1` release (about 4 MB, no weights) bound to the same author's weights; elsewhere it reads on the CPU. Needs a detector, a line or a block one. The most accurate engine on JMangaBench_Read through Bunko's pipeline: 95.84 (90.6% of the boxes exact) on the `ppocr-manga` detector, 96.73 (92.1%) on `animetext-blocks`, where hayai-nova reads 94.58 (86.2%); see [MODELS.md](rust-port/MODELS.md) §8. Weights CC BY-NC-SA 4.0. |
 
 **Licences.** `hayai-nova`, `paddle-manga`, `ppocr-manga` and the `ppocr-manga`
@@ -1401,8 +1401,9 @@ nothing). With `animetext-blocks` no lines are detected at all: the detector's b
 the page's blocks, the engine reads each, and the lines are the ones the engine finds
 in it: `charspot-small` knows where every character is and builds real lines;
 `nar-small` does not, and each block becomes one line the size of the block. On a
-card, `nar-small` reads all the blocks of a page in one call (in batches of up to 64,
-8 on a card with less than 4 GB of memory); on the CPU each block is a call of its own.
+card, `nar-small` and `charspot-small` read all the blocks of a page in one call (in
+batches of up to 64, 8 on a card with less than 4 GB of memory); on the CPU each block
+is a call of its own.
 
 The 0.5 detectors `ctd` (GPL-3.0), `animetext` (GPL-3.0) and `rtdetr` were
 removed; a row naming one is switched to `ppocr-manga` when the config loads.
@@ -1447,7 +1448,7 @@ key, an out-of-range number or a GPU for a CPU-only stage is refused:
 |---|---|---|
 | `hayai-nova` / `paddle-manga` | `detect` → `engine` → `post` | `detect` (CPU only), `engine` |
 | `ppocr-manga` | `detect` → `layout` | `detect` (CPU only) |
-| `charspot-small` / `nar-small` | `detect` → `engine` → `post` | `detect` (CPU only), `engine` (`charspot-small`: CPU only) |
+| `charspot-small` / `nar-small` | `detect` → `engine` → `post` | `detect` (CPU only), `engine` |
 
 Some placements worth knowing:
 
@@ -1530,7 +1531,7 @@ the result.
   [Precision modes](#precision-modes)); the fastest wins, and two within 5%
   count as a tie that goes to the more accurate format. A format with no
   compiled package for the card is skipped.
-- For a `nar-small` row whose engine stage went to a card without being
+- For a `nar-small` or `charspot-small` row whose engine stage went to a card without being
   pinned there (`stage_device.engine` unset or `auto`), it runs one trial with
   that stage on the card and one with it on the CPU, and keeps the faster
   (a tie within 5% stays on the card). The text is the same on both; on a
