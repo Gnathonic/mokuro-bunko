@@ -32,9 +32,9 @@ compare-reads`` pairs any two (``gate.py``). Any package whose constants live
 inside it is refused before it is loaded (``weights_inside``), and
 ``python -m torch_export refuse-embedded DIR`` checks a whole build or staging tree.
 
-charspot-small (roles ``dense`` and ``tail``) takes the same command with ``--expected``
-the JSON lines ``tools/textbox_export/charspot_reference.py`` writes (the authors' ONNX
-model on the CPU) and ``--batch`` the canvas batch (default 32, at most 64): both packages
+charspot-small (roles ``dense`` and ``tail``) takes the same command without ``--reads``,
+with ``--expected`` the JSON lines ``tools/textbox_export/charspot_reference.py`` writes
+(the authors' ONNX model on the CPU) and ``--batch`` the canvas batch (default 32, at most 64): both packages
 bound to the authors' ``model.safetensors``, the authors' ``core.detect`` / ``core.chain``
 between them (``charspot_read``), and every crop must be ``same_chars`` (same text and
 order, boxes within 0.5 px). Exit 0 only when every crop is.

@@ -233,7 +233,7 @@ mokuro-bunko library disconnect     # leaves every file in the folder where it i
 
 ## OCR
 
-The recognizers hayai-nova and paddle-manga run on [libtorch](https://pytorch.org/) — the same torch 0.5.2 used, without Python — and so does nar-small on an NVIDIA or AMD card; everything else runs on [ONNX Runtime](https://onnxruntime.ai/) on the CPU. The default engine, the default detector and the first three engines below are Apache-2.0:
+The recognizers hayai-nova and paddle-manga run on [libtorch](https://pytorch.org/) — the same torch 0.5.2 used, without Python — and so do nar-small and charspot-small on an NVIDIA or AMD card; everything else runs on [ONNX Runtime](https://onnxruntime.ai/) on the CPU. The default engine, the default detector and the first three engines below are Apache-2.0:
 
 | Engine | What it is |
 |---|---|
