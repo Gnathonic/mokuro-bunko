@@ -6,9 +6,10 @@
 #                                                                       asset's sha256 and size from
 #                                                                       `gh release view --json assets`
 #
-# <stage-dir> is what `python -m torch_export textbox-manifest -e animetext-blocks --tag
-# detector-torch-v1 --licence AGPL-3.0 --flat <stage-dir>` writes (the packages under their flat
-# release names and detector-torch-v1.json), plus NOTICE.md and the AGPL-3.0 text as LICENSE.
+# <stage-dir> is what `python -m torch_export detector-stage` writes (detector_gate.py): the packages
+# of the targets that may ship under their flat release names, detector-torch-v1.json (what
+# `textbox-manifest -e animetext-blocks --tag detector-torch-v1 --licence AGPL-3.0 --flat` writes),
+# NOTICE.md and the AGPL-3.0 text as LICENSE.
 #
 # In order, it refuses:
 #   1. any package with its weights inside (`python -m torch_export refuse-embedded`, run first);

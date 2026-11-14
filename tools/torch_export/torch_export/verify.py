@@ -33,7 +33,10 @@ constants bound from the pinned ONNX file by ``bunko.weights``) and through ONNX
 on the CPU, one page a call, turns both outputs into blocks with one port of the host's
 ``blocks_from_output`` and compares them (``verify_detector``). Exit 0 only when every
 page has the same block set, every matched corner is within 0.01 page px and no crop
-edge (``crop_edges``) moved.
+edge (``crop_edges``) moved. ``--bench-batches 1,4,8`` then times the package at each
+batch size on the gate's largest canvas (``detector_bench``, ``pages_per_s``); the gate
+loop itself reports ``package_ms_per_page`` (one page a call, the copy back and the first
+run at each canvas shape included).
 """
 
 from __future__ import annotations
@@ -426,7 +429,47 @@ def page_files(pages: Path) -> list[Path]:
     return files
 
 
-def _verify_detector(out: Path, target: str, pages: Path, onnx_file: Path, device: str, engine: str = "animetext-blocks"):
+def batches_arg(text: str) -> tuple[int, ...]:
+    """``--bench-batches``: comma-separated batch sizes, each 1 or more."""
+    b = tuple(int(x) for x in text.split(",") if x.strip())
+    if not b or min(b) < 1:
+        raise ValueError(f"batch sizes {text!r}: each must be 1 or more")
+    return b
+
+
+def detector_bench(m, dev, x, batches, runs: int = 20, warmup: int = 3) -> dict[str, float]:
+    """Pages a second of the package ``m`` at each batch size: ``x`` (one ``[3, H, W]``
+    canvas) repeated ``b`` times, ``warmup`` untimed runs, then ``runs`` timed ones, each
+    synchronised. Refuses a batch over the package's ``bunko.max_batch``."""
+    import torch
+
+    from .detector import MAX_BATCH
+
+    over = [b for b in batches if b > MAX_BATCH]
+    if over:
+        raise SystemExit(f"batch {over}: over the package's bunko.max_batch ({MAX_BATCH})")
+
+    def sync():
+        if dev.type == "cuda":
+            torch.cuda.synchronize(dev)
+
+    res = {}
+    with torch.no_grad():
+        for b in batches:
+            xb = torch.from_numpy(x[None]).to(dev).expand(b, *x.shape).contiguous()
+            for _ in range(warmup):
+                m(xb)
+            sync()
+            t0 = time.perf_counter()
+            for _ in range(runs):
+                m(xb)
+            sync()
+            res[str(b)] = round(b * runs / (time.perf_counter() - t0), 2)
+    return res
+
+
+def _verify_detector(out: Path, target: str, pages: Path, onnx_file: Path, device: str, engine: str = "animetext-blocks",
+                     bench_batches: tuple[int, ...] = ()):
     """``verify_detector``'s work; also returns what it holds loaded (package, weights)."""
     import numpy as np
     import onnxruntime as ort
@@ -467,6 +510,7 @@ def _verify_detector(out: Path, target: str, pages: Path, onnx_file: Path, devic
     sess = ort.InferenceSession(str(onnx_file), so, providers=["CPUExecutionProvider"])
     res = {"pages": 0, "identical_sets": 0, "worst_corner": 0.0, "edges_moved": 0, "blocks": 0, "differ": []}
     t0 = time.time()
+    package_s, timed, largest = 0.0, 0, None
     with torch.no_grad():
         for p in files:
             with Image.open(p) as im:
@@ -478,8 +522,12 @@ def _verify_detector(out: Path, target: str, pages: Path, onnx_file: Path, devic
                 continue
             x, scale, page = c
             ref = sess.run(["output0"], {"images": x[None]})[0][0]
+            t1 = time.perf_counter()
             got = m(torch.from_numpy(x[None]).to(dev))
             got = (got[0] if isinstance(got, (tuple, list)) else got)[0].float().cpu().numpy()
+            package_s, timed = package_s + time.perf_counter() - t1, timed + 1
+            if largest is None or x.shape[1] * x.shape[2] > largest.shape[1] * largest.shape[2]:
+                largest = x
             rb, gb = blocks_from_output(ref, scale, page), blocks_from_output(got, scale, page)
             same, worst, moved = compare_blocks(rb, gb)
             res["blocks"] += len(rb)
@@ -491,6 +539,10 @@ def _verify_detector(out: Path, target: str, pages: Path, onnx_file: Path, devic
                 name = str(p.relative_to(pages)) if Path(pages).is_dir() else str(p)
                 res["differ"].append({"page": name, "onnx": rb, "package": gb})
     print(f"{res['pages']} pages in {time.time() - t0:.1f}s, one a call", file=sys.stderr)
+    res["package_ms_per_page"] = round(package_s * 1e3 / timed, 2) if timed else None
+    if bench_batches and largest is not None:
+        res["bench_canvas"] = list(largest.shape[1:])
+        res["pages_per_s"] = detector_bench(m, dev, largest, bench_batches)
     return res, [m, weights]
 
 
@@ -555,6 +607,8 @@ def main(argv=None) -> int:
     ap.add_argument("--n", type=int, default=None, help="text-box engines: only the first N crops by name")
     ap.add_argument("--pages", type=Path, help="detector: a directory of page images, or a list file of them")
     ap.add_argument("--onnx", type=Path, help="detector: the pinned ONNX file the package binds")
+    ap.add_argument("--bench-batches", type=batches_arg, default=(),
+                    help="detector: after the gate, pages/s at these batch sizes (e.g. 1,4,8) on the largest canvas")
     a = ap.parse_args(argv)
     from .__main__ import _imports
 
@@ -567,7 +621,7 @@ def main(argv=None) -> int:
             raise SystemExit(f"{a.engine}: --pages and --onnx are required")
         if a.precision != "fp32":
             raise SystemExit(f"{a.engine}: fp32 only")
-        res, held = _verify_detector(a.out, a.target, a.pages, a.onnx, a.device, a.engine)
+        res, held = _verify_detector(a.out, a.target, a.pages, a.onnx, a.device, a.engine, a.bench_batches)
         print(json.dumps({**res, "differ": res["differ"][:3], "differ_pages": [d["page"] for d in res["differ"]]}), flush=True)
         return _finish(0 if detector_passes(res) else 1, held)
 
