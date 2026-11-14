@@ -520,6 +520,202 @@ pub fn charspot_batch_cap(max_batch: Option<u32>) -> usize {
     }
 }
 
+// The rest of this section is Bunko's own: the libtorch route's host side around the
+// ported decode (dense and tail inputs, and reading a tail part's outputs).
+
+/// The characters the tail graph takes per row at most (its `N`): 256 cells hold at most
+/// 1,024 stride-8 centres, so a prepared crop never has more. A crop that did would be
+/// read on the CPU route.
+pub const CHARSPOT_MAX_CHARS: usize = 1024;
+/// The dense graph's smallest canvas side in pixels (2 cells): a batch canvas with a
+/// 1-cell side is widened to it, which leaves the crop's own maps as they are (the graph
+/// masks each crop to its `hw`).
+pub const CHARSPOT_MIN_CANVAS: usize = 2 * CHARSPOT_CELL;
+
+/// The `(height, width)` in pixels of the canvas [`charspot_canvas`] draws for a
+/// `height x width` crop, without drawing it.
+pub fn charspot_canvas_hw(height: usize, width: usize) -> (usize, usize) {
+    let (_, rows, cols) = fit_grid(height, width, CHARSPOT_BUDGET);
+    (rows * CHARSPOT_CELL, cols * CHARSPOT_CELL)
+}
+
+/// One dense call's inputs: `img` `[len, 3, height, width]` (the canvases' bytes as
+/// they are, 0..255, red plane first, zero-padded right and below) and `hw` `[len, 2]`
+/// (each canvas's own height and width in pixels).
+#[derive(Debug, Clone, PartialEq)]
+pub struct DenseInput {
+    pub len: usize,
+    pub height: usize,
+    pub width: usize,
+    pub img: Vec<f32>,
+    pub hw: Vec<i64>,
+}
+
+/// The canvases of one batch ([`canvas_batches`]) on its `canvas` `(height, width)`,
+/// each side at least [`CHARSPOT_MIN_CANVAS`] and at least every canvas's own.
+pub fn charspot_dense_input(canvases: &[&Rgb], canvas: (usize, usize)) -> DenseInput {
+    let height = canvases
+        .iter()
+        .map(|c| c.height)
+        .fold(canvas.0.max(CHARSPOT_MIN_CANVAS), usize::max);
+    let width = canvases
+        .iter()
+        .map(|c| c.width)
+        .fold(canvas.1.max(CHARSPOT_MIN_CANVAS), usize::max);
+    let plane = height * width;
+    let mut img = vec![0.0f32; canvases.len() * 3 * plane];
+    let mut hw = Vec::with_capacity(2 * canvases.len());
+    for (r, c) in canvases.iter().enumerate() {
+        hw.extend([c.height as i64, c.width as i64]);
+        for ch in 0..3 {
+            let base = (r * 3 + ch) * plane;
+            for y in 0..c.height {
+                let src = &c.data[y * c.width * 3..(y + 1) * c.width * 3];
+                let dst = &mut img[base + y * width..base + y * width + c.width];
+                for (d, px) in dst.iter_mut().zip(src.as_chunks::<3>().0) {
+                    *d = f32::from(px[ch]);
+                }
+            }
+        }
+    }
+    DenseInput {
+        len: canvases.len(),
+        height,
+        width,
+        img,
+        hw,
+    }
+}
+
+/// Row `row` of a dense call's maps copied to the host as `[len, 6, height, width]`
+/// (heat, the 4 box channels, ruby, in that order).
+pub fn charspot_batch_maps(maps: &[f32], row: usize, height: usize, width: usize) -> DenseMaps<'_> {
+    let plane = height * width;
+    let m = &maps[row * 6 * plane..(row + 1) * 6 * plane];
+    DenseMaps {
+        heat: &m[..plane],
+        boxes: &m[plane..5 * plane],
+        ruby: &m[5 * plane..],
+        height,
+        width,
+    }
+}
+
+/// A batch's tail calls from its crops' kept counts: the parts ([`tail_parts`] with the
+/// authors' budget and row cap) over the crops the tail graph takes, and the crops with
+/// more than [`CHARSPOT_MAX_CHARS`] characters, which it does not (they read on the CPU
+/// route). Crops with no characters are in neither.
+pub fn charspot_tail_plan(counts: &[usize]) -> (Vec<Vec<usize>>, Vec<usize>) {
+    let over: Vec<usize> = (0..counts.len())
+        .filter(|&i| counts[i] > CHARSPOT_MAX_CHARS)
+        .collect();
+    let fits: Vec<usize> = counts
+        .iter()
+        .map(|&n| if n > CHARSPOT_MAX_CHARS { 0 } else { n })
+        .collect();
+    (
+        tail_parts(&fits, CHARSPOT_TAIL_BUDGET, CHARSPOT_ROWS_PER_TAIL),
+        over,
+    )
+}
+
+/// One tail call's inputs for a part's rows: `boxes` and `geo` `[rows, width, 4]` and
+/// `mask` `[rows, width]`, `width` [`charspot_tail_width`] of the longest row; a row's
+/// characters first, then padding (boxes 0, geo 1, mask false, as the authors pad).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TailInput {
+    pub rows: usize,
+    pub width: usize,
+    pub boxes: Vec<f32>,
+    pub geo: Vec<f32>,
+    pub mask: Vec<bool>,
+}
+
+pub fn charspot_tail_input(part: &[&Detected]) -> TailInput {
+    let width = charspot_tail_width(part.iter().map(|d| d.boxes.len()).max().unwrap_or(0));
+    let mut t = TailInput {
+        rows: part.len(),
+        width,
+        boxes: vec![0.0; part.len() * width * 4],
+        geo: vec![1.0; part.len() * width * 4],
+        mask: vec![false; part.len() * width],
+    };
+    for (p, d) in part.iter().enumerate() {
+        for (k, (b, g)) in d.boxes.iter().zip(&d.geo).enumerate() {
+            let at = (p * width + k) * 4;
+            t.boxes[at..at + 4].copy_from_slice(b);
+            t.geo[at..at + 4].copy_from_slice(g);
+            t.mask[p * width + k] = true;
+        }
+    }
+    t
+}
+
+/// A crop's characters as the cdylib answers them: `(text, [(char, box, score)])`.
+pub type CharspotChars = (String, Vec<(String, [f32; 4], f32)>);
+
+/// One crop's characters in reading order `seq`: class `ids[k]` from `classes` (an id
+/// outside the table writes `""`, as the ONNX route), box `det.boxes[k]` times `back`
+/// (`x`, `y`: canvas pixels back to crop pixels), score `det.scores[k]`. The text is the
+/// characters joined, so it always equals what the characters say.
+pub fn charspot_chars(
+    seq: &[usize],
+    ids: &[i64],
+    det: &Detected,
+    classes: &[String],
+    back: (f32, f32),
+) -> CharspotChars {
+    let (fx, fy) = back;
+    let chars: Vec<(String, [f32; 4], f32)> = seq
+        .iter()
+        .map(|&k| {
+            let c = usize::try_from(ids[k])
+                .ok()
+                .and_then(|id| classes.get(id))
+                .cloned()
+                .unwrap_or_default();
+            let b = det.boxes[k];
+            (
+                c,
+                [b[0] * fx, b[1] * fy, b[2] * fx, b[3] * fy],
+                det.scores[k],
+            )
+        })
+        .collect();
+    (chars.iter().map(|(c, ..)| c.as_str()).collect(), chars)
+}
+
+/// A tail call's outputs (`ids`, `start`, `end` `[rows, width]`, `pair`
+/// `[rows, width, width]`, row-major, as copied to the host) read back per row of the
+/// part: each row's own `n` characters only (its `n x n` corner of `pair`), chained
+/// ([`charspot_chain`]) and named ([`charspot_chars`]) with its crop's `back` factors.
+#[allow(clippy::too_many_arguments)]
+pub fn charspot_part_chars(
+    part: &[&Detected],
+    width: usize,
+    ids: &[i64],
+    pair: &[f32],
+    start: &[f32],
+    end: &[f32],
+    classes: &[String],
+    backs: &[(f32, f32)],
+) -> Vec<CharspotChars> {
+    part.iter()
+        .zip(backs)
+        .enumerate()
+        .map(|(p, (det, &back))| {
+            let n = det.boxes.len();
+            let row = p * width;
+            let sq = &pair[p * width * width..(p + 1) * width * width];
+            let own: Vec<f32> = (0..n)
+                .flat_map(|a| sq[a * width..a * width + n].iter().copied())
+                .collect();
+            let seq = charspot_chain(&own, &start[row..row + n], &end[row..row + n]);
+            charspot_chars(&seq, &ids[row..row + n], det, classes, back)
+        })
+        .collect()
+}
+
 // --- nar-small ---------------------------------------------------------------
 
 /// nar-small's inputs for a crop: the patches `[324, 588]` (each a 14 x 14 patch, red
@@ -1000,5 +1196,147 @@ mod tests {
         assert_eq!(charspot_batch_cap(Some(8)), 8);
         assert_eq!(charspot_batch_cap(Some(128)), 64);
         assert_eq!(charspot_batch_cap(Some(0)), 1);
+    }
+
+    #[test]
+    fn characters_come_back_in_chain_order_in_crop_pixels() {
+        let det = Detected {
+            boxes: vec![[0.0, 0.0, 8.0, 8.0], [8.0, 0.0, 16.0, 8.0]],
+            scores: vec![0.9, 0.8],
+            geo: vec![[0.0; 4]; 2],
+        };
+        let classes: Vec<String> = ["x", "y", "z"].map(String::from).to_vec();
+        let (text, chars) = charspot_chars(&[1, 0], &[2, 0], &det, &classes, (0.5, 2.0));
+        assert_eq!(text, "xz");
+        assert_eq!(chars[0], ("x".to_string(), [4.0, 0.0, 8.0, 16.0], 0.8));
+        // an id outside the class table writes nothing
+        let (text, chars) = charspot_chars(&[0, 1], &[7000, 1], &det, &classes, (1.0, 1.0));
+        assert_eq!(text, "y");
+        assert_eq!(chars[0].0, "");
+    }
+
+    #[test]
+    fn a_canvas_size_without_drawing_it() {
+        for (h, w) in [
+            (1, 1),
+            (10, 300),
+            (300, 10),
+            (64, 64),
+            (17, 5),
+            (1000, 37),
+            (37, 1000),
+            (4000, 4000),
+        ] {
+            let crop = Rgb {
+                width: w,
+                height: h,
+                data: vec![128; w * h * 3],
+            };
+            let (c, _) = charspot_canvas(&crop);
+            assert_eq!(charspot_canvas_hw(h, w), (c.height, c.width), "{h} x {w}");
+        }
+    }
+
+    #[test]
+    fn a_dense_batch_is_zero_padded_and_at_least_two_cells_a_side() {
+        let px = |w: usize, h: usize, seed: usize| Rgb {
+            width: w,
+            height: h,
+            data: (0..w * h * 3)
+                .map(|i| ((i + seed) % 251 + 1) as u8)
+                .collect(),
+        };
+        let (a, b) = (px(16, 16, 0), px(32, 16, 7));
+        let d = charspot_dense_input(&[&a, &b], (16, 32));
+        // the graph's smallest side is 2 cells: 16 px becomes 32
+        assert_eq!((d.len, d.height, d.width), (2, 32, 32));
+        assert_eq!(d.hw, vec![16, 16, 16, 32]);
+        assert_eq!(d.img.len(), 2 * 3 * 32 * 32);
+        let at = |r: usize, c: usize, y: usize, x: usize| d.img[((r * 3 + c) * 32 + y) * 32 + x];
+        // planar, the bytes as they are
+        assert_eq!(at(0, 0, 0, 0), f32::from(a.data[0]));
+        assert_eq!(at(0, 2, 3, 5), f32::from(a.data[(3 * 16 + 5) * 3 + 2]));
+        assert_eq!(at(1, 1, 15, 31), f32::from(b.data[(15 * 32 + 31) * 3 + 1]));
+        // padding is zero
+        assert_eq!(at(0, 0, 0, 16), 0.0);
+        assert_eq!(at(0, 1, 16, 0), 0.0);
+        assert_eq!(at(1, 2, 16, 31), 0.0);
+    }
+
+    #[test]
+    fn a_rows_maps_are_its_own_slice_of_the_batch() {
+        // 2 rows, heat + 4 box + ruby channels, 1 x 2 cells
+        let v: Vec<f32> = (0..2 * 6 * 2).map(|i| i as f32).collect();
+        let m = charspot_batch_maps(&v, 1, 1, 2);
+        assert_eq!((m.height, m.width), (1, 2));
+        assert_eq!(m.heat, &[12.0, 13.0]);
+        assert_eq!(m.boxes, &[14.0, 15.0, 16.0, 17.0, 18.0, 19.0, 20.0, 21.0]);
+        assert_eq!(m.ruby, &[22.0, 23.0]);
+    }
+
+    fn row(n: usize) -> Detected {
+        Detected {
+            boxes: (0..n)
+                .map(|k| [8.0 * k as f32, 0.0, 8.0 * k as f32 + 8.0, 8.0])
+                .collect(),
+            scores: (0..n).map(|k| 0.9 - 0.1 * k as f32).collect(),
+            geo: vec![[0.5; 4]; n],
+        }
+    }
+
+    #[test]
+    fn tail_input_pads_with_geo_one_and_mask_false() {
+        let one = row(1);
+        let t = charspot_tail_input(&[&one]);
+        assert_eq!((t.rows, t.width), (1, 2));
+        assert_eq!(t.boxes, [0.0, 0.0, 8.0, 8.0, 0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(t.geo, [0.5, 0.5, 0.5, 0.5, 1.0, 1.0, 1.0, 1.0]);
+        assert_eq!(t.mask, [true, false]);
+        let three = row(3);
+        let t = charspot_tail_input(&[&three, &one]);
+        assert_eq!((t.rows, t.width), (2, 3));
+        assert_eq!(t.boxes.len(), 2 * 3 * 4);
+        assert_eq!(&t.boxes[12..16], &[0.0, 0.0, 8.0, 8.0]);
+        assert_eq!(t.mask, [true, true, true, true, false, false]);
+    }
+
+    #[test]
+    fn a_crop_over_the_tail_graphs_characters_reads_elsewhere() {
+        // 1024 characters still fit (alone: 2 * 1024² > 2^18); 1025 do not
+        let (parts, over) = charspot_tail_plan(&[3, 1025, 0, 1024]);
+        assert_eq!(parts, vec![vec![3], vec![0]]);
+        assert_eq!(over, vec![1]);
+        let (parts, over) = charspot_tail_plan(&[0, 0]);
+        assert!(parts.is_empty() && over.is_empty());
+    }
+
+    #[test]
+    fn each_row_of_a_part_chains_its_own_characters() {
+        // a part of two rows, 3 characters wide: row a has 3, row b has 1 (padded)
+        let (a, b) = (row(3), row(1));
+        let classes: Vec<String> = ["x", "y", "z"].map(String::from).to_vec();
+        let nan = f32::NAN;
+        let ids = [2, 1, 0, 1, 99, 99];
+        #[rustfmt::skip]
+        let pair = [
+            0.0, 0.1, 0.5,  0.0, 0.0, 0.0,  0.0, 0.6, 0.0, // row a
+            0.0, nan, nan,  nan, nan, nan,  nan, nan, nan, // row b: only [0][0] is its own
+        ];
+        let start = [0.9, 0.1, 0.2, 0.3, nan, nan];
+        let end = [0.0, 0.0, 0.0, 0.0, nan, nan];
+        let r = charspot_part_chars(
+            &[&a, &b],
+            3,
+            &ids,
+            &pair,
+            &start,
+            &end,
+            &classes,
+            &[(1.0, 1.0), (2.0, 2.0)],
+        );
+        assert_eq!(r.len(), 2);
+        assert_eq!(r[0].0, "zxy");
+        assert_eq!(r[1].0, "y");
+        assert_eq!(r[1].1, vec![("y".to_string(), [0.0, 0.0, 16.0, 16.0], 0.9)]);
     }
 }

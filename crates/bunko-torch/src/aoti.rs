@@ -317,6 +317,12 @@ pub fn host_i64(t: &Tensor) -> Result<Vec<i64>, TorchError> {
     Vec::<i64>::try_from(&t.to_device(TDev::Cpu)).map_err(|e| TorchError::Run(e.to_string()))
 }
 
+/// A tensor's values on the host as f32, row-major.
+pub fn host_f32(t: &Tensor) -> Result<Vec<f32>, TorchError> {
+    let t = t.to_device(TDev::Cpu).to_kind(Kind::Float).contiguous();
+    Vec::<f32>::try_from(&t.reshape([-1])).map_err(|e| TorchError::Run(e.to_string()))
+}
+
 /// Sets the OpenMP/ATen thread count for the calling thread's next parallel regions
 /// (AOTInductor CPU kernels use `#pragma omp parallel`, whose width is a per-thread
 /// OpenMP setting). 0 leaves libtorch's default.
