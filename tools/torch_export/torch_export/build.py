@@ -16,6 +16,11 @@ are the same bytes for every target, GPU or CPU (the build checks it).
 (oneDNN/MKL-prepacked weights folded into the graph) with its weights inside, as
 ``TORCH_EXPORT_WIN_EMBED=1`` does for cross-built Windows GPU targets.
 
+Engines that bind the authors' own weights file (``textbox.PINS``: nar-small) write no
+weights files: ``bunko.weights`` maps each constant to its key in the authors' pinned
+file, which must hold every constant with the same shape and dtype, and both embed
+switches are refused.
+
 Weight groups: ``vision`` (the vision graph's weights) and ``decoder`` (prefill+step,
 plus the host loop's tables), each < 1.9 GB (GitHub's asset cap is 2 GiB).
 """
@@ -170,9 +175,12 @@ def build(engine: str, precision: str, t: Target, out: Path, io: int = IO_VERSIO
     import torch
 
     from . import graphs as G
+    from . import textbox as T
 
     if precision not in t.precisions:
         raise SystemExit(f"{t.name} does not build {precision} (has {t.precisions})")
+    if engine in T.PINS:
+        T.refuse_embedding(os.environ)  # before anything is built or written
     want = f"2.13.0+{t.torch_variant}"
     if t.gpu and torch.__version__ != want:
         raise SystemExit(f"{t.name} needs torch {want}, this is {torch.__version__}")
@@ -193,9 +201,12 @@ def build(engine: str, precision: str, t: Target, out: Path, io: int = IO_VERSIO
         gs = build_fn(precision, torch.device("cuda"), io, **kw)
         with torch.no_grad():
             eps = {g.role: torch.export.export(g.module, g.args, dynamic_shapes=g.dynamic_shapes, strict=False) for g in gs.graphs}
-        canon = _canonical(gs.model, gs.extra)
-        maps = {g.role: _weight_map(g, canon, eps[g.role]) for g in gs.graphs}
-        record["weights"] = write_weights(gs.model, maps, gs.host_weights, pdir, gs.extra)
+        if gs.authors_weights:
+            maps = _authors_maps(gs, eps, gs.authors_file)
+        else:
+            canon = _canonical(gs.model, gs.extra)
+            maps = {g.role: _weight_map(g, canon, eps[g.role]) for g in gs.graphs}
+            record["weights"] = write_weights(gs.model, maps, gs.host_weights, pdir, gs.extra)
         record["real_device"] = torch.cuda.get_device_name()
         meta_common = dict(gs.meta)
     elif t.gpu:
@@ -218,9 +229,12 @@ def build(engine: str, precision: str, t: Target, out: Path, io: int = IO_VERSIO
             fake_src = fake_src.to("cuda")
             gs = build_fn(precision, torch.device("cuda"), io, model=fake_src, **{**kw, "precast": False})
             eps = {g.role: torch.export.export(g.module, g.args, dynamic_shapes=g.dynamic_shapes, strict=False) for g in gs.graphs}
-        canon = _canonical(fake_src, gs.extra)
-        maps = {g.role: _weight_map(g, canon, eps[g.role]) for g in gs.graphs}
-        record["weights"] = write_weights(real.model, maps, real.host_weights, pdir, real.extra)
+        if gs.authors_weights:
+            maps = _authors_maps(gs, eps, real.authors_file)
+        else:
+            canon = _canonical(fake_src, gs.extra)
+            maps = {g.role: _weight_map(g, canon, eps[g.role]) for g in gs.graphs}
+            record["weights"] = write_weights(real.model, maps, real.host_weights, pdir, real.extra)
         meta_common = {**real.meta}
         win_cross = t.os == "windows" and sys.platform != "win32" and _win_embed()
         if win_cross:
@@ -245,7 +259,9 @@ def build(engine: str, precision: str, t: Target, out: Path, io: int = IO_VERSIO
         gs = build_fn(precision, torch.device("cpu"), io, **kw)
         with torch.no_grad():
             eps = {g.role: torch.export.export(g.module, g.args, dynamic_shapes=g.dynamic_shapes, strict=False) for g in gs.graphs}
-        if _cpu_embed():
+        if gs.authors_weights:
+            maps = _authors_maps(gs, eps, gs.authors_file)
+        elif _cpu_embed():
             maps = {g.role: {} for g in gs.graphs}
         else:
             # the same weights files as every GPU target of this engine x precision
@@ -254,6 +270,14 @@ def build(engine: str, precision: str, t: Target, out: Path, io: int = IO_VERSIO
             record["weights"] = write_weights(gs.model, maps, gs.host_weights, pdir, gs.extra)
         record["cpu_embed"] = _cpu_embed()
         meta_common = dict(gs.meta)
+
+    if gs.authors_weights:
+        pin = gs.authors_weights
+        meta_common.update(T.textbox_meta(pin, gs.max_batch))  # bunko.io = textbox-1 overrides str(io)
+        record["io"] = meta_common["io"]
+        record["fused"] = None  # the authors' graph as written: no hayai/paddle GEMM fusion
+        record["authors_weights"] = {"repo": pin.repo, "revision": pin.revision, "file": pin.file,
+                                     "sha256": pin.sha256, "size": pin.size}
 
     if t.os == "windows" and sys.platform == "win32":
         from . import winpatch
@@ -326,6 +350,38 @@ def build(engine: str, precision: str, t: Target, out: Path, io: int = IO_VERSIO
     record["total_s"] = round(time.time() - t0, 1)
     (tdir / "build.json").write_text(json.dumps(record, indent=1, default=str) + "\n")
     return record
+
+
+def _authors_maps(gs, eps: dict, path: Path | None) -> dict[str, dict[str, str]]:
+    """role -> {constant FQN: key of the authors' weights file}; refuses a constant the
+    pinned file does not hold with the same shape and dtype (so no weight stays inside)."""
+    import torch
+    from safetensors import safe_open
+
+    from .textbox import authors_weight_map, check_pin, refuse_embedding
+
+    refuse_embedding(os.environ)
+    pin = gs.authors_weights
+    if path is None:
+        raise SystemExit(f"{gs.engine}: the builder did not say where the authors' {pin.file} is")
+    check_pin(path, pin)
+    with safe_open(str(path), framework="pt") as f:
+        stored = {k: (tuple(f.get_slice(k).get_shape()), f.get_slice(k).get_dtype()) for k in f.keys()}
+    maps = {}
+    for g in gs.graphs:
+        if g.role not in pin.prefix:
+            raise SystemExit(f"{gs.engine}/{g.role}: no FQN prefix for this role in the pin")
+        prefix, ep = pin.prefix[g.role], eps[g.role]
+        consts = {}
+        for spec in ep.graph_signature.input_specs:
+            if spec.target is None or spec.kind.name not in ("PARAMETER", "BUFFER", "CONSTANT_TENSOR"):
+                continue
+            consts[spec.target] = ep.state_dict.get(spec.target, ep.constants.get(spec.target))
+        wanted = {fqn[len(prefix):]: (tuple(t.shape), _ST_DTYPE[str(t.dtype).removeprefix("torch.")])
+                  for fqn, t in consts.items() if fqn.startswith(prefix) and isinstance(t, torch.Tensor)}
+        maps[g.role] = authors_weight_map(list(consts), prefix, stored, wanted)
+        log(f"  {g.role}: {len(maps[g.role])} constants bound from the authors' {pin.file} ({pin.repo}@{pin.revision[:8]})")
+    return maps
 
 
 def _refake_constants(eps: dict) -> None:

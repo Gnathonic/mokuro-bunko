@@ -100,7 +100,7 @@ def main(argv=None) -> int:
     weights = load_weights(pdir, dev) if any(pdir.glob("weights-*.safetensors")) else {}
     t0 = time.time()
     pk = {}
-    for role in G.ROLES:
+    for role in G.ROLES[a.engine]:
         pk[role], meta = load_pkg(tdir / f"{role}.pt2", weights, dev.index if dev.type == "cuda" else -1)
     io = int(meta["bunko.io"])
     load_s = time.time() - t0
