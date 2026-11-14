@@ -481,6 +481,20 @@ fn animetext_on_a_gpu_detects_as_the_cpu_does() {
     );
     let cpu = p.open(&row(Some("cpu"))).unwrap();
     assert_eq!(export(&*cpu).as_deref(), Some("textbox-graphs-v1"));
+    // The plan follows where the detector loaded: a GPU detect stage of two workers, and
+    // the CPU pool gives up only its host side.
+    let (gr, cr) = (gpu.ready(), cpu.ready());
+    assert_eq!(gr.stage_device["detect"], "gpu:0", "{gr:?}");
+    assert_eq!(
+        gr.stage_workers["detect"],
+        bunko_engines::plan::DETECT_GPU_WORKERS
+    );
+    assert_eq!(cr.stage_device["detect"], "cpu", "{cr:?}");
+    assert!(
+        gr.stage_workers["engine"] >= cr.stage_workers["engine"],
+        "{gr:?} {cr:?}"
+    );
+    eprintln!("GPU detect: {}\nCPU detect: {}", gr.pipeline, cr.pipeline);
 
     let cbz = tmp.path().join("Vol.cbz");
     write_cbz(&cbz, &real_pages(&src, 4));

@@ -1520,6 +1520,34 @@ impl EnginePipeline {
         Ok((loaded, source, None))
     }
 
+    /// Where the detect stage of a row reading with `detector` would run beside an engine
+    /// on `engine_device` ([`pick_detect_device`] over this host's
+    /// [`detect_candidates`](Self::detect_candidates)), and why not on a GPU when it
+    /// could have been. The CPU for a line detector, and in a build without
+    /// `gpl-models` (no block detector).
+    #[cfg(any(feature = "nc-models", feature = "gpl-models"))]
+    fn detect_pick(
+        &self,
+        spec: &RowSpec,
+        detector: &str,
+        engine_device: &str,
+    ) -> (String, Option<String>) {
+        #[cfg(feature = "gpl-models")]
+        if models::block_detector(detector) {
+            return pick_detect_device(
+                spec.pools
+                    .stage_device
+                    .get(STAGE_DETECT)
+                    .map(String::as_str),
+                engine_device,
+                self.config.backend == Backend::Cpu,
+                &self.detect_candidates(detector),
+            );
+        }
+        let _ = (spec, detector, engine_device);
+        (Placement::cpu().device, None)
+    }
+
     /// The GPUs block detector `detector` might run on: the pack's GPUs that
     /// `ocr.backend` allows, with their memory and whether the detector runs there (the
     /// pack has `bt_detect_blocks` and an fp32 package for the device is obtainable).
@@ -2078,12 +2106,21 @@ impl EnginePipeline {
             }
             if recognizer.is_none() {
                 // The ONNX pool on the CPU: the session's threads follow the engine
-                // stage's planned width.
+                // stage's planned width, which leaves more cores to the pool when the
+                // block detector is to run on a GPU.
                 let host = host_of(&placement);
-                let workers = plan::plan(engine, road, &placement.device, &spec.pools, &host)
-                    .iter()
-                    .find(|s| s.key == plan::STAGE_ENGINE)
-                    .map_or(1, |s| s.workers);
+                let (detect_at, _) = self.detect_pick(spec, detector, &placement.device);
+                let workers = plan::plan(
+                    engine,
+                    road,
+                    &placement.device,
+                    &detect_at,
+                    &spec.pools,
+                    &host,
+                )
+                .iter()
+                .find(|s| s.key == plan::STAGE_ENGINE)
+                .map_or(1, |s| s.workers);
                 recognizer = Some(self.textbox_recognizer(engine, workers)?);
                 // nar-small's CPU graph is ours; charspot-small runs its authors' own.
                 textbox_release =
@@ -2130,11 +2167,19 @@ impl EnginePipeline {
         }
 
         let host = host_of(&placement);
-        let stages = plan::plan(engine, road, &placement.device, &spec.pools, &host);
-        let detect_workers = stages
-            .iter()
-            .find(|s| s.key == STAGE_DETECT)
-            .map_or(1, |s| s.workers) as usize;
+        let detect_width = |stages: &[plan::StagePlan]| {
+            stages
+                .iter()
+                .find(|s| s.key == STAGE_DETECT)
+                .map_or(1, |s| s.workers) as usize
+        };
+        // The plan with the detect stage on the CPU: the plan unless the block detector
+        // loads on a GPU, and its detect width the CPU detector's copies either way (a
+        // GPU detector that cannot load falls back to them).
+        let cpu_stages = plan::plan(engine, road, &placement.device, "cpu", &spec.pools, &host);
+        // Where the detect stage runs: the GPU the block detector loaded on, else the CPU.
+        #[allow(unused_mut)]
+        let mut detect_device = Placement::cpu().device;
         #[allow(unused_mut)]
         let mut blocks: Option<Arc<dyn bunko_ocr::blocks::BlockDetector>> = None;
         #[allow(unused_mut)]
@@ -2146,15 +2191,7 @@ impl EnginePipeline {
         if by_blocks {
             // The detect stage follows the engine's GPU when the detector runs there.
             let backend_cpu = self.config.backend == Backend::Cpu;
-            let (device, why) = pick_detect_device(
-                spec.pools
-                    .stage_device
-                    .get(STAGE_DETECT)
-                    .map(String::as_str),
-                &placement.device,
-                backend_cpu,
-                &self.detect_candidates(detector),
-            );
+            let (device, why) = self.detect_pick(spec, detector, &placement.device);
             match why {
                 // Asked for by the configuration: no news.
                 Some(why) if backend_cpu => info!("{detector}: detecting on the CPU: {why}"),
@@ -2167,9 +2204,26 @@ impl EnginePipeline {
                 runtime::place(Some(&device), &devices).0
             };
             let (loaded, source, release) =
-                self.block_detector(detector, detect_workers, &detect_placement)?;
+                self.block_detector(detector, detect_width(&cpu_stages), &detect_placement)?;
+            // A release only when it loaded on the GPU; a failed load detects on the CPU.
+            if release.is_some() {
+                detect_device = detect_placement.device.clone();
+            }
             (blocks, block_source, detector_release) = (Some(loaded), source, release);
         }
+        let stages = if detect_device == Placement::cpu().device {
+            cpu_stages
+        } else {
+            plan::plan(
+                engine,
+                road,
+                &placement.device,
+                &detect_device,
+                &spec.pools,
+                &host,
+            )
+        };
+        let detect_workers = detect_width(&stages);
         let reader = if by_blocks {
             None
         } else {

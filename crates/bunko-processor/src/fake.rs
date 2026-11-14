@@ -50,6 +50,11 @@ pub struct FakeConfig {
     /// Time per page when the engine runs on the CPU (instead of `page_delay`), for a
     /// benchmark that tries a GPU row's engine stage on the CPU.
     pub cpu_page_delay: Option<Duration>,
+    /// Time per page when a row on the AnimeText block detector (`animetext-blocks`)
+    /// detects on the CPU (instead of the engine's page time). With it and a GPU the
+    /// fake reports a detect stage, on `gpu:0` unless the row pins it to the CPU, for a
+    /// benchmark that tries the detect stage on the CPU.
+    pub detect_cpu_page_delay: Option<Duration>,
     /// The engine stage's width (`pools.stage_workers.engine`) divides the page time,
     /// up to this many workers; each worker past it slows a page by a quarter (0:
     /// widths change nothing).
@@ -272,6 +277,15 @@ impl PagePipeline for FakePipeline {
             .copied()
             .unwrap_or(1)
             .max(1);
+        let animetext = spec.detector.as_deref() == Some("animetext-blocks");
+        let detect =
+            (animetext && config.detect_cpu_page_delay.is_some() && config.gpu_formats.is_some())
+                .then(
+                    || match spec.pools.stage_device.get("detect").map(String::as_str) {
+                        Some("cpu") => "cpu".to_string(),
+                        _ => "gpu:0".to_string(),
+                    },
+                );
         Ok(Box::new(FakeRunner {
             pipeline: self.inner.clone(),
             engine: spec.engine.clone(),
@@ -279,6 +293,7 @@ impl PagePipeline for FakePipeline {
             items: AtomicU64::new(0),
             behind: Mutex::new(Duration::ZERO),
             device,
+            detect,
             precision,
             width,
         }))
@@ -293,6 +308,8 @@ struct FakeRunner {
     /// How far behind schedule the last volume ended, owed by the next ([`Pacer`]).
     behind: Mutex<Duration>,
     device: String,
+    /// The detect stage's device, when the fake reports one (`detect_cpu_page_delay`).
+    detect: Option<String>,
     precision: String,
     width: u32,
 }
@@ -301,7 +318,11 @@ impl FakeRunner {
     fn page_delay(&self) -> Duration {
         let config = &self.pipeline.config;
         let cpu = config.cpu_page_delay.filter(|_| self.device == "cpu");
-        let base = cpu
+        let detect_cpu = config
+            .detect_cpu_page_delay
+            .filter(|_| self.detect.as_deref() == Some("cpu"));
+        let base = detect_cpu
+            .or(cpu)
             .or_else(|| config.precision_page_delay.get(&self.precision).copied())
             .unwrap_or(config.page_delay);
         let useful = self.width.min(config.useful_width).max(1);
@@ -355,6 +376,9 @@ impl VolumeRunner for FakeRunner {
         stage_workers.insert("engine".to_string(), self.width);
         let mut stage_device = BTreeMap::new();
         stage_device.insert("engine".to_string(), self.device.clone());
+        if let Some(d) = &self.detect {
+            stage_device.insert("detect".to_string(), d.clone());
+        }
         ReadyInfo {
             weights,
             stage_workers,

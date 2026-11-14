@@ -20,18 +20,22 @@
 //!    pool at its own derived widths): the faster placement wins, the GPU keeping a 5%
 //!    tie, and the width search starts from the winner. The text is the same on either
 //!    device, so this only picks where it is read;
-//! 4. the width search: widen the stage the pipeline's own verdict names while it pays
+//! 4. likewise for a row on the AnimeText block detector whose detect stage the engines
+//!    put on a GPU and the row did not pin: one trial with the detect stage on the CPU,
+//!    after the engine's placement settled, the GPU keeping a 5% tie (the blocks are the
+//!    same either way);
+//! 5. the width search: widen the stage the pipeline's own verdict names while it pays
 //!    (≥ 3%), then give back what is not used while throughput holds (within 1% of the
 //!    peak); at most 8 trials (+ the precision and placement phases) and 900 s;
-//! 5. every trial re-feeds the sample as one continuous run until its measured window
+//! 6. every trial re-feeds the sample as one continuous run until its measured window
 //!    is ≥ 20 s (or 8 feeds), and the rate is `(M - 1) / (t_last - t_first)` over the
 //!    page emissions after the pipeline fill — never a stopwatch around anything.
 //!
 //! What 0.7 does differently, because the engines are in-process: a width or a format
 //! is a new [`VolumeRunner`] (the recognizer of an unchanged format is shared, so only
 //! the stage threads are rebuilt), a format is a compiled package rather than a cast of
-//! an fp32 master, and the detector placement search finds nothing to try (the PP-OCR
-//! detector runs on the CPU only, as in 0.5.2). The busy percentages are sampled here,
+//! an fp32 master, and the detector placement search finds nothing to try beyond step
+//! 4 (the PP-OCR detector runs on the CPU only, as in 0.5.2). The busy percentages are sampled here,
 //! where the work happens, and stamped on each trial (the bridge's behaviour in 0.5.2).
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -186,7 +190,9 @@ pub fn host_worker_budget(logical_cpus: usize, jobs: usize) -> u32 {
 /// budget), 1 on the CPU; the engine stage of a text-box recognizer (charspot-small,
 /// nar-small) on the CPU, workers over one shared session, up to the job's physical
 /// cores, which on an SMT host is the budget plus 2 (the budget counts two logical CPUs
-/// a worker past the first 6). Never below what the engines derived themselves.
+/// a worker past the first 6); a stage on a GPU that is not device-bound (the AnimeText
+/// detect stage, workers over one detector on the card) up to 4 (and the budget). Never
+/// below what the engines derived themselves.
 pub fn estimated_ceiling(
     stage: Option<&crate::pipeline::StageReport>,
     engine: &str,
@@ -214,9 +220,8 @@ fn ceiling_on(
                 1
             }
         }
-        Some(s) if textbox && s.key == "engine" && !s.device.starts_with("gpu") => {
-            (budget + 2).min(physical.max(1) as u32)
-        }
+        Some(s) if s.device.starts_with("gpu") => budget.min(4),
+        Some(s) if textbox && s.key == "engine" => (budget + 2).min(physical.max(1) as u32),
         _ => budget.min(pooled_cap),
     };
     ceiling.max(derived).max(1)
@@ -237,7 +242,21 @@ fn engine_candidates(engine: &str, asked: Option<&str>, placed: &str) -> Vec<Str
     }
 }
 
-/// Whether the CPU trial of [`engine_candidates`] wins: the GPU keeps a tie within
+/// The detect-stage placements a benchmark tries for this row: `[placed, "cpu"]` for the
+/// AnimeText block detector (`animetext-blocks`) that the engines `placed` (the first
+/// load's `stage_device.detect`) on a GPU while the row left its detect stage unpinned
+/// (`asked` None or `auto`: a benchmark keeps the row's device pins), else none. A weak
+/// card beside a busy engine can detect slower than the host's cores.
+fn detect_candidates(detector: &str, asked: Option<&str>, placed: &str) -> Vec<String> {
+    let unpinned = asked.is_none_or(|a| a.is_empty() || a == "auto");
+    if detector == "animetext-blocks" && unpinned && placed.starts_with("gpu") {
+        vec![placed.to_string(), "cpu".to_string()]
+    } else {
+        Vec::new()
+    }
+}
+
+/// Whether the CPU trial of [`engine_candidates`] (or [`detect_candidates`]) wins: the GPU keeps a tie within
 /// [`policy::PRECISION_TIE`] (5%), as the more accurate format does in
 /// `pick_precision`.
 fn cpu_beats_gpu(gpu_pps: f64, cpu_pps: f64) -> bool {
@@ -443,6 +462,8 @@ pub struct BenchRun<'a> {
     /// The engine stage's device every runner opens with (the placement phase's CPU
     /// trial, and every runner after it once the CPU won); None: the row's own.
     engine_device: Option<String>,
+    /// The detect stage's device likewise (the detect placement phase).
+    detect_device: Option<String>,
     volumes: AtomicUsize,
 }
 
@@ -483,6 +504,7 @@ impl<'a> BenchRun<'a> {
             candidates: Vec::new(),
             precision_why: String::new(),
             engine_device: None,
+            detect_device: None,
             volumes: AtomicUsize::new(0),
         }
     }
@@ -540,6 +562,11 @@ impl<'a> BenchRun<'a> {
             spec.pools
                 .stage_device
                 .insert("engine".to_string(), device.clone());
+        }
+        if let Some(device) = &self.detect_device {
+            spec.pools
+                .stage_device
+                .insert("detect".to_string(), device.clone());
         }
         spec
     }
@@ -1296,6 +1323,129 @@ impl<'a> BenchRun<'a> {
         Ok((cpu_trial, derived))
     }
 
+    /// `detect_phase(widths, measured, candidates)` for a row whose AnimeText detect
+    /// stage the engines put on a GPU ([`detect_candidates`]), after the engine's
+    /// placement settled: the detect stage on its GPU (the current runner at `widths`;
+    /// `measured`, an earlier phase's winner, when that phase already measured it)
+    /// against the same row with its detect stage on the CPU, opened at its own derived
+    /// widths and the settled format. The CPU wins only by more than the 5% tie
+    /// ([`cpu_beats_gpu`]); it then becomes the current runner, every later one opens
+    /// there and the ceilings are its own. A CPU that will not load, will not run or
+    /// measures too short a window leaves the GPU. The GPU is the one the current
+    /// runner detects on (the engine phase may have moved the engine, and the detect
+    /// stage that follows it); a current runner that no longer detects on a GPU (its
+    /// detector would not load there) has nothing to try. The winning trial and the
+    /// widths the search starts from.
+    fn detect_phase(
+        &mut self,
+        widths: &[u32],
+        measured: Option<usize>,
+        candidates: &[String],
+    ) -> Result<(usize, Vec<u32>), BenchAbort> {
+        let Some(cpu) = candidates.get(1) else {
+            return Err(BenchAbort::Fatal(format!(
+                "the detect placement phase needs a GPU and a CPU candidate, not {candidates:?}"
+            )));
+        };
+        let gpu = self
+            .current
+            .as_ref()
+            .and_then(|l| l.ready.stage_device.get("detect"))
+            .filter(|d| d.starts_with("gpu"))
+            .cloned();
+        let measure_here = |run: &mut Self, note: &str| -> Result<usize, BenchAbort> {
+            match measured {
+                Some(t) => Ok(t),
+                None => run.trial(widths, note),
+            }
+        };
+        let Some(gpu) = gpu else {
+            tracing::info!(
+                "benchmark {}: the detect stage no longer runs on a GPU; no detect placement trials",
+                self.op.bid
+            );
+            let t = measure_here(self, "auto")?;
+            if measured.is_none() {
+                self.emit_trial(t, true);
+            }
+            return Ok((t, widths.to_vec()));
+        };
+        tracing::info!(
+            "benchmark {}: placement trials -- detect on {gpu}, {cpu}",
+            self.op.bid
+        );
+        let gpu_trial = measure_here(self, &format!("detect on {gpu}"))?;
+        let keep_gpu = |run: &mut Self| {
+            if measured.is_none() {
+                run.emit_trial(gpu_trial, true);
+            }
+            Ok((gpu_trial, widths.to_vec()))
+        };
+        if Instant::now() >= self.deadline {
+            tracing::info!(
+                "benchmark {}: out of time before trying the detect stage on {cpu}",
+                self.op.bid
+            );
+            return keep_gpu(self);
+        }
+        self.check()?;
+        let held = self.detect_device.replace(cpu.clone());
+        let restore = |run: &mut Self, gpu_runner: Option<Loaded>| {
+            run.current = None;
+            run.current = gpu_runner;
+            run.detect_device = held.clone();
+        };
+        let settled = self.settled.clone();
+        let opened = match self.open(None, settled.as_deref()) {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::warn!(
+                    "benchmark {}: the detect stage could not open on {cpu} ({e}); it stays on {gpu}",
+                    self.op.bid
+                );
+                self.detect_device = held.clone();
+                return keep_gpu(self);
+            }
+        };
+        let derived = opened.widths.clone();
+        let report = opened.runner.stats();
+        let ceilings = self.ceilings_of(&*opened.runner, report.as_ref(), &derived);
+        let gpu_runner = self.current.replace(opened);
+        let cpu_trial = match self.trial(&derived, &format!("detect on {cpu}")) {
+            Ok(t) => t,
+            Err(BenchAbort::Fatal(e)) => {
+                tracing::warn!(
+                    "benchmark {}: the detect stage on {cpu} failed its trial ({e}); it stays on {gpu}",
+                    self.op.bid
+                );
+                restore(self, gpu_runner);
+                return keep_gpu(self);
+            }
+            Err(abort) => return Err(abort),
+        };
+        let (g, c) = (
+            self.trials[gpu_trial].pages_per_second(),
+            self.trials[cpu_trial].pages_per_second(),
+        );
+        let cpu_wins = self.decidable(cpu_trial, gpu_trial) && cpu_beats_gpu(g, c);
+        if measured.is_none() {
+            self.emit_trial(gpu_trial, !cpu_wins);
+        }
+        self.emit_trial(cpu_trial, cpu_wins);
+        tracing::info!(
+            "benchmark {}: detect on {gpu} {g:.3} pages/s, on {cpu} {c:.3}; it detects on {}",
+            self.op.bid,
+            if cpu_wins { cpu } else { &gpu }
+        );
+        if !cpu_wins {
+            restore(self, gpu_runner);
+            return Ok((gpu_trial, widths.to_vec()));
+        }
+        drop(gpu_runner);
+        self.ceilings = ceilings;
+        Ok((cpu_trial, derived))
+    }
+
     /// `_settle_precision`: every later runner runs `chosen` (loaded again when the
     /// phase ended on another candidate).
     fn settle(&mut self, chosen: &str, widths: &[u32]) -> Result<(), BenchAbort> {
@@ -1406,11 +1556,28 @@ impl<'a> BenchRun<'a> {
                 asked_devices.get("engine").map_or("", String::as_str),
             )
         };
-        // The placement phase's GPU trial is the precision phase's winner when there is one.
+        let detects = if self.op.precision_only {
+            Vec::new()
+        } else {
+            detect_candidates(
+                self.op.spec.detector.as_deref().unwrap_or(""),
+                self.op
+                    .spec
+                    .pools
+                    .stage_device
+                    .get("detect")
+                    .map(String::as_str),
+                asked_devices.get("detect").map_or("", String::as_str),
+            )
+        };
+        // A placement phase's GPU trial is the previous phase's winner when there is one.
         let phase = usable.len()
             + placements
                 .len()
-                .saturating_sub(usize::from(!usable.is_empty()));
+                .saturating_sub(usize::from(!usable.is_empty()))
+            + detects
+                .len()
+                .saturating_sub(usize::from(!usable.is_empty() || !placements.is_empty()));
         self.max_trials += phase;
         let mut ready = Map::new();
         ready.insert("startup_seconds".into(), r3(startup));
@@ -1447,6 +1614,14 @@ impl<'a> BenchRun<'a> {
             derived = widths;
             tunable = self.tunable(&derived);
         }
+        if !detects.is_empty() {
+            // At the settled engine placement; when the CPU detects faster, the search
+            // starts from that runner's derivation and ceilings.
+            let (t, widths) = self.detect_phase(&derived, winner, &detects)?;
+            winner = Some(t);
+            derived = widths;
+            tunable = self.tunable(&derived);
+        }
         if let Some(p) = &self.precision {
             tracing::info!(
                 "benchmark {}: the recognizer runs at {p} from here on",
@@ -1472,7 +1647,7 @@ impl<'a> BenchRun<'a> {
             };
             (baseline, baseline, derived.clone())
         } else {
-            // `place()` finds nothing to move: the detector runs on the CPU only.
+            // `place()` finds nothing to move: the placement phases above tried the GPUs.
             self.search(&derived, winner)?
         };
         let placed: BTreeMap<String, String> = self
@@ -1696,6 +1871,41 @@ mod tests {
         assert!(engine_candidates("nar-small", Some("cpu"), "cpu").is_empty());
         assert!(engine_candidates("nar-small", None, "cpu").is_empty());
         assert!(engine_candidates("hayai-nova", None, "gpu:0").is_empty());
+    }
+
+    #[test]
+    fn a_gpu_detect_stage_is_tried_on_the_cpu_too() {
+        assert_eq!(
+            detect_candidates("animetext-blocks", None, "gpu:0"),
+            ["gpu:0", "cpu"]
+        );
+        assert_eq!(
+            detect_candidates("animetext-blocks", Some("auto"), "gpu:1"),
+            ["gpu:1", "cpu"]
+        );
+        assert!(detect_candidates("animetext-blocks", Some("gpu:0"), "gpu:0").is_empty()); // pinned
+        assert!(detect_candidates("animetext-blocks", None, "cpu").is_empty());
+        assert!(detect_candidates("ppocr-manga", None, "gpu:0").is_empty());
+        assert_eq!(
+            ceiling_on(
+                Some(&stage("detect", "gpu:0", false)),
+                "nar-small",
+                8,
+                2,
+                24
+            ),
+            4
+        );
+        assert_eq!(
+            ceiling_on(
+                Some(&stage("detect", "gpu:0", false)),
+                "nar-small",
+                3,
+                1,
+                24
+            ),
+            3
+        );
     }
 
     #[test]
