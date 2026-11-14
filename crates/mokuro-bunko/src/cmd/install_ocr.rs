@@ -19,9 +19,11 @@
 //! ([`crate::ocr_target`]). A processor also uses a pack found in the library's storage.
 //!
 //! `--if-needed` (the Docker image's entrypoint runs it on every start): nothing when
-//! local OCR is off, `MOKURO_OCR_AUTO_INSTALL=false`, or a pack this release opens that
-//! serves the choice is there (for `cpu`, a GPU pack also serves); otherwise the steps
-//! above, then the packs the new one replaces are removed.
+//! local OCR is off, `MOKURO_OCR_AUTO_INSTALL=false`, no enabled generation needs the
+//! pack (ppocr-manga never does; a text-box engine, or a row on a block detector, needs
+//! the pack only on a GPU), or a pack this release opens that serves the choice is
+//! there (for `cpu`, a GPU pack also serves); otherwise the steps above, then the packs
+//! the new one replaces are removed.
 //!
 //! `--from <dir>` installs from local files instead (air-gapped hosts, tests): the pack
 //! archive (or its parts), optionally `release.json` + `.sig` (then checked like a
@@ -124,17 +126,25 @@ mod full {
         },
     }
 
-    /// The library's enabled generations need the libtorch backend (hayai-nova,
-    /// paddle-manga); ppocr-manga alone runs on ONNX Runtime and needs no pack. A
-    /// processor runs whatever its library asks for: always.
-    pub fn needs_backend(ocr: &crate::ocr_target::OcrTarget) -> bool {
+    /// Whether the library's enabled generations need the backend pack `variant`:
+    /// hayai-nova and paddle-manga always (libtorch is their only route); a text-box
+    /// engine (nar-small, charspot-small), or a row on a block detector (AnimeText),
+    /// only on a GPU, since on the CPU they read on ONNX Runtime and a cpu pack would
+    /// never be used; ppocr-manga never. A processor runs whatever its library asks
+    /// for: always.
+    pub fn needs_backend(ocr: &crate::ocr_target::OcrTarget, variant: &str) -> bool {
+        use bunko_engines::models;
         match (&ocr.role, &ocr.library) {
-            (crate::ocr_target::Role::Library, Some(c)) => c
-                .ocr
-                .generations
-                .iter()
-                .filter(|g| g.runnable())
-                .any(|g| g.engine != bunko_engines::models::PPOCR),
+            (crate::ocr_target::Role::Library, Some(c)) => {
+                let gpu = variant != "cpu";
+                c.ocr.generations.iter().filter(|g| g.runnable()).any(|g| {
+                    g.engine == models::HAYAI
+                        || g.engine == models::PADDLE
+                        || (gpu
+                            && (models::textbox_engine(&g.engine)
+                                || models::block_detector(g.effective_detector())))
+                })
+            }
             _ => true,
         }
     }
@@ -224,14 +234,14 @@ mod full {
         if let Some(why) = ocr.local_ocr_off() {
             return Need::Off(why);
         }
-        if !needs_backend(ocr) {
+        let root = ocr.backends_dir();
+        let choice = wanted_choice(ocr, hw, &root);
+        if !needs_backend(ocr, choice.variant) {
             return Need::Satisfied(
-                "no enabled OCR generation needs the OCR backend (ppocr-manga runs without it)"
+                "no enabled OCR generation needs the OCR backend here (ppocr-manga, and on the CPU the text-box engines, run without it)"
                     .into(),
             );
         }
-        let root = ocr.backends_dir();
-        let choice = wanted_choice(ocr, hw, &root);
         match already_fits(&ocr.backends_dirs(), choice.variant) {
             Some(m) => {
                 match hwdetect::vulkan_wanted(&ocr.backend_preference(), hw, bunko_update::TARGET) {
@@ -354,9 +364,9 @@ mod full {
             println!("  {h}");
         }
 
-        if args.if_needed && requested.is_none() && !args.force && !needs_backend(&ocr) {
+        if args.if_needed && requested.is_none() && !args.force && !needs_backend(&ocr, &variant) {
             println!(
-                "No enabled OCR generation needs the OCR backend (ppocr-manga runs without it): nothing to install."
+                "No enabled OCR generation needs the OCR backend here (ppocr-manga, and on the CPU the text-box engines, run without it): nothing to install."
             );
             return Ok(());
         }
@@ -1929,6 +1939,88 @@ pub(crate) mod tests {
         // Both in place: nothing at all.
         fake_pack(&backends, VULKAN);
         assert!(matches!(need(&target(), &hw), Need::Satisfied(_)));
+    }
+
+    /// A text-box engine reads on ONNX Runtime on the CPU: a CPU-only library of them
+    /// installs no pack it never uses, and a GPU host still installs the GPU pack before
+    /// OCR starts. A row on the AnimeText block detector is the same (L10).
+    #[test]
+    fn a_text_box_library_needs_a_pack_only_for_a_gpu() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.yaml");
+        // `rows` are YAML flow-mapping bodies; the first row is the primary.
+        let library = |rows: &[&str]| {
+            let mut yaml = format!(
+                "storage:\n  base_path: {}\nocr:\n  generations:\n",
+                dir.path().display()
+            );
+            for (i, row) in rows.iter().enumerate() {
+                yaml += &format!(
+                    "    - {{name: g{i}, {row}, primary: {}, enabled: true}}\n",
+                    i == 0
+                );
+            }
+            std::fs::write(&config, yaml).unwrap();
+            crate::ocr_target::OcrTarget {
+                role: crate::ocr_target::Role::Library,
+                storage: dir.path().to_path_buf(),
+                processor_config: None,
+                library: Some(crate::cfgfile::load_effective_quiet(&config).unwrap()),
+                reason: String::new(),
+            }
+        };
+        let rows = |engine: &str| library(&[&format!("engine: {engine}")]);
+        #[cfg(feature = "nc-models")]
+        {
+            assert!(!needs_backend(&rows("nar-small"), "cpu"));
+            assert!(!needs_backend(&rows("charspot-small"), "cpu"));
+            assert!(needs_backend(&rows("nar-small"), "cu130"));
+            assert!(needs_backend(&rows("charspot-small"), "rocm7.1"));
+            // On the CPU, need() says Satisfied, not Install.
+            let n = need(&rows("nar-small"), &crate::hwdetect::Hardware::default());
+            assert!(matches!(n, Need::Satisfied(_)), "{n:?}");
+            // With an NVIDIA GPU, the pack is installed before OCR starts.
+            let n = need(&rows("nar-small"), &nvidia());
+            assert!(
+                matches!(&n, Need::Install { variant, .. } if variant == "cu130"),
+                "{n:?}"
+            );
+        }
+        #[cfg(all(feature = "nc-models", feature = "gpl-models"))]
+        {
+            // L10: a ppocr-manga row plus a row on the AnimeText detector needs the GPU
+            // pack on a GPU host, and no pack on a CPU-only host.
+            let at = || {
+                library(&[
+                    "engine: ppocr-manga",
+                    "engine: charspot-small, detector: animetext-blocks",
+                ])
+            };
+            assert!(needs_backend(&at(), "cu130"));
+            assert!(needs_backend(&at(), "rocm7.1"));
+            assert!(!needs_backend(&at(), "cpu"));
+            let n = need(&at(), &nvidia());
+            assert!(
+                matches!(&n, Need::Install { variant, .. } if variant == "cu130"),
+                "{n:?}"
+            );
+            let n = need(&at(), &crate::hwdetect::Hardware::default());
+            assert!(matches!(n, Need::Satisfied(_)), "{n:?}");
+        }
+        #[cfg(feature = "gpl-models")]
+        {
+            // ppocr-manga brings its own detector: a `detector:` on its row is ignored,
+            // so the row reads with ppocr-manga and needs no pack anywhere.
+            let pp = library(&["engine: ppocr-manga, detector: animetext-blocks"]);
+            assert_eq!(
+                pp.library.as_ref().unwrap().ocr.generations[0].effective_detector(),
+                "ppocr-manga"
+            );
+            assert!(!needs_backend(&pp, "cu130"));
+        }
+        assert!(needs_backend(&rows("hayai-nova"), "cpu"));
+        assert!(needs_backend(&rows("paddle-manga"), "cpu"));
+        assert!(!needs_backend(&rows("ppocr-manga"), "cu130"));
     }
 
     #[test]
