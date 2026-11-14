@@ -494,4 +494,76 @@ mod tests {
         let a = Tensor::from_slice(&[1.0f32, 0.1]).to_kind(tch::Kind::Half);
         assert!(w.get("a").unwrap().equal(&a));
     }
+
+    /// Loads the package `pkg` on gpu:0, after the GPU half of the libtorch at
+    /// `$LIBTORCH` (the one the libtorch-feature tests link).
+    fn load_gpu_package(pkg: &std::ffi::OsStr) -> Aoti {
+        crate::runtime::init(&crate::abi::InitConfig {
+            lib_dir: std::env::var("LIBTORCH").ok().map(|d| format!("{d}/lib")),
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(crate::gpu::loaded(), "no GPU half of libtorch loaded");
+        Aoti::load(Path::new(pkg), 0).unwrap()
+    }
+
+    /// Binds the package `g` (on gpu:0) to the weights file `w` loaded with `cast`, by
+    /// its `bunko.weights` map, as [`bind_all`] does: the bind's error.
+    fn bind_with(g: &Aoti, w: &std::ffi::OsStr, cast: Option<Kind>) -> String {
+        let weights = Weights::load(&[PathBuf::from(w)], tch::Device::Cuda(0), cast).unwrap();
+        let map: HashMap<String, String> =
+            serde_json::from_str(&g.metadata("bunko.weights").unwrap()).unwrap();
+        let bound: Vec<(String, &Tensor)> = g
+            .constant_fqns()
+            .unwrap()
+            .into_iter()
+            .map(|fqn| {
+                let t = weights.get(&map[&fqn]).unwrap();
+                (fqn, t)
+            })
+            .collect();
+        g.bind(&bound).unwrap_err().to_string()
+    }
+
+    /// MOKURO_NAR_FP16_PACKAGE=<…/nar-small/fp16/linux-rocm-gfx1201/model.pt2> \
+    /// MOKURO_NAR_WEIGHTS=<model.safetensors> LIBTORCH=<dir> \
+    ///   cargo test -p bunko-torch --features libtorch --release --lib -- --ignored a_wrong_dtype_bind_is_refused
+    #[test]
+    #[ignore = "needs an fp16 nar package, the weights and a GPU (env vars)"]
+    fn a_wrong_dtype_bind_is_refused() {
+        let (Some(pkg), Some(w)) = (
+            std::env::var_os("MOKURO_NAR_FP16_PACKAGE"),
+            std::env::var_os("MOKURO_NAR_WEIGHTS"),
+        ) else {
+            eprintln!("skipping: MOKURO_NAR_FP16_PACKAGE or MOKURO_NAR_WEIGHTS is not set");
+            return;
+        };
+        let g = load_gpu_package(&pkg);
+        assert_eq!(g.metadata("bunko.weights_dtype").as_deref(), Some("fp16"));
+        // The authors' F32 tensors, NOT cast: what a pack without the cast would bind.
+        let err = bind_with(&g, &w, None);
+        assert!(err.contains("is F32, the package wants F16"), "{err}");
+    }
+
+    /// The other way round, with the fp32 package: weights cast to fp16 for it.
+    ///
+    /// MOKURO_NAR_PACKAGE=<…/nar-small/fp32/linux-rocm-gfx1201/model.pt2> \
+    /// MOKURO_NAR_WEIGHTS=<model.safetensors> LIBTORCH=<dir> \
+    ///   cargo test -p bunko-torch --features libtorch --release --lib -- --ignored an_fp16_bind_into_an_fp32_package_is_refused
+    #[test]
+    #[ignore = "needs an fp32 nar package, the weights and a GPU (env vars)"]
+    fn an_fp16_bind_into_an_fp32_package_is_refused() {
+        let (Some(pkg), Some(w)) = (
+            std::env::var_os("MOKURO_NAR_PACKAGE"),
+            std::env::var_os("MOKURO_NAR_WEIGHTS"),
+        ) else {
+            eprintln!("skipping: MOKURO_NAR_PACKAGE or MOKURO_NAR_WEIGHTS is not set");
+            return;
+        };
+        let g = load_gpu_package(&pkg);
+        assert_eq!(g.metadata("bunko.weights_dtype"), None);
+        let err = bind_with(&g, &w, Some(Kind::Half));
+        assert!(err.contains("is F16, the package wants F32"), "{err}");
+        assert!(err.contains("constant net."), "{err}");
+    }
 }
