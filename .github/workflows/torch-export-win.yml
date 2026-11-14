@@ -191,7 +191,7 @@ jobs:
         run: python -m torch_export.ocr_inputs "$env:GITHUB_WORKSPACE\ocr" --pages ${{ inputs.ocr_pages }} --engine $env:ENGINE
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
-          toolchain: stable
+          toolchain: "1.99.1" # not stable: see the note in ci.yml
         if: inputs.compare_embedded && inputs.ocr
       - name: "OCR: CPU backend pack + ocr_volume"
         if: inputs.compare_embedded && inputs.ocr

@@ -35,6 +35,7 @@ use serde_json::{Value, json};
 
 use super::collect::{CollectRequest, Outcome};
 use super::owed::UpgradeProbe;
+use super::sidecar_facts::{ObjectFacts, SidecarFacts, SidecarFactsCache};
 use super::types::{LibraryFacts, PathLocks, mtime_ns, rel_of};
 
 /// A plain sidecar's bytes, refused past `MAX_SIDECAR_BYTES` (never read whole).
@@ -102,31 +103,29 @@ impl Recipe {
 }
 
 /// `classify`: the recipe of a sidecar, from its provenance row, else its `ocr_engine`
-/// block, else mokuro's top-level `version` (legacy), else unknown.
+/// block, else mokuro's top-level `version` (legacy), else unknown. Reads the file now;
+/// the census reads its cached [`SidecarFacts`] instead ([`recipe_of`]).
 pub fn classify(path: &Path, row: Option<&bunko_db::OcrSidecar>) -> Recipe {
-    match bunko_library::sidecar::load_sidecar(path).data {
-        Some(data) => classify_data(&data, row),
+    recipe_of(&SidecarFacts::of_file(path), row)
+}
+
+/// [`classify`] of a plain sidecar's bytes already read.
+#[cfg(test)]
+fn classify_bytes(bytes: &[u8], row: Option<&bunko_db::OcrSidecar>) -> Recipe {
+    recipe_of(&SidecarFacts::of(bytes), row)
+}
+
+/// [`classify`] of a sidecar's facts.
+pub fn recipe_of(facts: &SidecarFacts, row: Option<&bunko_db::OcrSidecar>) -> Recipe {
+    match &facts.object {
+        Some(data) => classify_data(data, row),
         None => Recipe::unknown(),
     }
 }
 
-/// [`classify`] of a plain sidecar's bytes already read.
-fn classify_bytes(bytes: &[u8], row: Option<&bunko_db::OcrSidecar>) -> Recipe {
-    let parsed = std::str::from_utf8(bytes)
-        .ok()
-        .and_then(|text| bunko_library::pyjson::parse(bunko_library::pyjson::strip_bom(text)).ok());
-    match parsed {
-        Some(bunko_library::pyjson::JsonValue::Object(data)) => classify_data(&data, row),
-        _ => Recipe::unknown(),
-    }
-}
-
-fn classify_data(
-    data: &bunko_library::pyjson::JsonObject,
-    row: Option<&bunko_db::OcrSidecar>,
-) -> Recipe {
+fn classify_data(data: &ObjectFacts, row: Option<&bunko_db::OcrSidecar>) -> Recipe {
     // Provenance precedence (interop §1): EDITED, then GENERATED, then LEGACY.
-    if data.get("edited").and_then(|v| v.as_object()).is_some() {
+    if data.edited {
         return Recipe {
             family: EDITED.into(),
             edited: true,
@@ -138,31 +137,11 @@ fn classify_data(
 }
 
 /// [`classify_data`] with any `edited` block ignored.
-fn classify_unedited(
-    data: &bunko_library::pyjson::JsonObject,
-    row: Option<&bunko_db::OcrSidecar>,
-) -> Recipe {
-    let block = data.get("ocr_engine").and_then(|b| b.as_object());
-    let revision = block
-        .and_then(|b| b.get("revision"))
-        .and_then(|v| v.as_num())
-        .and_then(|n| match n {
-            bunko_library::pyjson::JsonNum::Int(i) if *i >= 0 => {
-                Some(u32::try_from(*i).unwrap_or(u32::MAX))
-            }
-            _ => None,
-        })
-        .unwrap_or(1);
-    let block_str = |k: &str| {
-        block
-            .and_then(|b| b.get(k))
-            .and_then(|v| v.as_str())
-            .map(str::to_string)
-    };
-    let block_budget = block
-        .and_then(|b| b.get("patch_budget"))
-        .and_then(|v| v.as_num())
-        .map(|n| n.as_f64() as u32);
+fn classify_unedited(data: &ObjectFacts, row: Option<&bunko_db::OcrSidecar>) -> Recipe {
+    let block = data.block.as_ref();
+    let revision = block.map_or(1, |b| b.revision);
+    let block_detector = || block.and_then(|b| b.detector.clone());
+    let block_budget = block.and_then(|b| b.patch_budget);
     if let Some(r) = row
         && let Some(engine) = r.engine.clone().filter(|e| !e.is_empty())
     {
@@ -174,14 +153,14 @@ fn classify_unedited(
         return Recipe {
             family: engine.clone(),
             engine,
-            detector: r.detector.clone().or_else(|| block_str("detector")),
+            detector: r.detector.clone().or_else(block_detector),
             patch_budget: budget,
             revision,
             edited: false,
             under: None,
         };
     }
-    if let Some(engine) = block_str("id") {
+    if let Some(engine) = block.and_then(|b| b.id.clone()) {
         if engine == "mokuro" {
             return Recipe {
                 family: LEGACY.into(),
@@ -195,7 +174,7 @@ fn classify_unedited(
         } else {
             None
         };
-        let detector = block_str("detector").or_else(|| {
+        let detector = block_detector().or_else(|| {
             bunko_core::engines::engine(&engine)
                 .and_then(|e| e.detector)
                 .map(str::to_string)
@@ -210,12 +189,7 @@ fn classify_unedited(
             under: None,
         };
     }
-    if block.is_none()
-        && data
-            .get("version")
-            .and_then(|v| v.as_str())
-            .is_some_and(|v| !v.is_empty())
-    {
+    if block.is_none() && data.version {
         return Recipe {
             family: LEGACY.into(),
             engine: LEGACY.into(),
@@ -299,12 +273,7 @@ fn existing_plain(cbz: &Path, suffix: &str) -> Option<PathBuf> {
 /// Anything else at its destination (a person's file, an edit, another engine's, an
 /// unsealed or a same or newer revision) is kept.
 pub fn superseded_own_output(bytes: &[u8], engine: &str, revision: u32) -> bool {
-    let Ok(data) = serde_json::from_slice::<Value>(strip_bom(bytes)) else {
-        return false;
-    };
-    data.get("edited").is_none()
-        && engine_of(&data).is_some_and(|(id, r)| id == engine && r < revision)
-        && bunko_layout::seal::is_sealed(bytes)
+    SidecarFacts::of(bytes).superseded(engine, revision)
 }
 
 /// Write `bytes` to a staging file at `tmp` (on a remote store: local until published;
@@ -359,6 +328,9 @@ enum Install<'a> {
 struct SwapError {
     text: String,
     refused: bool,
+    /// The main sidecar's bytes, read under its write lock, are marked EDITED: a
+    /// person's text, never replaced (the result goes beside it).
+    edited: bool,
 }
 
 impl From<String> for SwapError {
@@ -366,6 +338,7 @@ impl From<String> for SwapError {
         SwapError {
             text,
             refused: false,
+            edited: false,
         }
     }
 }
@@ -402,6 +375,9 @@ pub struct Upgrade {
     census: Mutex<HashMap<String, CensusEntry>>,
     /// [`Self::layer_outdated`]'s verdicts.
     layers: Mutex<HashMap<PathBuf, LayerVerdict>>,
+    /// What each sidecar the census judges says, read once per version of the file
+    /// (kept across settings changes and restarts; the verdicts above are not).
+    sidecars: SidecarFactsCache,
     /// Tests only: engine revisions in place of `ENGINE_REVISIONS`.
     revisions: Mutex<BTreeMap<String, u32>>,
     direct: Mutex<DirectProgress>,
@@ -431,6 +407,7 @@ impl Upgrade {
             config: Mutex::new(UpgradeConfig::default()),
             primary: Mutex::new(None),
             rows: Mutex::new(Vec::new()),
+            sidecars: SidecarFactsCache::new(library.clone(), db.clone()),
             library,
             db,
             facts,
@@ -445,12 +422,37 @@ impl Upgrade {
         }
     }
 
+    /// New settings: every verdict is judged again, from the sidecar facts already read
+    /// (a settings change reads no sidecar again).
     pub fn configure(&self, config: &UpgradeConfig, rows: &[Generation]) {
         *self.config.lock() = config.clone();
         *self.primary.lock() = bunko_core::generations::primary_generation(rows).cloned();
         *self.rows.lock() = rows.to_vec();
         self.census.lock().clear();
         self.layers.lock().clear();
+    }
+
+    /// What the census read off the library's sidecars ([`SidecarFactsCache`]).
+    pub fn sidecar_facts(&self) -> &SidecarFactsCache {
+        &self.sidecars
+    }
+
+    /// The file at `path` is not what the census judged (a collector found someone
+    /// else's file where a result was owed): its facts are read again and kept, and
+    /// its layer verdict goes, so the next walk owes nothing for the old bytes' sake.
+    /// On a store whose version an mtime and a size make, a rewrite at the same size
+    /// within one tick of the clock would otherwise owe the result again every walk.
+    pub fn refresh_sidecar(&self, path: &Path) {
+        self.sidecars.fresh(path);
+        self.layers.lock().remove(path);
+    }
+
+    /// The recipe of the sidecar at `path` (its cached facts), with its provenance row.
+    fn recipe_at(&self, path: &Path, row: Option<&bunko_db::OcrSidecar>) -> Recipe {
+        match self.sidecars.get(path) {
+            Some(facts) => recipe_of(&facts, row),
+            None => Recipe::unknown(),
+        }
     }
 
     /// `engine`'s current output revision ([`bunko_layout::sidecar::engine_revision`]).
@@ -474,7 +476,7 @@ impl Upgrade {
     /// at a lower revision than the engine's ([`superseded_own_output`]), so the row is
     /// owed again and its result replaces the file in place. A file that is not Bunko's
     /// own is never owed: its result could only be discarded, every walk. Cached by the
-    /// layer's stat (one capped read per change).
+    /// layer's stat; the file is read once per version ([`SidecarFactsCache`]).
     pub fn layer_outdated(&self, cbz: &Path, row: &Generation) -> bool {
         if row.primary {
             return false;
@@ -496,8 +498,10 @@ impl Upgrade {
             return *hit;
         }
         let target = self.target_revision(engine);
-        let outdated =
-            read_sidecar(plain).is_ok_and(|bytes| superseded_own_output(&bytes, engine, target));
+        let outdated = self
+            .sidecars
+            .get_at(plain, &meta)
+            .superseded(engine, target);
         self.layers
             .lock()
             .insert(plain.to_path_buf(), (stamp, outdated));
@@ -566,8 +570,8 @@ impl Upgrade {
         {
             return Err(Outcome::Superseded(super::collect::SUPERSEDED.into()));
         }
-        self.census.lock().remove(&rel);
-        if self.judge(cbz, &rel).1 != Verdict::Edited {
+        // On the main's bytes as they are now: its kept facts are a hint.
+        if self.judge_with(cbz, &rel, true).1 != Verdict::Edited {
             return Err(Outcome::Superseded(format!(
                 "{} is no longer marked edited; the next walk judges it again",
                 bare.display()
@@ -604,6 +608,8 @@ impl Upgrade {
         let mode = match super::collect::reconcile_existing(&plain, &gz, facts.as_ref()) {
             super::collect::Existing::Absent => Mode::CreateNew,
             super::collect::Existing::Keep => {
+                // Owed for what the census judged there; judged again on its bytes.
+                self.refresh_sidecar(&plain);
                 return Err(Outcome::Superseded(super::collect::SUPERSEDED.into()));
             }
             super::collect::Existing::Replace(base) => Mode::Replace { base },
@@ -671,7 +677,15 @@ impl Upgrade {
     /// edit, any hand-made layer) is never a candidate, nor ever deleted. Being a
     /// candidate is not enough to be swapped in: see [`Self::proven_layer`].
     fn layer_candidates(&self, cbz: &Path) -> Vec<(PathBuf, Option<bunko_db::OcrSidecar>)> {
-        Self::layer_files(cbz)
+        self.candidates_among(Self::layer_files(cbz))
+    }
+
+    /// [`Self::layer_candidates`] among `layers` (some of the volume's layer files).
+    fn candidates_among(
+        &self,
+        layers: Vec<PathBuf>,
+    ) -> Vec<(PathBuf, Option<bunko_db::OcrSidecar>)> {
+        layers
             .into_iter()
             .filter_map(|layer| {
                 let layer_rel = rel_of(&self.library, &layer).unwrap_or_default();
@@ -679,56 +693,38 @@ impl Upgrade {
                     .db
                     .as_ref()
                     .and_then(|db| db.get_ocr_sidecar(&layer_rel).ok().flatten());
-                let data = read_sidecar(&layer)
-                    .ok()
-                    .and_then(|b| serde_json::from_slice::<Value>(strip_bom(&b)).ok());
+                let facts = self.sidecars.get(&layer);
                 // A reader's EDITED layer is a person's text, whatever stamp it kept.
-                if data.as_ref().is_some_and(|d| d.get("edited").is_some()) {
+                if facts.as_ref().is_some_and(|f| f.edited_key()) {
                     return None;
                 }
-                (row.is_some() || data.as_ref().and_then(stamp_id).is_some())
+                (row.is_some() || facts.as_ref().is_some_and(|f| f.stamped()))
                     .then_some((layer, row))
             })
             .collect()
     }
 
-    /// Was this layer produced from the archive as it is now?
+    /// Was this layer produced from the archive as it is now? By its provenance row's
+    /// archive stamp, else by its kept facts' pages (a hint: the promotion decides on
+    /// the bytes it installs, [`Self::proven_layer`]).
     fn read_from_current_archive(
         &self,
         layer: &Path,
         cbz: &Path,
         row: Option<&bunko_db::OcrSidecar>,
     ) -> bool {
-        let stamp = super::types::stamp_of(cbz);
-        if let (Some(r), Some(s)) = (row, stamp)
-            && r.archive_size.is_some()
-        {
-            return r.archive_size == Some(s.0 as i64) && r.archive_mtime_ns == Some(s.1 as i64);
-        }
-        let loaded = bunko_library::sidecar::load_sidecar(layer);
-        let Some(data) = loaded.data else {
-            return false;
-        };
-        let Some(pages) = data.get("pages").and_then(|p| p.as_array()) else {
-            return false;
-        };
-        let Some(names) = bunko_library::archive::reader_image_names(cbz) else {
-            return false;
-        };
-        if pages.len() != names.len() {
-            return false;
-        }
-        let set: HashSet<&str> = names.iter().map(String::as_str).collect();
-        pages.iter().all(|p| {
-            p.as_object()
-                .and_then(|o| o.get("img_path"))
-                .and_then(|v| v.as_str())
-                .is_some_and(|i| set.contains(i))
-        })
+        from_archive(cbz, row, || self.sidecars.get(layer))
     }
 
-    /// The census verdict for one volume (cached by the bare file's stat).
+    /// The census verdict for one volume (cached by the bare file's stat), from the
+    /// bare file's kept facts.
     pub fn judge(&self, cbz: &Path, rel: &str) -> (String, Verdict) {
+        self.judge_with(cbz, rel, false)
+    }
+
+    /// [`Self::judge`], with `fresh`: on the bare file's bytes read now (under its write
+    /// lock: what a step that writes decides on), whatever the census or the facts kept.
+    fn judge_with(&self, cbz: &Path, rel: &str, fresh: bool) -> (String, Verdict) {
         // The bare file in the spelling the folder lists (`V.MOKURO`); nothing for a
         // volume shadowed by another spelling of itself.
         let Some(bare) = bunko_library::sidecar::sibling(cbz, ".mokuro") else {
@@ -743,7 +739,7 @@ impl Upgrade {
             .census
             .lock()
             .get(rel)
-            .filter(|e| e.stamp == stamp && e.version == version)
+            .filter(|e| !fresh && e.stamp == stamp && e.version == version)
         {
             return (hit.family.clone(), hit.verdict.clone());
         }
@@ -752,7 +748,12 @@ impl Upgrade {
             .db
             .as_ref()
             .and_then(|db| db.get_ocr_sidecar(&bare_rel).ok().flatten());
-        let recipe = classify(&bare, row.as_ref());
+        let facts = if fresh {
+            self.sidecars.fresh_at(&bare, &meta)
+        } else {
+            self.sidecars.get_at(&bare, &meta)
+        };
+        let recipe = recipe_of(&facts, row.as_ref());
         let upgraded = self.primary.lock().as_ref().is_some_and(|p| {
             recipe.is_current(&p.output_affecting(), self.target_revision(&p.engine))
         });
@@ -813,7 +814,7 @@ impl Upgrade {
         }
         for (layer, lrow) in self.layer_candidates(cbz) {
             if self.read_from_current_archive(&layer, cbz, lrow.as_ref())
-                && self.proven_layer(&layer, &target).is_some()
+                && self.layer_proven(&layer, &target)
             {
                 return Verdict::Ready(layer);
             }
@@ -821,45 +822,66 @@ impl Upgrade {
         Verdict::NeedsOcr
     }
 
-    /// D4's proof that `bytes` hold the OCR Bunko installed: their content seal
-    /// ([`bunko_layout::seal`], `ocr_engine.seal`) checks. An `ocr_engine` stamp alone
-    /// proves nothing: anyone who can write the file (a reader's edit, a WebDAV PUT, a
-    /// cloud upload) can add one, and a re-upload of edited text can keep one. The seal
-    /// covers the pages and the block themselves, so it travels with the file (another
-    /// Bunko, a moved library, a new instance on the same cloud folder, a rename) and an
-    /// edit of either breaks it. A layer without proof is treated as a person's: never
-    /// copied in as the main sidecar.
-    fn proven_own(bytes: &[u8]) -> bool {
-        bunko_layout::seal::is_sealed(bytes)
+    /// The census's [`Self::proven_layer`]: the same proof over the layer's cached facts
+    /// at the version it is now (a cloud file with no content version proves nothing).
+    /// The swap itself proves the very bytes it installs again.
+    fn layer_proven(&self, layer: &Path, target: &(String, String, Option<u32>)) -> bool {
+        let Some(meta) = fs::metadata(layer).ok().filter(|m| m.is_file()) else {
+            return false;
+        };
+        if meta.version().is_none()
+            && bunko_store::store_for(layer).is_some_and(|s| s.caps().remote)
+        {
+            return false;
+        }
+        self.proves(&self.sidecars.get_at(layer, &meta), target)
     }
 
-    /// A layer that may become the main sidecar: its bytes (on a remote store, one
-    /// pinned version), when they are proven Bunko's own ([`Self::proven_own`]) and
-    /// their own `ocr_engine` block (never the row) names the target recipe. A row alone
-    /// is not enough (a reader's push of a layer drops the stamp, and `classify` would
-    /// read the row first); a stamp alone is not either (a forged one would make a
-    /// person's file the model output).
+    /// `facts` are those of a layer that may become the main sidecar
+    /// ([`Self::proven_layer`]): stamped with the target recipe, not edited, and sealed.
+    ///
+    /// The seal is D4's proof that the bytes hold the OCR Bunko installed: their content
+    /// seal ([`bunko_layout::seal`], `ocr_engine.seal`) checks. An `ocr_engine` stamp
+    /// alone proves nothing: anyone who can write the file (a reader's edit, a WebDAV
+    /// PUT, a cloud upload) can add one, and a re-upload of edited text can keep one. The
+    /// seal covers the pages and the block themselves, so it travels with the file
+    /// (another Bunko, a moved library, a new instance on the same cloud folder, a
+    /// rename) and an edit of either breaks it. A layer without proof is treated as a
+    /// person's: never copied in as the main sidecar.
+    fn proves(&self, facts: &SidecarFacts, target: &(String, String, Option<u32>)) -> bool {
+        let current = recipe_of(facts, None).is_current(target, self.target_revision(&target.0));
+        facts.stamped() && !facts.edited_key() && current && facts.sealed
+    }
+
+    /// A layer of `cbz` that may become the main sidecar: its bytes, read now (on a
+    /// remote store, one pinned version), when they are proven Bunko's own (their seal,
+    /// [`Self::proves`]), their own `ocr_engine` block (never the row) names the target
+    /// recipe, and they were read from the archive as it is now (the layer's provenance
+    /// row's archive stamp, else their own pages). A row alone is not enough (a reader's
+    /// push of a layer drops the stamp, and `classify` would read the row first); a
+    /// stamp alone is not either (a forged one would make a person's file the model
+    /// output). The census found the layer by its kept facts, a hint: these bytes decide,
+    /// and their facts are kept in place of those.
     fn proven_layer(
         &self,
+        cbz: &Path,
         layer: &Path,
         target: &(String, String, Option<u32>),
     ) -> Option<Vec<u8>> {
         let meta = fs::metadata(layer).ok().filter(|m| m.is_file())?;
-        let remote = bunko_store::store_for(layer).filter(|s| s.caps().remote);
-        let bytes = match (remote, meta.version()) {
-            (Some(store), Some(version)) => {
-                let pinned = store.local_path(layer, Some(version)).ok()?;
-                read_sidecar(pinned.path()).ok()?
-            }
-            (Some(_), None) => return None,
-            (None, _) => read_sidecar(layer).ok()?,
-        };
-        let data = serde_json::from_slice::<Value>(strip_bom(&bytes)).ok();
-        let stamped = data.as_ref().and_then(stamp_id).is_some();
-        let edited = data.as_ref().is_some_and(|d| d.get("edited").is_some());
-        let current =
-            classify_bytes(&bytes, None).is_current(target, self.target_revision(&target.0));
-        (stamped && !edited && current && Self::proven_own(&bytes)).then_some(bytes)
+        if meta.version().is_none()
+            && bunko_store::store_for(layer).is_some_and(|s| s.caps().remote)
+        {
+            return None;
+        }
+        let (bytes, facts) = self.sidecars.read_now(layer, &meta).ok()?;
+        let layer_rel = rel_of(&self.library, layer).unwrap_or_default();
+        let row = self
+            .db
+            .as_ref()
+            .and_then(|db| db.get_ocr_sidecar(&layer_rel).ok().flatten());
+        (self.proves(&facts, target) && from_archive(cbz, row.as_ref(), || Some(facts.clone())))
+            .then_some(bytes)
     }
 
     /// `{enabled, replace, direct, families: {family: n}, ready, needs_ocr,
@@ -1016,6 +1038,53 @@ impl Upgrade {
         Ok(entry)
     }
 
+    /// The swap's own proof, under the bare file's write lock, right before the replace:
+    /// the file is still the version the census judged (its stat, and its content
+    /// version on a remote store), and its bytes, read now at that version, are still
+    /// outdated. The census judged it from its kept facts, a hint: a version that names
+    /// no content (an mtime and a size) hides a reader's rewrite at the same size within
+    /// one tick of the clock, and the facts kept for it are the old bytes'. A file marked
+    /// EDITED since, or no longer outdated, is never replaced (its facts are kept as
+    /// read). Returns the recipe replaced.
+    fn outdated_now(
+        &self,
+        bare: &Path,
+        entry: &CensusEntry,
+        row: Option<&bunko_db::OcrSidecar>,
+    ) -> Result<Recipe, SwapError> {
+        let as_judged = || {
+            fs::metadata(bare).ok().filter(|m| {
+                m.is_file()
+                    && (m.len(), mtime_ns(m)) == entry.stamp
+                    && m.version() == entry.version.as_ref()
+            })
+        };
+        let changed = || {
+            SwapError::from(format!(
+                "{} changed during its upgrade; the next census judges it again",
+                bare.display()
+            ))
+        };
+        let meta = as_judged().ok_or_else(changed)?;
+        let facts = self.sidecars.fresh_at(bare, &meta);
+        as_judged().ok_or_else(changed)?;
+        let recipe = recipe_of(&facts, row);
+        if recipe.edited {
+            return Err(SwapError {
+                text: format!(
+                    "{} is marked edited now: a person's text is never replaced",
+                    bare.display()
+                ),
+                refused: false,
+                edited: true,
+            });
+        }
+        if !self.outdated(&recipe) {
+            return Err(format!("{} no longer needs an upgrade", bare.display()).into());
+        }
+        Ok(recipe)
+    }
+
     /// The swap (§5, D4), with the new content already validated and normalised at
     /// `new`. Under the write lock of the bare file, which must still be the version
     /// the census judged, the new file replaces exactly that version outright, with no
@@ -1025,7 +1094,7 @@ impl Upgrade {
     /// `generated`. Returns the bare path.
     pub fn swap(&self, cbz: &Path, new: &Path, mode: &str) -> Result<PathBuf, String> {
         if mode == "direct" {
-            let bytes = self.layer_source(new)?;
+            let bytes = self.layer_source(cbz, new)?;
             return self
                 .swap_install(cbz, Install::Direct(bytes))
                 .map_err(|e| e.text);
@@ -1034,17 +1103,21 @@ impl Upgrade {
             .map_err(|e| e.text)
     }
 
-    /// The bytes of `layer` a direct replace may install, or why it may not.
-    fn layer_source(&self, layer: &Path) -> Result<Vec<u8>, String> {
+    /// The bytes of `layer` a direct replace of `cbz`'s main may install, or why it may
+    /// not (the volume is then judged again by the next census, on what was read now).
+    fn layer_source(&self, cbz: &Path, layer: &Path) -> Result<Vec<u8>, String> {
         let target = self
             .primary
             .lock()
             .clone()
             .map(|p| p.output_affecting())
             .ok_or("no primary generation")?;
-        self.proven_layer(layer, &target).ok_or_else(|| {
+        self.proven_layer(cbz, layer, &target).ok_or_else(|| {
+            if let Some(rel) = rel_of(&self.library, cbz) {
+                self.census.lock().remove(&rel);
+            }
             format!(
-                "{} is not proven to be Bunko's own output carrying the primary recipe's ocr_engine stamp",
+                "{} is not proven to be Bunko's own output of this archive carrying the primary recipe's ocr_engine stamp",
                 layer.display()
             )
         })
@@ -1092,32 +1165,25 @@ impl Upgrade {
             .as_ref()
             .and_then(|db| db.get_ocr_sidecar(&bare_rel).ok().flatten());
         let target = self.primary.lock().clone().map(|p| p.output_affecting());
-        let (judged, recipe) = if bunko_library::fsutil::listed_exactly(bare) {
-            let entry = self.judged(cbz, rel, bare)?;
-            (Some(entry), classify(bare, row.as_ref()))
+        let judged = if bunko_library::fsutil::listed_exactly(bare) {
+            Some(self.judged(cbz, rel, bare)?)
         } else {
-            (None, Recipe::unknown())
+            None
         };
         let hook = self.swap_hook.lock().clone();
         if let Some(hook) = hook {
             hook(bare);
         }
-        let mode_of = match &judged {
-            Some(entry) => {
-                // LocalStore: nothing pins the replace, so the stat is checked again
-                // right before it (a mismatch: skip).
-                if entry.version.is_none() && super::types::stamp_of(bare) != Some(entry.stamp) {
-                    return Err(format!(
-                        "{} changed during its upgrade; the next census judges it again",
-                        bare.display()
-                    )
-                    .into());
-                }
+        let (mode_of, recipe) = match &judged {
+            // The file is checked again right before the replace (LocalStore: nothing
+            // pins it), and its bytes decide.
+            Some(entry) => (
                 Mode::Replace {
                     base: entry.version.clone(),
-                }
-            }
-            None => Mode::CreateNew,
+                },
+                self.outdated_now(bare, entry, row.as_ref())?,
+            ),
+            None => (Mode::CreateNew, Recipe::unknown()),
         };
         let intent = WriteIntent::new(mode_of, Origin::Upgrade, Durability::Sync);
         let installed = match install {
@@ -1130,6 +1196,7 @@ impl Upgrade {
             refused: super::collect::refused_now(&e)
                 && bunko_store::store_for(bare).is_some_and(|s| s.caps().remote),
             text: format!("could not install {}: {e}", bare.display()),
+            edited: false,
         })?;
         // Bookkeeping: the old file's provenance row goes with it (the caller records the
         // new file's), or the next census would read the old recipe off it.
@@ -1164,7 +1231,7 @@ impl Upgrade {
     /// unless an enabled row writes it (removing it would only queue that row to write
     /// it again).
     pub fn direct_replace(&self, cbz: &Path, layer: &Path) -> Result<PathBuf, String> {
-        let bytes = self.layer_source(layer)?;
+        let bytes = self.layer_source(cbz, layer)?;
         let rel = rel_of(&self.library, cbz).unwrap_or_default();
         let bare = self
             .swap_install(cbz, Install::Direct(bytes))
@@ -1192,35 +1259,32 @@ impl Upgrade {
             .lock()
             .iter()
             .any(|r| r.runnable() && !r.primary && Some(&r.name) == layer_name.as_ref());
-        let identical = matches!(
-            (read_sidecar(layer), read_sidecar(&bare)),
-            (Ok(a), Ok(b)) if a == b
-        );
-        if !enabled && identical {
-            let _ = fs::remove_file(layer);
-            if let Some(db) = &self.db {
-                let _ = db.forget_ocr_sidecar(&layer_rel);
+        // Compared under the layer's write lock, on both files' bytes as they are now.
+        if !enabled && let Some(_guard) = self.locks.try_lock(layer) {
+            let identical = matches!(
+                (read_sidecar(layer), read_sidecar(&bare)),
+                (Ok(a), Ok(b)) if a == b
+            );
+            if identical {
+                let _ = fs::remove_file(layer);
+                if let Some(db) = &self.db {
+                    let _ = db.forget_ocr_sidecar(&layer_rel);
+                }
             }
         }
         self.facts.sidecar_installed(cbz);
         Ok(bare)
     }
 
-    /// A layer an earlier 0.7 beta's upgrade kept: stamped
-    /// `ocr_engine.upgraded_from_primary: true`. A person's layer, another generation's,
-    /// and what a 0.7 beta's forced upgrade kept (all unstamped) never carry it.
-    fn kept_by_upgrade(layer: &Path) -> bool {
-        bunko_library::sidecar::load_sidecar(layer)
-            .data
-            .as_ref()
-            .and_then(|d| d.get("ocr_engine"))
-            .and_then(|b| b.as_object())
-            .and_then(|b| b.get("upgraded_from_primary"))
-            .is_some_and(|v| v.is_truthy())
+    /// [`kept_layer`] by `layer`'s kept facts: the hint that the file is worth reading
+    /// again under its lock ([`Self::drop_kept_layer`]).
+    fn kept_by_upgrade(&self, layer: &Path) -> bool {
+        self.sidecars.get(layer).is_some_and(|f| kept_layer(&f))
     }
 
-    /// Is the bare file already the upgraded output (the current primary's recipe)?
-    fn bare_upgraded(&self, bare: &Path) -> bool {
+    /// Is the bare file already the upgraded output (the current primary's recipe)? By
+    /// its kept facts, or with `fresh` on its bytes read now ([`SidecarFactsCache::fresh`]).
+    fn bare_upgraded(&self, bare: &Path, fresh: bool) -> bool {
         let Some(primary) = self.primary.lock().clone() else {
             return false;
         };
@@ -1236,19 +1300,43 @@ impl Upgrade {
             .db
             .as_ref()
             .and_then(|db| db.get_ocr_sidecar(&bare_rel).ok().flatten());
-        classify(bare, row.as_ref()).is_current(&target, target_rev)
+        let recipe = if fresh {
+            match self.sidecars.fresh(bare) {
+                Some(facts) => recipe_of(&facts, row.as_ref()),
+                None => return false,
+            }
+        } else {
+            self.recipe_at(bare, row.as_ref())
+        };
+        recipe.is_current(&target, target_rev)
     }
 
     /// Remove `layer` when an earlier beta's upgrade kept it (stamped) and the caller
     /// found the bare file already the upgraded output. One log line per file.
+    ///
+    /// The kept facts that found it are a hint: under the layer's write lock, the layer
+    /// and the bare file are read again and decide ([`SidecarFactsCache::fresh`], which
+    /// keeps what it read). A version that names no content (an mtime and a size) hides
+    /// a reader's rewrite at the same size within one tick of the clock, and the facts
+    /// kept for it are the old bytes': a layer that is no longer the stamped old OCR
+    /// (rewritten, marked EDITED), or beside a main that is no longer the upgraded
+    /// output, stays.
     fn drop_kept_layer(&self, bare: &Path, layer: &Path) -> bool {
-        if !fs::is_file(layer) || !Self::kept_by_upgrade(layer) {
+        if !fs::is_file(layer) || !self.kept_by_upgrade(layer) {
             return false;
         }
         let Some(_guard) = self.locks.try_lock(layer) else {
             return false;
         };
         let layer_rel = rel_of(&self.library, layer).unwrap_or_default();
+        if !self.sidecars.fresh(layer).is_some_and(|f| kept_layer(&f)) {
+            tracing::debug!("{layer_rel} is not the old OCR an upgrade kept any more: kept");
+            return false;
+        }
+        if !self.bare_upgraded(bare, true) {
+            tracing::debug!("{layer_rel} stays: its main sidecar is not the upgraded output");
+            return false;
+        }
         if let Err(e) = fs::remove_file(layer) {
             tracing::warn!("could not remove {layer_rel}, the old OCR an upgrade kept: {e}");
             return false;
@@ -1267,15 +1355,14 @@ impl Upgrade {
 
     /// The census side of the clean-up: this volume's layers an earlier beta's upgrade
     /// kept, once its bare file is the upgraded output. Only layer names such an upgrade
-    /// gave (`mokuro`, `mokuro-old`, `-prev…`) are read; the stamp decides.
+    /// gave (`mokuro`, `mokuro-old`, `-prev…`) are read (the name is judged before the
+    /// file is); the stamp decides.
     fn sweep_kept(&self, cbz: &Path) -> usize {
         let Some(bare) = bunko_library::sidecar::sibling(cbz, ".mokuro") else {
             return 0;
         };
-        let named: Vec<PathBuf> = self
-            .layer_candidates(cbz)
+        let by_name: Vec<PathBuf> = Self::layer_files(cbz)
             .into_iter()
-            .map(|(l, _)| l)
             .filter(|l| {
                 let id = l
                     .file_name()
@@ -1286,7 +1373,12 @@ impl Upgrade {
                 id == "mokuro" || id.starts_with("mokuro-old") || id.contains("-prev")
             })
             .collect();
-        if named.is_empty() || !self.bare_upgraded(&bare) {
+        let named: Vec<PathBuf> = self
+            .candidates_among(by_name)
+            .into_iter()
+            .map(|(l, _)| l)
+            .collect();
+        if named.is_empty() || !self.bare_upgraded(&bare, false) {
             return 0;
         }
         let n = named
@@ -1368,7 +1460,7 @@ impl Upgrade {
                 continue;
             }
             if fs::is_file(&layer)
-                && self.bare_upgraded(&bare)
+                && self.bare_upgraded(&bare, false)
                 && self.drop_kept_layer(&bare, &layer)
             {
                 removed += 1;
@@ -1385,6 +1477,41 @@ impl Upgrade {
         }
         removed
     }
+}
+
+/// Was a layer with provenance row `row` read from `cbz` as it is now? The row's archive
+/// stamp says, when it has one; else the layer's own pages (`facts`, read only then)
+/// must be one per image of the archive.
+fn from_archive(
+    cbz: &Path,
+    row: Option<&bunko_db::OcrSidecar>,
+    facts: impl FnOnce() -> Option<Arc<SidecarFacts>>,
+) -> bool {
+    if let (Some(r), Some(s)) = (row, super::types::stamp_of(cbz))
+        && r.archive_size.is_some()
+    {
+        return r.archive_size == Some(s.0 as i64) && r.archive_mtime_ns == Some(s.1 as i64);
+    }
+    let Some(pages) = facts().and_then(|f| f.object.as_ref().and_then(|o| o.pages.clone())) else {
+        return false;
+    };
+    let Some(names) = bunko_library::archive::reader_image_names(cbz) else {
+        return false;
+    };
+    pages.name_the_images_of(&names)
+}
+
+/// A layer an earlier 0.7 beta's upgrade kept: stamped
+/// `ocr_engine.upgraded_from_primary: true`, and not marked EDITED (a reader's text,
+/// whatever stamp it kept). A person's layer, another generation's, and what a 0.7
+/// beta's forced upgrade kept (all unstamped) never carry it.
+fn kept_layer(facts: &SidecarFacts) -> bool {
+    !facts.edited_key()
+        && facts
+            .object
+            .as_ref()
+            .and_then(|o| o.block.as_ref())
+            .is_some_and(|b| b.upgraded_from_primary)
 }
 
 /// The listed archive whose primary sidecar (rule v1, over the folder listing) is
@@ -1441,21 +1568,21 @@ pub fn swap_in_generated(req: &CollectRequest, cbz: &Path) -> Result<(PathBuf, S
             .install_for_edited(cbz, &req.result)
             .map(|p| (p, Swapped::EditedMainLayer));
     }
-    upgrade
-        .swap_install(cbz, Install::Generated(&req.result))
-        .map(|p| (p, Swapped::Main))
-        .map_err(|e| {
-            if e.refused {
-                // The cloud store cannot take it now (this Bunko is still claiming the
-                // library, say): not a failure of the volume; the job goes back to the
-                // queue, as a plain install's does.
-                Outcome::Held(e.text)
-            } else if e.text.contains("locked") {
-                Outcome::Busy(e.text)
-            } else {
-                Outcome::Failed(e.text)
-            }
-        })
+    match upgrade.swap_install(cbz, Install::Generated(&req.result)) {
+        Ok(p) => Ok((p, Swapped::Main)),
+        // The census judged the main from its kept facts; its bytes, read under its
+        // lock, are a person's text now: the result goes beside it, as for any EDITED
+        // main (judged again there, under both locks).
+        Err(e) if e.edited => upgrade
+            .install_for_edited(cbz, &req.result)
+            .map(|p| (p, Swapped::EditedMainLayer)),
+        // The cloud store cannot take it now (this Bunko is still claiming the library,
+        // say): not a failure of the volume; the job goes back to the queue, as a plain
+        // install's does.
+        Err(e) if e.refused => Err(Outcome::Held(e.text)),
+        Err(e) if e.text.contains("locked") => Err(Outcome::Busy(e.text)),
+        Err(e) => Err(Outcome::Failed(e.text)),
+    }
 }
 
 impl super::sched::Scheduler {

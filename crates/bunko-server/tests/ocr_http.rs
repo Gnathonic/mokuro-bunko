@@ -419,6 +419,226 @@ async fn queue_file_document_etag_gzip_and_refusals() {
     e.ocr.stop().await;
 }
 
+/// The queue file v2 of each series over HTTP (`docs/design/queue-file-v2.md` §7):
+/// every job the series owes, `live` with the hold, a strong ETag and 304, a gzip form
+/// with its own tag for a long body, every spelling of the name, 404 for a folder the
+/// library does not show, an empty file for one that owes nothing, 405 for every
+/// write, 404 for a PROPFIND.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn series_queue_file_over_http() {
+    let e = env(|_| {});
+    let lib = e.core.layout.library();
+    ocr_common::write_cbz(&lib.join("Series A/V1.cbz"), 3);
+    e.ocr.archive_arrived(&lib.join("Series A/V1.cbz"));
+    for i in 0..40 {
+        let p = lib.join(format!(
+            "Long Example Series/Long Example Series Volume {i:03}.cbz"
+        ));
+        ocr_common::write_cbz(&p, 2);
+        e.ocr.archive_arrived(&p);
+    }
+    std::fs::create_dir_all(lib.join("Series B")).unwrap();
+    std::fs::write(lib.join("Series B/notes.txt"), b"x").unwrap();
+    std::fs::create_dir_all(lib.join("history")).unwrap();
+    std::fs::write(lib.join("loose.txt"), b"x").unwrap();
+    let app = Router::new()
+        .fallback(|| async { (StatusCode::IM_A_TEAPOT, "dav") })
+        .layer(axum::middleware::from_fn_with_state(
+            QueueFileState {
+                core: e.core.clone(),
+                ocr: Some(e.ocr.clone()),
+            },
+            queue_file::middleware,
+        ));
+    let path = "/mokuro-reader/Series%20A/.mokuro-series-queue.json";
+    let req = |method: &str, path: &str| {
+        Request::builder()
+            .method(method)
+            .uri(path)
+            .body(Body::empty())
+            .unwrap()
+    };
+    let (status, headers, body) = send(&app, req("GET", path)).await;
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+    let doc: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(doc["v"], 2);
+    assert_eq!(doc["series"], "Series A");
+    assert_eq!(doc["instance_id"], e.ocr.series_queue_state().instance_id(),);
+    assert!(
+        doc["rev"].as_u64().unwrap() > 1_000_000_000_000,
+        "time-based"
+    );
+    assert_eq!(
+        doc["rows"],
+        json!([{"kind": "ocr", "id": "hayai-nova",
+                "parts": [{"role": "recognizer", "name": "Hayai Nova", "version": "2.5"},
+                          {"role": "detector", "name": "PP-OCR Manga", "version": "0.3"}]}])
+    );
+    assert_eq!(doc["vols"], json!({"V1": [[0, "q", null]]}));
+    assert_eq!(doc["done"], json!({}));
+    assert_eq!(doc["live"]["held"], json!({"reason": "no-processor"}));
+    assert_eq!(doc["live"]["held_rows"], json!([]));
+    assert_eq!(doc["live"]["batch_s"], 5);
+    assert_eq!(doc["live"]["clock"].as_array().unwrap().len(), 2);
+    assert_eq!(doc["clock_at"], doc["live"]["clock_at"]);
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.starts_with("{\"v\":2,\"instance_id\":"), "{text}");
+    let etag = headers["etag"].to_str().unwrap().to_string();
+    assert_eq!(etag.len(), 34, "{etag}");
+    assert_eq!(headers["cache-control"], "no-cache");
+    assert_eq!(headers["vary"], "Accept-Encoding");
+    assert_eq!(headers["content-type"], "application/json");
+    assert!(
+        headers.get("content-encoding").is_none(),
+        "a short body is never gzipped"
+    );
+    // The same queue, rebuilt: the same tag; 304 for any tag in the list.
+    e.ocr.series_queue_state().expire();
+    let get_if = |tag: &str| {
+        Request::get(path)
+            .header(header::IF_NONE_MATCH, tag)
+            .body(Body::empty())
+            .unwrap()
+    };
+    let (status, headers2, body) = send(&app, get_if(&format!("\"other\", {etag}"))).await;
+    assert_eq!(status, 304);
+    assert!(body.is_empty());
+    assert_eq!(headers2["etag"].to_str().unwrap(), etag);
+    // HEAD: the headers, no body.
+    let (status, headers3, body) = send(&app, req("HEAD", path)).await;
+    assert_eq!(status, 200);
+    assert!(body.is_empty());
+    assert_eq!(headers3["etag"].to_str().unwrap(), etag);
+    // Every spelling of the name and of the folder is the same file.
+    for other in [
+        "/mokuro-reader/series%20a/.MOKURO-SERIES-QUEUE.JSON",
+        "/mokuro-reader/Series%20A/.mokuro-%C5%BFeries-queue.json",
+        "/mokuro-reader/./Series%20A/.mokuro-series-queue.json",
+    ] {
+        let (status, h, _) = send(&app, req("GET", other)).await;
+        assert_eq!(status, 200, "{other}");
+        assert_eq!(h["etag"].to_str().unwrap(), etag, "{other}");
+    }
+    // A folder the library does not show: 404. One that owes nothing: an empty file.
+    for missing in [
+        "/mokuro-reader/No%20Such/.mokuro-series-queue.json",
+        "/mokuro-reader/history/.mokuro-series-queue.json",
+        "/mokuro-reader/loose.txt/.mokuro-series-queue.json",
+    ] {
+        assert_eq!(send(&app, req("GET", missing)).await.0, 404, "{missing}");
+    }
+    let (status, _, body) = send(
+        &app,
+        req("GET", "/mokuro-reader/Series%20B/.mokuro-series-queue.json"),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let empty: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(empty["series"], "Series B");
+    assert_eq!(empty["vols"], json!({}));
+    assert_eq!(empty["rows"], json!([]));
+    // A long body: gzipped on request, with its own tag; either tag is "not modified".
+    let long = "/mokuro-reader/Long%20Example%20Series/.mokuro-series-queue.json";
+    let (_, plain_h, plain) = send(&app, req("GET", long)).await;
+    assert!(plain.len() >= 1024, "{}", plain.len());
+    let plain_tag = plain_h["etag"].to_str().unwrap().to_string();
+    let gz = Request::get(long)
+        .header(header::ACCEPT_ENCODING, "gzip, br")
+        .body(Body::empty())
+        .unwrap();
+    let (status, gz_h, packed) = send(&app, gz).await;
+    assert_eq!(status, 200);
+    assert_eq!(gz_h["content-encoding"], "gzip");
+    let gz_tag = gz_h["etag"].to_str().unwrap().to_string();
+    assert_eq!(
+        gz_tag,
+        format!("{}-gz\"", &plain_tag[..plain_tag.len() - 1])
+    );
+    let mut text = Vec::new();
+    std::io::Read::read_to_end(&mut flate2::read::GzDecoder::new(&packed[..]), &mut text).unwrap();
+    assert_eq!(text, plain);
+    for tag in [&plain_tag, &gz_tag] {
+        let r = Request::get(long)
+            .header(header::ACCEPT_ENCODING, "gzip")
+            .header(header::IF_NONE_MATCH, tag.as_str())
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(send(&app, r).await.0, 304, "{tag}");
+    }
+    // Writes: 405, in every spelling, onto it as well; PROPFIND: in no listing.
+    for method in [
+        "PUT",
+        "DELETE",
+        "PROPPATCH",
+        "LOCK",
+        "UNLOCK",
+        "MKCOL",
+        "POST",
+        "MOVE",
+        "COPY",
+    ] {
+        let r = Request::builder()
+            .method(method)
+            .uri("/mokuro-reader/Series%20A/.Mokuro-Series-Queue.json")
+            .header("destination", "http://h/mokuro-reader/Series%20A/x.json")
+            .body(Body::empty())
+            .unwrap();
+        let (status, h, _) = send(&app, r).await;
+        assert_eq!(status, 405, "{method}");
+        assert_eq!(h["allow"], "GET, HEAD, OPTIONS");
+    }
+    for method in ["MOVE", "COPY"] {
+        let r = Request::builder()
+            .method(method)
+            .uri("/mokuro-reader/Series%20A/x.json")
+            .header(
+                "destination",
+                "http://h/mokuro-reader/Series%20A/.MOKURO-series-queue.json",
+            )
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(send(&app, r).await.0, 405, "{method} onto it");
+    }
+    assert_eq!(send(&app, req("PROPFIND", path)).await.0, 404);
+    assert_eq!(
+        send(&app, req("OPTIONS", path)).await.0,
+        StatusCode::IM_A_TEAPOT
+    );
+    // Other files of the folder are WebDAV's.
+    assert_eq!(
+        send(&app, req("GET", "/mokuro-reader/Series%20A/V1.cbz"))
+            .await
+            .0,
+        StatusCode::IM_A_TEAPOT
+    );
+    e.stop.cancel();
+    e.ocr.stop().await;
+}
+
+/// The read gate is a GET of a file in the series folder: with anonymous downloads off,
+/// a visitor is asked to sign in.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn series_queue_file_has_the_read_gate_of_its_folder() {
+    let e = env(|c| c.registration.allow_anonymous_download = false);
+    let lib = e.core.layout.library();
+    ocr_common::write_cbz(&lib.join("Series A/V1.cbz"), 3);
+    let app = Router::new()
+        .fallback(|| async { (StatusCode::IM_A_TEAPOT, "dav") })
+        .layer(axum::middleware::from_fn_with_state(
+            QueueFileState {
+                core: e.core.clone(),
+                ocr: Some(e.ocr.clone()),
+            },
+            queue_file::middleware,
+        ));
+    let r = Request::get("/mokuro-reader/Series%20A/.mokuro-series-queue.json")
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(send(&app, r).await.0, 401);
+    e.stop.cancel();
+    e.ocr.stop().await;
+}
+
 #[test]
 fn queue_file_eta_hysteresis() {
     let doc = |eta: &str| {
@@ -2282,4 +2502,398 @@ async fn a_socket_opens_when_the_scheduler_answers_after_30_seconds() {
         opened.err()
     );
     assert!(started.elapsed() >= Duration::from_secs(30));
+}
+
+// --- this server's OCR turned off mid-queue ------------------------------------------------
+
+/// This server's OCR as `serve` runs it (a background install), counting its starts and
+/// its processor's ends: an end is every session wound down, its models freed.
+struct CountedLocal {
+    fake: bunko_processor::FakePipeline,
+    install: Arc<FakeInstall>,
+    starts: std::sync::atomic::AtomicUsize,
+    ended: Arc<std::sync::atomic::AtomicUsize>,
+    /// How much longer than its sessions its end takes (ms): a processor slow to free
+    /// its models.
+    end_delay_ms: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl bunko_server::ocr::LocalProcessorFactory for CountedLocal {
+    fn start(
+        &self,
+        results_dir: &std::path::Path,
+    ) -> Result<bunko_server::ocr::LocalChannels, String> {
+        self.starts
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let mut channels = FakeLocal(self.fake.clone()).start(results_dir)?;
+        let ended = self.ended.clone();
+        let delay = self.end_delay_ms.clone();
+        channels.finished = channels.finished.map(|f| {
+            tokio::spawn(async move {
+                let _ = f.await;
+                let ms = delay.load(std::sync::atomic::Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(ms)).await;
+                ended.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            })
+        });
+        Ok(channels)
+    }
+    fn installer(&self) -> Option<Arc<dyn bunko_server::ocr::BackgroundInstall>> {
+        Some(self.install.clone())
+    }
+}
+
+/// Wait up to `secs` for `f` to hold.
+async fn eventually<F: std::future::Future<Output = bool>>(
+    what: &str,
+    secs: u64,
+    mut f: impl FnMut() -> F,
+) {
+    let until = std::time::Instant::now() + Duration::from_secs(secs);
+    while std::time::Instant::now() < until {
+        if f().await {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("{what}: not within {secs}s");
+}
+
+/// The archives of the next `n` volume ops a processor is sent (within 10 s), sorted.
+async fn next_volumes(ops: &mut tokio::sync::mpsc::UnboundedReceiver<Op>, n: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    while out.len() < n {
+        let op = tokio::time::timeout(Duration::from_secs(10), ops.recv())
+            .await
+            .expect("a volume in time")
+            .expect("the link open");
+        if let Op::Volume(v) = op {
+            out.push(v.archive);
+        }
+    }
+    out.sort();
+    out
+}
+
+/// This server's OCR (one lane) reading `A/V1` (held before its last page until
+/// `hold` is cleared) with `A/V2` queued behind it in its session.
+struct LocalRun {
+    dir: tempfile::TempDir,
+    core: Core,
+    lib: std::path::PathBuf,
+    ocr: OcrControl,
+    fake: bunko_processor::FakePipeline,
+    factory: Arc<CountedLocal>,
+    hold: Arc<std::sync::atomic::AtomicBool>,
+    stop: CancellationToken,
+}
+
+impl LocalRun {
+    async fn start() -> LocalRun {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.storage.base_path = dir.path().join("storage");
+        config.ocr.autobench = false;
+        config.ocr.local_processing = true;
+        config.ocr.concurrency = 1;
+        let layout = config.storage.layout();
+        layout.ensure_directories().unwrap();
+        let db = Arc::new(
+            Database::open_with(
+                layout.database(),
+                &DbOptions {
+                    bcrypt_cost: 4,
+                    ..DbOptions::default()
+                },
+            )
+            .unwrap(),
+        );
+        let backend = Arc::new(DbAuthBackend::new(db.clone(), layout.clone()));
+        let core = Core::new(Arc::new(RwLock::new(config)), None, backend);
+        let hold = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let fake = bunko_processor::FakePipeline::new(bunko_processor::FakeConfig {
+            engines: vec!["hayai-nova".into()],
+            page_delay: Duration::from_millis(5),
+            overlap: 1,
+            hold: Some(hold.clone()),
+            ..Default::default()
+        });
+        let lib = layout.library();
+        for v in ["A/V1.cbz", "A/V2.cbz"] {
+            ocr_common::write_cbz(&lib.join(v), 3);
+        }
+        let factory = Arc::new(CountedLocal {
+            fake: fake.clone(),
+            install: FakeInstall::new(None),
+            starts: std::sync::atomic::AtomicUsize::new(0),
+            ended: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            end_delay_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        });
+        let ocr = OcrControl::new(OcrDeps {
+            core: core.clone(),
+            db: Some(db),
+            facts: Arc::new(FileFacts),
+            locks: Arc::new(DavLocks(bunko_dav::PathWriteLocks::new())),
+            local: Some(factory.clone()),
+            clock: None,
+        });
+        let stop = CancellationToken::new();
+        ocr.start(stop.clone());
+        let run = LocalRun {
+            dir,
+            core,
+            lib,
+            ocr,
+            fake,
+            factory,
+            hold,
+            stop,
+        };
+        eventually("this server reads a volume", 20, || {
+            let ocr = run.ocr.clone();
+            let ran = run.fake.ran().len();
+            async move { ran >= 1 && ocr.ask(|s| s.claims.len()).await == Some(2) }
+        })
+        .await;
+        run
+    }
+
+    /// `ocr.local_processing` saved and applied, as the settings pages do.
+    async fn set_local(&self, on: bool) -> Value {
+        self.core.config.write().ocr.local_processing = on;
+        let config = self.core.config.read().clone();
+        let ocr = self.ocr.clone();
+        tokio::task::spawn_blocking(move || ocr.apply_config(&config))
+            .await
+            .unwrap()
+    }
+
+    /// Whether this server is a machine, has a lane, a session, a claim.
+    async fn local_state(&self) -> (bool, bool, bool, bool) {
+        self.ocr
+            .ask(|s| {
+                (
+                    s.machines.contains_key("local"),
+                    s.lanes.iter().any(|l| l.pid == "local"),
+                    s.sessions.values().any(|x| x.local),
+                    s.claims.values().any(|c| c.pid == "local"),
+                )
+            })
+            .await
+            .unwrap()
+    }
+
+    fn starts(&self) -> usize {
+        self.factory
+            .starts
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn ended(&self) -> usize {
+        self.factory.ended.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn scratch(&self) -> Vec<std::path::PathBuf> {
+        walk(&self.dir.path().join("storage/.processing"))
+    }
+}
+
+/// Regression (owner report: "I changed settings to remove this machine's OCR backend,
+/// but it still keeps processing OCR tasks"). Turning this server's OCR off mid-queue
+/// stops it at once: the volume it was reading is cancelled, what it held goes back to
+/// the queue and on to the processor that is connected, its in-process processor ends
+/// (its engine freed), nothing it ran is installed, its scratch directory is empty, and
+/// it is no machine any more. Nothing starts it again while it is off (an install that
+/// ends, time passing). Turned on again it starts by itself and reads volumes; turned
+/// off again it stops again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn turning_this_servers_ocr_off_mid_queue_stops_it_at_once() {
+    let run = LocalRun::start().await;
+    // A processor connects with nothing left to take.
+    let mut remote = fake_processor(&run.ocr, "tower").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !std::iter::from_fn(|| remote.try_recv().ok()).any(|o| matches!(o, Op::Volume(_))),
+        "nothing was left for it"
+    );
+
+    run.set_local(false).await;
+
+    // At once: no machine, lane, session or claim of this server is left.
+    assert_eq!(run.local_state().await, (false, false, false, false));
+    // What it held went to the processor that is connected.
+    assert_eq!(
+        next_volumes(&mut remote, 2).await,
+        ["/mokuro-reader/A/V1.cbz", "/mokuro-reader/A/V2.cbz"]
+    );
+    // Its in-process processor ended: its sessions wound down, the engine freed.
+    eventually("the processor ends", 20, || {
+        let n = run.ended();
+        async move { n == 1 }
+    })
+    .await;
+    // Nothing it ran was installed; nothing is left in its scratch directory.
+    eventually("an empty scratch directory", 10, || {
+        let left = run.scratch();
+        async move { left.is_empty() }
+    })
+    .await;
+    assert!(!run.lib.join("A/V1.mokuro").exists());
+    assert!(!run.lib.join("A/V2.mokuro").exists());
+    // It is no machine of the status.
+    let (connected, processors) = run
+        .ocr
+        .ask(|s| (s.connected_machines(), s.processors()))
+        .await
+        .unwrap();
+    assert!(
+        connected.iter().all(|m| m["machine"] != "local"),
+        "{connected:?}"
+    );
+    assert!(
+        processors.iter().all(|m| m["local"] != true),
+        "{processors:?}"
+    );
+    // Nothing starts it while it is off: an install that ends, time passing.
+    let opened = run.fake.opened();
+    run.factory.install.end("done", true);
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(run.starts(), 1);
+    assert_eq!(run.fake.opened(), opened);
+    assert_eq!(run.local_state().await, (false, false, false, false));
+    assert!(
+        run.ocr
+            .running_jobs()
+            .iter()
+            .all(|j| j.get("machine") != Some(&json!("local"))),
+        "{:?}",
+        run.ocr.running_jobs()
+    );
+
+    // On again: it starts by itself and reads what arrives.
+    run.hold.store(false, std::sync::atomic::Ordering::SeqCst);
+    run.set_local(true).await;
+    eventually("this server's OCR starts again", 20, || {
+        let n = run.starts();
+        let up = run.local_state();
+        async move { n == 2 && up.await.0 }
+    })
+    .await;
+    ocr_common::write_cbz(&run.lib.join("B/V1.cbz"), 3);
+    run.ocr.archive_arrived(&run.lib.join("B/V1.cbz"));
+    eventually("B/V1 read by this server", 30, || {
+        let done = run.lib.join("B/V1.mokuro").is_file();
+        async move { done }
+    })
+    .await;
+
+    // Off again: it stops again.
+    run.set_local(false).await;
+    assert_eq!(run.local_state().await, (false, false, false, false));
+    eventually("the second processor ends", 20, || {
+        let n = run.ended();
+        async move { n == 2 }
+    })
+    .await;
+    run.stop.cancel();
+    run.ocr.stop().await;
+}
+
+/// A backend change while this server's OCR runs restarts it cleanly: the old processor
+/// has ended before the new one starts, what it held goes back to the queue and to the
+/// new one, and nothing of the old one is left in its scratch directory.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_backend_change_restarts_this_servers_ocr_cleanly() {
+    let run = LocalRun::start().await;
+    let old = run
+        .ocr
+        .ask(|s| s.sessions.keys().cloned().collect::<Vec<_>>())
+        .await
+        .unwrap();
+    assert_eq!(old.len(), 1);
+
+    run.ocr
+        .restart_local("the OCR backend preference changed")
+        .await;
+
+    assert_eq!(
+        (run.ended(), run.starts()),
+        (1, 2),
+        "ended before the start"
+    );
+    assert!(run.local_state().await.0);
+    let processing = run.dir.path().join("storage/.processing");
+    assert!(
+        !processing.join(&old[0]).exists(),
+        "the old session's scratch"
+    );
+    run.hold.store(false, std::sync::atomic::Ordering::SeqCst);
+    eventually("both volumes read by the new processor", 30, || {
+        let done = ["A/V1.mokuro", "A/V2.mokuro"]
+            .iter()
+            .all(|v| run.lib.join(v).is_file());
+        async move { done }
+    })
+    .await;
+    eventually("an empty scratch directory", 10, || {
+        let left = run.scratch();
+        async move { left.is_empty() }
+    })
+    .await;
+    run.stop.cancel();
+    run.ocr.stop().await;
+}
+
+/// The server stopping right after this server's OCR was turned off waits for the old
+/// processor's wind-down: the stop that turning it off spawned had taken the
+/// processor's end, so the server's stop found nothing to wait for and returned while
+/// the processor and its engine were still being torn down.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stop_right_after_turning_this_servers_ocr_off_waits_for_its_wind_down() {
+    let run = LocalRun::start().await;
+    run.factory
+        .end_delay_ms
+        .store(1500, std::sync::atomic::Ordering::SeqCst);
+    run.set_local(false).await;
+    // The wind-down that turning it off started is under way.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(run.ended(), 0, "still winding down");
+
+    run.stop.cancel();
+    run.ocr.stop().await;
+
+    assert_eq!(
+        run.ended(),
+        1,
+        "the server's stop returned before its OCR ended"
+    );
+    // Nothing starts it again once stopped.
+    run.ocr.restart_local("an install ended").await;
+    assert_eq!(run.starts(), 1);
+}
+
+/// Removing this machine's OCR backend turns OCR on this machine off and waits for it
+/// to have stopped before its files go: turning it off says how many volumes went back
+/// to the queue, and the wait returns only once its processor has ended (its engine
+/// freed) and its scratch directory is empty, however slow that is.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn turning_off_to_remove_the_backend_waits_until_this_servers_ocr_stopped() {
+    let run = LocalRun::start().await;
+    run.factory
+        .end_delay_ms
+        .store(1000, std::sync::atomic::Ordering::SeqCst);
+    let applied = run.set_local(false).await;
+    assert_eq!(applied["returned"], 2, "{applied}");
+    assert_eq!(run.ended(), 0, "still winding down");
+
+    let ocr = run.ocr.clone();
+    tokio::task::spawn_blocking(move || ocr.wait_local_stopped("its OCR backend is being removed"))
+        .await
+        .unwrap();
+
+    assert_eq!(run.ended(), 1, "returned before this server's OCR ended");
+    assert!(run.scratch().is_empty(), "{:?}", run.scratch());
+    assert_eq!(run.local_state().await, (false, false, false, false));
+    run.stop.cancel();
+    run.ocr.stop().await;
 }

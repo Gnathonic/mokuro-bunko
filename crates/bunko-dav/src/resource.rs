@@ -881,6 +881,15 @@ impl Roots {
             if paths::is_staging_name(&name) {
                 continue;
             }
+            // A series' OCR queue file (a cloud store's copy, in any spelling) is never
+            // listed: Bunko serves it from memory to a GET, and no client walks it.
+            if kind == FileKind::Library
+                && !reader_root
+                && bunko_core::names::is_fixed_name(&name, bunko_core::names::SERIES_QUEUE_FILE)
+                && !entry.file_type().is_ok_and(|t| t.is_dir())
+            {
+                continue;
+            }
             let phys = entry.path();
             // Follow symlinks for the stat, as 0.5.2's DirEntry did; a dangling link is
             // skipped (0.5.2 listed it with no properties).

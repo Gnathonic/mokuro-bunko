@@ -4,6 +4,10 @@
 //! rows for foreign `series.json` versions, `conflict` rows, and `local_row`s
 //! (staging files that are never published, such as `.nocover`).
 //!
+//! The `series_queue` table holds what the store's series-file sink last landed for each
+//! series (`docs/design/queue-file-v2.md` §6.7), so a restart rewrites nothing that did
+//! not change.
+//!
 //! The `own` set — `(pid, cver)` pairs the ledger holds with `echo_only = 0` — is
 //! kept in memory as well, because every metadata answer consults it.
 
@@ -44,6 +48,9 @@ CREATE TABLE IF NOT EXISTS merge_group(id TEXT PRIMARY KEY, scope TEXT NOT NULL,
   no_trash INTEGER NOT NULL DEFAULT 0, note TEXT);
 CREATE TABLE IF NOT EXISTS merge_block(conflict_id INTEGER PRIMARY KEY, this TEXT NOT NULL,
   that TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS series_queue(series_fold TEXT PRIMARY KEY, folder TEXT NOT NULL,
+  rev INTEGER NOT NULL, content_sha TEXT NOT NULL, jobs TEXT NOT NULL, done TEXT NOT NULL,
+  last_write_ms INTEGER NOT NULL);
 ";
 
 /// Columns added after a table first shipped: `(table, column, definition)`. `SCHEMA`
@@ -158,6 +165,24 @@ impl ConflictRow {
     }
 }
 
+/// One `series_queue` row: what the series-file sink last landed for a series.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SeriesQueueRow {
+    /// The series' fold key (primary key).
+    pub series_fold: String,
+    /// The folder spelling the file was written in.
+    pub folder: String,
+    pub rev: u64,
+    /// sha256 (hex) of the body without `at`, `rev` and `clock_at`.
+    pub content_sha: String,
+    /// The file's jobs: `{"at", "clock_at", "rows", "vols"}` as JSON.
+    pub jobs: String,
+    /// Its `done` tail as JSON.
+    pub done: String,
+    /// When it committed, unix ms.
+    pub last_write_ms: i64,
+}
+
 /// The durable state database.
 pub struct StateDb {
     conn: Arc<Mutex<Connection>>,
@@ -222,6 +247,62 @@ impl StateDb {
             c.execute(
                 "INSERT INTO meta(k, v) VALUES(?1, ?2) ON CONFLICT(k) DO UPDATE SET v = excluded.v",
                 params![k, v],
+            )
+            .map(|_| ())
+        })
+    }
+
+    // ---- the series-file sink (queue file v2 §6.7) --------------------------------
+
+    /// Every `series_queue` row.
+    pub fn series_queue_rows(&self) -> Vec<SeriesQueueRow> {
+        self.with("series_queue_rows", |c| {
+            c.prepare(
+                "SELECT series_fold, folder, rev, content_sha, jobs, done, last_write_ms \
+                 FROM series_queue ORDER BY series_fold",
+            )?
+            .query_map([], |r| {
+                Ok(SeriesQueueRow {
+                    series_fold: r.get(0)?,
+                    folder: r.get(1)?,
+                    rev: r.get::<_, i64>(2)?.max(0) as u64,
+                    content_sha: r.get(3)?,
+                    jobs: r.get(4)?,
+                    done: r.get(5)?,
+                    last_write_ms: r.get(6)?,
+                })
+            })?
+            .collect()
+        })
+        .unwrap_or_default()
+    }
+
+    /// Record (replace) a series' row.
+    pub fn series_queue_put(&self, row: &SeriesQueueRow) -> std::io::Result<()> {
+        self.with("series_queue_put", |c| {
+            c.execute(
+                "INSERT OR REPLACE INTO series_queue(series_fold, folder, rev, content_sha, jobs, \
+                 done, last_write_ms) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    row.series_fold,
+                    row.folder,
+                    i64::try_from(row.rev).unwrap_or(i64::MAX),
+                    row.content_sha,
+                    row.jobs,
+                    row.done,
+                    row.last_write_ms
+                ],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// Forget a series' row.
+    pub fn series_queue_del(&self, series_fold: &str) -> std::io::Result<()> {
+        self.with("series_queue_del", |c| {
+            c.execute(
+                "DELETE FROM series_queue WHERE series_fold = ?1",
+                [series_fold],
             )
             .map(|_| ())
         })
@@ -521,6 +602,24 @@ impl StateDb {
             .collect()
         })
         .unwrap_or_default()
+    }
+
+    /// Mark every unresolved conflict of one of `kinds` at the library path `path`
+    /// (ASCII case aside) resolved; returns how many.
+    pub fn conflicts_resolve_at(&self, kinds: &[ConflictRow], path: &str) -> usize {
+        kinds
+            .iter()
+            .map(|k| {
+                self.with("conflicts_resolve_at", |c| {
+                    c.execute(
+                        "UPDATE conflict SET resolved = 1 \
+                         WHERE kind = ?1 AND lower(path) = lower(?2) AND resolved = 0",
+                        params![k.as_str(), path],
+                    )
+                })
+                .unwrap_or(0)
+            })
+            .sum()
     }
 
     /// Mark a conflict resolved.

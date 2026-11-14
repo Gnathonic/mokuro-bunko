@@ -1,6 +1,8 @@
 //! Cloud status files (spec §9): the marker and lease `mokuro-reader/.mokuro-bunko.json`
-//! (§9.2, D9) and the pure transform behind the cloud copy of
-//! `mokuro-reader/.mokuro-queue.json` (§9.1, D10).
+//! (§9.2, D9). The OCR queue rides in it: the marker's `series_queue` block
+//! (`docs/design/queue-file-v2.md` §4.2) carries the hold, the held rows and the work
+//! clock, filled at each write by a [`MarkerBlock`] (the store's series-file sink,
+//! `series_queue.rs`); the per-series files themselves are outbox ops.
 //!
 //! **Lease.** Every Bunko that manages a cloud library writes a [`Marker`]. The holder
 //! is the top of the total order `(epoch desc, claimed_at asc, instance_id asc)` over
@@ -19,13 +21,15 @@
 //! [`MemoryLeaseStore`] for tests, [`SqliteLeaseStore`] over the `meta` table of a
 //! caller's connection (`state.sqlite`, D7).
 //!
-//! **Queue document.** [`cloud_queue_doc`] turns the server's `build_document` output
-//! into the cloud copy (instance id, `truncated`, `done[]`, progress quantised to 0.1,
-//! 64 KiB cap); [`queue_doc_changed`] is the "write only on change" rule.
+//! **Store clock** (queue file v2 §6.9). Every marker listing records `server_now −
+//! local_now`; [`Fence::clock_offset_ms`] is the median of the last
+//! [`CLOCK_SAMPLES`], so times written to the store can be put on its clock.
 
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -33,7 +37,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use parking_lot::Mutex;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value, json};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
@@ -97,9 +101,11 @@ fn default_active() -> MarkerState {
 /// ```json
 /// {"version":1,"kind":"mokuro-bunko","instance_id":"6f1c…","boot_id":"a93e…","instance_name":"nas",
 ///  "bunko_version":"0.8.0","epoch":3,"claimed_at":"…","heartbeat_at":"…","ttl_s":900,"state":"active",
-///  "compiles":["series.json","catalog.json"],"ocr":true,"queue":".mokuro-queue.json","dedup":true,
+///  "compiles":["series.json","catalog.json"],"ocr":true,"queue":null,"dedup":true,
 ///  "curated":true,"took_over_from":null,
-///  "per_user_files":["volume-data.json","profiles.json","goals.json","positions.json","history/"]}
+///  "per_user_files":["volume-data.json","profiles.json","goals.json","positions.json","history/"],
+///  "series_queue":{"v":2,"file":".mokuro-series-queue.json","batch_s":120,"held":null,
+///   "held_rows":[],"clock":[[…,…],[…,…]],"clock_at":…}}
 /// ```
 ///
 /// Reading is lenient (a newer Bunko's marker must still be respected): only `kind`,
@@ -140,9 +146,15 @@ pub struct Marker {
     /// Whether the holder runs OCR.
     #[serde(default)]
     pub ocr: bool,
-    /// The queue file the holder publishes (§9.1), if any.
+    /// The root queue file the holder publishes (§9.1), if any. A 0.8 holder writes
+    /// none (`null`): the queue rides in [`Marker::series_queue`] and per-series files.
     #[serde(default)]
     pub queue: Option<String>,
+    /// The OCR queue's library-wide state (`docs/design/queue-file-v2.md` §4.2):
+    /// `{v, file, batch_s, held, held_rows, clock, clock_at}`, refreshed at every
+    /// marker write. Absent when the holder writes no series files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub series_queue: Option<Value>,
     /// Whether the holder merges duplicate folders itself (D5 rev.): a reader that
     /// sees it on a fresh holder leaves them to Bunko.
     #[serde(default)]
@@ -284,7 +296,8 @@ pub struct LeaseConfig {
     pub compiles: Vec<String>,
     /// The marker's `ocr`.
     pub ocr: bool,
-    /// The marker's `queue`.
+    /// The marker's `queue` (none since the queue file v2: the queue rides in the
+    /// marker's `series_queue` block, from a [`MarkerBlock`]).
     pub queue: Option<String>,
     /// The marker's `dedup`.
     pub dedup: bool,
@@ -299,8 +312,8 @@ pub struct LeaseConfig {
 
 impl LeaseConfig {
     /// The defaults: TTL 900 s, feed interval 300 s, compiles `series.json` and
-    /// `catalog.json`, OCR on, queue `.mokuro-queue.json`, the curated layer kept,
-    /// heartbeats replace in place.
+    /// `catalog.json`, OCR on, no root queue file, the curated layer kept, heartbeats
+    /// replace in place.
     pub fn new(
         instance_id: impl Into<String>,
         boot_id: impl Into<String>,
@@ -319,7 +332,7 @@ impl LeaseConfig {
             feed_interval: Duration::from_secs(300),
             compiles: vec!["series.json".into(), "catalog.json".into()],
             ocr: true,
-            queue: Some(".mokuro-queue.json".into()),
+            queue: None,
             dedup: false,
             // Every 0.8 Bunko that compiles also keeps the curated layer (auth decides
             // who writes it).
@@ -362,6 +375,35 @@ impl WallClock for SystemClock {
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
     }
+}
+
+/// How many marker listings the store clock's offset is the median of (queue file v2
+/// §6.9).
+pub const CLOCK_SAMPLES: usize = 5;
+/// How long a marker write waits for its `series_queue` block before it carries the
+/// block it had.
+pub const BLOCK_WAIT: Duration = Duration::from_secs(10);
+
+/// What a [`MarkerBlock`] answers with.
+pub type BlockFuture<'a> = Pin<Box<dyn Future<Output = Option<Value>> + Send + 'a>>;
+
+/// Fills the marker's `series_queue` block (queue file v2 §4.2, §6.2, §6.8): the store's
+/// series-file sink.
+pub trait MarkerBlock: Send + Sync {
+    /// The block for a marker about to be written (None: the marker carries none).
+    /// `heartbeat`: a heartbeat, which refits the work clock first; a claim or a take
+    /// over carries the clock in use.
+    fn prepare(&self, heartbeat: bool) -> BlockFuture<'_>;
+    /// The marker carrying the block last prepared was written and the lease is held:
+    /// its clock is the one readers now have.
+    fn held(&self);
+}
+
+/// The median of the store clock's samples (the lower middle of an even count).
+fn median(samples: &VecDeque<i64>) -> Option<i64> {
+    let mut v: Vec<i64> = samples.iter().copied().collect();
+    v.sort_unstable();
+    v.get(v.len().saturating_sub(1) / 2).copied()
 }
 
 /// The lease's persisted state.
@@ -691,6 +733,10 @@ pub struct Lease<B: Backend> {
     /// When CLAIM_LEASE's settle wait ends, while it runs (shared with the [`Fence`],
     /// so a refused write can say how long this Bunko is still claiming).
     settle_until: Arc<Mutex<Option<Instant>>>,
+    /// Fills each marker's `series_queue` block.
+    block: Option<Arc<dyn MarkerBlock>>,
+    /// `server_now − local_now` of the last [`CLOCK_SAMPLES`] marker listings, ms.
+    offsets: Arc<Mutex<VecDeque<i64>>>,
 }
 
 static STAGING_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -743,6 +789,35 @@ impl<B: Backend> Lease<B> {
             mine: None,
             cache: HashMap::new(),
             settle_until: Arc::new(Mutex::new(None)),
+            block: None,
+            offsets: Arc::new(Mutex::new(VecDeque::new())),
+        }
+    }
+
+    /// Fill every marker's `series_queue` block from `block` (queue file v2 §6.8).
+    pub fn with_marker_block(mut self, block: Arc<dyn MarkerBlock>) -> Self {
+        self.block = Some(block);
+        self
+    }
+
+    /// The block for a marker about to be written, or `was` when it does not come in
+    /// time; None without a [`MarkerBlock`].
+    async fn marker_block(&self, heartbeat: bool, was: Option<Value>) -> Option<Value> {
+        let b = self.block.clone()?;
+        match tokio::time::timeout(BLOCK_WAIT, b.prepare(heartbeat)).await {
+            Ok(v) => v,
+            Err(_) => {
+                tracing::warn!(
+                    "lease: the queue block did not come in time; the marker keeps its last"
+                );
+                was
+            }
+        }
+    }
+
+    fn block_held(&self) {
+        if let Some(b) = &self.block {
+            b.held();
         }
     }
 
@@ -796,6 +871,7 @@ impl<B: Backend> Lease<B> {
             window: self.cfg.fence_window(),
             clock: self.clock.clone(),
             settle_until: self.settle_until.clone(),
+            offsets: self.offsets.clone(),
         }
     }
 
@@ -809,6 +885,13 @@ impl<B: Backend> Lease<B> {
                 let (found, now) = self.backend.find_named(r, MARKER_NAME).await?;
                 nodes.extend(found);
                 server_now = server_now.max(now);
+            }
+            if server_now.0 != i64::MIN {
+                let mut o = self.offsets.lock();
+                o.push_back(server_now.0 - self.clock.now_ms());
+                while o.len() > CLOCK_SAMPLES {
+                    o.pop_front();
+                }
             }
             // A name search can lag behind the files (Drive's does): the file this
             // install recorded as its marker is looked up by id when the search left
@@ -916,6 +999,7 @@ impl<B: Backend> Lease<B> {
             curated: self.cfg.curated,
             took_over_from,
             per_user_files: self.cfg.per_user_files.clone(),
+            series_queue: None,
         }
     }
 
@@ -946,12 +1030,14 @@ impl<B: Backend> Lease<B> {
                     m.dedup = self.cfg.dedup;
                     m.curated = self.cfg.curated;
                     m.per_user_files = self.cfg.per_user_files.clone();
+                    m.series_queue = self.marker_block(false, m.series_queue.clone()).await;
                     let ok_at = self.clock.now_ms();
                     let Some(node) = self.write_marker(&m, &set, WriteMode::Claim).await? else {
                         continue;
                     };
                     tracing::info!(epoch = m.epoch, "lease: resumed our own fresh marker");
                     self.become_holder(m, &node, ok_at)?;
+                    self.block_held();
                     return Ok(LeaseState::Holder);
                 }
                 let holder = top.marker.clone();
@@ -969,7 +1055,8 @@ impl<B: Backend> Lease<B> {
                 });
             }
             let epoch = set.max_epoch().max(self.record.lock().lease_epoch) + 1;
-            let m = self.new_marker(epoch, None);
+            let mut m = self.new_marker(epoch, None);
+            m.series_queue = self.marker_block(false, None).await;
             if self
                 .write_marker(&m, &set, WriteMode::Claim)
                 .await?
@@ -994,6 +1081,7 @@ impl<B: Backend> Lease<B> {
                     let (marker, node) = (top.marker.clone(), top.node.clone());
                     tracing::info!(epoch, "lease: claimed");
                     self.become_holder(marker, &node, ok_at)?;
+                    self.block_held();
                     return Ok(LeaseState::Holder);
                 }
                 Some(top) => {
@@ -1019,6 +1107,8 @@ impl<B: Backend> Lease<B> {
         let Some(mine) = self.mine.clone() else {
             return Err(LeaseError::NotHolder);
         };
+        // The work clock is refitted just before the heartbeat that carries it (§6.2).
+        let block = self.marker_block(true, mine.series_queue.clone()).await;
         let ok_at = self.clock.now_ms();
         for _ in 0..2 {
             let set = self.marker_set().await?;
@@ -1047,8 +1137,10 @@ impl<B: Backend> Lease<B> {
             }
             let mut next = mine.clone();
             next.heartbeat_at = self.now_iso();
+            next.series_queue = block.clone();
             if let Some(node) = self.write_marker(&next, &set, WriteMode::Heartbeat).await? {
                 self.become_holder(next, &node, ok_at)?;
+                self.block_held();
                 self.trash_stale_duplicates(&set, &node.pid).await;
                 return Ok(Heartbeat::Held);
             }
@@ -1066,11 +1158,13 @@ impl<B: Backend> Lease<B> {
                 Some(top) if !self.is_ours(&top.marker) => top.marker.clone(),
                 _ => return self.claim().await,
             };
-            let m = self.new_marker(holder.epoch + 1, Some(holder.instance_id.clone()));
+            let mut m = self.new_marker(holder.epoch + 1, Some(holder.instance_id.clone()));
+            m.series_queue = self.marker_block(false, None).await;
             let ok_at = self.clock.now_ms();
             if let Some(node) = self.write_marker(&m, &set, WriteMode::Claim).await? {
                 tracing::info!(from = %holder.instance_name, epoch = m.epoch, "lease: took over");
                 self.become_holder(m, &node, ok_at)?;
+                self.block_held();
                 return Ok(LeaseState::Holder);
             }
         }
@@ -1472,6 +1566,13 @@ impl<B: Backend> Lease<B> {
                         }
                         let _ = reply.send(r);
                     }
+                    Some(LeaseCommand::Heartbeat) => {
+                        // An early heartbeat (the queue's hold changed, §6.8): at once
+                        // while we hold the lease; the caller debounces.
+                        if self.mine.is_some() && !released {
+                            deadline = Instant::now();
+                        }
+                    }
                     Some(LeaseCommand::Stop) | None => return,
                 },
             }
@@ -1486,6 +1587,8 @@ pub enum LeaseCommand {
     TakeOver(oneshot::Sender<Result<LeaseState, LeaseError>>),
     /// "Disconnect library": write `released` and stop heartbeating.
     Release(oneshot::Sender<Result<(), LeaseError>>),
+    /// Heartbeat now (while holding): the marker's queue block changed.
+    Heartbeat,
     /// Stop the task (a clean shutdown writes nothing).
     Stop,
 }
@@ -1497,6 +1600,7 @@ pub struct Fence {
     window: Duration,
     clock: Arc<dyn WallClock>,
     settle_until: Arc<Mutex<Option<Instant>>>,
+    offsets: Arc<Mutex<VecDeque<i64>>>,
 }
 
 impl Fence {
@@ -1525,6 +1629,13 @@ impl Fence {
     /// The lease's persisted state as it stands.
     pub fn state(&self) -> LeaseRecordState {
         self.record.lock().lease_state
+    }
+
+    /// The store's clock against this machine's (`server_now − local_now`, ms): the
+    /// median of the last [`CLOCK_SAMPLES`] marker listings (§6.9). None before the
+    /// first.
+    pub fn clock_offset_ms(&self) -> Option<i64> {
+        median(&self.offsets.lock())
     }
 }
 
@@ -1565,6 +1676,16 @@ impl LeaseHandle {
         rx.await.map_err(|_| LeaseError::Stopped)?
     }
 
+    /// Ask for a heartbeat now (ignored unless the lease is held).
+    pub fn request_heartbeat(&self) {
+        let _ = self.cmds.send(LeaseCommand::Heartbeat);
+    }
+
+    /// A cloneable way to ask for a heartbeat ([`LeaseHandle::request_heartbeat`]).
+    pub fn heartbeat_requester(&self) -> HeartbeatRequester {
+        HeartbeatRequester(self.cmds.clone())
+    }
+
     /// Run [`Lease::release`] in the task.
     pub async fn release(&self) -> Result<(), LeaseError> {
         let (tx, rx) = oneshot::channel();
@@ -1583,239 +1704,22 @@ impl LeaseHandle {
     }
 }
 
+/// Asks a running lease task for a heartbeat now.
+#[derive(Clone)]
+pub struct HeartbeatRequester(mpsc::UnboundedSender<LeaseCommand>);
+
+impl HeartbeatRequester {
+    pub fn request(&self) {
+        let _ = self.0.send(LeaseCommand::Heartbeat);
+    }
+}
+
 impl Drop for LeaseHandle {
     fn drop(&mut self) {
         if let Some(j) = self.join.take() {
             j.abort();
         }
     }
-}
-
-// ---- the cloud queue document ---------------------------------------------------
-
-/// The cloud queue file's size cap (§9.1).
-pub const QUEUE_DOC_MAX_BYTES: usize = 64 * 1024;
-/// Waiting volumes listed at most: a backstop; the server lists at most 100 waiting
-/// jobs (`QUEUE_REPORT_LIMIT`), so at most 100 waiting volumes besides those about to
-/// start. A volume whose every job is `queued` with no `eta` does not count
-/// ([`counts_toward_the_cap`]).
-pub const QUEUE_WAITING_LIMIT: usize = 100;
-/// `done[]` holds at most this many completions …
-pub const DONE_LIMIT: usize = 100;
-/// … from at most this long ago.
-pub const DONE_WINDOW: Duration = Duration::from_secs(24 * 3600);
-
-/// One layer file of a [`DoneEntry`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DoneLayer {
-    pub id: String,
-    /// Relative to the root, e.g. `Kingdom/Kingdom 12.hayai.mokuro`.
-    pub path: String,
-}
-
-/// A completed volume whose sidecar op COMMITTED (D10).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DoneEntry {
-    pub series: String,
-    pub volume: String,
-    /// When it committed, unix ms.
-    pub at_ms: i64,
-    /// The main sidecar, relative to the root, e.g. `Kingdom/Kingdom 12.mokuro`.
-    pub ocr: Option<String>,
-    pub layers: Vec<DoneLayer>,
-}
-
-impl DoneEntry {
-    fn to_json(&self) -> Value {
-        json!({
-            "series": self.series,
-            "volume": self.volume,
-            "at": format_iso_s(self.at_ms),
-            "ocr": self.ocr,
-            "layers": self.layers.iter().map(|l| json!({"id": l.id, "path": l.path})).collect::<Vec<_>>(),
-        })
-    }
-}
-
-fn is_running(volume: &Value) -> bool {
-    volume["jobs"]
-        .as_array()
-        .is_some_and(|jobs| jobs.iter().any(|j| j["state"] == "running"))
-}
-
-/// Whether a waiting volume counts toward [`QUEUE_WAITING_LIMIT`]: it has a job with a
-/// finishing time, or a held one. A volume whose every job is `queued` with no `eta`
-/// is most often one whose job a machine has claimed and not yet started, which the
-/// server lists outside its 100 waiting jobs; cutting it from the count keeps the cap
-/// from dropping that many volumes off the end of an honest list. (A job behind one
-/// the queue cannot time looks the same; the server still lists at most 100 of
-/// those, and the byte cap binds whatever this lets through.)
-fn counts_toward_the_cap(volume: &Value) -> bool {
-    volume["jobs"].as_array().is_none_or(|jobs| {
-        jobs.iter()
-            .any(|j| !(j["state"] == "queued" && j["eta"].is_null()))
-    })
-}
-
-fn quantise_progress(volume: &mut Value) {
-    let Some(Value::Array(jobs)) = volume.get_mut("jobs") else {
-        return;
-    };
-    for j in jobs {
-        if let Some(p) = j.get("progress").and_then(Value::as_f64) {
-            j["progress"] = json!((p * 10.0).round() / 10.0);
-        }
-    }
-}
-
-fn json_len(v: &Value) -> usize {
-    serde_json::to_vec(v).map_or(0, |b| b.len())
-}
-
-fn assemble(
-    src: &Map<String, Value>,
-    instance_id: &str,
-    running: &[Value],
-    waiting: &[Value],
-    pending: usize,
-    done: &[Value],
-) -> Value {
-    let truncated = waiting.len() < pending;
-    let volumes = || Value::Array(running.iter().chain(waiting).cloned().collect());
-    let mut out = Map::new();
-    let (mut has_id, mut has_trunc, mut has_vols) = (false, false, false);
-    for (k, v) in src {
-        match k.as_str() {
-            "instance_id" | "truncated" | "done" => continue,
-            "volumes" => {
-                out.insert(k.clone(), volumes());
-                has_vols = true;
-            }
-            _ => {
-                out.insert(k.clone(), v.clone());
-            }
-        }
-        if k == "generated_at" {
-            out.insert("instance_id".into(), json!(instance_id));
-            has_id = true;
-        }
-        if k == "pending_volumes" {
-            out.insert("truncated".into(), json!(truncated));
-            has_trunc = true;
-        }
-    }
-    if !has_id {
-        out.insert("instance_id".into(), json!(instance_id));
-    }
-    if !has_trunc {
-        out.insert("truncated".into(), json!(truncated));
-    }
-    if !has_vols {
-        out.insert("volumes".into(), volumes());
-    }
-    out.insert("done".into(), Value::Array(done.to_vec()));
-    Value::Object(out)
-}
-
-/// The cloud copy of the queue file (§9.1, D10) from the server's `build_document`
-/// output: adds `instance_id`, `truncated` and `done[]`, quantises every job's
-/// `progress` to 0.1, and keeps the compact JSON within `max_bytes`
-/// ([`QUEUE_DOC_MAX_BYTES`]).
-///
-/// - `volumes`: in the server's order (every running job, the jobs about to start,
-///   then the next 100 waiting jobs, by volume), at most [`QUEUE_WAITING_LIMIT`]
-///   waiting volumes besides those whose every job is queued with no `eta` (about to
-///   start). `truncated` is true when fewer waiting volumes are listed than
-///   `pending_volumes`; a volume listed with only some of its jobs does not count.
-/// - `done`: entries from the [`DONE_WINDOW`] before the document's `generated_at`
-///   (every entry when it has none), newest first, at most [`DONE_LIMIT`].
-/// - Over the cap, waiting volumes go first (from the end), then the oldest `done`
-///   entries, then running volumes (from the end).
-pub fn cloud_queue_doc(
-    server_doc: &Value,
-    instance_id: &str,
-    done: &[DoneEntry],
-    max_bytes: usize,
-) -> Value {
-    let src = server_doc.as_object().cloned().unwrap_or_default();
-    let now = src
-        .get("generated_at")
-        .and_then(Value::as_str)
-        .and_then(parse_iso_ms);
-    let (mut running, mut waiting): (Vec<Value>, Vec<Value>) = (Vec::new(), Vec::new());
-    for v in src
-        .get("volumes")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-    {
-        let mut v = v.clone();
-        quantise_progress(&mut v);
-        if is_running(&v) {
-            running.push(v);
-        } else {
-            waiting.push(v);
-        }
-    }
-    let pending = src
-        .get("pending_volumes")
-        .and_then(Value::as_u64)
-        .map_or(waiting.len(), |n| usize::try_from(n).unwrap_or(usize::MAX));
-    let mut counted = 0;
-    waiting.retain(|v| {
-        if !counts_toward_the_cap(v) {
-            return true;
-        }
-        counted += 1;
-        counted <= QUEUE_WAITING_LIMIT
-    });
-    let window_ms = i64::try_from(DONE_WINDOW.as_millis()).unwrap_or(i64::MAX);
-    let mut recent: Vec<&DoneEntry> = done
-        .iter()
-        .filter(|e| now.is_none_or(|n| n.saturating_sub(e.at_ms) < window_ms))
-        .collect();
-    recent.sort_by_key(|a| std::cmp::Reverse(a.at_ms));
-    recent.truncate(DONE_LIMIT);
-    let mut done: Vec<Value> = recent.into_iter().map(DoneEntry::to_json).collect();
-    loop {
-        let doc = assemble(&src, instance_id, &running, &waiting, pending, &done);
-        let size = json_len(&doc);
-        if size <= max_bytes || (running.is_empty() && waiting.is_empty() && done.is_empty()) {
-            return doc;
-        }
-        // Drop entries until their bytes (plus a comma each) cover the overflow;
-        // the next round measures again.
-        let mut over = size - max_bytes;
-        while over > 0 {
-            let dropped = if let Some(v) = waiting.pop() {
-                v
-            } else if let Some(d) = done.pop() {
-                d
-            } else if let Some(v) = running.pop() {
-                v
-            } else {
-                break;
-            };
-            over = over.saturating_sub(json_len(&dropped) + 1);
-        }
-    }
-}
-
-/// Whether `next` differs from `prev` in anything but `generated_at` (the queue file
-/// is written only on change).
-pub fn queue_doc_changed(prev: &Value, next: &Value) -> bool {
-    fn stable(v: &Value) -> Value {
-        match v {
-            Value::Object(m) => Value::Object(
-                m.iter()
-                    .filter(|(k, _)| *k != "generated_at")
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect(),
-            ),
-            other => other.clone(),
-        }
-    }
-    stable(prev) != stable(next)
 }
 
 // ---- ISO-8601 -------------------------------------------------------------------
@@ -1982,6 +1886,37 @@ mod tests {
         assert_eq!(rank(&d, &a), Ordering::Less);
         let junk = m(2, "garbage", "0");
         assert_eq!(rank(&a, &junk), Ordering::Less);
+    }
+
+    #[test]
+    fn the_store_clock_is_the_median_of_its_samples() {
+        let q = |v: &[i64]| median(&v.iter().copied().collect());
+        assert_eq!(q(&[]), None);
+        assert_eq!(q(&[7]), Some(7));
+        assert_eq!(
+            q(&[5, -3_000, 9, 6, 400_000]),
+            Some(6),
+            "outliers do not move it"
+        );
+        assert_eq!(q(&[1, 3]), Some(1));
+    }
+
+    #[test]
+    fn a_marker_without_a_queue_block_reads_and_writes_without_one() {
+        let m = Marker::parse(
+            br#"{"kind":"mokuro-bunko","instance_id":"x","epoch":1,"queue":".mokuro-queue.json"}"#,
+        )
+        .unwrap();
+        assert_eq!(m.series_queue, None);
+        let out: Value = serde_json::to_value(&m).unwrap();
+        assert!(out.get("series_queue").is_none(), "{out}");
+        let m = Marker::parse(
+            br#"{"kind":"mokuro-bunko","instance_id":"x","epoch":1,"queue":null,
+                 "series_queue":{"v":2,"future":true}}"#,
+        )
+        .unwrap();
+        assert_eq!(m.queue, None);
+        assert_eq!(m.series_queue.unwrap()["future"], true);
     }
 
     #[test]

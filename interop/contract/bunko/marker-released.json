@@ -16,7 +16,27 @@
       "catalog.json"
     ],
     "ocr": true,
-    "queue": ".mokuro-queue.json",
+    "queue": null,
+    "series_queue": {
+      "v": 2,
+      "file": ".mokuro-series-queue.json",
+      "batch_s": 120,
+      "held": {
+        "reason": "no-processor"
+      },
+      "held_rows": [],
+      "clock": [
+        [
+          946684800,
+          946684800
+        ],
+        [
+          946771200,
+          946771200
+        ]
+      ],
+      "clock_at": 946684800
+    },
     "dedup": true,
     "curated": true,
     "took_over_from": null,

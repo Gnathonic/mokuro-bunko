@@ -176,6 +176,7 @@ fn base_caps() -> BackendCaps {
         chunk_multiple: 1,
         path_ids: false,
         duplicate_names: false,
+        content_versions: true,
     }
 }
 
@@ -222,6 +223,8 @@ impl FakeBackend {
                 cas_overwrite: cas,
                 pinned_read: cas,
                 path_ids: true,
+                // A WebDAV host's ETag (or mtime and size) names no file's bytes.
+                content_versions: false,
                 ..base_caps()
             },
             ids: Ids::Path,
@@ -258,6 +261,8 @@ impl FakeBackend {
                 atomic_replace: true,
                 mtime_granularity_ns: 1_000_000,
                 path_ids: true,
+                // `folder::FolderBackend`'s version is the file's mtime and size.
+                content_versions: false,
                 ..base_caps()
             },
             ids: Ids::Path,

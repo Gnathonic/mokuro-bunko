@@ -1,7 +1,7 @@
 //! A whole server on a cloud library (the in-memory `FakeBackend`), write side: an
 //! un-OCR'd volume is OCR'd by this server's own processor (`FakePipeline`) and its
-//! sidecar, the covers, `series.json`, `catalog.json` and the queue file (listing the
-//! result in `done[]`) land in the cloud folder; the lease marker appears; a store that
+//! sidecar, the covers, `series.json`, `catalog.json` and the series' queue file (the
+//! result in its `done`) land in the cloud folder; the lease marker appears; a store that
 //! stops mid-upload resumes after a restart with exactly one copy of each result.
 
 // Fixtures are checked with std::fs on purpose.
@@ -242,24 +242,29 @@ async fn an_unocrd_cloud_volume_is_ocrd_and_everything_lands_in_the_cloud() {
     let catalog = json_at(&fake, "catalog.json").expect("catalog.json in the cloud");
     assert!(catalog.to_string().contains("Series"), "{catalog}");
 
-    // The cloud queue file: nothing pending, the result in `done[]`.
+    // The series' queue file (queue file v2): nothing pending, the volume in `done`.
+    // No root queue file is written.
     eventually(
-        "the queue file with its done entry",
+        "the series' queue file with its done entry",
         Duration::from_secs(30),
         || {
-            json_at(&fake, ".mokuro-queue.json").is_some_and(|q| {
-                q["done"]
-                    .as_array()
-                    .is_some_and(|d| d.iter().any(|e| e["volume"] == "Vol 2"))
-            })
+            json_at(&fake, "Series/.mokuro-series-queue.json")
+                .is_some_and(|q| q["done"].get("Vol 2").is_some())
         },
     )
     .await;
-    let queue = json_at(&fake, ".mokuro-queue.json").unwrap();
+    let queue = json_at(&fake, "Series/.mokuro-series-queue.json").unwrap();
     assert_eq!(queue["instance_id"], store.instance_id());
-    assert_eq!(queue["pending_volumes"], 0, "{queue}");
+    assert_eq!(queue["vols"], serde_json::json!({}), "{queue}");
+    assert!(node(&fake, ".mokuro-queue.json").is_none());
     // Exactly one copy of everything Bunko wrote.
-    for name in ["Vol 2.mokuro", "Vol 1.webp", "Vol 2.webp", "series.json"] {
+    for name in [
+        "Vol 2.mokuro",
+        "Vol 1.webp",
+        "Vol 2.webp",
+        "series.json",
+        ".mokuro-series-queue.json",
+    ] {
         assert_eq!(copies(&fake, "Series", name).await, 1, "{name}");
     }
     // Nothing on disk under the synthetic root.

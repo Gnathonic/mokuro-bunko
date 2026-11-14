@@ -1791,8 +1791,10 @@ async fn a_push_feed_ignores_activity() {
 }
 
 /// Regression: another install's lease heartbeat (it rewrites `.mokuro-bunko.json`
-/// every `ttl / 3`, 5 min by default) and its queue file are foreign changes, but no
-/// reader's: counted, a standby install polled at the active interval for good.
+/// every `ttl / 3`, 5 min by default) and its queue files (a pre-release's root file,
+/// and each series' `.mokuro-series-queue.json` of the queue file v2) are foreign
+/// changes, but no reader's: counted, a standby install polled at the active interval
+/// for good.
 #[tokio::test(start_paused = true)]
 async fn another_installs_control_files_are_not_reader_activity() {
     let f = FakeBackend::drive_like();
@@ -1805,12 +1807,18 @@ async fn another_installs_control_files_are_not_reader_activity() {
             .reader_put("mokuro-reader/.mokuro-bunko.json", &[b'{', round, b'}']);
         r.fake
             .reader_put("mokuro-reader/.mokuro-queue.json", &[b'[', round, b']']);
+        r.fake.reader_put(
+            "mokuro-reader/A/.mokuro-series-queue.json",
+            &[b'{', round, b'}'],
+        );
         r.feed.poll_now();
         tokio::time::sleep(Duration::from_secs(5)).await;
         let c = r.feed.cadence();
         assert!(!c.active && c.because.is_empty(), "round {round}: {c:?}");
     }
     r.fake.reader_delete("mokuro-reader/.mokuro-queue.json");
+    r.fake
+        .reader_delete("mokuro-reader/A/.mokuro-series-queue.json");
     r.feed.poll_now();
     tokio::time::sleep(Duration::from_secs(5)).await;
     assert!(

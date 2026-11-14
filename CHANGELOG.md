@@ -536,6 +536,15 @@
   first release's 213 MB ONNX file, which a store prune then removes. Its engine
   revision is now 2, so with upgrades on, `nar-small` layers written by a 0.8
   pre-release are read again once.
+- **nar-small and charspot-small use the whole CPU on big hosts.** These engines read
+  one text block at a time, too little work for one reader with many threads, so they
+  kept only about 6 cores busy however big the host. Now many one-thread readers share
+  the loaded model, sized from the physical cores and split with the detect stage. On a
+  24-core host, nar-small on AnimeText blocks reads about 3x as many pages a second
+  (1.8 to 5.8 on a test volume); on a 16-core desktop, 1.5 to 2.7. The text is the
+  same. The startup benchmark now widens or narrows that stage instead of calling it
+  impossible to widen, and `pools.stage_workers.engine` sets its width. hayai-nova and
+  paddle-manga are unchanged.
 - **A generation's upgrades run at that generation's place in the queue.** An upgrade
   replaces OCR a volume already has: an older main `.mokuro`, or a layer Bunko wrote
   at an older engine revision. Upgrades now run right after their generation's missing
@@ -724,6 +733,109 @@
 - **Dependency updates**: zip 9, rcgen 0.14, windows 0.62, windows-sys 0.61.
 
 ### Fixed
+- **The OCR walk no longer downloads every sidecar again after a start or a settings
+  change.** With generation upgrades on, every walk asks of each volume whether its main
+  `.mokuro` is outdated and whether each generation layer is Bunko's own output at an
+  older revision. Those answers were kept in memory only, cleared by every saved OCR
+  setting and lost at every restart, so the next walk read every sidecar again (some of
+  them two or three times: a layer was read once to judge it and again to prove it, and
+  a current volume's layers were all read to find the few an earlier beta kept). On a
+  cloud library each read is a provider download, and a large library has more sidecar
+  bytes than the store's small-file cache (`cache_mb`) holds: a library of thousands of
+  sidecars downloaded them all again, for an hour or more, after every start and every
+  settings change. What the census needs of a sidecar (its recipe block, revision, pages
+  and seal) is now read once per version of the file and kept in `mokuro.db`
+  (`sidecar_facts`): a settings change and a restart read no unchanged sidecar again,
+  and the walk owes what a census reading every file owes. A sidecar the reader
+  replaces (in place, or MEGA's delete-then-upload) is read once at its new version. A
+  file renamed or moved on Google Drive, OneDrive or MEGA (a case rename, a series
+  folder renamed) keeps its version, which names its bytes there, and is not read again.
+  On WebDAV and a connected local folder the version is the file's mtime and size (or an
+  ETag the host makes of them), which two files can share: a renamed file is read once
+  under its new name, never judged by another file's facts. There, as on a local disk,
+  a file written within the last 3 seconds is read again until it is older, so two
+  writes within one tick of the clock are never taken for one. What is kept is only a
+  hint: removing a layer an earlier beta kept, replacing an outdated main sidecar and
+  promoting a layer to the main read the file again under its write lock and decide on
+  those bytes, and keep what they read. A main a reader marked edited since is never
+  replaced (an upgrade job's result goes beside it), a layer is promoted only when its
+  pages are the archive's, and a kept layer a reader marked edited stays. The facts of
+  files that are gone or changed are pruned after a walk, never while the library folder
+  itself is missing (a disk or share not mounted yet). Layers no generation writes are
+  no longer read for the earlier beta's clean-up unless their name is one it gave.
+- **A cloud library upgraded from a 0.8 pre-release lets go of its root queue file.**
+  The pre-release wrote `.mokuro-queue.json` at the library root, and its writes of
+  that file stayed in the outbox across the upgrade. One still on its way was sent
+  after the upgrade. Writes whose bytes had been lost stood in the Storage panel as
+  failed for good (attempts 0, "the staged bytes cannot be read"), each with a
+  `failed-op` conflict. At startup these writes are now dropped, whatever their state,
+  and so are the conflicts they left. The lease holder then deletes the file, as it
+  already did for a leftover with no writes pending.
+- **Two writes of one file staged at once no longer lose both.** This is how the
+  pre-release lost those bytes. Its two queue-file writers could stage the file
+  together. The newer write superseded the older one in the middle of its staging,
+  which removed the older write's bytes. The older write then saved itself again
+  without its bytes, failed at upload, and also superseded the newer write. A write
+  now supersedes only older writes of its file. A write superseded while it is being
+  staged stays superseded. This applies to every coalesced write: queue files,
+  `series.json` and `catalog.json`.
+- **A write whose bytes are gone no longer stands failed for good.** Such a write can
+  never be sent. A status file's write is dropped, because Bunko writes the file again
+  when it is due. Any other write, such as an OCR result or a compiled file, is
+  reported as a `lost-write` conflict that names its path. A write whose bytes changed
+  after staging, or are there but cannot be read (permissions, an I/O error), still
+  fails and keeps its bytes for a retry or the export.
+- **The series queue files wait quietly for the OCR queue.** Until the scheduler's
+  first walk of the library was over (an hour on a large cloud library), the store's
+  series-file sink asked it for the queue about a hundred times a second. It now asks
+  once a second. The admin storage status (`library.storage.series_queue`) shows the
+  sink's state: `waiting_for_first_walk`, `adopting`, `fenced`, `writing`, `idle`,
+  `no_source`, or `off` with `status_files: false`. It also shows the files the sink
+  wrote, its backlog, and when its last window ran, so a library with no series files
+  yet says why.
+- **Turning this server's OCR off stops it at once.** With OCR on this machine turned
+  off mid-queue (This server, the OCR settings or the setup wizard), the server went on
+  claiming volumes for its own OCR for minutes: the setting retired only its idle slots,
+  the busy one stayed and its session never drained, so it kept fetching archives from a
+  cloud library, reading them, weighing itself when placing volumes ("this server would
+  take ~Ns") and showing as a machine. It now stops in the same step: the volumes it was
+  reading are cancelled and go back to the queue unrecorded, where a connected processor
+  (or this server, turned on again) takes them; nothing it was running is installed (a
+  finished result already being moved into place still is); its OCR engine shuts down
+  and frees its memory; and what its sessions left in `.processing` is removed. It is no
+  machine of the queue page, the admin panel or the placement any more, and nothing
+  starts it again while it is off (an OCR backend install that ends included). Turned on
+  again, it starts without a restart. A restart for another OCR backend sweeps the old
+  sessions' leftovers the same way. A cloud archive fetched for this server's OCR after
+  its claim went back no longer returns another processor's claim of that volume to the
+  queue (that processor's result was then thrown away as late). A benchmark of this
+  server cut short by turning it off now says "OCR on this machine was turned off"
+  instead of "local disconnected". Turning it off, or stopping the server, no longer
+  logs each volume it was reading as a failure (a WARN "volume failed: the OCR pipeline
+  stopped before this volume did" and an ERROR "the pipeline failed"): a stop is an
+  INFO "cancelled" line, and a pipeline that really breaks is still an error. A server
+  stopped right after turning it off waits for its OCR engine to shut down, as it does
+  otherwise, instead of exiting with it half torn down.
+- **Removing this machine's OCR backend stops its OCR first.** This server's Remove
+  deleted the backend packs and left OCR on this machine on: it went on reading volumes
+  from the libraries still loaded in memory, and only a restart stopped it. Remove now
+  turns OCR on this machine off first, as its toggle does (saved, so nothing installs a
+  pack again until it is turned on), waits for it to stop, and then removes the packs;
+  the panel says so before and after (and how many volumes went back to the queue), and
+  shows the toggle off. Remove is refused while an install or the optional Vulkan
+  pack's fetch runs, before anything changes. A pack is never left half deleted: it is
+  renamed out of the packs first and deleted after, and what a deletion could not
+  finish goes at the next start. On Windows a pack this server has loaded cannot be
+  deleted while it runs: it is removed when the server next starts, before anything
+  loads it (unless OCR on this machine was turned on again meanwhile). On Linux and
+  macOS a loaded pack goes at once, and OCR started again later restarts the server
+  rather than run on what is left of it.
+- **A processor that drops off leaves no uploaded result behind.** A processor that
+  disconnected (or whose account was disabled or deleted) after uploading a result but
+  before saying the volume was done left that result in `.processing` for good: the
+  volume went back to the queue, and nothing ever removed the file. Its uploads now go
+  with it, as they do when its session ends (a result already being installed stays
+  until the install is done).
 - **hayai-nova reads at patch budgets 256 and 384 on libtorch and ncnn.** The settings
   offer both, but only the WebGPU runtime read at them: the libtorch packs refused to
   load (`hayai-nova packages are compiled for patch budget 512, not 256`), ncnn refused
@@ -754,7 +866,7 @@
   after the last of: a WebDAV request through Bunko, OCR work in flight on the library
   (a held queue does not count: only a running claim), or a change in the cloud that
   was not Bunko's own write (a reader writing directly; another install's lease
-  marker and queue file do not count). The first of them polls at
+  marker and queue files do not count). The first of them polls at
   once. `storage.library.poll.active_s` and `idle_s` still set the intervals. MEGA
   pushes its changes and is unaffected. The admin Storage panel and `mokuro-bunko
   library status` show the current interval and why (`Polling: every 30 s (OCR

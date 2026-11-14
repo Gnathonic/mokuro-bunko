@@ -2391,4 +2391,34 @@ exit 0"#,
         };
         assert_eq!(problems_of(Some(&missing)).len(), 1);
     }
+    /// Removing this machine's OCR backend turns OCR on this machine off and saves it:
+    /// from then on nothing installs a pack again by itself, whatever starts the
+    /// installer (the start of the server, a settings save, a retry, the optional
+    /// pack's fetch after an install, a button), until it is turned on again.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn nothing_installs_while_ocr_on_this_machine_is_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let ran = dir.path().join("ran");
+        let exe = fake_exe(dir.path(), &format!("touch {}\nexit 0", ran.display()));
+        let who = library(dir.path());
+        let Who::Library { config_path, .. } = &who else {
+            unreachable!()
+        };
+        let mut text = std::fs::read_to_string(config_path).unwrap();
+        text.push_str("ocr:\n  local_processing: false\n");
+        std::fs::write(config_path, text).unwrap();
+        let inst = Installer::with_exe(who, exe);
+        assert!(!inst.start_if_needed());
+        assert_eq!(inst.start_for_settings(), Ok(false));
+        assert_eq!(inst.start_manual(), Ok(false));
+        assert_eq!(inst.start_retry(), Ok(false));
+        let me = inst.clone();
+        tokio::task::spawn_blocking(move || me.start_extra_if_wanted())
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!inst.running() && !inst.fetching_extra());
+        assert!(!ran.exists(), "an install ran");
+    }
 }

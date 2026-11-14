@@ -21,6 +21,7 @@
 //! | [`folders`] | `series_folder_owners`, `series_folder_adoption` (series folder owners, 0.8) |
 //! | [`ocr`] | `ocr_sidecars` |
 //! | [`identities`] | `volume_identities` |
+//! | [`sidecar_facts`] | `sidecar_facts` (what the OCR census read off each sidecar, 0.8) |
 //! | [`series`] | `series_facts`, `series_entry_cache`, `catalog_folders`, `community_details` |
 //! | [`schema`] | DDL, migrations, `schema_version` |
 //!
@@ -39,6 +40,7 @@ pub mod pyfmt;
 pub mod pytime;
 pub mod schema;
 pub mod series;
+pub mod sidecar_facts;
 pub mod tokens;
 pub mod uploads;
 pub mod users;
@@ -57,6 +59,7 @@ pub use invites::{
 pub use ocr::OcrSidecar;
 pub use schema::SCHEMA_VERSION;
 pub use series::{CatalogSeries, CommunityDetails, SeriesFacts};
+pub use sidecar_facts::{SidecarFacts, SidecarFactsKey};
 pub use tokens::{TOKEN_TOUCH_SECONDS, TokenKind, token_hash};
 pub use uploads::{fold_series_title_key, layer_sidecar_volume_path, normalize_volume_key};
 pub use users::{KeepAdmin, LAST_ADMIN_MESSAGE, User, UserStatus, normalize_role};

@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bunko_remote::folder::{FolderBackend, FolderConfig};
+use bunko_remote::series_queue::{SeriesQueueSource, SnapshotFuture};
 use bunko_remote::status::{LeaseEvent, MARKER_NAME, Marker};
 use bunko_remote::{RemoteStore, RemoteStoreConfig};
 use bunko_store::{Durability, LibraryStore, Mode, MountGuard, Origin, WriteIntent, fs};
@@ -266,25 +267,128 @@ fn an_outside_delete_is_applied_after_the_grace() {
     });
 }
 
+/// The scheduler as the test sets it: one queued job in series `S` (queue file v2).
+struct Src(parking_lot::Mutex<bunko_sched::series_queue::Snapshot>);
+
+impl SeriesQueueSource for Src {
+    fn snapshot(&self) -> SnapshotFuture<'_> {
+        let mut s = self.0.lock().clone();
+        s.now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+        Box::pin(async move { Some(s) })
+    }
+
+    fn regeneration_pending(&self, _: &str) -> bool {
+        false
+    }
+}
+
+fn one_queued_job() -> Arc<Src> {
+    use bunko_sched::series_queue::{LiveJob, LiveState, RowDesc, SeriesLive, Snapshot};
+    let mut s = Snapshot {
+        rows: vec![RowDesc {
+            kind: "ocr".into(),
+            id: "main".into(),
+            parts: serde_json::json!([{"role": "recognizer", "name": "Main", "version": "1"}]),
+        }],
+        ..Snapshot::default()
+    };
+    s.series.insert(
+        "s".into(),
+        SeriesLive {
+            folder: "S".into(),
+            vols: [(
+                "Vol 1".to_string(),
+                vec![LiveJob {
+                    row: "main".into(),
+                    state: LiveState::Queued { e: None },
+                }],
+            )]
+            .into(),
+        },
+    );
+    Arc::new(Src(parking_lot::Mutex::new(s)))
+}
+
+/// The lease marker lands at the folder's root and the series' queue file v2 in the
+/// series folder (the folder is the library root, §3), and a change rewrites it in
+/// place; the folder's window is 15 s (§6.4), and no root queue file is written.
 #[test]
-fn the_lease_marker_and_queue_file_are_written_at_the_root() {
-    let t = T::with(&[("S/Vol 1.cbz", b"zip")], lease_quick);
+fn the_lease_marker_and_series_queue_file_are_written_in_the_folder() {
+    let t = T::with(&[("S/Vol 1.cbz", b"zip")], |c| {
+        lease_quick(c);
+        c.queue_floor = Some(Duration::from_millis(200));
+    });
+    let src = one_queued_job();
+    t.s().set_series_queue_source(src.clone());
     wait_until("the lease", || {
         t.s().lease().map(|l| l.event()) == Some(LeaseEvent::Acquired)
     });
-    wait_until("the marker", || t.disk(MARKER_NAME).is_file());
+    wait_until("the series file", || {
+        t.disk("S/.mokuro-series-queue.json").is_file()
+    });
+    let q: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(t.disk("S/.mokuro-series-queue.json")).unwrap())
+            .unwrap();
+    assert_eq!(q["v"], 2, "{q}");
+    assert_eq!(q["vols"]["Vol 1"][0][1], "q", "{q}");
+    wait_until("the marker's queue block", || {
+        t.disk(MARKER_NAME).is_file()
+            && Marker::parse(&std::fs::read(t.disk(MARKER_NAME)).unwrap())
+                .is_some_and(|m| m.series_queue.is_some())
+    });
     let m = Marker::parse(&std::fs::read(t.disk(MARKER_NAME)).unwrap()).unwrap();
     assert!(!m.instance_id.is_empty());
-    let doc = serde_json::json!({"version": 1, "generated_at": "2026-10-12T10:00:01Z",
-        "pending_volumes": 1, "volumes": [{"path": "S/Vol 1.cbz"}]});
-    assert!(t.s().publish_queue_doc(doc).unwrap());
+    assert_eq!(q["instance_id"], m.instance_id.as_str());
+    // The window W: `queue_floor` here; the folder's own is 15 s.
+    assert_eq!(m.series_queue.unwrap()["batch_s"], 1);
+    // The job starts: the file is overwritten where it is (the Status fast path).
+    {
+        use bunko_sched::series_queue::LiveState;
+        let mut snap = src.0.lock();
+        let job = &mut snap
+            .series
+            .get_mut("s")
+            .unwrap()
+            .vols
+            .get_mut("Vol 1")
+            .unwrap()[0];
+        job.state = LiveState::Running {
+            t0: 1_794_398_340.0,
+            e: None,
+        };
+    }
+    let read = || -> serde_json::Value {
+        std::fs::read(t.disk("S/.mokuro-series-queue.json"))
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default()
+    };
+    wait_until("the rewritten series file", || {
+        read()["vols"]["Vol 1"][0][1] == "r"
+    });
+    assert!(read()["rev"].as_i64() > q["rev"].as_i64(), "{}", read());
     t.idle();
-    wait_until("the queue file", || t.disk(".mokuro-queue.json").is_file());
-    let q: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(t.disk(".mokuro-queue.json")).unwrap()).unwrap();
-    assert_eq!(q["pending_volumes"], 1, "{q}");
-    // The control files are listed like any other file, and nothing else was left.
+    assert!(t.s().conflicts().is_empty(), "{:?}", t.s().conflicts());
+    assert_eq!(t.on_disk_named("S", "series-queue").len(), 1);
+    assert!(!t.disk(".mokuro-queue.json").exists());
+    // Nothing else was left: no temp files at the root or in the series folder.
     assert!(t.on_disk_named("", ".bunko-").is_empty());
+    assert!(t.on_disk_named("S", ".bunko-").is_empty());
+}
+
+/// A local folder's series files are written every 15 s, at most 100 a window (queue
+/// file v2 §6.4): no network, a temporary file and a rename.
+#[test]
+fn a_folder_writes_series_files_every_15_s() {
+    let t = T::new(&[("S/Vol 1.cbz", b"zip")]);
+    let sink = t
+        .s()
+        .series_queue()
+        .expect("status files are on by default");
+    assert_eq!(sink.window(), Duration::from_secs(15));
 }
 
 /// A crash after the rename put the file in place and before the commit: the reopened

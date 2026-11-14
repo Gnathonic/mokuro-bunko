@@ -26,6 +26,7 @@ import {
     nestedChanges,
     nestedState,
     nodeBytes,
+    replacedBelow,
     retag,
     seedFiles,
     seedNodes,
@@ -368,7 +369,12 @@ test('S9 end: the reader merges the roots while Bunko is down; Bunko restarts wi
         const nested = rows.filter((r) => r.folder && !r.trashed && r.name === LIBRARY_FOLDER && r.id !== rootC);
         const ever = await treeEver(rig);
         const inNested = (r) => nested.some((n) => under(ever, r.id, n.id));
-        expect(writesOutside(ever, rootC, startedAt, inNested)).toEqual([]);
+        // The reader writes into C until it sees Bunko's marker (a series.json it compiles
+        // after its merge, in the second Bunko starts): Bunko replaces it, and MEGA sends
+        // the reader's version to the rubbish bin on its own. That is no write outside C.
+        const replaced = replacedBelow(ever, rootC);
+        const allowed = (r) => inNested(r) || replaced(r);
+        expect(writesOutside(ever, rootC, startedAt, allowed)).toEqual([]);
     } finally {
         expectNeverSuspect(await storage.stop());
     }

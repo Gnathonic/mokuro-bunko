@@ -804,19 +804,7 @@ impl Scheduler {
                         progress = json!(bunko_sched::py::round_to((d / t).clamp(0.0, 1.0), 3));
                     }
                 }
-                // What a reader labels the job by, as the finished file will carry it
-                // (`ocr_engine.parts`): recognizer, then detector, with versions.
-                let parts: Vec<Value> =
-                    bunko_core::engines::parts(&row.engine, row.effective_detector())
-                        .iter()
-                        .map(|p| {
-                            let mut part = json!({"role": p.role, "name": p.name});
-                            if !p.version.is_empty() {
-                                part["version"] = json!(p.version);
-                            }
-                            part
-                        })
-                        .collect();
+                let parts = row_parts(row);
                 out.push(json!({"kind": if row.primary { "ocr" } else { "layer" }, "id": row.name, "parts": parts, "state": state, "eta": eta, "progress": progress}));
             }
             if !out.is_empty() {
@@ -826,6 +814,183 @@ impl Scheduler {
         }
         (held, volumes, window.pending_volumes)
     }
+
+    /// The whole queue for the queue file v2 (`docs/design/queue-file-v2.md` §5): every
+    /// owed (volume, row) of the owed board, grouped by series fold key, each as the
+    /// plan sees it now (running with its start and predicted finish, claimed, or
+    /// waiting with its predicted finish, untimed when the plan cannot time it or does
+    /// not hold it: failure backoff). Volumes at the library root, or deeper than one
+    /// folder, have no series file and are left out. Prices the plan once.
+    pub fn series_queue_snapshot(&mut self) -> bunko_sched::series_queue::Snapshot {
+        use std::collections::{BTreeSet, HashMap};
+
+        use bunko_sched::series_queue::{LiveJob, LiveState, RowDesc, SeriesLive, Snapshot};
+
+        let now = self.now();
+        let held = self.queue_hold().map(str::to_string);
+        let running = self.running_jobs();
+        let pending = self.pending_jobs();
+        let items = Self::plan_items(&pending, &running);
+        let plan = self.queue_plan(&running, &items, None);
+        let mut rows = self.enabled_rows();
+        rows.sort_by_key(|r| !r.primary);
+        let name_of: HashMap<&str, &str> = rows
+            .iter()
+            .map(|r| (r.id.as_str(), r.name.as_str()))
+            .collect();
+        let descs: Vec<RowDesc> = rows
+            .iter()
+            .map(|r| RowDesc {
+                kind: if r.primary { "ocr" } else { "layer" }.into(),
+                id: r.name.clone(),
+                parts: row_parts(r),
+            })
+            .collect();
+        let text = |e: &Map<String, Value>, k: &str| {
+            e.get(k).and_then(Value::as_str).unwrap_or("").to_string()
+        };
+        let id = |e: &Map<String, Value>| {
+            (
+                text(e, "series"),
+                text(e, "volume"),
+                text(e, "generation_id"),
+            )
+        };
+        // Jobs held one by one before the plan (an upgrade waiting while this Bunko
+        // claims a cloud library): their row is not held, they are only untimed.
+        let held_jobs: HashSet<(String, String, String)> = items
+            .iter()
+            .filter(|e| bunko_sched::py::truthy(e.get("held")))
+            .map(id)
+            .collect();
+        // Predicted finishes by (series, volume, row id).
+        let mut finish: HashMap<(String, String, String), f64> = HashMap::new();
+        let mut held_rows: BTreeSet<String> = BTreeSet::new();
+        for e in plan.running.iter().chain(plan.pending.iter()) {
+            let gid = text(e, "generation_id");
+            if bunko_sched::py::truthy(e.get("held"))
+                && !held_jobs.contains(&id(e))
+                && let Some(name) = name_of.get(gid.as_str())
+            {
+                held_rows.insert((*name).to_string());
+            }
+            if let Some(seconds) = e.get("eta_seconds").and_then(Value::as_f64) {
+                finish
+                    .entry((text(e, "series"), text(e, "volume"), gid))
+                    .or_insert(now + seconds);
+            }
+        }
+        for (gid, _) in self.precision_holds() {
+            if let Some(name) = name_of.get(gid.as_str()) {
+                held_rows.insert((*name).to_string());
+            }
+        }
+        let started: HashMap<(&str, &str), f64> = self
+            .cards
+            .iter()
+            .map(|(job, card)| {
+                let t0 = card
+                    .get("started_at")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(now);
+                ((&*job.rel, &*job.gid), t0)
+            })
+            .collect();
+        let claimed: HashSet<(&str, &str)> = self
+            .claims
+            .keys()
+            .map(|job| (&*job.rel, &*job.gid))
+            .collect();
+        let board = self.owed_board();
+        let mut series: std::collections::BTreeMap<String, SeriesLive> = Default::default();
+        for (rel, owed) in &board.volumes {
+            let job = Job::new(rel, "");
+            let folder = job.series();
+            if folder == "." || folder.contains('/') {
+                continue;
+            }
+            let stem = job.volume().to_string();
+            let mut jobs = Vec::new();
+            for i in owed {
+                let Some(row) = board.rows.get(usize::from(*i)) else {
+                    continue;
+                };
+                let e = finish
+                    .get(&(folder.to_string(), stem.clone(), row.id.clone()))
+                    .copied();
+                let key = (rel.as_str(), row.id.as_str());
+                let state = if let Some(t0) = started.get(&key) {
+                    LiveState::Running { t0: *t0, e }
+                } else if claimed.contains(&key) {
+                    LiveState::Claimed
+                } else {
+                    LiveState::Queued { e }
+                };
+                jobs.push(LiveJob {
+                    row: row.name.clone(),
+                    state,
+                });
+            }
+            if jobs.is_empty() {
+                continue;
+            }
+            series
+                .entry(bunko_core::names::fold_name(folder))
+                .or_insert_with(|| SeriesLive {
+                    folder: folder.to_string(),
+                    vols: Default::default(),
+                })
+                .vols
+                .insert(stem, jobs);
+        }
+        // Volumes finished lately and owing nothing again: a file names them done
+        // even when it never showed them (a job queued and finished between looks).
+        let day = bunko_sched::series_queue::DONE_KEEP_SECONDS as f64;
+        let mut finished: std::collections::BTreeMap<
+            String,
+            (String, std::collections::BTreeMap<String, f64>),
+        > = Default::default();
+        for (rel, at) in &self.recent_finished {
+            if *at + day <= now || board.volumes.contains_key(rel.as_str()) {
+                continue;
+            }
+            let job = Job::new(rel, "");
+            let folder = job.series();
+            if folder == "." || folder.contains('/') {
+                continue;
+            }
+            finished
+                .entry(bunko_core::names::fold_name(folder))
+                .or_insert_with(|| (folder.to_string(), Default::default()))
+                .1
+                .insert(job.volume().to_string(), *at);
+        }
+        Snapshot {
+            now,
+            rows: descs,
+            held,
+            held_rows,
+            series,
+            finished,
+        }
+    }
+}
+
+/// What a reader labels a row's job by, as the finished file will carry it
+/// (`ocr_engine.parts`): recognizer, then detector, with versions.
+fn row_parts(row: &Generation) -> Value {
+    Value::Array(
+        bunko_core::engines::parts(&row.engine, row.effective_detector())
+            .iter()
+            .map(|p| {
+                let mut part = json!({"role": p.role, "name": p.name});
+                if !p.version.is_empty() {
+                    part["version"] = json!(p.version);
+                }
+                part
+            })
+            .collect(),
+    )
 }
 
 /// One (machine, layer) line of the admin speed list (`_speed_layer`), or None when

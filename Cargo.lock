@@ -801,6 +801,7 @@ dependencies = [
  "bunko-library",
  "bunko-mega",
  "bunko-remote",
+ "bunko-sched",
  "bunko-store",
  "bytes",
  "chacha20poly1305",

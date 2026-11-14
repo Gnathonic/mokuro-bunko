@@ -20,6 +20,8 @@ mod ocr_probe;
 #[cfg(feature = "ocr")]
 mod ocr_target;
 mod out;
+#[cfg(feature = "ocr")]
+mod pack_removal;
 mod prompt;
 mod serve;
 mod server_machine;

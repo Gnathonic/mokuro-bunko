@@ -676,6 +676,52 @@ impl Index {
         v
     }
 
+    /// Every file one folder below the root whose name folds to `fold` (every spelling),
+    /// with its path: the series' queue files (queue file v2), by path.
+    pub fn series_level_files(&self, fold: &str) -> Vec<(RelPath, Entry)> {
+        let sql = format!(
+            "SELECT {ENTRY_COLS}, p.name FROM entry e JOIN entry p ON e.parent_eid = p.eid \
+             WHERE p.parent_eid = ?1 AND p.kind = ?2 AND e.fold = ?3 AND e.kind = ?4 \
+             ORDER BY p.name, e.name"
+        );
+        soft(
+            self.conn.prepare_cached(&sql).and_then(|mut s| {
+                s.query_map(params![ROOT_EID, KIND_DIR, fold, KIND_FILE], |r| {
+                    let e = entry_from_row(r)?;
+                    let folder: String = r.get(13)?;
+                    Ok((folder, e))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()
+            }),
+            "series_level_files",
+        )
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(folder, e)| {
+            let rel = RelPath::from_segments([folder, e.name.clone()])?;
+            Some((rel, e))
+        })
+        .collect()
+    }
+
+    /// Does a folder one below the root, in any spelling folding to `fold`, hold a
+    /// volume archive (a file named `*.cbz` in any case, a pending create included)?
+    /// A series folder without one has no volume left (queue file v2: its series file
+    /// goes, as its `series.json` does).
+    pub fn folder_holds_archive(&self, fold: &str) -> bool {
+        let sql = "SELECT 1 FROM entry e JOIN entry p ON e.parent_eid = p.eid \
+                   WHERE p.parent_eid = ?1 AND p.kind = ?2 AND p.fold = ?3 \
+                   AND e.kind = ?4 AND e.fold LIKE '%.cbz' LIMIT 1";
+        soft(
+            self.conn
+                .prepare_cached(sql)
+                .and_then(|mut s| s.exists(params![ROOT_EID, KIND_DIR, fold, KIND_FILE])),
+            "folder_holds_archive",
+        )
+        // An index that cannot answer is not an empty folder.
+        .unwrap_or(true)
+    }
+
     /// Every `(parent_eid, fold)` that more than one entry shares: the case-variant
     /// sets a case merge looks at (§5.9), by parent then fold.
     pub fn fold_collisions(&self) -> Vec<(i64, String)> {

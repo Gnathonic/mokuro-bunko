@@ -1,9 +1,9 @@
 //! `cloud_e2e` on a local folder library (`storage.library.backend: folder`) over a
 //! real directory instead of the in-memory `FakeBackend`: the folder is kept exactly
 //! like a cloud folder. An un-OCR'd volume gets its sidecar, covers, `series.json` and
-//! `catalog.json` written into the folder, and `.mokuro-queue.json` lists it in
-//! `done[]`; the lease marker is fresh and held; a store stopped mid-upload resumes with
-//! exactly one copy of each result; a Chrome-like reader write of a new `.cbz` arrives
+//! `catalog.json` written into the folder, and its series' `.mokuro-series-queue.json`
+//! names it `done` (queue file v2); the lease marker is fresh and held; a store stopped
+//! mid-upload resumes with exactly one copy of each result; a Chrome-like reader write of a new `.cbz` arrives
 //! and is OCR'd; a reader-style rename (copy every file, then delete the old folder)
 //! makes no OCR job for volumes whose sidecars moved with them.
 
@@ -255,21 +255,21 @@ async fn an_unocrd_volume_is_ocrd_and_everything_lands_in_the_folder() {
     let catalog = json_at(&folder, "catalog.json").expect("catalog.json in the folder");
     assert!(catalog.to_string().contains("Series"), "{catalog}");
 
+    // The series' queue file (queue file v2) in the series folder: nothing pending,
+    // the volume in `done`. No root queue file is written.
     eventually(
-        "the queue file with its done entry",
+        "the series' queue file with its done entry",
         Duration::from_secs(30),
         || {
-            json_at(&folder, ".mokuro-queue.json").is_some_and(|q| {
-                q["done"]
-                    .as_array()
-                    .is_some_and(|d| d.iter().any(|e| e["volume"] == "Vol 2"))
-            })
+            json_at(&folder, "Series/.mokuro-series-queue.json")
+                .is_some_and(|q| q["done"].get("Vol 2").is_some())
         },
     )
     .await;
-    let queue = json_at(&folder, ".mokuro-queue.json").unwrap();
+    let queue = json_at(&folder, "Series/.mokuro-series-queue.json").unwrap();
     assert_eq!(queue["instance_id"], store.instance_id());
-    assert_eq!(queue["pending_volumes"], 0, "{queue}");
+    assert_eq!(queue["vols"], serde_json::json!({}), "{queue}");
+    assert!(!folder.join(".mokuro-queue.json").exists());
 
     // One copy of everything Bunko wrote, under its own name, and nothing half-written.
     idle(&store).await;
@@ -282,6 +282,7 @@ async fn an_unocrd_volume_is_ocrd_and_everything_lands_in_the_folder() {
         "Vol 2.mokuro",
         "Vol 2.webp",
         "series.json",
+        ".mokuro-series-queue.json",
     ] {
         assert!(series_names.contains(name), "{name} in {series_names:?}");
     }

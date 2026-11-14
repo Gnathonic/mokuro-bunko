@@ -1609,8 +1609,13 @@ impl Scheduler {
 
     /// A machine left: its line ends. A remote processor's autobench runs are parked
     /// for its return under the same `identity` (`(host, catalog)`); every other run
-    /// fails, and its autobench pair may be asked again.
-    pub fn bench_machine_left(&mut self, machine: &str, identity: Option<(Value, Value)>) {
+    /// fails with `why`, and its autobench pair may be asked again.
+    pub fn bench_machine_left(
+        &mut self,
+        machine: &str,
+        identity: Option<(Value, Value)>,
+        why: &str,
+    ) {
         let Some(line) = self.bench.lines.remove(machine) else {
             return;
         };
@@ -1634,7 +1639,7 @@ impl Scheduler {
                 parked.push_back(run);
                 continue;
             }
-            self.bench_gone(machine, run, format!("{machine} disconnected"));
+            self.bench_gone(machine, run, why.to_string());
         }
         if let Some(identity) = identity.filter(|_| !parked.is_empty()) {
             self.bench.parked.insert(

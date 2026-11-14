@@ -42,7 +42,10 @@
 //! replace with `if_cver` sends `If-Match`; otherwise the bytes go to
 //! `.<name>.bunko-<op>.tmp` first and a MOVE (`Overwrite: T` for a replace, `F` for a
 //! create) puts them in place. Every write ends with a PROPFIND Depth 0 of the target
-//! (a PUT response may lack an ETag).
+//! (a PUT response may lack an ETag), except the Status fast path
+//! ([`Backend::overwrite`], queue file v2 §6.6): a PUT with `If-Match` whose answer's
+//! `ETag` the probe saw read as the listing's `getetag` ([`PutEtag`]) is its own
+//! version, so that write is one request.
 
 mod probe;
 mod xml;
@@ -65,7 +68,7 @@ use crate::backend::{
 };
 use crate::names::fold_path_pid;
 
-pub use probe::Probe;
+pub use probe::{Probe, PutEtag};
 use xml::DavEntry;
 
 /// Path segment characters sent unescaped (RFC 3986 unreserved).
@@ -158,6 +161,14 @@ struct SnapFile {
     base: Generation,
     /// The generation the last `changes` call returned, until the caller uses it.
     next: Option<Generation>,
+}
+
+/// What a PUT's answer says about the version it made.
+struct PutReply {
+    /// The `ETag` header as sent.
+    etag: Option<String>,
+    /// `Last-Modified`, else the server's `Date`.
+    mtime_ms: i64,
 }
 
 /// A WebDAV server as a [`Backend`].
@@ -390,6 +401,8 @@ fn caps_from(p: &Probe, disable_cas: bool) -> BackendCaps {
         chunk_multiple: 1,
         path_ids: true,
         duplicate_names: false,
+        // An ETag (often the host's mtime and size), or `<lastmod ms>-<size>`.
+        content_versions: false,
     }
 }
 
@@ -825,7 +838,7 @@ impl WebDavBackend {
         pid: &str,
         src: UploadSource<'_>,
         cond: &[(&str, String)],
-    ) -> Result<(), BErr> {
+    ) -> Result<PutReply, BErr> {
         let UploadSource::File { path, size, sha256 } = src;
         let file = tokio::fs::File::open(path)
             .await
@@ -850,7 +863,37 @@ impl WebDavBackend {
             // RFC 4918 §9.7.2: a PUT onto a collection.
             return Err(BErr::NameConflict);
         }
-        ok_or_err(resp).map(drop)
+        let resp = ok_or_err(resp)?;
+        let h = resp.headers();
+        let text = |k: &str| h.get(k).and_then(|v| v.to_str().ok());
+        Ok(PutReply {
+            etag: text("etag").map(str::to_string),
+            mtime_ms: text("last-modified")
+                .and_then(http_date_ms)
+                .unwrap_or(server_time(&resp).0),
+        })
+    }
+
+    /// The node a PUT made, from its answer: `version` is the listing's form of its
+    /// `ETag`. No hash and no creation time (a later listing brings them).
+    fn put_node(&self, pid: &str, size: u64, version: String, mtime_ms: i64) -> RNode {
+        let (parent, name) = split_pid(pid);
+        let strong = !version.starts_with("W/");
+        let pinned = self.caps.read().pinned_read;
+        RNode {
+            pid: pid.to_string(),
+            parent: Some(parent.to_string()),
+            name_raw: name.as_bytes().to_vec(),
+            is_dir: false,
+            size,
+            base_mtime_ms: mtime_ms,
+            created_ms: 0,
+            cver: version.clone(),
+            pin: (strong && pinned).then(|| version.clone()),
+            version,
+            hash: None,
+            trashed: false,
+        }
     }
 
     async fn delete_quietly(&self, pid: &str) {
@@ -1313,6 +1356,7 @@ impl Backend for WebDavBackend {
                 let r = if caps.cas_create {
                     self.put_file(&pid, src, &[("if-none-match", "*".into())])
                         .await
+                        .map(drop)
                 } else {
                     self.put_via_temp(parent, name, src, op, false).await
                 };
@@ -1332,7 +1376,7 @@ impl Backend for WebDavBackend {
                 match if_cver.filter(|_| caps.cas_overwrite) {
                     Some(tag) => {
                         self.put_file(pid, src, &[("if-match", quote_tag(tag))])
-                            .await?
+                            .await?;
                     }
                     None => {
                         let (parent, name) = split_pid(pid);
@@ -1343,6 +1387,35 @@ impl Backend for WebDavBackend {
             }
         };
         self.written(&pid).await
+    }
+
+    async fn overwrite(
+        &self,
+        pid: &str,
+        if_cver: Option<&str>,
+        src: UploadSource<'_>,
+        op: &mut OpCtx,
+    ) -> Result<RNode, BErr> {
+        // Without a version to send, a replace goes through a temporary name (and a
+        // stat after its MOVE): what `upload` does, minus the caller's stat before.
+        let Some(tag) = if_cver.filter(|_| self.caps.read().cas_overwrite) else {
+            return self
+                .upload(UploadTarget::Replace { pid, if_cver }, src, op)
+                .await;
+        };
+        if pid.is_empty() {
+            return Err(BErr::NotFound);
+        }
+        let UploadSource::File { size, .. } = src;
+        // `If-Match` on a name that is gone fails too (RFC 9110 §13.1.1): 412.
+        let reply = self
+            .put_file(pid, src, &[("if-match", quote_tag(tag))])
+            .await?;
+        let put_etag = self.probe.read().put_etag;
+        match put_etag.listing_form(reply.etag.as_deref()) {
+            Some(version) => Ok(self.put_node(pid, size, version, reply.mtime_ms)),
+            None => self.written(pid).await,
+        }
     }
 
     async fn mkdir(&self, parent: &str, name: &str, _op: &OpCtx) -> Result<RNode, BErr> {

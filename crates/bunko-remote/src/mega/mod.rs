@@ -1092,6 +1092,8 @@ impl Backend for MegaBackend {
             chunk_multiple: CHUNK,
             path_ids: false,
             duplicate_names: true,
+            // The node handle: a node's bytes never change (a replace is a new node).
+            content_versions: true,
         }
     }
 

@@ -343,7 +343,25 @@ impl Scheduler {
             if vol.rows.is_empty() && !vol.upgrade && vol.skipped.is_empty() {
                 self.owed.volumes.remove(&*job.rel);
                 self.volumes_started.remove(&*job.rel);
+                self.note_finished(&job.rel);
             }
+        }
+    }
+
+    /// Volume `rel` owes nothing any more: kept a day for the queue file v2's `done`
+    /// entries ([`Self::recent_finished`]).
+    pub fn note_finished(&mut self, rel: &str) {
+        let now = self.now();
+        self.recent_finished.shift_remove(rel);
+        self.recent_finished.insert(rel.to_string(), now);
+        let day = bunko_sched::series_queue::DONE_KEEP_SECONDS as f64;
+        while self.recent_finished.len() > super::RECENT_FINISHED_MAX
+            || self
+                .recent_finished
+                .first()
+                .is_some_and(|(_, at)| *at + day <= now)
+        {
+            self.recent_finished.shift_remove_index(0);
         }
     }
 
@@ -1001,12 +1019,18 @@ impl Scheduler {
         let Some(lane) = self.lanes.iter().find(|l| l.id == lane_id).cloned() else {
             return (None, false);
         };
-        let Some(mname) = self.machines.get(&lane.pid).map(|m| m.name.clone()) else {
+        let Some((mname, local)) = self
+            .machines
+            .get(&lane.pid)
+            .map(|m| (m.name.clone(), m.local))
+        else {
             return (None, false);
         };
         let pid = lane.pid.clone();
-        // Phase A.
+        // Phase A. This server's own OCR turned off takes nothing (turning it off drops
+        // its lanes; this holds whatever path the setting took).
         if self.stopping
+            || (local && !self.settings.local_processing)
             || self.held(&mname)
             || self.breaker_open(&pid)
             || self.machine_paused(&pid)
@@ -1281,7 +1305,10 @@ impl Scheduler {
             let Some(machine) = self.machines.get(&lane.pid) else {
                 continue;
             };
-            if self.held(&machine.name) || (!machine.local && self.breaker_open(&lane.pid)) {
+            if self.held(&machine.name)
+                || (!machine.local && self.breaker_open(&lane.pid))
+                || (machine.local && !self.settings.local_processing)
+            {
                 continue;
             }
             // By volume a lane with a volume to finish runs that next, not this work.

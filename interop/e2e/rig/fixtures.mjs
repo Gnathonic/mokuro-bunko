@@ -17,11 +17,13 @@
 // lease?: {ttl_s}, uploads?: {dir, files}}) and RIG_CONTROL_URL (the runner's control port, with a Bunko
 // server: `rig.restartBunko`, `rig.stopBunko`, `rig.startBunko`).
 import { test as base, expect } from '@playwright/test';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { gateCapabilities, parsePendingCaps } from './caps.mjs';
 import { CLOUD_TEST_HOOKS, V1_METHODS, driver } from './driver.mjs';
 import { STUBBED_SCRIPTS, refusedError, routeFor } from './egress.mjs';
+import { launchFolderContext } from './local-folder.mjs';
 import { takeViolations } from './violations.mjs';
 
 export { expect };
@@ -221,6 +223,61 @@ async function configure(context, rig) {
     await context.addInitScript(installInteropConfig, await interopConfig(rig));
 }
 
+/**
+ * The `context` fixture's work on `context`: the route (or the watch, with
+ * `preflightsReachServers`), the interop config, then the spec; after it, what cloudsim
+ * recorded and the hosts refused fail it.
+ */
+async function routedContext(
+    context,
+    use,
+    testInfo,
+    { rig, readerUrl, readerStub, refusedHosts, stubbedUrls, refusedFails, preflightsReachServers },
+) {
+    const sim = (method, path) => rig.sim(method, path);
+    // What cloudsim recorded since the last spec ended (the server's startup, its
+    // polling in between) is no spec's doing: the results fail it on its own
+    // ("cloudsim violations before <spec>", playwright.rs).
+    if (rig.cloudsimUrl) {
+        const before = await takeViolations(sim);
+        if (before.length) {
+            testInfo.annotations.push({ type: 'cloudsim-violations-between', description: JSON.stringify(before) });
+        }
+    }
+    if (preflightsReachServers) {
+        if (readerStub !== null)
+            throw new Error('readerStub is served by a route; preflightsReachServers has none');
+        // The resolver refuses the host; this records it (the stubs: `page` below).
+        context.on('request', (request) => {
+            const url = new URL(request.url());
+            // blob: and data: name no host (a route never sees them either).
+            if (!/^(https?|wss?):$/.test(url.protocol)) return;
+            switch (routeFor(request.url())) {
+                case 'stub':
+                    return stubbedUrls.push(`${url.origin}${url.pathname}`);
+                case 'refuse':
+                    return refusedHosts.push(url.host);
+            }
+        });
+    } else {
+        await routeContext(context, { readerUrl, readerStub, refusedHosts, stubbedUrls });
+    }
+    await configure(context, rig);
+    await use(context);
+    const errors = [];
+    // A request cloudsim could not accept is a defect of whoever sent it. One
+    // recorded while the spec ran fails it, the reader's or the server's alike: the
+    // server polls cloudsim all along, so the window, not the sender, is what is
+    // known.
+    if (rig.cloudsimUrl) {
+        const during = await takeViolations(sim);
+        if (during.length) errors.push(`cloudsim violations while the spec ran: ${JSON.stringify(during)}`);
+    }
+    const refused = refusedFails ? refusedError(refusedHosts) : null;
+    if (refused) errors.push(refused);
+    if (errors.length) throw new Error(errors.join('\n'));
+}
+
 export const test = base.extend({
     /** Capabilities the spec needs from the reader: `test.use({ needs: [...] })`. */
     needs: [[], { option: true }],
@@ -268,54 +325,46 @@ export const test = base.extend({
         }
     },
 
+    /**
+     * True: the reader runs in full Chromium on a profile of its own, which lets it
+     * write to a folder on this disk it is given (local-folder.mjs): the specs that sign
+     * its Local Folder in to the folder provider's library folder.
+     */
+    folderBrowser: [false, { option: true }],
+
     // Playwright's context is already one per test; this one refuses the network.
     context: async (
-        { context, rig, readerUrl, readerStub, refusedHosts, stubbedUrls, refusedFails, preflightsReachServers },
+        {
+            context: given,
+            rig,
+            readerUrl,
+            readerStub,
+            refusedHosts,
+            stubbedUrls,
+            refusedFails,
+            preflightsReachServers,
+            folderBrowser,
+        },
         use,
         testInfo,
     ) => {
-        const sim = (method, path) => rig.sim(method, path);
-        // What cloudsim recorded since the last spec ended (the server's startup, its
-        // polling in between) is no spec's doing: the results fail it on its own
-        // ("cloudsim violations before <spec>", playwright.rs).
-        if (rig.cloudsimUrl) {
-            const before = await takeViolations(sim);
-            if (before.length) {
-                testInfo.annotations.push({ type: 'cloudsim-violations-between', description: JSON.stringify(before) });
-            }
-        }
-        if (preflightsReachServers) {
-            if (readerStub !== null)
-                throw new Error('readerStub is served by a route; preflightsReachServers has none');
-            // The resolver refuses the host; this records it (the stubs: `page` below).
-            context.on('request', (request) => {
-                const url = new URL(request.url());
-                // blob: and data: name no host (a route never sees them either).
-                if (!/^(https?|wss?):$/.test(url.protocol)) return;
-                switch (routeFor(request.url())) {
-                    case 'stub':
-                        return stubbedUrls.push(`${url.origin}${url.pathname}`);
-                    case 'refuse':
-                        return refusedHosts.push(url.host);
-                }
+        // The profile is no spec output: outside the work folder, whose logs the rig keeps.
+        const profile = folderBrowser ? mkdtempSync(path.join(tmpdir(), 'rig-folder-profile-')) : null;
+        const own = profile ? await launchFolderContext(profile, readerUrl, testInfo.project.use) : null;
+        try {
+            await routedContext(own ?? given, use, testInfo, {
+                rig,
+                readerUrl,
+                readerStub,
+                refusedHosts,
+                stubbedUrls,
+                refusedFails,
+                preflightsReachServers,
             });
-        } else {
-            await routeContext(context, { readerUrl, readerStub, refusedHosts, stubbedUrls });
+        } finally {
+            await own?.close();
+            if (profile) rmSync(profile, { recursive: true, force: true });
         }
-        await configure(context, rig);
-        await use(context);
-        const errors = [];
-        // A request cloudsim could not accept is a defect of whoever sent it. One
-        // recorded while the spec ran fails it, the reader's or the server's alike: the
-        // server polls cloudsim all along, so the window, not the sender, is what is
-        // known.
-        if (rig.cloudsimUrl) {
-            const during = await takeViolations(sim);
-            if (during.length) errors.push(`cloudsim violations while the spec ran: ${JSON.stringify(during)}`);
-        }
-        const refused = refusedFails ? refusedError(refusedHosts) : null;
-        if (refused) errors.push(refused);
-        if (errors.length) throw new Error(errors.join('\n'));
     },
 
     /** Without the route (`preflightsReachServers`), the Google scripts are stubbed here. */

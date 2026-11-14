@@ -125,6 +125,20 @@ pub fn is_relevant_change(path: &Path, is_directory: bool) -> bool {
 mod tests {
     use super::*;
 
+    /// A series' OCR queue file (queue file v2), which the lease holder rewrites as jobs
+    /// start and finish, never asks for a recompile: its settle rule waits for the
+    /// series' recompiles to end, so one that did would never settle.
+    #[test]
+    fn a_series_queue_file_write_is_no_library_change() {
+        for name in [
+            bunko_core::names::SERIES_QUEUE_FILE,
+            ".MOKURO-Series-Queue.JSON",
+        ] {
+            let p = Path::new("/lib/Example Saga").join(name);
+            assert!(!is_relevant_change(&p, false), "{name}");
+        }
+    }
+
     #[test]
     fn aliases_normalize() {
         assert!(is_catalog_file_path("/mokuro-reader//catalog.json"));

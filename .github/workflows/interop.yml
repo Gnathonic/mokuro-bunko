@@ -31,7 +31,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
-          toolchain: stable
+          toolchain: "1.99.1" # not stable: see the note in ci.yml
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
@@ -90,7 +90,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
-          toolchain: stable
+          toolchain: "1.99.1" # not stable: see the note in ci.yml
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: interop-rig
@@ -154,14 +154,14 @@ jobs:
           - { leg: rclone, suites: "bridge,direct,shared", provider: rclone }
           # The clouds by name: `all` would run the folder's cloud suite here too.
           - { leg: cloud, suites: cloud, provider: "google,microsoft,mega,rclone" }
-          # A library folder on the runner's disk: cloud and bridge only; direct and
-          # shared need the reader's Local Folder, which only a picker opens.
-          - { leg: folder, suites: "cloud,bridge", provider: folder }
+          # A library folder on the runner's disk: cloud, bridge and shared (the
+          # reader's Local Folder on that folder, dropped on its page); no direct.
+          - { leg: folder, suites: "cloud,bridge,shared", provider: folder }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
-          toolchain: stable
+          toolchain: "1.99.1" # not stable: see the note in ci.yml
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: interop-rig
