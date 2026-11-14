@@ -547,6 +547,10 @@
   first release's 213 MB ONNX file, which a store prune then removes. Its engine
   revision is now 2, so with upgrades on, `nar-small` layers written by a 0.8
   pre-release are read again once.
+- **fp32 on an NVIDIA Ampere or newer card now computes in full fp32 (TF32 off) for
+  every engine.** The libtorch backend pack turns TF32 off for convolutions and
+  matrix products when it starts, so hayai-nova and paddle-manga at fp32 on such a
+  card may read a little slower than before and their output may differ slightly.
 - **nar-small and charspot-small use the whole CPU on big hosts.** These engines read
   one text block at a time, too little work for one reader with many threads, so they
   kept only about 6 cores busy however big the host. Now many one-thread readers share

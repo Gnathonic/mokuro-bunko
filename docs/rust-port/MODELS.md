@@ -211,7 +211,7 @@ A changed graph is a new asset name or a new release, never a replaced asset.
 On an NVIDIA or AMD card with the libtorch backend pack, nar-small reads through a
 compiled AOTInductor package of the same `r16` network instead of the ONNX graph:
 `torch/nar-small/fp32/<target>/model.pt2`, one per GPU target, made by
-`tools/torch_export` (`python -m torch_export build nar-small fp32 <target>`). Like the
+`tools/torch_export` (`python -m torch_export build -e nar-small -p fp32 -t <target>`). Like the
 ONNX graph it holds **no trained weights**: the exporter refuses to embed them, the
 package's 181 constants are bound at load from the author's own `model.safetensors`
 (the same file, at the same pin, the CPU route reads), and `verify` and

@@ -422,7 +422,7 @@ the recognizers' integer), `bunko.max_batch = "64"` (the graph's dynamic batch i
 `bunko.weights` mapping each of its 181 constants to a key of the author's
 `model.safetensors` (pinned: `muscgab/manga-ocr-nar-small` @ `8cc14c15…`, sha256
 `bc7418e2…20a3`, 217,035,140 B). The package holds **no weights**: the exporter
-(`python -m torch_export build nar-small fp32 <target>`) refuses `TORCH_EXPORT_WIN_EMBED`
+(`python -m torch_export build -e nar-small -p fp32 -t <target>`) refuses `TORCH_EXPORT_WIN_EMBED`
 and `TORCH_EXPORT_CPU_EMBED` for it, drops the non-persistent buffers the graph recomputes,
 and `python -m torch_export refuse-embedded`, `verify` and `publish_textbox.sh` refuse a
 `.pt2` whose constants live inside it. The preprocessing (`bunko_vlm::textbox`: canvas,
