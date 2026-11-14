@@ -9,12 +9,17 @@ commit and binds at load (package metadata ``bunko.weights`` maps FQN -> key). T
 exporter refuses to write a package whose constants are not all keys of that file with
 the same shape and dtype, and refuses the weights-inside layouts
 (``TORCH_EXPORT_WIN_EMBED``, ``TORCH_EXPORT_CPU_EMBED``) outright.
+
+charspot-small (muscgab, ``CHARSPOT_PIN``) is two graphs, roles ``dense`` and ``tail``,
+over the authors' Apache-2.0 ``model.py`` at the pin, bound the same way to the authors'
+``model.safetensors`` (TEXTBOX-GPU.md §7.4). fp32 only.
 """
 
 from __future__ import annotations
 
 import hashlib
 import importlib.util
+import json
 import os
 import sys
 from dataclasses import dataclass
@@ -48,10 +53,16 @@ class AuthorsWeights:
 
 NAR_PIN = AuthorsWeights("muscgab/manga-ocr-nar-small", "8cc14c152ccb21da3aa88fa51a92766537c12da2", "model.safetensors",
                          "bc7418e27d476f86bb5984b45974d69cf9f7623eff6b9b57012df2c8fc9920a3", 217035140, {"model": "net."})
+# charspot-small's file holds both networks under "dense." and "tail."; the graphs carry
+# them one level deeper ("dense.dense.<k>", "tail.tail.<k>"), so the FQN minus the role's
+# prefix is the file's own key
+CHARSPOT_PIN = AuthorsWeights("muscgab/manga-ocr-charspot-small", "72ca29202673880ca9c67b1c02c107535be4472b",
+                              "model.safetensors", "3dec28460e10353b8a12d0e6d252bff9b892ec2d12ffb7a3d81ae02532963286",
+                              43860012, {"dense": "dense.", "tail": "tail."})
 
 # engines whose packages bind the authors' weights (build.py refuses embedding for these
 # before it builds anything)
-PINS: dict[str, AuthorsWeights] = {"nar-small": NAR_PIN}
+PINS: dict[str, AuthorsWeights] = {"nar-small": NAR_PIN, "charspot-small": CHARSPOT_PIN}
 
 
 def _sha256(path: Path) -> str:
@@ -254,3 +265,206 @@ def nar_small(prec: str, device: torch.device, io: int, model=None, **kw) -> Gra
     graph = Graph("model", wrap, ex, ({0: B},) * 6)
     return Graphs("nar-small", prec, io, model, [graph], authors_weights=NAR_PIN,
                   authors_file=snap / NAR_PIN.file if snap is not None else None, max_batch=MAX_BATCH)
+
+
+# --- charspot-small -------------------------------------------------------------------
+#
+# Two graphs over the authors' Apache-2.0 ``model.py`` at CHARSPOT_PIN (TEXTBOX-GPU.md
+# §7.4): ``dense`` (the masked dense network: a crop padded onto a larger canvas reads as
+# it does alone) and ``tail`` (pooled box features, classes, reading-order scores). The
+# decode between them (heatmap, NMS, furigana, geometry) and the reading-order chain run
+# on the host: the authors' ``core.py`` here and in verify, its Rust port in Bunko.
+
+CHARSPOT_SNAPSHOT_VAR = "TORCH_EXPORT_CHARSPOT_SNAPSHOT"
+# sha256 of the authors' files the exporter, verify and tools/textbox_export read, from the
+# repository's own SHA256SUMS at the pin (model.onnx: the CPU reference only)
+CHARSPOT_FILES = {
+    "model.safetensors": CHARSPOT_PIN.sha256,
+    "model.onnx": "05fb79760f8e3dbc989b61f23a34c46b511818a2166573ce7e41d994f4403843",
+    "config.json": "fbab49bfbfee9e9fee22e74288202a7928e268e9b03de185aa9e206614b0a65c",
+    "vocab.json": "9f72fc7852b1432bcb61b3b94b2e4cd8abef52b01e9051550a6a3070e2b314d5",
+    "LICENSE": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+    "LICENSE_MODEL": "e66c269d4819aaab34b49ef5220c4ddab6756f21bb5180761a4eb8561f2b7bbd",
+    "NOTICE.md": "6f81dc2287f230c2d1329dd819552313d2e920e64d820c36f2a514073a449d35",
+    "manga_ocr_charspot_small/__init__.py": "8693db4d83b64d8e2fdd994901c3c7ae2af6135041e0ecbcdcf98460ab48e1c7",
+    "manga_ocr_charspot_small/core.py": "a907e94f21b40641027d014dfea36df6489997809dd053dca3987d4965650a65",
+    "manga_ocr_charspot_small/model.py": "4ec554862b56171bbd85a42b7e27d88621b24617a5ddbbffd2091dfe421e7895",
+    "manga_ocr_charspot_small/gpu_preprocess.py": "391647938bce2d5cc425097ff4fd14fa270c6b68ac9026cf0cc60dcd6af8a598",
+    "manga_ocr_charspot_small/backends/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "manga_ocr_charspot_small/backends/onnx.py": "2da0c938e3f4c623969cdfb39f1279a20e8e09fecfb088850d67e4e5e7f70ca9",
+    "manga_ocr_charspot_small/backends/cuda.py": "60cbe33a615265ccdd6f85aa580d14f6526d26e60499f2fe68cf537f0a708235",
+}
+CHARSPOT_MAX_CELLS = 256  # a canvas side, in 16-px cells (the authors' ladder ends at 256)
+# The dense graph's smallest canvas side, in cells. Exported with 1, torch.export guards
+# the graph to >= 2 anyway (a 1-cell side makes size-1 dimensions, which it specialises),
+# so it is declared as 2: the host puts a crop with a 1-cell side (the ladder's first
+# rung; none of JMangaBench_Read's 7,929 crops has one) on a 2-cell canvas, which the
+# masked network reads as the crop alone (measured on the CPU: max |diff| 9e-5 on emb,
+# float noise).
+CHARSPOT_MIN_CELLS = 2
+CHARSPOT_MAX_ROWS = 512  # tail rows per call (the authors' ROWS_PER_TAIL)
+CHARSPOT_MAX_CHARS = 1024  # characters per tail row: 256 cells hold at most 1,024 stride-8 centres
+CHARSPOT_TAIL_BUDGET = 1 << 18  # rows x characters² per tail call (the authors' tail_budget)
+
+
+def charspot_snapshot(arg: str | None = None) -> Path:
+    """The authors' repository at CHARSPOT_PIN: ``arg``, else ``TORCH_EXPORT_CHARSPOT_SNAPSHOT``,
+    else the Hugging Face cache (fetched once at the pinned revision)."""
+    arg = arg or os.environ.get(CHARSPOT_SNAPSHOT_VAR)
+    if arg:
+        return Path(arg)
+    from huggingface_hub import snapshot_download
+
+    return Path(snapshot_download(CHARSPOT_PIN.repo, revision=CHARSPOT_PIN.revision, allow_patterns=list(CHARSPOT_FILES)))
+
+
+def check_charspot(snap: Path, files=None) -> None:
+    """Refuse a snapshot whose files are not the pinned ones (``files``: the names to check,
+    default all of CHARSPOT_FILES)."""
+    check_pin(snap / CHARSPOT_PIN.file, CHARSPOT_PIN)
+    for rel in files if files is not None else CHARSPOT_FILES:
+        if rel == CHARSPOT_PIN.file:
+            continue
+        got = _sha256(snap / rel)
+        if got != CHARSPOT_FILES[rel]:
+            raise SystemExit(f"{snap / rel}: sha256 {got}, pinned {CHARSPOT_FILES[rel]} "
+                             f"({CHARSPOT_PIN.repo}@{CHARSPOT_PIN.revision})")
+
+
+def charspot_modules(snap: Path):
+    """The authors' ``core`` and ``model`` modules from the snapshot."""
+    if str(snap) not in sys.path:
+        sys.path.insert(0, str(snap))
+    from manga_ocr_charspot_small import core, model
+
+    return core, model
+
+
+class CharspotNet(nn.Module):
+    """The authors' two networks under one root: its state_dict keys are the weights
+    file's own keys (``dense.<k>``, ``tail.<k>``)."""
+
+    def __init__(self, dense: nn.Module, tail: nn.Module):
+        super().__init__()
+        self.dense, self.tail = dense, tail
+
+
+def load_charspot(snap: Path) -> CharspotNet:
+    """The authors' ``build(cfg, n_out)`` with the pinned weights, fp32, CPU (strict load:
+    every key of the file is one of the networks' tensors and the reverse)."""
+    from safetensors.torch import load_file
+
+    _, model = charspot_modules(snap)
+    cfg = json.loads((snap / "config.json").read_text(encoding="utf-8"))
+    w = load_file(str(snap / CHARSPOT_PIN.file))
+    n_out = w["tail.cls.weight"].shape[0]
+    if n_out != cfg["n_out"]:
+        raise SystemExit(f"{n_out} output classes in the weights, config.json says {cfg['n_out']}")
+    net = CharspotNet(*model.build(cfg, n_out))
+    net.load_state_dict(w, strict=True)
+    return net.eval()
+
+
+class DenseGraph(nn.Module):
+    """``dense(img [B,3,16h,16w] f32 raw 0..255, hw [B,2] i64 valid px) -> heat [B,1,2h,2w],
+    box [B,4,..], ruby [B,1,..], emb [B,144,..]``: the authors' masked ``Dense.forward``."""
+
+    def __init__(self, net: CharspotNet):
+        super().__init__()
+        self.dense = nn.ModuleDict({"dense": net.dense})  # FQN dense.dense.<k>
+
+    def forward(self, img, hw):
+        return self.dense["dense"](img, hw)
+
+
+class TailGraph(nn.Module):
+    """``tail(emb [R,144,H8,W8], boxes [R,N,4] input px, geo [R,N,4], mask [R,N] bool) ->
+    ids [R,N] i64, pair [R,N,N], start [R,N], end [R,N]``: the authors' ``Tail.pooled`` then
+    ``Tail.forward``. ``pooled``'s sample points (the non-persistent ``qx``/``qy`` buffers,
+    which are not in the weights file) are computed in the graph: 0.25/0.75 exactly."""
+
+    def __init__(self, net: CharspotNet):
+        super().__init__()
+        self.tail = nn.ModuleDict({"tail": net.tail})  # FQN tail.tail.<k>
+
+    def forward(self, emb, boxes, geo, mask):
+        t = self.tail["tail"]
+        q = torch.arange(4, device=boxes.device)
+        qx = (q % 2).to(boxes.dtype) * 0.5 + 0.25  # [0.25, 0.75, 0.25, 0.75]
+        qy = (q // 2).to(boxes.dtype) * 0.5 + 0.25  # [0.25, 0.25, 0.75, 0.75]
+        # Tail.pooled, verbatim but for qx/qy
+        B, N = boxes.shape[:2]
+        H8, W8 = emb.shape[-2:]
+        px = boxes[..., 0:1] + qx * (boxes[..., 2:3] - boxes[..., 0:1])
+        py = boxes[..., 1:2] + qy * (boxes[..., 3:4] - boxes[..., 1:2])
+        grid = torch.stack((px / (W8 * 8) * 2 - 1, py / (H8 * 8) * 2 - 1), -1)
+        s = F.grid_sample(emb, grid, mode="bilinear", align_corners=False)
+        e = t.pool(s.permute(0, 2, 3, 1).reshape(B, N, -1))
+        return t(e, geo, mask)
+
+
+def charspot_small(prec: str, device: torch.device, io: int, model=None, **kw) -> Graphs:
+    """charspot-small as two graphs, ``dense`` (B 1..64, canvas sides 2..256 cells) and
+    ``tail`` (R 1..512 rows, N 2..1024 characters), fp32 only (the authors' fp16 differs on
+    3/100 texts). ``model`` None: the authors' repository at the pin (``charspot_snapshot``),
+    every pinned file the export reads checked. ``io`` and ``kw`` do not apply."""
+    if prec != "fp32":
+        raise SystemExit(f"charspot-small: no {prec} build (fp32 only)")
+    snap = None
+    if model is None:
+        snap = charspot_snapshot()
+        check_charspot(snap, [CHARSPOT_PIN.file, "config.json", "manga_ocr_charspot_small/model.py"])
+        model = load_charspot(snap)
+    # (none left on a copy of a model this builder already had: build.py exports a copy)
+    gone = set(drop_recomputed_buffers(model))
+    if not gone <= {"tail.qx", "tail.qy"}:
+        raise SystemExit(f"charspot-small: non-persistent buffers {sorted(gone)}; the graph computes only tail.qx and tail.qy")
+    model = _to(model.eval(), device)
+    dense, tail = DenseGraph(model).eval(), TailGraph(model).eval()
+    # three crops on a 6 x 4 cell canvas (one padded), as the authors' batches make them
+    img = torch.zeros(3, 3, 16 * 6, 16 * 4, device=device)
+    hw = torch.tensor([[96, 64], [80, 48], [96, 32]], dtype=torch.int64, device=device)
+    B = Dim("b", min=1, max=MAX_BATCH)
+    Hc = Dim("hc", min=CHARSPOT_MIN_CELLS, max=CHARSPOT_MAX_CELLS)
+    Wc = Dim("wc", min=CHARSPOT_MIN_CELLS, max=CHARSPOT_MAX_CELLS)
+    emb_dim = model.dense.emb.out_channels
+    r, n = 3, 5
+    emb = torch.zeros(r, emb_dim, 12, 8, device=device)
+    boxes = (torch.arange(r * n * 4, dtype=torch.float32, device=device) % 40).reshape(r, n, 4)
+    geo = torch.ones(r, n, 4, device=device)
+    mask = torch.ones(r, n, dtype=torch.bool, device=device)
+    R, N = Dim("r", min=1, max=CHARSPOT_MAX_ROWS), Dim("n", min=2, max=CHARSPOT_MAX_CHARS)
+    H8, W8 = Dim("h8", min=2, max=2 * CHARSPOT_MAX_CELLS), Dim("w8", min=2, max=2 * CHARSPOT_MAX_CELLS)
+    graphs = [Graph("dense", dense, (img, hw), ({0: B, 2: 16 * Hc, 3: 16 * Wc}, {0: B})),
+              Graph("tail", tail, (emb, boxes, geo, mask), ({0: R, 2: H8, 3: W8}, {0: R, 1: N}, {0: R, 1: N}, {0: R, 1: N}))]
+    return Graphs("charspot-small", prec, io, model, graphs, authors_weights=CHARSPOT_PIN,
+                  authors_file=snap / CHARSPOT_PIN.file if snap is not None else None, max_batch=MAX_BATCH)
+
+
+def charspot_result(seq, ids, kb, sc, fx_fy, out_str) -> dict:
+    """The authors' ``core.result`` without its rounding: ``{"text", "chars": [[c, x0, y0, x1,
+    y1, score], ...]}`` in reading order, boxes in crop pixels (f32 box times the f64 factor,
+    as ``core.result`` computes them before it rounds)."""
+    fx, fy = fx_fy
+    chars = []
+    for k in seq:
+        x0, y0, x1, y1 = (float(v) for v in kb[k])
+        chars.append([out_str[int(ids[k])], x0 * fx, y0 * fy, x1 * fx, y1 * fy, float(sc[k])])
+    return {"text": "".join(c[0] for c in chars), "chars": chars}
+
+
+def charspot_tail_parts(counts: list[int], budget: int = CHARSPOT_TAIL_BUDGET, rows_max: int = CHARSPOT_MAX_ROWS) -> list[list[int]]:
+    """The authors' tail parts (``backends/cuda.py`` ``infer``): rows with characters, by
+    count descending (stable); a part always takes its first row, then more while it has
+    fewer than ``rows_max`` rows and ``(rows + 1) * n0² <= budget``. Indices into ``counts``.
+    (Bunko's ``bunko_vlm::textbox::tail_parts`` is the same rule.)"""
+    rows = sorted((i for i, c in enumerate(counts) if c > 0), key=lambda i: -counts[i])
+    parts, k = [], 0
+    while k < len(rows):
+        nc, j = counts[rows[k]], k + 1
+        while j < len(rows) and j - k < rows_max and (j - k + 1) * nc * nc <= budget:
+            j += 1
+        part = rows[k:k + max(1, j - k)]
+        parts.append(part)
+        k += len(part)
+    return parts

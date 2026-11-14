@@ -400,4 +400,10 @@ def nar_small(*a, **kw) -> Graphs:
     return build(*a, **kw)
 
 
-BUILDERS = {"hayai-nova": hayai, "paddle-manga": paddle, "nar-small": nar_small}
+def charspot_small(*a, **kw) -> Graphs:
+    from .textbox import charspot_small as build
+
+    return build(*a, **kw)
+
+
+BUILDERS = {"hayai-nova": hayai, "paddle-manga": paddle, "nar-small": nar_small, "charspot-small": charspot_small}
