@@ -228,9 +228,11 @@ pub struct EnginePipeline {
     /// The PP-OCR pair of a line detector (its id first), shared by every session on
     /// that detector that needs no more detect workers than it has sessions.
     ppocr: Mutex<Option<(String, usize, Weak<PpocrPageReader>)>>,
-    /// The loaded block detector (its id first), shared by the sessions on it.
+    /// The loaded block detectors by detector and device (`cpu`, `gpu:<n>`), shared by
+    /// the sessions on them.
     #[cfg(feature = "gpl-models")]
-    block_detector: Mutex<Option<(String, Weak<bunko_ocr::animetext::AnimeText>)>>,
+    #[allow(clippy::type_complexity)]
+    block_detectors: Mutex<Vec<((String, String), Weak<dyn bunko_ocr::blocks::BlockDetector>)>>,
     /// The loaded text-box recognizers by engine and session threads, shared by their
     /// sessions.
     #[cfg(feature = "nc-models")]
@@ -250,7 +252,7 @@ impl EnginePipeline {
             recognizers: RecognizerCache::new(Arc::new(OrtSessionFactory)),
             ppocr: Mutex::new(None),
             #[cfg(feature = "gpl-models")]
-            block_detector: Mutex::new(None),
+            block_detectors: Mutex::new(Vec::new()),
             #[cfg(feature = "nc-models")]
             textbox: Mutex::new(Vec::new()),
             loading: Mutex::new(()),
@@ -1489,18 +1491,25 @@ impl EnginePipeline {
         &self.config
     }
 
-    /// The block detector `detector` (`models::block_detector`), loaded once, and the
-    /// pinned `(repo, revision)` of its file when it is the pinned one.
+    /// The block detector `detector` (`models::block_detector`) for `placement`, loaded
+    /// once per device, the pinned `(repo, revision)` of its file when it is the pinned
+    /// one, and the export set of its compiled package when it runs on a GPU
+    /// ([`bunko_ocr::models::DETECTOR_TORCH_RELEASE`]). On a GPU placement AnimeText
+    /// runs on the pack (`bt_detect_blocks`) when it can; any reason it cannot is
+    /// warned about and the detector loads on the CPU (ONNX Runtime), as everywhere
+    /// else. Both routes read the same ONNX file.
     #[cfg(feature = "gpl-models")]
     #[allow(clippy::type_complexity)]
     fn block_detector(
         &self,
         detector: &str,
         copies: usize,
+        placement: &Placement,
     ) -> Result<
         (
             Arc<dyn bunko_ocr::blocks::BlockDetector>,
             Option<(String, String)>,
+            Option<String>,
         ),
         String,
     > {
@@ -1509,12 +1518,39 @@ impl EnginePipeline {
         let source = file
             .verified
             .then(|| (repo.to_string(), revision.to_string()));
-        let mut slot = self.block_detector.lock();
-        if let Some((of, weak)) = slot.as_ref()
-            && of == detector
-            && let Some(d) = weak.upgrade()
-        {
-            return Ok((d, source));
+        // Held across a load: a second session on the same detector waits for it.
+        let mut slots = self.block_detectors.lock();
+        slots.retain(|(_, w)| w.strong_count() > 0);
+        let cached =
+            |slots: &[((String, String), Weak<dyn bunko_ocr::blocks::BlockDetector>)],
+             device: &str| {
+                slots
+                    .iter()
+                    .find(|((d, dev), _)| d == detector && dev == device)
+                    .and_then(|(_, w)| w.upgrade())
+            };
+        #[cfg(feature = "torch")]
+        if placement.is_gpu() {
+            let release = || Some(bunko_ocr::models::torch_release_name_for(detector));
+            if let Some(d) = cached(&slots, &placement.device) {
+                return Ok((d, source, release()));
+            }
+            match self.torch_block_detector(detector, placement, &file.path) {
+                Ok(d) => {
+                    slots.push((
+                        (detector.to_string(), placement.device.clone()),
+                        Arc::downgrade(&d),
+                    ));
+                    return Ok((d, source, release()));
+                }
+                Err(why) => warn!("{detector}: detecting on the CPU: {why}"),
+            }
+        }
+        #[cfg(not(feature = "torch"))]
+        let _ = placement;
+        let cpu = Placement::cpu().device;
+        if let Some(d) = cached(&slots, &cpu) {
+            return Ok((d, source, None));
         }
         let opts = RuntimeOptions {
             intra_threads: plan::SESSION_THREADS + 2 * (copies.max(1) - 1),
@@ -1522,12 +1558,137 @@ impl EnginePipeline {
             copies,
             spinning: false,
         };
-        let loaded = Arc::new(
+        let loaded: Arc<dyn bunko_ocr::blocks::BlockDetector> = Arc::new(
             bunko_ocr::animetext::AnimeText::load(&file.path, &opts)
                 .map_err(|e| format!("could not load AnimeText: {e}"))?,
         );
-        *slot = Some((detector.to_string(), Arc::downgrade(&loaded)));
-        Ok((loaded, source))
+        slots.push(((detector.to_string(), cpu), Arc::downgrade(&loaded)));
+        Ok((loaded, source, None))
+    }
+
+    /// Where the detect stage of a row reading with `detector` would run beside an engine
+    /// on `engine_device` ([`pick_detect_device`] over this host's
+    /// [`detect_candidates`](Self::detect_candidates)), and why not on a GPU when it
+    /// could have been. The CPU for a line detector, and in a build without
+    /// `gpl-models` (no block detector).
+    #[cfg(any(feature = "nc-models", feature = "gpl-models"))]
+    fn detect_pick(
+        &self,
+        spec: &RowSpec,
+        detector: &str,
+        engine_device: &str,
+    ) -> (String, Option<String>) {
+        #[cfg(feature = "gpl-models")]
+        if models::block_detector(detector) {
+            return pick_detect_device(
+                spec.pools
+                    .stage_device
+                    .get(STAGE_DETECT)
+                    .map(String::as_str),
+                engine_device,
+                self.config.backend == Backend::Cpu,
+                &self.detect_candidates(detector),
+            );
+        }
+        let _ = (spec, detector, engine_device);
+        (Placement::cpu().device, None)
+    }
+
+    /// The GPUs block detector `detector` might run on: the pack's GPUs that
+    /// `ocr.backend` allows, with their memory and whether the detector runs there (the
+    /// pack has `bt_detect_blocks` and an fp32 package for the device is obtainable).
+    /// None without a libtorch pack, and none for a detector with no GPU route.
+    #[cfg(feature = "gpl-models")]
+    fn detect_candidates(&self, detector: &str) -> Vec<DetectCandidate> {
+        #[cfg(feature = "torch")]
+        if detector == models::ANIMETEXT
+            && let Ok(tb) = self.torch()
+        {
+            let detects = tb.pack.detects_blocks();
+            return tb
+                .report
+                .devices
+                .iter()
+                .filter(|d| d.id != "cpu" && self.config.backend.allows(&d.kind))
+                .map(|d| DetectCandidate {
+                    id: d.id.clone(),
+                    vram_mb: d.vram_mb,
+                    runs: detects
+                        && torch::device_formats(&tb.report, &d.id, |p, targets| {
+                            self.store.torch_package_obtainable(detector, p, targets)
+                        })
+                        .contains(&"fp32"),
+                })
+                .collect();
+        }
+        let _ = detector;
+        Vec::new()
+    }
+
+    /// AnimeText on the libtorch GPU of `placement`, binding `onnx` (the CPU route's
+    /// file): the pack must export `bt_detect_blocks`, and a `detector.pt2` for one of
+    /// the device's targets must be here or in the detector release; it is fetched
+    /// (or found) and loaded on the pack.
+    #[cfg(all(feature = "torch", feature = "gpl-models"))]
+    fn torch_block_detector(
+        &self,
+        detector: &str,
+        placement: &Placement,
+        onnx: &std::path::Path,
+    ) -> Result<Arc<dyn bunko_ocr::blocks::BlockDetector>, String> {
+        if detector != models::ANIMETEXT {
+            return Err(format!("{detector} has no GPU route"));
+        }
+        let tb = self.torch()?;
+        if !tb.pack.detects_blocks() {
+            return Err(torch::DETECTOR_PACK_REASON.into());
+        }
+        let precision = Precision::Fp32;
+        let targets = Self::torch_targets(&tb, &placement.device, precision);
+        if !self
+            .store
+            .torch_package_obtainable(detector, precision.as_str(), &targets)
+        {
+            return Err(format!(
+                "no compiled {detector} package for {} here or in the {} release (it needs one of: {}){}",
+                placement.device,
+                bunko_ocr::models::torch_release_name_for(detector),
+                if targets.is_empty() {
+                    "none for this device".into()
+                } else {
+                    targets.join(", ")
+                },
+                if self.store.can_download() {
+                    ""
+                } else {
+                    "; downloads are off (MOKURO_MODELS_DOWNLOAD)"
+                }
+            ));
+        }
+        let pkg = self
+            .store
+            .ensure_torch_package(detector, precision.as_str(), &targets)
+            .map_err(|e| e.to_string())?;
+        let unpack_cache = self
+            .store
+            .options()
+            .root
+            .join(bunko_ocr::models::TORCH_DIR)
+            .join(".unpacked");
+        // The pack's preprocessing pool (the canvas becomes the input tensor on the host).
+        let threads = plan::cpu_engine_threads(
+            plan::physical_cpu_count(),
+            plan::performance_core_count(),
+            self.config.jobs,
+        ) as u32;
+        let reader = tb.detector(
+            &pkg.dir,
+            onnx,
+            &placement.device,
+            threads,
+            Some(&unpack_cache),
+        )?;
+        Ok(Arc::new(torch::detector::TorchBlockDetector::new(reader)))
     }
 
     /// The page reader on `detector`'s lines (`models::DETECTORS`).
@@ -2023,12 +2184,21 @@ impl EnginePipeline {
             }
             if recognizer.is_none() {
                 // The ONNX pool on the CPU: the session's threads follow the engine
-                // stage's planned width.
+                // stage's planned width, which leaves more cores to the pool when the
+                // block detector is to run on a GPU.
                 let host = host_of(&placement);
-                let workers = plan::plan(engine, road, &placement.device, &spec.pools, &host)
-                    .iter()
-                    .find(|s| s.key == plan::STAGE_ENGINE)
-                    .map_or(1, |s| s.workers);
+                let (detect_at, _) = self.detect_pick(spec, detector, &placement.device);
+                let workers = plan::plan(
+                    engine,
+                    road,
+                    &placement.device,
+                    &detect_at,
+                    &spec.pools,
+                    &host,
+                )
+                .iter()
+                .find(|s| s.key == plan::STAGE_ENGINE)
+                .map_or(1, |s| s.workers);
                 recognizer = Some(self.textbox_recognizer(engine, workers)?);
                 // nar-small's CPU graph is ours; charspot-small runs its authors' own.
                 textbox_release =
@@ -2075,20 +2245,63 @@ impl EnginePipeline {
         }
 
         let host = host_of(&placement);
-        let stages = plan::plan(engine, road, &placement.device, &spec.pools, &host);
-        let detect_workers = stages
-            .iter()
-            .find(|s| s.key == STAGE_DETECT)
-            .map_or(1, |s| s.workers) as usize;
+        let detect_width = |stages: &[plan::StagePlan]| {
+            stages
+                .iter()
+                .find(|s| s.key == STAGE_DETECT)
+                .map_or(1, |s| s.workers) as usize
+        };
+        // The plan with the detect stage on the CPU: the plan unless the block detector
+        // loads on a GPU, and its detect width the CPU detector's copies either way (a
+        // GPU detector that cannot load falls back to them).
+        let cpu_stages = plan::plan(engine, road, &placement.device, "cpu", &spec.pools, &host);
+        // Where the detect stage runs: the GPU the block detector loaded on, else the CPU.
+        #[allow(unused_mut)]
+        let mut detect_device = Placement::cpu().device;
         #[allow(unused_mut)]
         let mut blocks: Option<Arc<dyn bunko_ocr::blocks::BlockDetector>> = None;
         #[allow(unused_mut)]
         let mut block_source: Option<(String, String)> = None;
+        // The export set of the block detector's compiled package, when it runs on a GPU.
+        #[allow(unused_mut)]
+        let mut detector_release: Option<String> = None;
         #[cfg(feature = "gpl-models")]
         if by_blocks {
-            let (loaded, source) = self.block_detector(detector, detect_workers)?;
-            (blocks, block_source) = (Some(loaded), source);
+            // The detect stage follows the engine's GPU when the detector runs there.
+            let backend_cpu = self.config.backend == Backend::Cpu;
+            let (device, why) = self.detect_pick(spec, detector, &placement.device);
+            match why {
+                // Asked for by the configuration: no news.
+                Some(why) if backend_cpu => info!("{detector}: detecting on the CPU: {why}"),
+                Some(why) => warn!("{detector}: detecting on the CPU: {why}"),
+                None => {}
+            }
+            let detect_placement = if device == Placement::cpu().device {
+                Placement::cpu()
+            } else {
+                runtime::place(Some(&device), &devices).0
+            };
+            let (loaded, source, release) =
+                self.block_detector(detector, detect_width(&cpu_stages), &detect_placement)?;
+            // A release only when it loaded on the GPU; a failed load detects on the CPU.
+            if release.is_some() {
+                detect_device = detect_placement.device.clone();
+            }
+            (blocks, block_source, detector_release) = (Some(loaded), source, release);
         }
+        let stages = if detect_device == Placement::cpu().device {
+            cpu_stages
+        } else {
+            plan::plan(
+                engine,
+                road,
+                &placement.device,
+                &detect_device,
+                &spec.pools,
+                &host,
+            )
+        };
+        let detect_workers = detect_width(&stages);
         let reader = if by_blocks {
             None
         } else {
@@ -2126,7 +2339,10 @@ impl EnginePipeline {
                     bunko_ocr::models_release::RELEASE.to_string()
                 })
             };
-            weights.extend(models::export_entry(None, recognizer_release.as_deref()));
+            weights.extend(models::export_entry(
+                detector_release.as_deref(),
+                recognizer_release.as_deref(),
+            ));
         }
         let (stage_workers, queue_capacity) = plan::tables(&stages);
         let pipeline = plan::graph_line(&stages);
@@ -2328,6 +2544,89 @@ pub(crate) fn textbox_gpu_formats(
         .copied()
         .filter(|p| built.contains(p))
         .collect()
+}
+
+/// The least GPU memory (MiB) on which the block detector runs beside a text-box engine:
+/// on a smaller card it stays on the CPU rather than risk running out of memory.
+#[cfg(feature = "gpl-models")]
+pub(crate) const DETECT_GPU_MIN_VRAM_MB: u64 = 4096;
+
+/// A GPU the detect stage might run on.
+#[cfg(feature = "gpl-models")]
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DetectCandidate {
+    /// `gpu:<n>`.
+    pub id: String,
+    /// Device memory in MiB, when the pack knows it.
+    pub vram_mb: Option<u64>,
+    /// The detector runs there: the pack has `bt_detect_blocks` and an fp32 package for
+    /// one of the device's targets is here or downloadable.
+    pub runs: bool,
+}
+
+/// Where the block detector runs (`cpu` or `gpu:<n>`) and, when that is the CPU though
+/// a GPU was asked for or is here, why. `asked` is the row's `pools.stage_device.detect`;
+/// `engine_device` where its recognizer runs; `backend_cpu` whether `ocr.backend` is
+/// `cpu`. A GPU qualifies when it [`runs`](DetectCandidate::runs) the detector and has
+/// at least [`DETECT_GPU_MIN_VRAM_MB`] (unknown memory counts as enough). `auto` (or
+/// nothing) takes the engine's GPU when it qualifies, else the first that does.
+#[cfg(feature = "gpl-models")]
+pub(crate) fn pick_detect_device(
+    asked: Option<&str>,
+    engine_device: &str,
+    backend_cpu: bool,
+    gpus: &[DetectCandidate],
+) -> (String, Option<String>) {
+    let cpu = |why: Option<String>| ("cpu".to_string(), why);
+    if backend_cpu {
+        return cpu(Some("ocr.backend is cpu".into()));
+    }
+    let unfit = |g: &DetectCandidate| -> Option<String> {
+        if !g.runs {
+            return Some(format!(
+                "{} has no AnimeText package it can run (or the pack has no GPU block detection)",
+                g.id
+            ));
+        }
+        match g.vram_mb {
+            Some(v) if v < DETECT_GPU_MIN_VRAM_MB => Some(format!(
+                "{} has {v} MiB of memory; detecting on a GPU needs {DETECT_GPU_MIN_VRAM_MB}",
+                g.id
+            )),
+            _ => None,
+        }
+    };
+    let asked = asked.map(|s| s.trim().to_ascii_lowercase());
+    match asked.as_deref() {
+        None | Some("") | Some("auto") => {
+            if gpus.is_empty() {
+                return cpu(None);
+            }
+            let engine_gpu = gpus.iter().filter(|g| g.id == engine_device);
+            let mut why = Vec::new();
+            for g in engine_gpu.chain(gpus.iter().filter(|g| g.id != engine_device)) {
+                match unfit(g) {
+                    None => return (g.id.clone(), None),
+                    Some(w) => why.push(w),
+                }
+            }
+            cpu(Some(why.join("; ")))
+        }
+        Some("cpu") => cpu(None),
+        Some(other) => {
+            let want = match other {
+                "gpu" | "cuda" => "gpu:0".to_string(),
+                o => o.replace("cuda:", "gpu:"),
+            };
+            match gpus.iter().find(|g| g.id == want) {
+                None => cpu(Some(format!("{want} is not a GPU of this machine"))),
+                Some(g) => match unfit(g) {
+                    None => (g.id.clone(), None),
+                    why => cpu(why),
+                },
+            }
+        }
+    }
 }
 
 /// The target a text-box row on the CPU names (its ONNX route) in
@@ -2689,6 +2988,84 @@ mod backends_dirs_tests {
         assert_eq!(
             c.backends_dirs(),
             vec![PathBuf::from("/p/backends"), PathBuf::from("/lib/backends")]
+        );
+    }
+}
+
+#[cfg(all(test, feature = "gpl-models"))]
+mod detect_device_tests {
+    use super::*;
+
+    fn gpu(id: &str, vram: u64, runs: bool) -> DetectCandidate {
+        DetectCandidate {
+            id: id.into(),
+            vram_mb: Some(vram),
+            runs,
+        }
+    }
+
+    #[test]
+    fn detect_follows_the_engines_gpu() {
+        let g = [gpu("gpu:0", 16384, true), gpu("gpu:1", 24576, true)];
+        assert_eq!(pick_detect_device(None, "gpu:1", false, &g).0, "gpu:1");
+        assert_eq!(
+            pick_detect_device(Some("auto"), "cpu", false, &g).0,
+            "gpu:0"
+        );
+        assert_eq!(
+            pick_detect_device(Some("cpu"), "gpu:0", false, &g),
+            ("cpu".into(), None)
+        );
+        assert_eq!(pick_detect_device(None, "gpu:0", true, &g).0, "cpu");
+    }
+
+    #[test]
+    fn a_small_gpu_keeps_detect_on_the_cpu() {
+        let (d, why) = pick_detect_device(None, "gpu:0", false, &[gpu("gpu:0", 3072, true)]);
+        assert_eq!(d, "cpu");
+        assert!(why.unwrap().contains("4096"));
+    }
+
+    #[test]
+    fn an_absent_gpu_falls_back_to_the_cpu() {
+        let (d, why) =
+            pick_detect_device(Some("gpu:1"), "gpu:0", false, &[gpu("gpu:0", 16384, true)]);
+        assert_eq!(d, "cpu");
+        assert!(why.unwrap().contains("gpu:1"));
+        assert_eq!(
+            pick_detect_device(None, "cpu", false, &[]),
+            ("cpu".into(), None)
+        );
+    }
+
+    /// Unknown memory counts as enough; an unfit engine GPU gives way to one that
+    /// qualifies; a GPU without the detector's package is never picked, and says why.
+    #[test]
+    fn the_first_gpu_that_qualifies_detects() {
+        let unknown = DetectCandidate {
+            id: "gpu:0".into(),
+            vram_mb: None,
+            runs: true,
+        };
+        assert_eq!(
+            pick_detect_device(None, "gpu:0", false, std::slice::from_ref(&unknown)),
+            ("gpu:0".into(), None)
+        );
+        let g = [gpu("gpu:0", 16384, true), gpu("gpu:1", 2048, true)];
+        assert_eq!(
+            pick_detect_device(Some("auto"), "gpu:1", false, &g),
+            ("gpu:0".into(), None)
+        );
+        let (d, why) = pick_detect_device(Some("cuda:1"), "gpu:0", false, &g);
+        assert_eq!(d, "cpu");
+        assert!(why.unwrap().contains("gpu:1 has 2048 MiB"));
+        let none = [gpu("gpu:0", 16384, false)];
+        let (d, why) = pick_detect_device(None, "gpu:0", false, &none);
+        assert_eq!(d, "cpu");
+        assert!(why.unwrap().contains("no AnimeText package"));
+        assert_eq!(
+            pick_detect_device(Some("gpu:0"), "gpu:0", true, &g),
+            ("cpu".into(), Some("ocr.backend is cpu".into()))
         );
     }
 }

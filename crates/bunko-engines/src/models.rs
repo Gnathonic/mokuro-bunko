@@ -141,6 +141,18 @@ pub fn detector_ids(detector: &str) -> Vec<&'static str> {
     }
 }
 
+/// Manifest ids of the host files a block detector reads on a libtorch GPU besides its
+/// compiled package: AnimeText's `detector.pt2` binds the ONNX file the CPU route reads
+/// ([`detector_ids`]), so the GPU route plans no file of its own. Empty for a detector
+/// with no GPU route.
+pub fn detector_torch_host_ids(detector: &str) -> Vec<&'static str> {
+    match detector {
+        #[cfg(feature = "gpl-models")]
+        ANIMETEXT => vec![bunko_ocr::models::ANIMETEXT_DETECTOR],
+        _ => Vec::new(),
+    }
+}
+
 /// The `ocr_engine.weights` entry naming the ONNX export set: `{repo: release tag}`.
 pub const EXPORT_REPO: &str = "Gnathonic/mokuro-bunko";
 
@@ -631,6 +643,19 @@ mod tests {
                 assert!(m.get(paddle_embed_id(p)).is_some());
             }
         }
+    }
+
+    /// The GPU detector binds the ONNX file the CPU detector reads: the GPU route plans
+    /// no extra host file (Q21).
+    #[cfg(feature = "gpl-models")]
+    #[test]
+    fn the_gpu_detector_reads_the_cpu_detectors_file() {
+        assert_eq!(detector_torch_host_ids(ANIMETEXT), detector_ids(ANIMETEXT));
+        assert_eq!(
+            detector_torch_host_ids(ANIMETEXT),
+            [bunko_ocr::models::ANIMETEXT_DETECTOR]
+        );
+        assert!(detector_torch_host_ids(CTD).is_empty());
     }
 
     /// nar-small's package holds no weights: on the GPU it binds the authors'

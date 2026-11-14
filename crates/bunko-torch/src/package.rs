@@ -16,9 +16,11 @@
 //! empty map). Packages without the metadata (the shootout's) are I/O v1 with embedded
 //! weights. A [`GraphSet`] whose graphs say `bunko.weights_dtype = "fp16"` (nar-small's
 //! fp16 packages, compiled over the authors' fp32 file) has its floating weights cast to
-//! fp16 at load; no fp16 copy of the weights exists on disk.
+//! fp16 at load; no fp16 copy of the weights exists on disk. A set whose graphs say
+//! `bunko.weights_format = "onnx"` (AnimeText) binds the raw initializers of one ONNX
+//! file instead ([`Weights::load_onnx`]).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
@@ -189,6 +191,48 @@ impl Weights {
         Ok(Self { tensors, aliases })
     }
 
+    /// Loads the `wanted` initializers of the ONNX file at `path` onto `dev`, one tensor
+    /// at a time, keyed by initializer name (`bunko.weights_format = "onnx"`). The file
+    /// must be `size` bytes (`bunko.weights_size`); [`crate::onnx_weights::scan`] refuses
+    /// a missing or repeated name, a dtype other than FLOAT, an external tensor and a byte
+    /// count that does not match the dims. The host checked the file's sha256 when it
+    /// downloaded it, so it is not hashed again here.
+    pub fn load_onnx(
+        path: &Path,
+        dev: tch::Device,
+        wanted: &HashSet<String>,
+        size: u64,
+    ) -> Result<Self, TorchError> {
+        let err = |m: String| TorchError::Load(format!("{}: {m}", path.display()));
+        let f = std::fs::File::open(path).map_err(|e| err(e.to_string()))?;
+        let len = f.metadata().map_err(|e| err(e.to_string()))?.len();
+        if len != size {
+            return Err(err(format!(
+                "{len} bytes, the packages were built against a {size}-byte file"
+            )));
+        }
+        let mut r = std::io::BufReader::new(f);
+        let found = crate::onnx_weights::scan(&mut r, size, wanted).map_err(err)?;
+        let mut f = r.into_inner();
+        let mut tensors = HashMap::with_capacity(found.len());
+        for (name, t) in found {
+            let mut bytes = vec![0u8; t.len as usize];
+            f.seek(SeekFrom::Start(t.offset))
+                .map_err(|e| err(e.to_string()))?;
+            f.read_exact(&mut bytes)
+                .map_err(|e| err(format!("{name}: {e}")))?;
+            // ONNX raw_data is little-endian, as tch reads host bytes on every target we build.
+            let t = Tensor::f_from_data_size(&bytes, &t.dims, Kind::Float)
+                .map_err(|e| err(format!("{name}: {e}")))?
+                .to_device(dev);
+            tensors.insert(name, t);
+        }
+        Ok(Self {
+            tensors,
+            aliases: HashMap::new(),
+        })
+    }
+
     pub fn get(&self, key: &str) -> Option<&Tensor> {
         self.tensors.get(key)
     }
@@ -216,6 +260,37 @@ impl Drop for Weights {
     }
 }
 
+/// Where the weights of a set of graphs are read from (`bunko.weights_format`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WeightsFormat {
+    /// `weights-*.safetensors` files, or the authors' safetensors (no metadata).
+    Safetensors,
+    /// One ONNX file's raw initializers (`onnx`), `size` bytes (`bunko.weights_size`).
+    Onnx { size: u64 },
+}
+
+impl WeightsFormat {
+    /// From the graphs' agreed `bunko.weights_format` and `bunko.weights_size`.
+    fn from_meta(format: Option<&str>, size: Option<&str>) -> Result<Self, TorchError> {
+        match format.map(str::trim) {
+            None => Ok(Self::Safetensors),
+            Some("onnx") => {
+                let size = size.ok_or_else(|| {
+                    TorchError::Load("bunko.weights_format onnx without bunko.weights_size".into())
+                })?;
+                let size = size
+                    .trim()
+                    .parse::<u64>()
+                    .map_err(|_| TorchError::Load(format!("bad bunko.weights_size {size:?}")))?;
+                Ok(Self::Onnx { size })
+            }
+            Some(v) => Err(TorchError::Load(format!(
+                "bunko.weights_format {v}: this runtime reads safetensors or onnx"
+            ))),
+        }
+    }
+}
+
 /// Loads the weights files once onto `dev` and binds every graph whose `bunko.weights`
 /// map is not empty to them (each of its constants by its key), cast to `cast` when the
 /// set asks for it ([`Weights::load`]). `None` when no graph has a map (weights inside
@@ -224,6 +299,7 @@ fn bind_all(
     graphs: &[&Aoti],
     weight_files: &[PathBuf],
     dev: tch::Device,
+    format: WeightsFormat,
     cast: Option<Kind>,
 ) -> Result<Option<Weights>, TorchError> {
     let maps: Vec<HashMap<String, String>> = graphs
@@ -238,12 +314,33 @@ fn bind_all(
     if maps.iter().all(|m| m.is_empty()) {
         return Ok(None);
     }
-    if weight_files.is_empty() {
-        return Err(TorchError::Load(
-            "the packages need their weights-*.safetensors files, none found".into(),
-        ));
-    }
-    let w = Weights::load(weight_files, dev, cast)?;
+    let w = match format {
+        WeightsFormat::Safetensors => {
+            if weight_files.is_empty() {
+                return Err(TorchError::Load(
+                    "the packages need their weights-*.safetensors files, none found".into(),
+                ));
+            }
+            Weights::load(weight_files, dev, cast)?
+        }
+        WeightsFormat::Onnx { size } => {
+            if cast.is_some() {
+                // The ONNX reader binds FLOAT initializers as stored; no package casts them.
+                return Err(TorchError::Load(
+                    "bunko.weights_dtype with bunko.weights_format onnx: this runtime casts safetensors weights only".into(),
+                ));
+            }
+            let [file] = weight_files else {
+                return Err(TorchError::Load(format!(
+                    "the packages bind one ONNX file's weights, {} files given",
+                    weight_files.len()
+                )));
+            };
+            // Only the initializers the graphs name (the file also holds shape constants).
+            let wanted: HashSet<String> = maps.iter().flat_map(|m| m.values().cloned()).collect();
+            Weights::load_onnx(file, dev, &wanted, size)?
+        }
+    };
     for (g, map) in graphs.iter().zip(&maps) {
         if map.is_empty() {
             continue;
@@ -263,11 +360,6 @@ fn bind_all(
     Ok(Some(w))
 }
 
-/// Package metadata keys this runtime does not act on yet: a graph that sets one would
-/// be bound wrongly, so the set is refused (the ONNX weights reader comes with the route
-/// that needs it).
-const NOT_YET: [&str; 1] = ["bunko.weights_format"];
-
 /// The graphs of one package set by role (`model`; `vision`/`prefill`/`step`; ...),
 /// bound and ready to run. Unlike [`PackageSet`] it assumes no roles, and its I/O id
 /// (`bunko.io`) is a string the caller names (`textbox-1`, ...).
@@ -286,8 +378,9 @@ unsafe impl Sync for GraphSet {}
 impl GraphSet {
     /// Loads each `(role, path)` graph onto `at`, refuses the set unless every graph says
     /// `bunko.io = expect_io` and the graphs agree on `bunko.weights_dtype` and
-    /// `bunko.weights_format`, then binds them to `weight_files` (cast to fp16 when
-    /// `bunko.weights_dtype = "fp16"`, [`crate::graphmeta::weights_cast`]).
+    /// `bunko.weights_format`, then binds them to `weight_files` (safetensors files, cast
+    /// to fp16 when `bunko.weights_dtype = "fp16"` ([`crate::graphmeta::weights_cast`]),
+    /// or with `bunko.weights_format = "onnx"` the one ONNX file).
     pub fn load(
         graphs: &[(&str, &Path)],
         weight_files: &[PathBuf],
@@ -314,15 +407,6 @@ impl GraphSet {
         let io = meta("bunko.io");
         let io: Vec<Option<&str>> = io.iter().map(Option::as_deref).collect();
         crate::graphmeta::check_io(&io, expect_io).map_err(TorchError::Load)?;
-        for key in NOT_YET {
-            let found = meta(key);
-            let found: Vec<Option<&str>> = found.iter().map(Option::as_deref).collect();
-            if let Some(v) = crate::graphmeta::agreed(key, &found).map_err(TorchError::Load)? {
-                return Err(TorchError::Load(format!(
-                    "{key} {v}: this runtime binds the weights as stored"
-                )));
-            }
-        }
         let dtype = meta("bunko.weights_dtype");
         let dtype: Vec<Option<&str>> = dtype.iter().map(Option::as_deref).collect();
         let cast = match crate::graphmeta::weights_cast(&dtype).map_err(TorchError::Load)? {
@@ -330,8 +414,22 @@ impl GraphSet {
             Some(v) => return Err(TorchError::Load(format!("bunko.weights_dtype {v}"))),
             None => None,
         };
+        let agreed = |key: &str| -> Result<Option<String>, TorchError> {
+            let found = meta(key);
+            let found: Vec<Option<&str>> = found.iter().map(Option::as_deref).collect();
+            Ok(crate::graphmeta::agreed(key, &found)
+                .map_err(TorchError::Load)?
+                .map(str::to_string))
+        };
+        let format_meta = agreed("bunko.weights_format")?;
+        // The size matters only to the ONNX reader (safetensors files carry their own).
+        let size_meta = match format_meta {
+            Some(_) => agreed("bunko.weights_size")?,
+            None => None,
+        };
+        let format = WeightsFormat::from_meta(format_meta.as_deref(), size_meta.as_deref())?;
         let refs: Vec<&Aoti> = loaded.iter().map(|(_, g)| g).collect();
-        let weights = bind_all(&refs, weight_files, at.dev, cast)?;
+        let weights = bind_all(&refs, weight_files, at.dev, format, cast)?;
         Ok(Self {
             graphs: loaded,
             weights,
@@ -409,7 +507,13 @@ impl PackageSet {
                 "package I/O versions {ios:?}: this runtime drives {IO_VERSIONS:?} and all three graphs must agree"
             )));
         }
-        let weights = bind_all(&[&vision, &prefill, &step], weight_files, at.dev, None)?;
+        let weights = bind_all(
+            &[&vision, &prefill, &step],
+            weight_files,
+            at.dev,
+            WeightsFormat::Safetensors,
+            None,
+        )?;
         Ok(Self {
             vision,
             prefill,

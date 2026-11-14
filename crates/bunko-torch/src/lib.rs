@@ -6,7 +6,8 @@
 //! step) compiled with the exact torch of the pack, through `tch` 0.26 (libtorch 2.13)
 //! and a small C++ shim over `AOTIModelPackageLoader`. Host preprocessing and the token
 //! loops are bunko-vlm's, so a crop reads the same text as on 0.5.2's torch at the same
-//! precision.
+//! precision. The AnimeText block detector (animetext-blocks) runs the same way, bound
+//! to the ONNX file its CPU route runs.
 //!
 //! This crate is built **per backend pack** (`--features libtorch`, against that pack's
 //! libtorch) as a cdylib that `mokuro-bunko` opens at run time; the binary itself never
@@ -16,7 +17,10 @@
 
 pub mod abi;
 pub mod graphmeta;
+pub mod onnx_weights;
 
+#[cfg(feature = "libtorch")]
+mod animetext;
 #[cfg(feature = "libtorch")]
 mod aoti;
 #[cfg(feature = "libtorch")]

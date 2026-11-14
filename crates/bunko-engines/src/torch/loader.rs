@@ -7,8 +7,8 @@ use std::mem::ManuallyDrop;
 use std::path::{Path, PathBuf};
 
 use bunko_torch::abi::{
-    self, BT_ABI_VERSION, BT_OK, BtCrop, CharsRead, DevicesReport, InitConfig, LoadInfo,
-    LoadOptions, PACK_JSON, PackManifest, ReadCharsFn,
+    self, BT_ABI_VERSION, BT_OK, BtCrop, CharsRead, DetectBlocksFn, DetectOut, DevicesReport,
+    InitConfig, LoadInfo, LoadOptions, PACK_JSON, PackManifest, ReadCharsFn,
 };
 
 /// Why a pack could not be used.
@@ -69,6 +69,8 @@ struct Api {
     free_str: FreeStrFn,
     /// `bt_read_chars`, optional: packs before 0.8 lack it.
     read_chars: Option<ReadCharsFn>,
+    /// `bt_detect_blocks`, optional: packs before 0.8 lack it.
+    detect_blocks: Option<DetectBlocksFn>,
 }
 
 /// An opened backend pack.
@@ -305,6 +307,10 @@ impl Pack {
                 read_chars: sym(abi::symbols::READ_CHARS)
                     .ok()
                     .map(|p| std::mem::transmute::<*const c_void, ReadCharsFn>(p)),
+                // Optional: absent, the pack detects no blocks on the GPU.
+                detect_blocks: sym(abi::symbols::DETECT_BLOCKS)
+                    .ok()
+                    .map(|p| std::mem::transmute::<*const c_void, DetectBlocksFn>(p)),
             }
         };
         let gpu_archs = manifest.requires.gpu_archs.clone();
@@ -337,6 +343,12 @@ impl Pack {
     /// engines run on it only then.
     pub fn reads_chars(&self) -> bool {
         self.api.read_chars.is_some()
+    }
+
+    /// Whether the pack's library exports `bt_detect_blocks` (a 0.8 pack): the block
+    /// detector runs on it only then.
+    pub fn detects_blocks(&self) -> bool {
+        self.api.detect_blocks.is_some()
     }
 
     /// An optional entry point of the pack's library (beyond the ABI's).
@@ -408,7 +420,8 @@ impl Pack {
     }
 }
 
-/// A loaded recognizer handle (freed on drop).
+/// A loaded engine handle: a recognizer, a text-box engine or the block detector (freed
+/// on drop).
 pub struct Loaded {
     api: Api,
     handle: *mut c_void,
@@ -510,5 +523,55 @@ impl Loaded {
             ));
         }
         Ok(read)
+    }
+
+    /// `bt_detect_blocks`: each canvas's raw candidates scored `min_score` or more.
+    /// `canvases` are `(rgb bytes, width, height)`, letterboxed pages whose sides are
+    /// positive multiples of 32, at most 640 (the library refuses any other).
+    pub fn detect_blocks(
+        &self,
+        canvases: &[(&[u8], u32, u32)],
+        min_score: f32,
+    ) -> Result<Vec<DetectOut>, String> {
+        let Some(detect_blocks) = self.api.detect_blocks else {
+            return Err("the OCR backend pack predates GPU block detection".into());
+        };
+        let raw: Vec<BtCrop> = canvases
+            .iter()
+            .map(|(data, w, h)| BtCrop {
+                data: data.as_ptr(),
+                width: *w,
+                height: *h,
+            })
+            .collect();
+        let (mut out, mut err) = (std::ptr::null_mut(), std::ptr::null_mut());
+        // SAFETY: `raw` holds `canvases.len()` entries and outlives the call; each
+        // canvas's bytes are width*height*3 (checked by the caller's Rgb).
+        let status = unsafe {
+            detect_blocks(
+                self.handle,
+                raw.as_ptr(),
+                raw.len(),
+                min_score,
+                &mut out,
+                &mut err,
+            )
+        };
+        let out = take(self.api.free_str, out);
+        let err = take(self.api.free_str, err);
+        if status != BT_OK {
+            return Err(err.unwrap_or_else(|| format!("bt_detect_blocks: status {status}")));
+        }
+        let found: Vec<DetectOut> = serde_json::from_str(&out.unwrap_or_default())
+            .map_err(|e| format!("bt_detect_blocks: {e}"))?;
+        // A pack that answers another count would put blocks on the wrong pages.
+        if found.len() != canvases.len() {
+            return Err(format!(
+                "bt_detect_blocks returned {} results for {} canvases",
+                found.len(),
+                canvases.len()
+            ));
+        }
+        Ok(found)
     }
 }

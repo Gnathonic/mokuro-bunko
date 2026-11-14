@@ -314,10 +314,14 @@ ocr:
   #                               CPU): tight on dialogue, skips most sound
   #                               effects and furigana. Opt-in, like the
   #                               engines above.
-  #                - animetext-blocks: AnimeText YOLO12-x (weights GPL-3.0,
-  #                               CPU): whole text blocks, not lines. Only
+  #                - animetext-blocks: AnimeText YOLO12-x (weights GPL-3.0):
+  #                               whole text blocks, not lines. Only
   #                               for charspot-small and nar-small, which
-  #                               read a block at once. Opt-in.
+  #                               read a block at once. Opt-in. On an
+  #                               NVIDIA or AMD card with the libtorch
+  #                               backend pack (fp32, the same blocks as
+  #                               on the CPU; its compiled graph is
+  #                               AGPL-3.0), else on the CPU
   #                Ignored (and stored as null) for the ppocr-manga engine. A
   #                row naming the removed ctd / animetext / rtdetr of 0.5 is
   #                switched to ppocr-manga.
@@ -345,7 +349,8 @@ ocr:
   #                  queue_capacity how many may wait in the queue it fills
   #                  stage_device   WHERE that stage's model runs: cpu or
   #                                 gpu:<n>; absent = auto. The detect
-  #                                 stage is CPU only.
+  #                                 stage (but animetext-blocks') is CPU
+  #                                 only.
   #
   # See docs/configuration.md for the full reference and docs/ocr-internals.md
   # for how it works. Renaming a row other than the primary means its files

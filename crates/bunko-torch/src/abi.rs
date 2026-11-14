@@ -15,9 +15,13 @@
 //! void     bt_free(void *handle);
 //! void     bt_free_str(char *s);
 //!
-//! // Optional (a pack may lack it; the loader looks it up by name): text-box engines.
+//! // Optional (a pack may lack them; the loader looks each up by name).
+//! // Text-box engines:
 //! int32_t  bt_read_chars(void *handle, const BtCrop *crops, size_t n,
 //!                        char **json_out, char **err);            // [CharsRead, ...], one per crop
+//! // The block detector (animetext-blocks):
+//! int32_t  bt_detect_blocks(void *handle, const BtCrop *canvases, size_t n, float min_score,
+//!                           char **json_out, char **err);         // [DetectOut, ...], one per canvas
 //! ```
 //!
 //! `bt_read_chars` answers one [`CharsRead`] per crop, in crop order:
@@ -28,6 +32,13 @@
 //! its CPU route. A crop of zero width or height (its `data` may be null) reads `""`
 //! without a model call. On a hayai-nova or paddle-manga handle it is [`BT_ERR_ARG`].
 //! `bt_read` on a text-box handle returns the texts.
+//!
+//! `bt_detect_blocks` answers one [`DetectOut`] per canvas, in canvas order:
+//! `{"n":N,"cand":[[cx,cy,w,h,score], ...]}`, the network's `N` candidates scored
+//! `min_score` or more, in its output's index order, in canvas pixels. A canvas is the
+//! host's letterboxed page, RGB8, both sides positive multiples of 32 and at most 640;
+//! any other is [`BT_ERR_ARG`]. `bt_read` and `bt_read_chars` on a detector handle, and
+//! `bt_detect_blocks` on a recognizer handle, are [`BT_ERR_ARG`].
 //!
 //! Rules: no tensor crosses the boundary, only RGB8 crops in and UTF-8 JSON out. Every
 //! string the library hands out (`json_out`, `err`) is freed with `bt_free_str`. A
@@ -67,6 +78,8 @@ pub mod symbols {
     pub const FREE_STR: &[u8] = b"bt_free_str\0";
     /// Optional: packs before 0.8 lack it.
     pub const READ_CHARS: &[u8] = b"bt_read_chars\0";
+    /// Optional: packs before 0.8 lack it.
+    pub const DETECT_BLOCKS: &[u8] = b"bt_detect_blocks\0";
 }
 
 /// `bt_read_chars`.
@@ -77,6 +90,30 @@ pub type ReadCharsFn = unsafe extern "C" fn(
     *mut *mut std::ffi::c_char,
     *mut *mut std::ffi::c_char,
 ) -> i32;
+
+/// `bt_detect_blocks`.
+pub type DetectBlocksFn = unsafe extern "C" fn(
+    *mut std::ffi::c_void,
+    *const BtCrop,
+    usize,
+    f32,
+    *mut *mut std::ffi::c_char,
+    *mut *mut std::ffi::c_char,
+) -> i32;
+
+/// The package I/O id (`bunko.io`) of the block detector's graph (animetext-blocks).
+/// `bt_info` reports `io: 0` for its handles.
+pub const DETECT_IO: &str = "detect-1";
+
+/// One canvas's `bt_detect_blocks` result.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DetectOut {
+    /// The network's candidate count for this canvas (before the score filter).
+    pub n: usize,
+    /// The candidates scored `min_score` or more, in the output's index order:
+    /// `[cx, cy, w, h, score]` in canvas pixels.
+    pub cand: Vec<[f32; 5]>,
+}
 
 /// The package I/O id (`bunko.io`) of the text-box engines' graphs (nar-small,
 /// charspot-small). `bt_info` reports `io: 0` for their handles.
@@ -1209,6 +1246,19 @@ mod tests {
             serde_json::from_str(r#"[{"text":"字","chars":[["字",1.0,2.0,3.0,4.0,0.5]]}]"#)
                 .unwrap();
         assert_eq!(back, vec![cs]);
+    }
+
+    #[test]
+    fn detect_out_json_shape() {
+        let d = DetectOut {
+            n: 5880,
+            cand: vec![[1.0, 2.0, 3.0, 4.0, 0.5]],
+        };
+        assert_eq!(
+            serde_json::to_string(&d).unwrap(),
+            r#"{"n":5880,"cand":[[1.0,2.0,3.0,4.0,0.5]]}"#
+        );
+        assert_eq!(DETECT_IO, "detect-1");
     }
 
     #[test]

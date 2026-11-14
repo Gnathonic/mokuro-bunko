@@ -14,6 +14,8 @@
 //! default `backends/`, see `EngineConfig::backends_dirs`), the directories are tried
 //! in order, each in that order ([`discover_all`]).
 
+#[cfg(feature = "gpl-models")]
+pub mod detector;
 pub mod loader;
 pub mod recognizer;
 pub mod textbox;
@@ -50,6 +52,11 @@ pub const PACK_UPDATE: &str = "update the OCR backend pack";
 /// Why a text-box engine does not run on a pack without `bt_read_chars` (one built
 /// before 0.8.0).
 pub const TEXTBOX_PACK_REASON: &str = "the OCR backend pack predates GPU text-box reading; update the OCR backend pack (`mokuro-bunko install-ocr --force`)";
+
+/// Why the block detector does not run on a pack without `bt_detect_blocks` (one built
+/// before 0.8.0). After the pack floor moves to 0.8 a released build never loads such a
+/// pack, so only a development pack shows it.
+pub const DETECTOR_PACK_REASON: &str = "the OCR backend pack predates GPU block detection; update the OCR backend pack (`mokuro-bunko install-ocr --force`)";
 
 /// A GPU that reports less memory than this reads text boxes in batches of
 /// [`TEXTBOX_SMALL_BATCH`] instead of its package's own `bunko.max_batch`.
@@ -152,6 +159,8 @@ pub struct TorchBackend {
     pub report: DevicesReport,
     loaded: Mutex<HashMap<Key, Weak<TorchRecognizer>>>,
     textboxes: Mutex<HashMap<Key, Weak<TorchTextbox>>>,
+    #[cfg(feature = "gpl-models")]
+    detectors: Mutex<HashMap<Key, Weak<detector::TorchDetector>>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -276,6 +285,8 @@ fn open_backend(backends_dirs: &[PathBuf], cpu_only: bool) -> Result<Arc<TorchBa
                         report,
                         loaded: Mutex::new(HashMap::new()),
                         textboxes: Mutex::new(HashMap::new()),
+                        #[cfg(feature = "gpl-models")]
+                        detectors: Mutex::new(HashMap::new()),
                     }));
                 }
                 Err(e) => errors.push(format!("{}: {e}", dir.display())),
@@ -515,6 +526,81 @@ impl TorchBackend {
         map.insert(key, Arc::downgrade(&r));
         Ok(r)
     }
+
+    /// AnimeText's `detector.pt2` in `package` on `device` at fp32, bound to the
+    /// initializers of `onnx` (the CPU route's file), shared while anyone holds it.
+    /// `unpack_cache` is where a `.pt2` zip is unpacked to be loaded in place. A pack
+    /// without `bt_detect_blocks` answers [`DETECTOR_PACK_REASON`].
+    #[cfg(feature = "gpl-models")]
+    pub fn detector(
+        &self,
+        package: &Path,
+        onnx: &Path,
+        device: &str,
+        threads: u32,
+        unpack_cache: Option<&Path>,
+    ) -> Result<Arc<dyn detector::BlocksReader>, String> {
+        if !self.pack.detects_blocks() {
+            return Err(DETECTOR_PACK_REASON.into());
+        }
+        let engine = crate::models::ANIMETEXT;
+        let precision = Precision::Fp32;
+        let key = Key {
+            engine: engine.into(),
+            precision,
+            device: device.into(),
+            dir: package.to_path_buf(),
+            budget: 0,
+            threads,
+        };
+        let mut map = self.detectors.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(r) = map.get(&key).and_then(Weak::upgrade) {
+            return Ok(r);
+        }
+        let opts = detector_load_options(onnx, threads, unpack_cache);
+        let handle = self
+            .pack
+            .load(engine, package, precision.as_str(), device, &opts)?;
+        let li = handle.info()?;
+        info!(
+            "{engine} {} on {device} (libtorch {}, {} bound weights) loaded in {:.1}s from {}",
+            li.precision,
+            li.torch,
+            li.weights,
+            li.load_seconds,
+            package.display()
+        );
+        // As for the recognizers: the package must have bound to the pack's libtorch.
+        let foreign = self.pack.foreign_libraries();
+        if !foreign.is_empty() {
+            return Err(format!(
+                "libtorch libraries from outside the pack were loaded ({}); remove them from LD_LIBRARY_PATH / LD_PRELOAD",
+                foreign.join(", ")
+            ));
+        }
+        let r = Arc::new(detector::TorchDetector::new(self.pack.clone(), handle, li));
+        map.retain(|_, w| w.strong_count() > 0);
+        map.insert(key, Arc::downgrade(&r));
+        Ok(r)
+    }
+}
+
+/// The load options of the block detector: the ONNX file whose initializers its
+/// package binds (the one weights path it takes), the preprocessing threads and the
+/// unpack cache. It reads no vocabulary.
+#[cfg(feature = "gpl-models")]
+pub fn detector_load_options(
+    onnx: &Path,
+    threads: u32,
+    unpack_cache: Option<&Path>,
+) -> LoadOptions {
+    LoadOptions {
+        tokenizer: String::new(),
+        threads,
+        weights: Some(vec![onnx.to_string_lossy().into_owned()]),
+        cache_dir: unpack_cache.map(|p| p.to_string_lossy().into_owned()),
+        ..LoadOptions::default()
+    }
 }
 
 /// The formats a recognizer runs in on catalog device `id`: the device's formats for
@@ -713,6 +799,25 @@ mod tests {
         let second = backend_in(&dirs, true).err().unwrap_or_default();
         assert_ne!(second, first, "looked again");
         assert!(forget_failure());
+    }
+
+    /// The block detector's package binds the ONNX file as its one weights path and
+    /// reads no vocabulary (the cdylib refuses any other weights count).
+    #[cfg(feature = "gpl-models")]
+    #[test]
+    fn detector_load_options_carry_the_onnx_file_alone() {
+        let o = detector_load_options(Path::new("/m/yolo.onnx"), 6, Some(Path::new("/u")));
+        assert_eq!(o.weights, Some(vec!["/m/yolo.onnx".to_string()]));
+        assert_eq!((o.tokenizer.as_str(), o.threads), ("", 6));
+        assert_eq!(o.cache_dir.as_deref(), Some("/u"));
+        assert_eq!(
+            (o.max_batch, o.patch_budget, o.pos_table, o.embeddings),
+            (None, None, None, None)
+        );
+        assert_eq!(
+            detector_load_options(Path::new("/m/yolo.onnx"), 6, None).cache_dir,
+            None
+        );
     }
 
     #[test]

@@ -459,6 +459,98 @@ fn nar_on_a_gpu_reads_as_the_cpu_does() {
     eprintln!("fp16: {differ} of {} lines differ from fp32", g.len());
 }
 
+/// With a backend pack that has `bt_detect_blocks` and an AnimeText package for the GPU
+/// (`MOKURO_TORCH_PACK`, `MOKURO_TORCH_MODELS_DIR`), plus nar-small's CPU files and the
+/// AnimeText ONNX file (`MOKURO_MODELS_DIR`, downloads off), a nar-small row on
+/// AnimeText with its engine stage on the CPU detects on the GPU: the sidecar names the
+/// detector's torch release beside nar-small's graph set, and a volume gets the same
+/// blocks and text as with the detect stage pinned to the CPU.
+#[cfg(all(feature = "nc-models", feature = "gpl-models"))]
+#[test]
+#[ignore = "needs a backend pack with bt_detect_blocks, an AnimeText GPU package, the model files and a sample archive"]
+fn animetext_on_a_gpu_detects_as_the_cpu_does() {
+    let Some(src) = sample() else {
+        eprintln!("no sample archive; skipped");
+        return;
+    };
+    if std::env::var_os("MOKURO_TORCH_PACK").is_none() {
+        eprintln!("no MOKURO_TORCH_PACK; skipped");
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let p = EnginePipeline::new(EngineConfig::new(tmp.path().join("models"), Backend::Auto));
+    // A process opens one pack (see nar_on_a_gpu_reads_as_the_cpu_does): run alone.
+    if !p.devices().iter().any(|d| d.id == "gpu:0") {
+        eprintln!("the backend pack of this process sees no GPU; skipped (run this test alone)");
+        return;
+    }
+    let row = |detect: Option<&str>| {
+        let mut s = spec("nar-small", "auto-accuracy");
+        s.detector = Some("animetext-blocks".into());
+        s.pools.stage_device.insert("engine".into(), "cpu".into());
+        if let Some(d) = detect {
+            s.pools.stage_device.insert("detect".into(), d.into());
+        }
+        s
+    };
+    let export = |runner: &dyn bunko_processor::VolumeRunner| {
+        runner
+            .ready()
+            .weights
+            .get("Gnathonic/mokuro-bunko")
+            .cloned()
+    };
+    let gpu = p.open(&row(None)).unwrap();
+    assert_eq!(
+        export(&*gpu).as_deref(),
+        Some("detector-torch-v1+textbox-graphs-v1"),
+        "{:?}",
+        gpu.ready()
+    );
+    let cpu = p.open(&row(Some("cpu"))).unwrap();
+    assert_eq!(export(&*cpu).as_deref(), Some("textbox-graphs-v1"));
+    // The plan follows where the detector loaded: a GPU detect stage of two workers, and
+    // the CPU pool gives up only its host side.
+    let (gr, cr) = (gpu.ready(), cpu.ready());
+    assert_eq!(gr.stage_device["detect"], "gpu:0", "{gr:?}");
+    assert_eq!(
+        gr.stage_workers["detect"],
+        bunko_engines::plan::DETECT_GPU_WORKERS
+    );
+    assert_eq!(cr.stage_device["detect"], "cpu", "{cr:?}");
+    assert!(
+        gr.stage_workers["engine"] >= cr.stage_workers["engine"],
+        "{gr:?} {cr:?}"
+    );
+    eprintln!("GPU detect: {}\nCPU detect: {}", gr.pipeline, cr.pipeline);
+
+    let cbz = tmp.path().join("Vol.cbz");
+    write_cbz(&cbz, &real_pages(&src, 4));
+    let blocks =
+        |runner: &dyn bunko_processor::VolumeRunner, name: &str| -> Vec<serde_json::Value> {
+            let out = tmp.path().join(name);
+            runner
+                .run_volume(&cbz, &meta("Vol"), &out, &|_| {}, &CancelToken::new())
+                .unwrap();
+            let v: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+            v["pages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|p| p["blocks"].as_array().unwrap().clone())
+                .map(|b| serde_json::json!([b["box"], b["lines"]]))
+                .collect()
+        };
+    let (g, c) = (blocks(&*gpu, "gpu.mokuro"), blocks(&*cpu, "cpu.mokuro"));
+    assert!(g.len() > 10, "{} blocks", g.len());
+    assert_eq!(g, c);
+    eprintln!(
+        "{} blocks detected and read alike on the GPU and the CPU",
+        g.len()
+    );
+}
+
 #[test]
 #[ignore = "needs the model files"]
 fn refusals_before_loading() {

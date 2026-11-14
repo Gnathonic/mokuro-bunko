@@ -607,6 +607,145 @@ async fn a_pinned_or_cpu_text_box_row_has_no_placement_phase() {
     assert_eq!(seen.trials[0]["note"], "auto");
 }
 
+/// A nar-small row on AnimeText the engines put on a GPU, engine and detect stage: a
+/// page takes `gpu_ms`, `engine_cpu_ms` with the engine on the CPU and `detect_cpu_ms`
+/// with the detect stage on the CPU.
+async fn detect_run(gpu_ms: u64, engine_cpu_ms: u64, detect_cpu_ms: u64, pin_engine: bool) -> Seen {
+    let config = FakeConfig {
+        engines: vec!["nar-small".into()],
+        gpu_formats: Some(vec!["fp32".into()]),
+        page_delay: Duration::from_millis(gpu_ms),
+        cpu_page_delay: Some(Duration::from_millis(engine_cpu_ms)),
+        detect_cpu_page_delay: Some(Duration::from_millis(detect_cpu_ms)),
+        ..Default::default()
+    };
+    let mut row = spec("nar-small", "auto-accuracy", &[]);
+    row.detector = Some("animetext-blocks".into());
+    if pin_engine {
+        row.pools
+            .stage_device
+            .insert("engine".into(), "gpu:0".into());
+    }
+    let (seen, _) = run(config, row, false).await;
+    assert_eq!(seen.fatal, None);
+    assert_eq!(seen.exit, Some(Some(0)));
+    seen
+}
+
+fn detect_notes(seen: &Seen) -> Vec<(&str, bool, &str)> {
+    seen.trials
+        .iter()
+        .map(|t| {
+            (
+                t["note"].as_str().unwrap(),
+                t["accepted"] == true,
+                t["stage_device"]["detect"].as_str().unwrap(),
+            )
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_gpu_detect_stage_stays_when_the_cpu_is_slower() {
+    let seen = detect_run(4, 12, 12, true).await;
+    let ready = seen.ready.as_ref().unwrap();
+    assert_eq!(
+        ready["stage_device"],
+        json!({"engine": "gpu:0", "detect": "gpu:0"})
+    );
+    assert_eq!(
+        ready["max_trials"], 10,
+        "the detect phase brings two trials"
+    );
+    let notes = detect_notes(&seen);
+    assert_eq!(
+        &notes[..2],
+        [
+            ("detect on gpu:0", true, "gpu:0"),
+            ("detect on cpu", false, "cpu")
+        ],
+        "{:#?}",
+        seen.trials
+    );
+    assert!(notes[2..].iter().all(|n| n.2 == "gpu:0"), "{notes:?}");
+    let done = seen.done.unwrap();
+    assert_eq!(done["best"]["stage_device"], json!({}));
+    assert_eq!(done["best"]["trial"], 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_faster_cpu_takes_the_detect_stage() {
+    let seen = detect_run(12, 12, 4, true).await;
+    let notes = detect_notes(&seen);
+    assert_eq!(
+        &notes[..2],
+        [
+            ("detect on gpu:0", false, "gpu:0"),
+            ("detect on cpu", true, "cpu")
+        ],
+        "{:#?}",
+        seen.trials
+    );
+    // Every later trial (the width search) detects on the CPU too.
+    assert!(notes[2..].iter().all(|n| n.2 == "cpu"), "{notes:?}");
+    let done = seen.done.unwrap();
+    assert_eq!(done["best"]["stage_device"], json!({"detect": "cpu"}));
+    assert_eq!(done["best"]["trial"], 2);
+    assert_eq!(
+        done["baseline"]["pages_per_second"],
+        seen.trials[1]["pages_per_second"]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_detect_phase_follows_the_engine_phase() {
+    // The engine stays on the GPU; its trial is the detect phase's GPU trial.
+    let seen = detect_run(12, 24, 4, false).await;
+    assert_eq!(
+        seen.ready.as_ref().unwrap()["max_trials"],
+        11,
+        "two engine trials, one more for the detect stage"
+    );
+    let notes = detect_notes(&seen);
+    assert_eq!(
+        &notes[..3],
+        [
+            ("engine on gpu:0", true, "gpu:0"),
+            ("engine on cpu", false, "gpu:0"),
+            ("detect on cpu", true, "cpu")
+        ],
+        "{:#?}",
+        seen.trials
+    );
+    assert!(
+        seen.trials[2..]
+            .iter()
+            .all(|t| t["stage_device"]["engine"] == "gpu:0"),
+        "{:#?}",
+        seen.trials
+    );
+    let done = seen.done.unwrap();
+    assert_eq!(done["best"]["stage_device"], json!({"detect": "cpu"}));
+
+    // A row that pins its detect stage has no detect phase.
+    let config = FakeConfig {
+        engines: vec!["nar-small".into()],
+        gpu_formats: Some(vec!["fp32".into()]),
+        page_delay: Duration::from_millis(12),
+        detect_cpu_page_delay: Some(Duration::from_millis(4)),
+        ..Default::default()
+    };
+    let mut row = spec("nar-small", "auto-accuracy", &[]);
+    row.detector = Some("animetext-blocks".into());
+    for k in ["engine", "detect"] {
+        row.pools.stage_device.insert(k.into(), "gpu:0".into());
+    }
+    let (seen, _) = run(config, row, false).await;
+    assert_eq!(seen.ready.as_ref().unwrap()["max_trials"], 8);
+    assert_eq!(seen.trials[0]["note"], "auto");
+    assert!(detect_notes(&seen).iter().all(|n| n.2 == "gpu:0"));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn models_that_will_not_load_and_a_missing_sample_are_fatal() {
     let config = FakeConfig {

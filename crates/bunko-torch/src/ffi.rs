@@ -261,6 +261,59 @@ pub unsafe extern "C" fn bt_read_chars(
     }
 }
 
+// The loader calls it through this type.
+const _: crate::abi::DetectBlocksFn = bt_detect_blocks;
+
+/// # Safety
+/// `h` is a live handle; `canvases` points at `n` canvases whose `data` holds
+/// `width * height * 3` bytes each; out pointers are null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn bt_detect_blocks(
+    h: *mut c_void,
+    canvases: *const BtCrop,
+    n: usize,
+    min_score: f32,
+    json_out: *mut *mut c_char,
+    err: *mut *mut c_char,
+) -> i32 {
+    let r = guarded(err, || {
+        let h = handle(h)?;
+        if n > 0 && canvases.is_null() {
+            return Err(TorchError::Arg("canvases is null".into()));
+        }
+        let raw: &[BtCrop] = if n == 0 {
+            &[]
+        } else {
+            // SAFETY: the caller passes `n` canvases.
+            unsafe { std::slice::from_raw_parts(canvases, n) }
+        };
+        let mut imgs = Vec::with_capacity(n);
+        for (i, c) in raw.iter().enumerate() {
+            let (w, hgt) = (c.width as usize, c.height as usize);
+            // Checked before any byte is read: a canvas is at most 640 x 640.
+            crate::animetext::check_canvas(w, hgt)?;
+            if c.data.is_null() {
+                return Err(TorchError::Arg(format!("canvas {i} has no data")));
+            }
+            // SAFETY: the caller guarantees width*height*3 readable bytes.
+            let bytes = unsafe { std::slice::from_raw_parts(c.data, w * hgt * 3) };
+            imgs.push(
+                Rgb::from_raw(w, hgt, bytes.to_vec())
+                    .ok_or_else(|| TorchError::Arg(format!("canvas {i} has a bad size")))?,
+            );
+        }
+        let refs: Vec<&Rgb> = imgs.iter().collect();
+        to_json(&h.detect_blocks(&refs, min_score)?)
+    });
+    match r {
+        Ok(s) => {
+            put(json_out, s);
+            BT_OK
+        }
+        Err(code) => code,
+    }
+}
+
 /// # Safety
 /// `h` is null or a handle from `bt_load` that no other thread is using.
 #[unsafe(no_mangle)]

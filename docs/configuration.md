@@ -1071,8 +1071,8 @@ The recognizers (hayai-nova, paddle-manga, and nar-small and charspot-small on a
 the torch 0.5.2 used, without Python — from a *backend pack* that `mokuro-bunko
 install-ocr` installs into `<storage>/backends/`: `cu130` (NVIDIA, Linux and Windows),
 `rocm7.1` (AMD, Linux) or `cpu`. ppocr-manga and the PP-OCR text detector run on ONNX
-Runtime on the CPU, as in 0.5.2, and so do nar-small and charspot-small wherever they
-cannot use a card. `serve` and `processor serve` install the pack themselves when local OCR needs
+Runtime on the CPU, as in 0.5.2, and so do the `ctd-lines` detector, and nar-small,
+charspot-small and the `animetext-blocks` detector wherever they cannot use a card. `serve` and `processor serve` install the pack themselves when local OCR needs
 it and it is missing, **in the background**: they serve at once, show the progress (log,
 admin panel, dashboard, tray, `/control/status`) and start local OCR when it is done
 (see [Deployment](deployment.md#ocr-backend-install-ocr)); the full Docker image, which
@@ -1332,11 +1332,14 @@ are opt-in and under other terms:
 |---|---|---|
 | `ctd-lines` and `animetext-blocks` detectors | GPL-3.0 | `gpl-models` |
 | `charspot-small`, `nar-small` engines | CC BY-NC-SA 4.0: non-commercial use, share alike | `nc-models` |
+| `animetext-blocks` on a card: its compiled graph (`detector-torch-v1`, no weights) | AGPL-3.0 (compiled Ultralytics code) | `gpl-models` |
 
 Nothing of an opt-in model is on the machine until a generation uses it: its files are
 downloaded when the first session on it opens. The admin panel shows the licence
 beside the name. The code that runs these models is part of this project and under its
-licence; only the weights carry the terms above.
+licence; only the weights carry the terms above, and so does AnimeText's compiled graph
+for a card, which holds Ultralytics' code (its `NOTICE.md` names the exporter and its
+commit).
 
 Both features are on in the release builds. A build without one (`xtask dist
 --permissive-models`, or `cargo build --no-default-features --features ocr,tray`)
@@ -1390,7 +1393,16 @@ merged line by line; the same layout groups the lines into blocks and orders the
 | `ctd-lines` | The line map of [comic-text-detector](https://github.com/dmMaze/comic-text-detector) (weights GPL-3.0, 95 MB) | Tight boxes on dialogue; leaves most sound effects and furigana out, so it finds fewer lines. Looks at the page at 1024 px, so small text on large pages can be missed. Opt-in; see [Licences](#ocr-engines). |
 | `animetext-blocks` | [AnimeText YOLO12-x](https://huggingface.co/deepghs/AnimeText_yolo) (weights GPL-3.0, 237 MB) | A **block** detector: it boxes whole pieces of text (a balloon's lines together, a sound effect). Only for `charspot-small` and `nar-small`, which read a block at once; see below. The slowest of the three on a CPU (about a third of a second a page). Opt-in. |
 
-All three run on the CPU.
+`ppocr-manga` and `ctd-lines` run on the CPU. `animetext-blocks` also runs on an
+NVIDIA or AMD card with the libtorch backend pack (fp32, the same blocks as on the
+CPU), from a compiled graph of this project's `detector-torch-v1` release (no weights
+in it; it reads them from the same 237 MB file the CPU route reads; AGPL-3.0, since it
+is compiled Ultralytics code). Its `detect` stage follows the engine's card when the
+engine was put on one, else goes to the first card that has a package for it; a card
+with less than 4 GB of memory, a card the release has no package for, a backend pack
+from before 0.8, `ocr.backend: cpu`, `stage_device.detect: cpu` or a failed load keeps it
+on the CPU, with the reason in the log. The benchmark also tries it on the CPU and
+keeps the faster.
 
 **Lines or blocks.** With a line detector the page is read line by line: PP-OCRv6
 reads each line, the row's engine reads it again and the two reads are merged.
@@ -1448,12 +1460,16 @@ key, an out-of-range number or a GPU for a CPU-only stage is refused:
 |---|---|---|
 | `hayai-nova` / `paddle-manga` | `detect` → `engine` → `post` | `detect` (CPU only), `engine` |
 | `ppocr-manga` | `detect` → `layout` | `detect` (CPU only) |
-| `charspot-small` / `nar-small` | `detect` → `engine` → `post` | `detect` (CPU only), `engine` |
+| `charspot-small` / `nar-small` | `detect` → `engine` → `post` | `detect` (CPU only, but a card on `animetext-blocks`), `engine` |
 
 Some placements worth knowing:
 
 - **Detector on the CPU, recognizer on the card** is the normal layout: the
   whole card goes to the recognizer and the detector is a CPU pool.
+- **`animetext-blocks` and `nar-small` on one card** is what `auto` picks for
+  such a row on a card that runs both: the two take turns on the card, and the
+  CPU is left to decoding pages. On a host with many cores and a slow card the
+  CPU may detect faster (`stage_device: {detect: cpu}`); the benchmark tries both.
 - **Two rows on two cards** (`gpu:0`, `gpu:1`) with `ocr.concurrency: 2` run
   side by side.
 - **Everything on the CPU** is for a machine with no card.

@@ -910,7 +910,10 @@ fn parse_pools(
             let device = parse_device(&device)
                 .map_err(|e| row_err(index, "pools", format!("pools.stage_device.{key}: {e}")))?;
             let cpu_locked = match key {
-                "detect" => true, // the PP-OCR detector is CPU-only
+                // The detector's own rule: AnimeText may run on a GPU, the line
+                // detectors (and so the ppocr-manga engine's own) run on the CPU.
+                "detect" => engines::detector(spec.effective_detector())
+                    .is_none_or(|d| !d.cpu_only_reason.is_empty()),
                 _ => spec.engine_spec().is_some_and(|e| e.cpu_only()),
             };
             if cpu_locked && device != "auto" && device != "cpu" {
@@ -1324,6 +1327,52 @@ mod tests {
         assert_eq!(
             pools.stage_device.get("engine").map(String::as_str),
             Some("gpu:0")
+        );
+    }
+
+    /// The pools of a second row reading with `engine` on `detector`, after the hayai
+    /// primary.
+    fn detector_row_pools(
+        engine: &str,
+        detector: &str,
+        pools: Value,
+    ) -> Result<Pools, GenerationError> {
+        let rows = json!([
+            {"name": "main", "engine": "hayai-nova", "primary": true},
+            {"name": "layer", "engine": engine, "detector": detector, "pools": pools}
+        ]);
+        parse_generation_list(&rows).map(|p| p.rows[1].pools.clone())
+    }
+
+    /// AnimeText's detect stage may be pinned to a GPU (the libtorch route); the line
+    /// detectors' stays on the CPU, and so does that of the engine that brings its own.
+    #[test]
+    fn animetext_may_detect_on_a_gpu() {
+        let gpu = || json!({"stage_device": {"detect": "gpu:0"}});
+        let p = detector_row_pools("nar-small", "animetext-blocks", gpu()).unwrap();
+        assert_eq!(
+            p.stage_device.get("detect").map(String::as_str),
+            Some("gpu:0")
+        );
+        for detector in ["ppocr-manga", "ctd-lines"] {
+            let err = detector_row_pools("nar-small", detector, gpu()).unwrap_err();
+            assert!(
+                format!("{err:?}").contains("that stage runs on the CPU"),
+                "{detector}: {err:?}"
+            );
+        }
+        let err = layer_pools("ppocr-manga", gpu()).unwrap_err();
+        assert!(
+            format!("{err:?}").contains("that stage runs on the CPU"),
+            "{err:?}"
+        );
+        assert!(
+            detector_row_pools(
+                "nar-small",
+                "ctd-lines",
+                json!({"stage_device": {"detect": "cpu"}})
+            )
+            .is_ok()
         );
     }
 }

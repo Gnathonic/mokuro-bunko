@@ -13,10 +13,13 @@
                                   torch-models.json over everything under --out
   textbox-manifest -e E1,E2 [--out DIR] [--tag TAG] [--licence L] [--base-url URL] [--flat DIR]
                                   <tag>.json of the packages that bind their authors'
-                                  weights (textbox-torch-v1): rows of those engines only
+                                  weights (textbox-torch-v1; detector-torch-v1 with
+                                  -e animetext-blocks --licence AGPL-3.0): rows of those
+                                  engines only
   verify OUT ENGINE PREC TARGET [...]
                                   python -m torch_export.verify (text-box engines:
-                                  --crops DIR --expected FILE, the crop-level gate)
+                                  --crops DIR --expected FILE, the crop-level gate;
+                                  animetext-blocks: --pages DIR|LIST --onnx FILE)
   gate-bundle --out BUILD -e ENGINE -p PREC -t TARGET --crops DIR --reference FILE --fp32 FILE
               --commit C --dest DIR
                                   one target's self-contained crop-gate bundle (package, crops,
@@ -24,6 +27,18 @@
   gate-run BUNDLE                 the bundle's checks (what its run.sh runs); exit 0 = passed
   compare-reads A B [--limit L]   differing texts of two reads files; exit 0 within floor(L x n)
   block-preds READS BLOCKS OUT    crop texts joined per page key: paired.py's {key, pred} lines
+  detector-check [--out DIR] [-t T1,T2]
+                                  the AnimeText builds of decision L8's targets, checked
+                                  (detector_gate.py: one clean exporter commit, every
+                                  constant bound, the ONNX route's metadata)
+  detector-pages --list FILE [--odd DIR] [--min N] SRC...
+                                  write the AnimeText gate's page list once
+  detector-gate-bundle [--out DIR] -t TARGET --pages LIST --onnx FILE --dest DIR
+                                  one target's self-contained gate bundle (run.sh,
+                                  SHA256SUMS); detector-gate-run BUNDLE is what it runs
+  detector-stage [--out DIR] --stage DIR --passed T1,T2 [--verified T=CARD]... [--licence-file F]
+                                  the detector-torch-v1 stage over the targets that may
+                                  ship (L1/L2), with NOTICE.md and LICENSE; uploads nothing
   refuse-embedded DIR...          exit 1 on the first .pt2 with its weights inside
                                   (*_embed.pt2, or an entry > pinned weights / 4)
   fetch-windows-cross             download the pinned Windows wheels + llvm-mingw used to
@@ -37,6 +52,9 @@ checked against it), HF_HUB_OFFLINE (default 1: models come from the HF cache),
 TORCH_EXPORT_CPU_EMBED=1 (CPU targets: the old frozen layout, weights inside the package),
 TORCH_EXPORT_WIN_EMBED=1 (cross-built Windows GPU targets: weights inside),
 TORCH_EXPORT_OBJDUMP (the GNU objdump the checks run; default objdump).
+animetext-blocks also reads TORCH_EXPORT_ANIMETEXT_ONNX (the pinned ONNX file; default the
+Hugging Face cache at the pin) and TORCH_EXPORT_DETECTOR_PYLIB (requirements-detector.txt
+installed with pip --no-deps --target; or put that directory on PYTHONPATH).
 """
 
 from __future__ import annotations
@@ -159,10 +177,11 @@ def cmd_manifest(a) -> int:
 
 
 def cmd_textbox_manifest(a) -> int:
+    from .detector import PINS as DETECTOR_PINS
     from .manifest import build_textbox_manifest
     from .textbox import PINS
 
-    build_textbox_manifest(Path(a.out), a.tag, tuple(a.engine.split(",")), PINS, a.licence, a.base_url,
+    build_textbox_manifest(Path(a.out), a.tag, tuple(a.engine.split(",")), {**PINS, **DETECTOR_PINS}, a.licence, a.base_url,
                            Path(a.flat) if a.flat else None)
     return 0
 
@@ -210,6 +229,62 @@ def cmd_block_preds(a) -> int:
 
     n = block_preds(Path(a.reads), Path(a.blocks), Path(a.out))
     print(f"wrote {a.out}: {n} keys", file=sys.stderr)
+    return 0
+
+
+def cmd_detector_check(a) -> int:
+    from .detector_gate import TARGETS, check_builds
+
+    commit, builds = check_builds(Path(a.out), a.target.split(",") if a.target else TARGETS)
+    for b in builds:
+        print(json.dumps({k: str(v) if isinstance(v, Path) else v for k, v in b.items()}))
+    print(f"{len(builds)} detector targets, exporter commit {commit}", file=sys.stderr)
+    return 0
+
+
+def cmd_detector_pages(a) -> int:
+    from .detector_gate import odd_pages, write_page_list
+    from .verify import page_files
+
+    sources = [Path(s) for s in a.sources]
+    if a.odd:
+        odd_pages(page_files(sources[0])[:2], Path(a.odd))
+        sources.append(Path(a.odd))
+    files = write_page_list(sources, Path(a.list), a.min)
+    print(f"wrote {a.list}: {len(files)} pages", file=sys.stderr)
+    return 0
+
+
+def cmd_detector_gate_bundle(a) -> int:
+    from .detector_gate import stage_bundle
+
+    stage_bundle(Path(a.out), a.target, Path(a.pages), Path(a.onnx), Path(a.dest))
+    return 0
+
+
+def cmd_detector_gate_run(a) -> int:
+    from .detector_gate import run_gate
+
+    s = run_gate(Path(a.bundle))
+    print(json.dumps({k: s[k] for k in ("target", "pages", "identical_sets", "worst_corner", "edges_moved",
+                                        "pages_per_s", "passed")}))
+    if s.get("error"):
+        print(s["error"], file=sys.stderr)
+        return 3
+    return 0 if s["passed"] else 1
+
+
+def cmd_detector_stage(a) -> int:
+    from .detector_gate import stage_release
+
+    verified = {}
+    for v in a.verified:
+        t, sep, card = v.partition("=")
+        if not sep or not card:
+            raise SystemExit(f"--verified {v!r}: TARGET=CARD")
+        verified[t] = card
+    stage_release(Path(a.out), Path(a.stage), a.passed.split(","), verified,
+                  Path(a.licence_file) if a.licence_file else None, a.base_url)
     return 0
 
 
@@ -288,6 +363,34 @@ def main(argv=None) -> int:
     s.add_argument("blocks")
     s.add_argument("out")
     s.set_defaults(fn=cmd_block_preds)
+    s = sub.add_parser("detector-check")
+    s.add_argument("--out", default=str(WORK / "out"))
+    s.add_argument("-t", "--target", default=None, help="comma-separated; default: every target of decision L8")
+    s.set_defaults(fn=cmd_detector_check)
+    s = sub.add_parser("detector-pages")
+    s.add_argument("--list", required=True, help="the page list to write")
+    s.add_argument("--odd", default=None, help="also write odd canvases, from the first source's first two pages, here")
+    s.add_argument("--min", type=int, default=300)
+    s.add_argument("sources", nargs="+", help="page directories or list files")
+    s.set_defaults(fn=cmd_detector_pages)
+    s = sub.add_parser("detector-gate-bundle")
+    s.add_argument("--out", default=str(WORK / "out"))
+    s.add_argument("-t", "--target", required=True)
+    s.add_argument("--pages", required=True, help="the gate's page list (or a directory)")
+    s.add_argument("--onnx", required=True, help="the pinned animetext_yolo12x.onnx")
+    s.add_argument("--dest", required=True, help="the bundle directory (must not exist)")
+    s.set_defaults(fn=cmd_detector_gate_bundle)
+    s = sub.add_parser("detector-gate-run")
+    s.add_argument("bundle")
+    s.set_defaults(fn=cmd_detector_gate_run)
+    s = sub.add_parser("detector-stage")
+    s.add_argument("--out", default=str(WORK / "out"))
+    s.add_argument("--stage", required=True, help="new or empty directory")
+    s.add_argument("--passed", required=True, help="comma-separated targets whose gate passed")
+    s.add_argument("--verified", action="append", default=[], help="TARGET=CARD it passed on (repeatable)")
+    s.add_argument("--licence-file", default=None, help="the AGPL-3.0 text (default: ultralytics' own)")
+    s.add_argument("--base-url", default=None)
+    s.set_defaults(fn=cmd_detector_stage)
     s = sub.add_parser("refuse-embedded")
     s.add_argument("dirs", nargs="+")
     s.set_defaults(fn=cmd_refuse_embedded)

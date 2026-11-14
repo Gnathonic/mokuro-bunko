@@ -8,8 +8,10 @@ use bunko_vlm::Rgb;
 
 use crate::TorchError;
 use crate::abi::{
-    BT_ABI_VERSION, CharsRead, DevicesReport, InitConfig, LoadInfo, LoadOptions, TEXTBOX_IO,
+    BT_ABI_VERSION, CharsRead, DETECT_IO, DetectOut, DevicesReport, InitConfig, LoadInfo,
+    LoadOptions, TEXTBOX_IO,
 };
+use crate::animetext::{DETECTOR_ROLE, TorchAnimeText};
 use crate::aoti::{Placement, TPrec, set_threads};
 use crate::hayai::{HayaiFiles, PACKAGE_BUDGET, TorchHayai};
 use crate::package::{GraphSet, PackageSet, default_weight_files};
@@ -168,9 +170,10 @@ enum Engine {
     Paddle(TorchPaddle),
     Nar(TorchNar),
     Charspot(TorchCharspot),
+    Detector(TorchAnimeText),
 }
 
-/// A loaded recognizer. Shared by any number of threads.
+/// A loaded recognizer or block detector. Shared by any number of threads.
 pub struct Handle {
     engine: Engine,
     threads: u32,
@@ -250,7 +253,8 @@ impl Unpacked {
 /// Loads `engine` (`hayai-nova` / `paddle-manga` from the package set in `model_dir`,
 /// `{vision,prefill,step}.pt2` or the paths in `opts`; `nar-small` from
 /// `<model_dir>/model.pt2` and `charspot-small` from `<model_dir>/{dense,tail}.pt2`, both
-/// bound to `opts.weights`) at `precision` on `device` (`cpu` / `gpu:<n>`).
+/// bound to `opts.weights`; `animetext-blocks` from `<model_dir>/detector.pt2` bound to the
+/// ONNX file in `opts.weights`) at `precision` on `device` (`cpu` / `gpu:<n>`).
 pub fn load(
     engine: &str,
     model_dir: &Path,
@@ -263,10 +267,10 @@ pub fn load(
     let at = Placement::parse(device)?;
     if !matches!(
         engine,
-        "hayai-nova" | "paddle-manga" | "nar-small" | "charspot-small"
+        "hayai-nova" | "paddle-manga" | "nar-small" | "charspot-small" | "animetext-blocks"
     ) {
         return Err(TorchError::Arg(format!(
-            "unknown engine {engine:?} (hayai-nova, paddle-manga, nar-small, charspot-small)"
+            "unknown engine {engine:?} (hayai-nova, paddle-manga, nar-small, charspot-small, animetext-blocks)"
         )));
     }
     // Loading runs ATen ops too (casts, copies): give it this handle's width.
@@ -280,6 +284,11 @@ pub fn load(
         let c = load_charspot(model_dir, prec, at, opts, &mut unpacked)?;
         let (b, w) = (c.batch(), c.bound());
         (Engine::Charspot(c), b, 0, w)
+    } else if engine == "animetext-blocks" {
+        let d = load_detector(model_dir, prec, at, opts, &mut unpacked)?;
+        let w = d.bound();
+        // One page a call (`bt_detect_blocks`); the graph batches canvases of one size.
+        (Engine::Detector(d), 1, 0, w)
     } else {
         load_recognizer(engine, model_dir, prec, at, opts, &mut unpacked)?
     };
@@ -436,6 +445,41 @@ fn load_charspot(
     )
 }
 
+/// animetext-blocks: the graph `detector` (`<model_dir>/detector.pt2`, or the installer's
+/// unpacked `detector/`), bound to the ONNX file the CPU route runs (`opts.weights`, one
+/// path, required). `opts.tokenizer` is not read.
+fn load_detector(
+    model_dir: &Path,
+    prec: TPrec,
+    at: Placement,
+    opts: &LoadOptions,
+    unpacked: &mut Unpacked,
+) -> Result<TorchAnimeText, TorchError> {
+    if prec != TPrec::Fp32 {
+        return Err(TorchError::Arg(format!(
+            "animetext-blocks runs at fp32, not {}",
+            prec.as_str()
+        )));
+    }
+    let weight_files: Vec<PathBuf> = opts.weights.iter().flatten().map(PathBuf::from).collect();
+    if weight_files.len() != 1 {
+        return Err(TorchError::Arg(format!(
+            "animetext-blocks needs its ONNX file as the one weights path ({} given)",
+            weight_files.len()
+        )));
+    }
+    let model = unpacked.in_place(graph(model_dir, &None, DETECTOR_ROLE))?;
+    let set = match GraphSet::load(&[(DETECTOR_ROLE, &model)], &weight_files, at, DETECT_IO) {
+        Ok(s) => s,
+        Err(e) => {
+            unpacked.discard();
+            return Err(e);
+        }
+    };
+    register_exit_hook();
+    Ok(TorchAnimeText::load(set, at)?.with_threads(opts.threads))
+}
+
 fn set_threads_here(n: u32) {
     if n > 0 && THREADS.with(Cell::get) != n {
         set_threads(n);
@@ -472,13 +516,40 @@ impl Handle {
         match &self.engine {
             Engine::Nar(n) => n.read_chars(crops),
             Engine::Charspot(c) => c.read_chars(crops),
-            Engine::Hayai(_) | Engine::Paddle(_) => Err(refuse()),
+            Engine::Hayai(_) | Engine::Paddle(_) | Engine::Detector(_) => Err(refuse()),
         }
+    }
+
+    /// Finds the text-block candidates of letterboxed page canvases: one [`DetectOut`]
+    /// per canvas, in canvas order, scored `min_score` or more. Only the block detector
+    /// detects; a canvas whose sides are not multiples of 32 up to 640 is refused.
+    pub fn detect_blocks(
+        &self,
+        canvases: &[&Rgb],
+        min_score: f32,
+    ) -> Result<Vec<DetectOut>, TorchError> {
+        let Engine::Detector(d) = &self.engine else {
+            return Err(TorchError::Arg(format!(
+                "bt_detect_blocks: {} detects no blocks",
+                self.info.engine
+            )));
+        };
+        if canvases.is_empty() {
+            return Ok(Vec::new());
+        }
+        let _running = InFlight::enter()?;
+        set_threads_here(self.threads);
+        d.detect(canvases, min_score)
     }
 
     /// Reads crops; one text per crop (Python `strip()`ed, no NFKC). `caps[i]` caps
     /// crop i's generated tokens (paddle-manga; hayai-nova and nar-small ignore caps).
+    /// The block detector reads no text.
     pub fn read(&self, crops: &[&Rgb], caps: Option<&[u32]>) -> Result<Vec<String>, TorchError> {
+        let no_text = || TorchError::Arg(format!("bt_read: {} reads no text", self.info.engine));
+        if let Engine::Detector(_) = &self.engine {
+            return Err(no_text());
+        }
         if let Some(c) = caps
             && c.len() != crops.len()
         {
@@ -508,6 +579,7 @@ impl Handle {
             }
             Engine::Nar(n) => Ok(n.read_chars(crops)?.into_iter().map(|c| c.text).collect()),
             Engine::Charspot(c) => Ok(c.read_chars(crops)?.into_iter().map(|c| c.text).collect()),
+            Engine::Detector(_) => Err(no_text()),
         }
     }
 }

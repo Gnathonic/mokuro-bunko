@@ -20,7 +20,7 @@ use crate::runtime::{Model, RuntimeOptions, TensorBuf};
 pub const SIDE: usize = 640;
 const STRIDE: usize = 32;
 /// The canvas colour around the page (the value the network was trained with).
-const PAD: f32 = 114.0 / 255.0;
+pub const PAD_BYTE: u8 = 114;
 /// A candidate is a block from this score up.
 pub const MIN_SCORE: f32 = 0.3;
 /// Of two candidates overlapping by more than this, the better one stays.
@@ -117,6 +117,67 @@ pub fn input_size(width: usize, height: usize) -> (f64, usize, usize, usize, usi
     )
 }
 
+/// A page letterboxed for the network, as both routes feed it: the page scaled by
+/// `scale` (its longer side 640) at the top left of a canvas of [`PAD_BYTE`] whose sides
+/// are multiples of 32, in RGB.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Canvas {
+    pub rgb: bunko_vlm::Rgb,
+    /// Page pixels to canvas pixels.
+    pub scale: f64,
+    /// The page's `(width, height)`.
+    pub page: (usize, usize),
+}
+
+/// The page on its canvas ([`input_size`], [`fit`], BGR to RGB); `None` for a page of
+/// zero width or height, which has no blocks.
+pub fn canvas(bgr: &BgrImage) -> Option<Canvas> {
+    let (pw, ph) = (bgr.width(), bgr.height());
+    if pw == 0 || ph == 0 {
+        return None;
+    }
+    let (scale, w, h, cw, ch) = input_size(pw, ph);
+    let small = fit(bgr, w, h);
+    let mut data = vec![PAD_BYTE; cw * ch * 3];
+    for (row, line) in small.as_raw().chunks_exact(w * 3).enumerate() {
+        let dst = &mut data[row * cw * 3..][..w * 3];
+        for (d, s) in dst
+            .as_chunks_mut::<3>()
+            .0
+            .iter_mut()
+            .zip(line.as_chunks::<3>().0)
+        {
+            *d = [s[2], s[1], s[0]];
+        }
+    }
+    Some(Canvas {
+        rgb: bunko_vlm::Rgb::from_raw(cw, ch, data)?,
+        scale,
+        page: (pw, ph),
+    })
+}
+
+/// The candidates of a `[5, n]` output (row-major) that [`blocks_from_output`] can
+/// keep, in index order, as a `[5, k]` output and `k`: those scored `min_score` or more
+/// (and a NaN score, which `blocks_from_output` does not skip either). With `min_score`
+/// at most [`MIN_SCORE`], `blocks_from_output` gives the same blocks from either.
+pub fn compact_candidates(out: &[f32], n: usize, min_score: f32) -> (Vec<f32>, usize) {
+    let kept: Vec<usize> = (0..n)
+        .filter(|&i| {
+            let score = out[4 * n + i];
+            score >= min_score || score.is_nan()
+        })
+        .collect();
+    let k = kept.len();
+    let mut small = vec![0.0f32; 5 * k];
+    for (j, &i) in kept.iter().enumerate() {
+        for row in 0..5 {
+            small[row * k + j] = out[row * n + i];
+        }
+    }
+    (small, k)
+}
+
 /// The network's candidates (`[5, n]` row-major: centre x, centre y, width, height,
 /// score, in input pixels) as the page's blocks: scored, in page pixels, the better of
 /// two overlapping ones, no box around several blocks and no box of a block's part.
@@ -153,28 +214,16 @@ pub fn blocks_from_output(
 
 impl BlockDetector for AnimeText {
     fn detect(&self, bgr: &BgrImage) -> Result<(Vec<TextBlock>, DetectorInfo)> {
-        let (pw, ph) = (bgr.width(), bgr.height());
         let mut info = DetectorInfo {
             side: SIDE as u32,
             tile: "off".into(),
             ..Default::default()
         };
-        if pw == 0 || ph == 0 {
+        let Some(c) = canvas(bgr) else {
             return Ok((Vec::new(), info));
-        }
-        let (scale, w, h, cw, ch) = input_size(pw, ph);
-        let small = fit(bgr, w, h);
-        let plane = cw * ch;
-        let mut x = vec![PAD; 3 * plane];
-        for (row, line) in small.as_raw().chunks_exact(w * 3).enumerate() {
-            for (col, px) in line.as_chunks::<3>().0.iter().enumerate() {
-                let at = row * cw + col;
-                // Blue, green, red in the page; red first in the tensor.
-                x[at] = f32::from(px[2]) / 255.0;
-                x[plane + at] = f32::from(px[1]) / 255.0;
-                x[2 * plane + at] = f32::from(px[0]) / 255.0;
-            }
-        }
+        };
+        let (cw, ch) = (c.rgb.width, c.rgb.height);
+        let x = bunko_vlm::animetext::canvas_chw(&c.rgb);
         let out = self.model.run_named(
             vec![("images", TensorBuf::f32(&[1, 3, ch, cw], x))],
             &["output0"],
@@ -191,9 +240,9 @@ impl BlockDetector for AnimeText {
                     out.first().map(|t| t.shape.clone())
                 ))
             })?;
-        let blocks = blocks_from_output(data, n, scale, (pw, ph));
+        let blocks = blocks_from_output(data, n, c.scale, c.page);
         info.passes.push(DetectorPass {
-            scale: py::round_to(scale, 4),
+            scale: py::round_to(c.scale, 4),
             tiles: 1,
             lines: blocks.len(),
             why: "animetext".into(),
@@ -248,5 +297,80 @@ mod tests {
         let page = BgrImage::from_raw(4, 2, data).unwrap();
         let small = fit(&page, 2, 1);
         assert_eq!(small.as_raw(), &[50, 50, 50, 100, 100, 100]);
+    }
+
+    /// The canvas colour as the old tensor wrote it.
+    const PAD: f32 = 114.0 / 255.0;
+
+    /// The input tensor as `detect` built it before the canvas was shared with the GPU
+    /// route, kept here as the reference.
+    fn old_input(bgr: &BgrImage) -> Vec<f32> {
+        let (_, w, h, cw, ch) = input_size(bgr.width(), bgr.height());
+        let small = fit(bgr, w, h);
+        let plane = cw * ch;
+        let mut x = vec![PAD; 3 * plane];
+        for (row, line) in small.as_raw().chunks_exact(w * 3).enumerate() {
+            for (col, px) in line.as_chunks::<3>().0.iter().enumerate() {
+                let at = row * cw + col;
+                // Blue, green, red in the page; red first in the tensor.
+                x[at] = f32::from(px[2]) / 255.0;
+                x[plane + at] = f32::from(px[1]) / 255.0;
+                x[2 * plane + at] = f32::from(px[0]) / 255.0;
+            }
+        }
+        x
+    }
+
+    fn gradient(w: usize, h: usize) -> BgrImage {
+        let data = (0..w * h * 3).map(|i| (i * 7 % 251) as u8).collect();
+        BgrImage::from_raw(w, h, data).unwrap()
+    }
+
+    #[test]
+    fn canvas_and_chw_equal_the_old_tensor() {
+        for (w, h) in [(3, 2), (1000, 700), (640, 640), (2000, 100)] {
+            let page = gradient(w, h);
+            let c = canvas(&page).unwrap();
+            let new: Vec<u32> = bunko_vlm::animetext::canvas_chw(&c.rgb)
+                .iter()
+                .map(|v| v.to_bits())
+                .collect();
+            let old: Vec<u32> = old_input(&page).iter().map(|v| v.to_bits()).collect();
+            assert_eq!(new, old, "{w}x{h}");
+            assert!(bunko_vlm::animetext::canvas_ok(c.rgb.width, c.rgb.height));
+            assert_eq!(c.page, (w, h));
+            assert_eq!(c.scale, input_size(w, h).0);
+        }
+        assert!(canvas(&BgrImage::zeros(0, 5)).is_none());
+        assert!(canvas(&BgrImage::zeros(5, 0)).is_none());
+    }
+
+    #[test]
+    fn compact_candidates_give_the_same_blocks() {
+        // n = 6: cx, cy, w, h, score rows
+        let n = 6;
+        let mut out = vec![0.0f32; 5 * n];
+        let rows = [
+            [100., 100., 50., 80., 0.9],
+            [10., 10., 5., 5., 0.1],
+            [300., 200., 60., 60., 0.35],
+            [400., 400., 40., 40., 0.3],
+            [500., 50., 30., 30., 0.29],
+            [110., 105., 50., 80., 0.8],
+        ];
+        for (i, r) in rows.iter().enumerate() {
+            for c in 0..5 {
+                out[c * n + i] = r[c];
+            }
+        }
+        let (small, k) = compact_candidates(&out, n, MIN_SCORE);
+        assert_eq!(k, 4);
+        assert_eq!(small.len(), 5 * k);
+        assert_eq!(small[4 * k + 2], 0.3);
+        assert_eq!(
+            blocks_from_output(&small, k, 0.5, (1280, 960)),
+            blocks_from_output(&out, n, 0.5, (1280, 960))
+        );
+        assert_eq!(compact_candidates(&[], 0, MIN_SCORE), (Vec::new(), 0));
     }
 }

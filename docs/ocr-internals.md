@@ -14,7 +14,7 @@ what they do. The design documents it summarises are in
 |---|---|---|
 | Scheduler | the server process (all builds) | One actor that owns every piece of OCR state: it keeps an index of what is owed, claims `(volume, generation)` jobs for each lane, collects sidecars, records failures. Its state is mutated one message at a time, with no locks around scheduling. |
 | Processor | the server process (full build, "local") or another machine (`mokuro-bunko processor serve`) | Receives open-session and volume operations, runs the OCR pipeline, answers with events and the finished sidecar. The local processor is the same code as a remote one, wired over in-process channels, and the scheduler treats it as a machine named `local`. |
-| Engines | inside a processor (full build only) | `hayai-nova` and `paddle-manga` on libtorch (the backend pack `install-ocr` installs), `nar-small` and `charspot-small` on libtorch on a card that has a package for them and on ONNX Runtime on the CPU elsewhere, `ppocr-manga` and the detectors on ONNX Runtime on the CPU, plus the layout step that turns reads into the sidecar. |
+| Engines | inside a processor (full build only) | `hayai-nova` and `paddle-manga` on libtorch (the backend pack `install-ocr` installs), `nar-small` and `charspot-small` on libtorch on a card that has a package for them and on ONNX Runtime on the CPU elsewhere, the `animetext-blocks` detector likewise (its `detect` stage follows the engine's card), `ppocr-manga` and the line detectors on ONNX Runtime on the CPU, plus the layout step that turns reads into the sidecar. |
 
 The lite build has no engines: `ocr.local_processing` is forced off, the
 queue holds with "no processor" until a remote processor connects, and the

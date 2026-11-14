@@ -1,6 +1,6 @@
 """The graphs of each engine as exportable modules (``ROLES``): the vision-language
 recognizers here (vision, decoder prefill, decoder step); the text-box recognizers in
-``textbox.py``.
+``textbox.py``; the AnimeText block detector in ``detector.py``.
 
 The arithmetic is the onnx_export functional modules' (``tools/onnx_export``: same
 weights, same host-computed inputs as spec §5/§6), driven the way the 0.5.2 runner
@@ -39,6 +39,7 @@ from torch import nn
 from torch.export import Dim
 
 if TYPE_CHECKING:
+    from .detector import OnnxPin
     from .textbox import AuthorsWeights
 
 DT = {"fp32": torch.float32, "bf16": torch.bfloat16, "fp16": torch.float16}
@@ -86,6 +87,11 @@ class Graphs:
     # authors' weights only: the dtype the host casts them to before binding
     # (bunko.weights_dtype, "fp16"); None binds them as stored
     weights_dtype: str | None = None
+    # set: the packages bind an ONNX file's initializers (detector.py: AnimeText) and no
+    # weights-<group>.safetensors is written; onnx_file is the local copy the real (CPU)
+    # model was loaded from (None when the builder was handed a model)
+    onnx_weights: OnnxPin | None = None
+    onnx_file: Path | None = None
 
 
 class Autocast(nn.Module):
@@ -409,4 +415,11 @@ def charspot_small(*a, **kw) -> Graphs:
     return build(*a, **kw)
 
 
-BUILDERS = {"hayai-nova": hayai, "paddle-manga": paddle, "nar-small": nar_small, "charspot-small": charspot_small}
+def animetext_blocks(*a, **kw) -> Graphs:
+    from .detector import animetext_blocks as build
+
+    return build(*a, **kw)
+
+
+BUILDERS = {"hayai-nova": hayai, "paddle-manga": paddle, "nar-small": nar_small, "charspot-small": charspot_small,
+            "animetext-blocks": animetext_blocks}
