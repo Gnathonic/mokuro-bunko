@@ -2107,8 +2107,15 @@ mod tests {
                 .iter()
                 .all(|f| f.path != "nar-small/mangaocr_nar_small_fp32.onnx")
         );
+        // The host files under nar-small/; the GPU packages of textbox-torch-v1 (once its
+        // rows are compiled in) under the torch package layout.
         for f in m.engine_files("nar-small") {
-            assert!(f.path.starts_with("nar-small/"), "{}", f.path);
+            let dir = if f.unpack_to.is_some() {
+                "torch/nar-small/"
+            } else {
+                "nar-small/"
+            };
+            assert!(f.path.starts_with(dir), "{}", f.path);
             assert_eq!(f.sha256.len(), 64);
         }
         // Ids, store paths and mirror names are each unique across the manifest.
@@ -2264,7 +2271,13 @@ mod tests {
             for r in &g.requires {
                 assert!(m.get(r).is_some(), "{} requires {r}", g.id);
             }
-            // every package, CPU ones too, binds the shared weights files
+            // The packages of textbox-torch-v1 and detector-torch-v1 bind their authors'
+            // weights, host files of this manifest, and require nothing of the release.
+            if torch_release_name_for(&g.engine) != torch_release_name() {
+                assert!(g.requires.is_empty(), "{} requires {:?}", g.id, g.requires);
+                continue;
+            }
+            // every package of the torch release, CPU ones too, binds the shared weights files
             assert!(!g.requires.is_empty(), "{} binds no weights", g.id);
         }
         assert!(torch_release_name().starts_with("torch-models"));
