@@ -238,7 +238,7 @@ into the package's batches, at most 64 blocks, or 8 on a card with less than
 `nar-small` reads at fp32 with the same text, or at fp16 (every auto precision
 mode on a card that has nar's fp16 package; see
 [Precision modes](#precision-modes)). Where it cannot run on the card (no
-backend pack, a pack without text-box reading, no package for that card, its
+backend pack, a development pack without text-box reading, no package for that card, its
 host files missing with downloads off, a failed load) it falls back to the
 CPU pool and logs why. A `charspot-small` block with more than 1,024
 characters, more than its second graph reads at once, is read on the CPU
@@ -659,8 +659,10 @@ buys 4, 5 or 6 patch rows across the glyph at 256, 384 or 512. Every
 backend reads at all three: libtorch's packages keep a static axis of 512
 patches, and a smaller budget resizes the crop for it and masks the rest of
 the axis; ncnn and WebGPU run each crop at its own patch count. Backend packs
-from before 0.8.0 read 512 only (libtorch and ncnn refuse 256 and 384), and
-the session then asks for a pack update (`mokuro-bunko install-ocr --force`).
+from before 0.8.0 read 512 only (libtorch and ncnn refuse 256 and 384); 0.8.0
+does not load them and installs its own (backend packs are tied to the
+release). A development pack that still reads 512 only makes the session ask
+for a pack update (`mokuro-bunko install-ocr --force`).
 The memory difference across the whole range is small next to the model
 itself, so lowering the budget saves time, not memory. 512 is the default rather than the model card's 384 because on the
 model author's own benchmark 384 reads worse than the previous hayai model

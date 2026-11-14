@@ -106,8 +106,8 @@ without installing anything.
   `cu130`) and macOS on Apple silicon (`cpu`) only.
 - **"... is release X, not Y"** or **"the archive holds the backend pack of
   mokuro-bunko X; release Y opens the packs of A to Y"**: the pack must come from
-  the running version's release, or an earlier one that builds the same pack (0.7.4
-  and later, for 0.8). A source build of an unreleased version needs its own pack
+  the running version's release, or an earlier one that builds the same pack (for
+  0.8.0, 0.8.0-beta.1 and later: no 0.7.x pack loads, and `install-ocr` replaces it). A source build of an unreleased version needs its own pack
   (`cargo run -p xtask -- torch-pack --variant <variant>` writes it to
   `dist/`; then `install-ocr --from dist`).
 - **A host without internet**: download the pack archive

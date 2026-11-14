@@ -221,6 +221,17 @@
   `curated-<n>`.** Those names are readers' corrections now (see "OCR corrections have
   their own layer names" below). A config that already names a generation one of them
   fails to load, with an error naming that row, until it is renamed.
+- **0.8.0 needs its own OCR backend pack.** Packs of 0.7.x are not loaded. An
+  automatic update downloads it with the binary. Otherwise the server, the processor or
+  the Docker image installs it at the first start, before OCR uses the GPU: about
+  350 MB for CUDA and about 3 GB for ROCm, plus about 20 MB for the Vulkan pack. With
+  `MOKURO_OCR_AUTO_INSTALL=false`, run `mokuro-bunko install-ocr`. Backend packs are
+  now tied to the release: 0.8.0's packs add nar-small, charspot-small and the
+  AnimeText detector on a GPU and hayai-nova at patch budgets below 512, which no
+  0.7.x pack has, so a pack that does not match what the release expects is not loaded
+  and the release's own is installed in its place (the old one is removed). Until
+  then a machine with automatic installs off reads only with ppocr-manga and the
+  engines that run on ONNX Runtime on the CPU.
 
 ### Added
 - **Keep the library in a folder you choose** (`storage.library.backend: folder`,
@@ -303,7 +314,7 @@
   less than 4 GB), from a compiled graph of ours with no weights in it (the pre-release
   `textbox-torch-v1`, about 4 MB per card type) bound to the same `model.safetensors`
   of the author that the CPU route reads. A card the release has no package for, a
-  backend pack from before this release, or a failed load leaves the row on the CPU,
+  development backend pack without text-box reading, or a failed load leaves the row on the CPU,
   with the reason in the log. `pools.stage_device.engine` may now name a card for a
   `nar-small` row, and the benchmark tries its engine stage on the CPU too and keeps
   the faster. The sidecar's `ocr_engine.weights` names the export set it was read with
@@ -330,7 +341,7 @@
   graphs and the reading order run on the host. All of a page's blocks are read in one
   call (at most 64 at a time, 8 on a card with less than 4 GB). A block with more than
   1,024 characters is read on the CPU, with a line in the log. As for `nar-small`, a
-  card with no package, an older backend pack, a failed load, or a machine that cannot
+  card with no package, a development backend pack without it, a failed load, or a machine that cannot
   download the safetensors (`MOKURO_MODELS_DOWNLOAD` off) leaves the row on the CPU;
   `pools.stage_device.engine` may name a card for a `charspot-small` row, and the
   benchmark tries its engine stage on the CPU too. The sidecar names
@@ -355,7 +366,7 @@
   reads; the suppression of overlapping boxes stays on the host, one code for both
   routes. Its `detect` stage follows the engine's card, else goes to the first card
   that has a package for it; a card with less than 4 GB of memory, a card the release
-  has no package for, a backend pack without the detector, `ocr.backend: cpu`, or a
+  has no package for, a development backend pack without the detector, `ocr.backend: cpu`, or a
   failed load keeps it on the CPU, with the reason in the log.
   `pools.stage_device.detect` may now name a card for a row on `animetext-blocks` (the
   line detectors stay CPU only), the planner sizes a detect stage on a card, and the
@@ -626,12 +637,6 @@
   redone; without it nothing is redone and new volumes simply get the new models. A
   processor still on an older release is offered no work until it is updated (the
   library tells it; `auto_update` does it).
-- **An update keeps the installed OCR backend.** This release opens the backend packs
-  of 0.7.4 and later (it builds the same packs), so updating from those (by hand, the
-  automatic update or a new Docker image) downloads no pack; a release whose pack
-  changes still fetches its own. The packs of 0.7.1 to 0.7.3 leak a libtorch model's
-  weights on every OCR session (fixed in 0.7.4), so an update from those fetches the
-  new pack.
 - **OCR corrections have their own layer names.** Edits never touch a volume's main
   OCR file. `<Volume>.edit.mokuro` (and `edit-2`, `edit-3`, …) are an account's own
   corrections: any account that can save progress, `registered` included, writes,
@@ -902,10 +907,11 @@
   crop is now resized for the row's budget and read in the graphs' 512 patches, the
   rest masked, as a small crop already was. At 512 the text is unchanged. The Vulkan
   self-test reads its goldens at 512 whatever the row's budget, and one verdict serves
-  every budget. A backend pack from before this release still reads 512 only: at 256
-  or 384 the session stops with `update the OCR backend pack` (`mokuro-bunko
-  install-ocr --force`) instead of trying the CPU, and the refusal is no verdict against
-  the Vulkan runtime on that card.
+  every budget. Backend packs from before this release read 512 only, so 0.8.0 does
+  not load them and installs its own (see "0.8.0 needs its own OCR backend pack"). A
+  development pack that still reads 512 only stops a session at 256 or 384 with
+  `update the OCR backend pack` (`mokuro-bunko install-ocr --force`) instead of trying
+  the CPU, and the refusal is no verdict against the Vulkan runtime on that card.
 - **A library folder never takes a volume Mokuro Reader is still writing.** The
   reader's Local Folder writes the way Chromium does: an empty file first, then the
   bytes into `<name>.crswap` beside it, renamed over the empty file at the end. Bunko

@@ -165,8 +165,10 @@ new server nothing installs until `/setup` finishes: its "OCR on this machine"
 choice decides, and finishing starts the install. After that, at every start
 (and on a processor, which has no setup), when
 local OCR is on, an enabled generation needs the backend (hayai-nova,
-paddle-manga; a processor: always) and no fitting pack this release opens is
-installed (its own, or one of an earlier release that builds the same pack), they start serving at once and run the same detection and install
+paddle-manga; when this machine's pack is a GPU one, also nar-small, charspot-small and
+rows on `animetext-blocks`; a processor: always) and no fitting pack this release opens is
+installed (its own, or one of an earlier release that builds the same pack; 0.8.0
+opens no 0.7.x pack, since backend packs are tied to the release), they start serving at once and run the same detection and install
 (`install-ocr --if-needed`, as a child process) meanwhile; with the pack in
 place, the same run fetches missing models:
 
@@ -214,7 +216,8 @@ run on the side.
 While the install runs, and after a failed one with no pack in place, the
 machine does no OCR at all, ppocr-manga included; other processors keep
 working. Only with `MOKURO_OCR_AUTO_INSTALL=false` does it run without the
-backend, offering ppocr-manga alone.
+backend, offering ppocr-manga and the engines that read on ONNX Runtime on the CPU
+(nar-small, charspot-small).
 
 ### OCR models
 
@@ -981,7 +984,7 @@ backend](#ocr-backend-install-ocr)), with what the container was given:
    `cpu` stays on the CPU, `cuda` / `rocm` take that vendor's GPU, or the CPU
    with a note when it is not there.
 4. It downloads the matching backend pack of this release (unless one of an
-   earlier release with the same pack is already there, after an update) into
+   earlier release with the same pack is already there; for 0.8.0 no 0.7.x pack is) into
    `/data/backends` (~80 MB for the CPU; ~350 MB plus ~1.6 GB of NVIDIA's CUDA
    libraries from PyPI; ~3 GB for AMD) and the models of the enabled OCR
    engines into `/data/models`; local OCR then starts by itself.
@@ -990,7 +993,14 @@ Later starts find the pack and download nothing. Started with a different GPU
 (or with `MOKURO_OCR_BACKEND` asking for a GPU it now sees) the container
 installs that GPU's pack and removes the one it replaces; started without its
 GPU it keeps the GPU pack, which runs on the CPU too. An image update installs
-the new release's pack on its first start. If the download fails, the server
+the new release's pack on its first start when the release does not open the old one:
+the first start of a 0.8.0 container over a 0.7.x pack in `/data/backends` installs
+0.8.0's pack (about 350 MB for NVIDIA, whose unchanged CUDA libraries are taken from the
+old pack, about 3 GB for AMD) before OCR starts, then removes the old one; a Vulkan
+pack of 0.7.x (about 20 MB) is replaced too, in the background, or before OCR
+starts where it is the machine's only GPU route. With `MOKURO_OCR_AUTO_INSTALL=false` the
+old pack is not loaded either: OCR stays on ppocr-manga and the ONNX CPU routes
+(nar-small, charspot-small, the detectors) until `install-ocr` has run. If the download fails, the server
 keeps serving, but its own OCR, ppocr-manga included, waits for the pack;
 remote processors keep working. The admin panel shows the failure with a
 Retry button; a network failure is also retried after 5, 15 and 60 minutes,

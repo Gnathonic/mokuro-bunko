@@ -927,7 +927,8 @@ Updates card), `processor.auto_update: true` in a processor's `processor.yaml`
 release (its `pack.json` says `bunko_version`; a pack built outside a release,
 without one, is accepted as a development pack). Release X's program opens the
 packs of the releases that build the same pack as X, from the oldest such
-release up to X itself (0.7.4 and later, for 0.8); any other is refused with
+release up to X itself (for 0.8.0, 0.8.0-beta.1 and later: no pack of
+0.8.0-beta.1 was published, so in practice only 0.8.0's own); any other is refused with
 `the backend pack is from mokuro-bunko A, this is B, which opens the packs of O
 to B; run 'mokuro-bunko install-ocr' (with automatic updates on, an update
 installs it)`, and `doctor`, `/control/status` and
@@ -936,7 +937,11 @@ uses are named by manifests compiled into its program, so new model files only
 ever arrive with a new release. An update therefore installs, together: the
 program (the tray is part of it), the release's pack for the variant installed
 here unless the installed pack is one the release opens, and the release's
-model files.
+model files. Backend packs are tied to the release, and 0.8.0 opens no 0.7.x
+pack: an update to 0.8.0 downloads the 0.8.0 backend pack with the binary
+(about 350 MB for NVIDIA, whose unchanged CUDA libraries are taken from the
+installed pack, about 3 GB for AMD, about 80 MB for the CPU) before it
+switches, so OCR never runs on a pack the release does not expect.
 
 **Server.** With `auto` on, every check (12 h by default;
 `MOKURO_UPDATE_CHECK_SECONDS` sets the period) that finds a newer release on
@@ -1076,7 +1081,9 @@ charspot-small and the `animetext-blocks` detector wherever they cannot use a ca
 it and it is missing, **in the background**: they serve at once, show the progress (log,
 admin panel, dashboard, tray, `/control/status`) and start local OCR when it is done
 (see [Deployment](deployment.md#ocr-backend-install-ocr)); the full Docker image, which
-carries no pack, relies on this.
+carries no pack, relies on this. A pack of another release counts as missing: backend
+packs are tied to the release, so 0.8.0 does not load a 0.7.x pack and installs its own
+over it before OCR uses the backend.
 
 `ocr.backend` (and `serve --ocr`) picks the devices, and with them the pack
 `install-ocr` (without `--variant`) and the Docker image install on this machine:
@@ -1145,7 +1152,7 @@ ocr:
 | `enabled` | `true` | A disabled row queues nothing and writes nothing. Its name stays reserved. |
 | `engine` | — (required) | One of the [engines](#ocr-engines). |
 | `detector` | `ppocr-manga` | The [text detector](#ocr-detectors) of every engine but `ppocr-manga`: `ppocr-manga`, `ctd-lines`, or (for the engines that read blocks) `animetext-blocks`. Ignored (and stored as `null`) for the `ppocr-manga` engine, which brings its own. |
-| `patch_budget` | `512` | `256`, `384` or `512`: the resolution `hayai-nova` reads each line at, on every backend (libtorch, ncnn, WebGPU, the CPU). A backend pack from before 0.8.0 reads 512 only; at another budget its session stops with "update the OCR backend pack" (`mokuro-bunko install-ocr --force`). Reaches no other engine. |
+| `patch_budget` | `512` | `256`, `384` or `512`: the resolution `hayai-nova` reads each line at, on every backend (libtorch, ncnn, WebGPU, the CPU). 0.8.0 does not load the older backend packs that read 512 only (it installs its own); a development pack that reads 512 only stops a session at another budget with "update the OCR backend pack" (`mokuro-bunko install-ocr --force`). Reaches no other engine. |
 | `precision` | `auto-accuracy` | The row's [precision mode](#precision-modes), the same on every machine: `auto-accuracy`, `auto-balanced`, `auto-speed`, or `fp32` / `bf16` / `fp16` only. `nar-small` has no `bf16` (a row error). `ppocr-manga` fixes its own and ignores it. |
 | `pools` | `{}` (derive) | Where each stage of this row runs and how wide. See [Pools](#pools-stages-and-devices). |
 
@@ -1399,8 +1406,8 @@ CPU), from a compiled graph of this project's `detector-torch-v1` release (no we
 in it; it reads them from the same 237 MB file the CPU route reads; AGPL-3.0, since it
 is compiled Ultralytics code). Its `detect` stage follows the engine's card when the
 engine was put on one, else goes to the first card that has a package for it; a card
-with less than 4 GB of memory, a card the release has no package for, a backend pack
-from before 0.8, `ocr.backend: cpu`, `stage_device.detect: cpu` or a failed load keeps it
+with less than 4 GB of memory, a card the release has no package for, a development
+backend pack without the detector, `ocr.backend: cpu`, `stage_device.detect: cpu` or a failed load keeps it
 on the CPU, with the reason in the log. The benchmark also tries it on the CPU and
 keeps the faster.
 

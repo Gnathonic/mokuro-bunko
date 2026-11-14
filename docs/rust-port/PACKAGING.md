@@ -793,13 +793,15 @@ bunko-torch, bunko-vlm, bunko-vulkan and bunko-ncnn, with what `torch_specs.rs`,
 `torch_pack.rs` and `vulkan_pack.rs` pin (libtorch, wheels, ncnn, the layout). bunko-ocr
 is no part of a pack's cdylib (its code, page decoding included, runs in the host); it
 counts as a pack input for its model manifests: `torch_models.json`, which `xtask
-torch-pack` reads, and `vulkan_models.json`, which bunko-vulkan's tests check. 0.7.4 to
-0.8.0 build packs that read the same (the packs of 0.7.1 to 0.7.3 lack 0.7.4's fix for a
-libtorch recognizer's leaked weights, so 0.8 refuses them). 0.8.0's packs also read
-hayai-nova at patch budgets below 512; an older pack refuses them, and the host turns that
-refusal into "update the OCR backend pack" (`install-ocr --force`) instead of a CPU
-fallback. A feature an older pack lacks is not a reason to move the floor while what it
-does read stays the same. When a change to those is one an older
+torch-pack` reads, and `vulkan_models.json`, which bunko-vulkan's tests check. 0.8 moved
+the floor to 0.8.0-beta.1, the workspace version of the commit that moved it (no pack of
+that version was ever published, so 0.8.0 in practice opens only its own packs): its packs
+add the text-box and block-detector routes and hayai-nova at patch budgets below 512.
+Backend packs are tied to the release; a pack that does not match what the release
+expects is not loaded, and `install-ocr` (at start, `--if-needed`, or an update's
+prefetch) installs the release's own pack before OCR uses the backend. The optional
+symbols stay, so a development pack without them runs those rows on the CPU. When a
+change to those is one an older
 pack lacks, `OLDEST_PACK_RELEASE` moves to the release being made. bunko-torch's test
 `pack_inputs` fingerprints those files and fails on any change until it is decided
 either way (move the floor, or record the new fingerprint). A pack without
@@ -890,11 +892,15 @@ with a `processor.yaml` and no library configuration.
 `--if-needed` (what `serve` and `processor serve` run in the background, §2): nothing when
 `MOKURO_OCR_AUTO_INSTALL=false`, when local OCR is off (`ocr.backend: skip`,
 `ocr.local_processing: false`), when no enabled generation needs the pack (ppocr-manga
-alone) or when a pack this release opens (below) that serves the chosen
+alone; when the chosen variant is `cpu`, also nar-small, charspot-small and rows on
+`animetext-blocks`, which read on ONNX Runtime there; on a GPU they need it) or when a
+pack this release opens (below) that serves the chosen
 variant is installed (for `cpu`, an installed GPU pack counts: it runs on the CPU too, so
 a container started once without its GPU downloads nothing); otherwise the full install
 above, after which the packs it replaces in the install directory (another variant,
-another release) are removed. 0.5.2's `OCR_AUTO_INSTALL=true` keeps it on; its
+another release) are removed. A pack of a release this one does not open (for 0.8.0,
+every 0.7.x pack) counts as not installed, so a 0.8.0 container started over a 0.7.x
+pack installs 0.8.0's before OCR uses the backend. 0.5.2's `OCR_AUTO_INSTALL=true` keeps it on; its
 `OCR_AUTO_INSTALL=false` is noted and ignored.
 
 `--from DIR` installs from local files (air-gapped hosts, tests): the archive or its

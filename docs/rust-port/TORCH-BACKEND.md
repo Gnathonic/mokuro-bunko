@@ -484,8 +484,11 @@ cannot load an fp16 package (the shim's dtype check), and the host falls back as
 The optional entry point `bt_read_chars(handle, crops, n, out_json, err_out)` returns
 `[{"text", "chars"}]`, one entry per crop: an empty crop reads `""` without a model call,
 and the crops are split into batches of at most the handle's batch, in crop order. The
-ABI stays 1; the host looks the symbol up and a pack without it (0.7.x) leaves the
-text-box engines on the CPU, with the reason logged once. `bt_init` turns TF32 off for
+ABI stays 1; the host looks the symbol up and a pack without it leaves the
+text-box engines on the CPU, with the reason logged once. 0.8.0 loads no 0.7.x pack
+(backend packs are tied to the release, `OLDEST_PACK_RELEASE` 0.8.0-beta.1, and
+`install-ocr` installs 0.8.0's own before OCR uses the backend), so only a development
+pack, or a local 0.8.0-beta.1 pack built before the symbol, can lack it. `bt_init` turns TF32 off for
 cuDNN and matmul on every pack, so fp32 is fp32 on Ampere and later.
 
 **Batch on small cards.** `LoadOptions.max_batch` caps the batch below the package's.
@@ -628,7 +631,8 @@ A handle is shared by any number of threads (device work is serialised inside).
   existing manifest. `bunko.special` / `bunko.prompt` are checked against the code's
   constants. hayai-nova packages: a static axis of 512 patches; a patch budget from 1 to
   512 resizes each crop for it and masks the rest of the axis (packs before 0.8.0 refuse
-  any budget but 512, and the host asks for a pack update).
+  any budget but 512; 0.8.0 loads none of them, and for a development pack that does the
+  host asks for a pack update).
 * Layout **(changed: B's target names)**:
   `<storage>/models/torch/<engine>/<precision>/{weights-*.safetensors, <target>/{vision,prefill,step}.pt2}`,
   targets `<os>-cuda-sm_NN` (a device tries its own arch, then every older one: PTX),
