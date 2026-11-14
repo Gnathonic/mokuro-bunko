@@ -387,6 +387,139 @@ pub fn charspot_classes(mut characters: Vec<String>) -> Result<Vec<String>, Stri
     Ok(characters)
 }
 
+/// The canvas sides charspot's crops are batched on, in cells (`backends/cuda.py`'s
+/// `LADDER`): a crop's canvas is zero-padded up to the first of these on each side.
+pub const CHARSPOT_LADDER: [usize; 17] = [
+    1, 2, 3, 4, 6, 8, 11, 14, 20, 28, 40, 56, 80, 112, 160, 196, 256,
+];
+/// The cost of one more dense call, in padded cells (`MERGE_OVERHEAD`): two canvas
+/// groups merge onto one larger canvas when that saves more than it pads.
+pub const CHARSPOT_MERGE_OVERHEAD: usize = 1024;
+/// Crops per dense call at most (the authors' `max_batch` on a GPU of 4 GB or more).
+pub const CHARSPOT_MAX_BATCH: usize = 64;
+/// Rows x characters² per tail call at most (`tail_budget`): it bounds the tail's
+/// `[rows, n, n, d]` pair tensor.
+pub const CHARSPOT_TAIL_BUDGET: usize = 1 << 18;
+/// Rows per tail call at most (`ROWS_PER_TAIL`).
+pub const CHARSPOT_ROWS_PER_TAIL: usize = 512;
+
+/// The canvas a crop of `h_px x w_px` is batched on (`backends/cuda.py`'s `canvas`):
+/// each side `16 * v` for the first ladder value `v >= px / 16` (floor division, as
+/// the authors'). charspot's own canvases are whole cells of at most 256 cells, so the
+/// ladder always has a value; past it (which the authors' code would not accept) the
+/// side stays `16 * (px / 16)`.
+pub fn charspot_canvas_size(h_px: usize, w_px: usize) -> (usize, usize) {
+    let up = |px: usize| {
+        let cells = px / CHARSPOT_CELL;
+        CHARSPOT_CELL
+            * CHARSPOT_LADDER
+                .iter()
+                .copied()
+                .find(|&v| v >= cells)
+                .unwrap_or(cells)
+    };
+    (up(h_px), up(w_px))
+}
+
+/// The authors' `CudaBackend.batches` without the CUDA-graph canvases: the crops
+/// (`shapes`, canvas `(height, width)` in pixels) grouped by [`charspot_canvas_size`]
+/// in first-seen order; then, while any pair of groups gains from it, the pair with
+/// the largest gain (the first such pair on a tie) merges onto the larger of each side,
+/// where `cost(hw, n) = 1024 + n * h * w / 256` (in f64, as the authors' Python) and a
+/// merge never holds more than `max_batch` crops; then each group cut into chunks of
+/// `max_batch`. Each batch: the crops' indices and the canvas `(height, width)`.
+pub fn canvas_batches(
+    shapes: &[(usize, usize)],
+    max_batch: usize,
+) -> Vec<(Vec<usize>, (usize, usize))> {
+    let max_batch = max_batch.max(1);
+    let mut groups: Vec<((usize, usize), Vec<usize>)> = Vec::new();
+    for (i, &(h, w)) in shapes.iter().enumerate() {
+        let hw = charspot_canvas_size(h, w);
+        match groups.iter_mut().find(|(g, _)| *g == hw) {
+            Some((_, idx)) => idx.push(i),
+            None => groups.push((hw, vec![i])),
+        }
+    }
+    let cell2 = (CHARSPOT_CELL * CHARSPOT_CELL) as f64;
+    let cost = |hw: (usize, usize), n: usize| {
+        CHARSPOT_MERGE_OVERHEAD as f64 + (n * hw.0 * hw.1) as f64 / cell2
+    };
+    loop {
+        let mut best: Option<(f64, usize, usize, (usize, usize))> = None;
+        for a in 0..groups.len() {
+            for b in a + 1..groups.len() {
+                let ((ha, ia), (hb, ib)) = (&groups[a], &groups[b]);
+                if ia.len() + ib.len() > max_batch {
+                    continue;
+                }
+                let m = (ha.0.max(hb.0), ha.1.max(hb.1));
+                let gain = cost(*ha, ia.len()) + cost(*hb, ib.len()) - cost(m, ia.len() + ib.len());
+                if gain > 0.0 && best.is_none_or(|(g, ..)| gain > g) {
+                    best = Some((gain, a, b, m));
+                }
+            }
+        }
+        let Some((_, a, b, m)) = best else { break };
+        let (_, moved) = groups.remove(b);
+        groups[a].0 = m;
+        groups[a].1.extend(moved);
+    }
+    groups
+        .into_iter()
+        .flat_map(|(hw, idx)| {
+            idx.chunks(max_batch)
+                .map(|c| (c.to_vec(), hw))
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// The crops' rows grouped into tail calls, as the authors' `infer` does
+/// (`backends/cuda.py`): the rows with characters (`counts[i] > 0`), most characters
+/// first (a stable sort, so equal counts keep their order); each part takes its first
+/// row whatever its size, then the next rows while it holds fewer than `rows_max` and
+/// `(rows + 1) * n0²` stays within `budget`, `n0` the part's first count. A row with
+/// more than 512 characters (whose `n0²` alone is over 2^18) is a part of its own and
+/// still runs. Each part: indices into `counts`.
+pub fn tail_parts(counts: &[usize], budget: usize, rows_max: usize) -> Vec<Vec<usize>> {
+    let mut rows: Vec<usize> = (0..counts.len()).filter(|&i| counts[i] > 0).collect();
+    rows.sort_by_key(|&i| std::cmp::Reverse(counts[i]));
+    let mut parts = Vec::new();
+    let mut rest = &rows[..];
+    while let Some(&first) = rest.first() {
+        let n0 = counts[first];
+        let mut len = 1;
+        while len < rest.len()
+            && len < rows_max
+            && (len + 1).saturating_mul(n0).saturating_mul(n0) <= budget
+        {
+            len += 1;
+        }
+        parts.push(rest[..len].to_vec());
+        rest = &rest[len..];
+    }
+    parts
+}
+
+/// The characters a tail part's boxes, geometry and mask are padded to: `max(2, n0)`,
+/// since the tail graph takes `N >= 2`. The padding is geometry `1.0` and mask `false`,
+/// as the authors pad (`geo = torch.ones`, `mask = torch.zeros`).
+pub fn charspot_tail_width(n0: usize) -> usize {
+    n0.max(2)
+}
+
+/// The crops per dense call: [`CHARSPOT_MAX_BATCH`] when nothing caps it (`None`, the
+/// package's own maximum), else the cap (a small GPU's) within `1..=64`.
+pub fn charspot_batch_cap(max_batch: Option<u32>) -> usize {
+    match max_batch {
+        None => CHARSPOT_MAX_BATCH,
+        Some(n) => usize::try_from(n)
+            .unwrap_or(usize::MAX)
+            .clamp(1, CHARSPOT_MAX_BATCH),
+    }
+}
+
 // --- nar-small ---------------------------------------------------------------
 
 /// nar-small's inputs for a crop: the patches `[324, 588]` (each a 14 x 14 patch, red
@@ -790,5 +923,82 @@ mod tests {
             ("a", "", "!!", "??", "!!!", "???")
         );
         assert!(charspot_classes(vec![String::new(); 6819]).is_err());
+    }
+
+    // --- charspot's canvas batches and tail parts --------------------------------
+
+    #[test]
+    fn canvases_follow_the_ladder() {
+        assert_eq!(charspot_canvas_size(32, 48), (32, 48));
+        assert_eq!(charspot_canvas_size(80, 16), (96, 16));
+    }
+
+    #[test]
+    fn a_cheap_merge_is_made() {
+        // apart 1024 + 6 and 1024 + 9, merged 1024 + 18: a gain of 1021
+        assert_eq!(
+            canvas_batches(&[(32, 48), (48, 48)], 64),
+            vec![(vec![0, 1], (48, 48))]
+        );
+    }
+
+    #[test]
+    fn a_merge_that_costs_more_is_not_made() {
+        // apart 1024 + 256 and 1024 + 256; merged onto 4096 x 4096: 1024 + 2 * 65536
+        assert_eq!(
+            canvas_batches(&[(16, 4096), (4096, 16)], 64),
+            vec![(vec![0], (16, 4096)), (vec![1], (4096, 16))]
+        );
+    }
+
+    #[test]
+    fn batches_stop_at_64() {
+        let b = canvas_batches(&vec![(32, 32); 70], 64);
+        assert_eq!(b.iter().map(|(i, _)| i.len()).collect::<Vec<_>>(), [64, 6]);
+        assert_eq!(b[1].0[0], 64);
+    }
+
+    #[test]
+    fn tail_parts_skip_empty_rows() {
+        assert_eq!(
+            tail_parts(&[3, 10, 0, 5], 1 << 18, 512),
+            vec![vec![1, 3, 0]]
+        );
+        assert_eq!(
+            tail_parts(&[3, 10, 0, 5], 250, 512),
+            vec![vec![1, 3], vec![0]]
+        );
+        assert!(tail_parts(&[0, 0], 1 << 18, 512).is_empty());
+    }
+
+    #[test]
+    fn a_long_row_still_gets_a_part() {
+        // 600² = 360,000 > 2^18: the first row is taken anyway, alone
+        assert_eq!(tail_parts(&[3, 600], 1 << 18, 512), vec![vec![1], vec![0]]);
+        assert_eq!(tail_parts(&[513], 1 << 18, 512), vec![vec![0]]);
+        // 362² * 2 = 262,088 <= 2^18 still pairs; 363² * 2 = 263,538 does not
+        assert_eq!(tail_parts(&[362, 362], 1 << 18, 512), vec![vec![0, 1]]);
+        assert_eq!(
+            tail_parts(&[363, 363], 1 << 18, 512),
+            vec![vec![0], vec![1]]
+        );
+        // the row cap alone: 513 one-character rows make 512 + 1
+        let p = tail_parts(&vec![1; 513], 1 << 18, 512);
+        assert_eq!(p.iter().map(Vec::len).collect::<Vec<_>>(), [512, 1]);
+    }
+
+    #[test]
+    fn a_tail_part_is_at_least_two_wide() {
+        assert_eq!(charspot_tail_width(1), 2);
+        assert_eq!(charspot_tail_width(2), 2);
+        assert_eq!(charspot_tail_width(600), 600);
+    }
+
+    #[test]
+    fn a_small_gpu_caps_the_canvas_batch() {
+        assert_eq!(charspot_batch_cap(None), 64);
+        assert_eq!(charspot_batch_cap(Some(8)), 8);
+        assert_eq!(charspot_batch_cap(Some(128)), 64);
+        assert_eq!(charspot_batch_cap(Some(0)), 1);
     }
 }
