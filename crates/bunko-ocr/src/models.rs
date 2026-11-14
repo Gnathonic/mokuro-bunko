@@ -392,6 +392,8 @@ impl Manifest {
         files.extend(torch_release_files());
         #[cfg(feature = "nc-models")]
         files.extend(textbox_torch_release_files());
+        #[cfg(feature = "gpl-models")]
+        files.extend(detector_torch_release_files());
         files.extend(vulkan_release_files());
         #[cfg(feature = "gpl-models")]
         files.push(ModelFile {
@@ -1305,16 +1307,38 @@ const TEXTBOX_TORCH_MODELS_JSON: &str = include_str!("textbox_torch_models.json"
 #[cfg(feature = "nc-models")]
 const TEXTBOX_TORCH_ENGINES: [&str; 2] = ["nar-small", "charspot-small"];
 
+/// The release of AnimeText's libtorch packages (`detector.pt2`, weightless graphs that
+/// bind the mirrored ONNX file's initializers): AGPL-3.0 compiled Ultralytics code, kept
+/// apart from every other release and used only by `gpl-models` builds.
+#[cfg(feature = "gpl-models")]
+pub const DETECTOR_TORCH_RELEASE: &str = "detector-torch-v1";
+
+/// `tools/torch_export`'s manifest of [`DETECTOR_TORCH_RELEASE`], with the
+/// `torch_models.json` schema. Its rows carry no `requires`: the weights are the ONNX
+/// file of the CPU route (`animetext/yolo12x`).
+#[cfg(feature = "gpl-models")]
+const DETECTOR_TORCH_MODELS_JSON: &str = include_str!("detector_torch_models.json");
+
+/// The engines whose packages come from [`DETECTOR_TORCH_RELEASE`].
+#[cfg(feature = "gpl-models")]
+const DETECTOR_TORCH_ENGINES: [&str; 1] = ["animetext-blocks"];
+
 /// The torch package release `engine`'s packages come from, for provenance: the
-/// text-box release for the text-box engines, [`torch_release_name`] for the others.
+/// text-box release for the text-box engines, the detector release for AnimeText,
+/// [`torch_release_name`] for the others.
 pub fn torch_release_name_for(engine: &str) -> String {
     #[cfg(feature = "nc-models")]
     if TEXTBOX_TORCH_ENGINES.contains(&engine) {
         return serde_json::from_str::<TorchRelease>(TEXTBOX_TORCH_MODELS_JSON)
             .map_or_else(|_| "unknown".into(), |r| r.release);
     }
-    // Without `nc-models` there are no text-box packages: every engine is the base release's.
-    #[cfg(not(feature = "nc-models"))]
+    #[cfg(feature = "gpl-models")]
+    if DETECTOR_TORCH_ENGINES.contains(&engine) {
+        return serde_json::from_str::<TorchRelease>(DETECTOR_TORCH_MODELS_JSON)
+            .map_or_else(|_| "unknown".into(), |r| r.release);
+    }
+    // Without the features there are no such packages: every engine is the base release's.
+    #[cfg(not(any(feature = "nc-models", feature = "gpl-models")))]
     let _ = engine;
     torch_release_name()
 }
@@ -1369,6 +1393,16 @@ fn torch_release_files_from(json: &str) -> std::result::Result<Vec<ModelFile>, S
 fn textbox_torch_release_files() -> Vec<ModelFile> {
     release_files_from(TEXTBOX_TORCH_MODELS_JSON, TORCH_MIRROR_ENV).unwrap_or_else(|e| {
         tracing::error!("the compiled-in text-box torch package release does not load: {e}");
+        Vec::new()
+    })
+}
+
+/// The compiled-in detector packages as manifest entries, mirrored like the torch
+/// release (`MOKURO_TORCH_MODELS_MIRROR`). Empty when it does not load, logged.
+#[cfg(feature = "gpl-models")]
+fn detector_torch_release_files() -> Vec<ModelFile> {
+    release_files_from(DETECTOR_TORCH_MODELS_JSON, TORCH_MIRROR_ENV).unwrap_or_else(|e| {
+        tracing::error!("the compiled-in detector torch package release does not load: {e}");
         Vec::new()
     })
 }
@@ -2559,6 +2593,75 @@ mod tests {
                 f.id
             );
         }
+    }
+
+    #[cfg(feature = "gpl-models")]
+    #[test]
+    fn the_detector_has_its_own_release() {
+        assert_eq!(
+            torch_release_name_for("animetext-blocks"),
+            "detector-torch-v1"
+        );
+        assert_eq!(
+            torch_graphs("animetext-blocks"),
+            ["detector.pt2"].as_slice()
+        );
+    }
+
+    /// The compiled-in detector torch release loads, is the one the constant names, and
+    /// its rows (none until `detector-torch-v1` is published) are AnimeText's
+    /// `detector.pt2` packages, which bind nothing of the release (their weights are the
+    /// CPU route's ONNX file).
+    #[cfg(feature = "gpl-models")]
+    #[test]
+    fn the_detector_torch_release_is_pinned() {
+        let files = release_files_from(DETECTOR_TORCH_MODELS_JSON, TORCH_MIRROR_ENV).unwrap();
+        assert_eq!(
+            serde_json::from_str::<TorchRelease>(DETECTOR_TORCH_MODELS_JSON)
+                .unwrap()
+                .release,
+            DETECTOR_TORCH_RELEASE
+        );
+        let m = Manifest::builtin();
+        for f in &files {
+            assert!(
+                DETECTOR_TORCH_ENGINES.contains(&f.engine.as_str()),
+                "{}",
+                f.id
+            );
+            assert!(f.requires.is_empty(), "{} requires {:?}", f.id, f.requires);
+            let file = f.id.rsplit('/').next().unwrap();
+            assert!(torch_graphs(&f.engine).contains(&file), "{}", f.id);
+            assert_eq!(f.precision.as_deref(), Some("fp32"), "{}", f.id);
+            assert!(
+                m.get(&f.id).is_some(),
+                "{} is in the builtin manifest",
+                f.id
+            );
+        }
+    }
+
+    /// A detector row of the release's shape becomes a package the store can fetch for
+    /// its target.
+    #[cfg(feature = "gpl-models")]
+    #[test]
+    fn detector_rows_load_without_requires() {
+        let json = r#"{"release":"detector-torch-v1","files":[{"engine":"animetext-blocks","file":"animetext-blocks_fp32_linux-rocm-gfx1201_detector.pt2",
+          "url":"https://example.com/x","size":2,"sha256":"00","role":"detector","precision":"fp32","licence":"AGPL-3.0",
+          "id":"torch/animetext-blocks/fp32/linux-rocm-gfx1201/detector.pt2","path":"torch/animetext-blocks/fp32/linux-rocm-gfx1201/detector.pt2",
+          "target":"linux-rocm-gfx1201","unpack_to":"torch/animetext-blocks/fp32/linux-rocm-gfx1201/detector/"}]}"#;
+        let files = release_files_from(json, TORCH_MIRROR_ENV).unwrap();
+        assert!(files[0].requires.is_empty());
+        assert_eq!(files[0].license, "AGPL-3.0");
+        assert_eq!(
+            files[0].id,
+            torch_manifest_id(
+                "animetext-blocks",
+                "fp32",
+                "linux-rocm-gfx1201",
+                "detector.pt2"
+            )
+        );
     }
 
     #[test]

@@ -228,9 +228,11 @@ pub struct EnginePipeline {
     /// The PP-OCR pair of a line detector (its id first), shared by every session on
     /// that detector that needs no more detect workers than it has sessions.
     ppocr: Mutex<Option<(String, usize, Weak<PpocrPageReader>)>>,
-    /// The loaded block detector (its id first), shared by the sessions on it.
+    /// The loaded block detectors by detector and device (`cpu`, `gpu:<n>`), shared by
+    /// the sessions on them.
     #[cfg(feature = "gpl-models")]
-    block_detector: Mutex<Option<(String, Weak<bunko_ocr::animetext::AnimeText>)>>,
+    #[allow(clippy::type_complexity)]
+    block_detectors: Mutex<Vec<((String, String), Weak<dyn bunko_ocr::blocks::BlockDetector>)>>,
     /// The loaded text-box recognizers by engine and session threads, shared by their
     /// sessions.
     #[cfg(feature = "nc-models")]
@@ -250,7 +252,7 @@ impl EnginePipeline {
             recognizers: RecognizerCache::new(Arc::new(OrtSessionFactory)),
             ppocr: Mutex::new(None),
             #[cfg(feature = "gpl-models")]
-            block_detector: Mutex::new(None),
+            block_detectors: Mutex::new(Vec::new()),
             #[cfg(feature = "nc-models")]
             textbox: Mutex::new(Vec::new()),
             loading: Mutex::new(()),
@@ -1443,18 +1445,25 @@ impl EnginePipeline {
         &self.config
     }
 
-    /// The block detector `detector` (`models::block_detector`), loaded once, and the
-    /// pinned `(repo, revision)` of its file when it is the pinned one.
+    /// The block detector `detector` (`models::block_detector`) for `placement`, loaded
+    /// once per device, the pinned `(repo, revision)` of its file when it is the pinned
+    /// one, and the export set of its compiled package when it runs on a GPU
+    /// ([`bunko_ocr::models::DETECTOR_TORCH_RELEASE`]). On a GPU placement AnimeText
+    /// runs on the pack (`bt_detect_blocks`) when it can; any reason it cannot is
+    /// warned about and the detector loads on the CPU (ONNX Runtime), as everywhere
+    /// else. Both routes read the same ONNX file.
     #[cfg(feature = "gpl-models")]
     #[allow(clippy::type_complexity)]
     fn block_detector(
         &self,
         detector: &str,
         copies: usize,
+        placement: &Placement,
     ) -> Result<
         (
             Arc<dyn bunko_ocr::blocks::BlockDetector>,
             Option<(String, String)>,
+            Option<String>,
         ),
         String,
     > {
@@ -1463,12 +1472,39 @@ impl EnginePipeline {
         let source = file
             .verified
             .then(|| (repo.to_string(), revision.to_string()));
-        let mut slot = self.block_detector.lock();
-        if let Some((of, weak)) = slot.as_ref()
-            && of == detector
-            && let Some(d) = weak.upgrade()
-        {
-            return Ok((d, source));
+        // Held across a load: a second session on the same detector waits for it.
+        let mut slots = self.block_detectors.lock();
+        slots.retain(|(_, w)| w.strong_count() > 0);
+        let cached =
+            |slots: &[((String, String), Weak<dyn bunko_ocr::blocks::BlockDetector>)],
+             device: &str| {
+                slots
+                    .iter()
+                    .find(|((d, dev), _)| d == detector && dev == device)
+                    .and_then(|(_, w)| w.upgrade())
+            };
+        #[cfg(feature = "torch")]
+        if placement.is_gpu() {
+            let release = || Some(bunko_ocr::models::torch_release_name_for(detector));
+            if let Some(d) = cached(&slots, &placement.device) {
+                return Ok((d, source, release()));
+            }
+            match self.torch_block_detector(detector, placement, &file.path) {
+                Ok(d) => {
+                    slots.push((
+                        (detector.to_string(), placement.device.clone()),
+                        Arc::downgrade(&d),
+                    ));
+                    return Ok((d, source, release()));
+                }
+                Err(why) => warn!("{detector}: detecting on the CPU: {why}"),
+            }
+        }
+        #[cfg(not(feature = "torch"))]
+        let _ = placement;
+        let cpu = Placement::cpu().device;
+        if let Some(d) = cached(&slots, &cpu) {
+            return Ok((d, source, None));
         }
         let opts = RuntimeOptions {
             intra_threads: plan::SESSION_THREADS + 2 * (copies.max(1) - 1),
@@ -1476,12 +1512,78 @@ impl EnginePipeline {
             copies,
             spinning: false,
         };
-        let loaded = Arc::new(
+        let loaded: Arc<dyn bunko_ocr::blocks::BlockDetector> = Arc::new(
             bunko_ocr::animetext::AnimeText::load(&file.path, &opts)
                 .map_err(|e| format!("could not load AnimeText: {e}"))?,
         );
-        *slot = Some((detector.to_string(), Arc::downgrade(&loaded)));
-        Ok((loaded, source))
+        slots.push(((detector.to_string(), cpu), Arc::downgrade(&loaded)));
+        Ok((loaded, source, None))
+    }
+
+    /// AnimeText on the libtorch GPU of `placement`, binding `onnx` (the CPU route's
+    /// file): the pack must export `bt_detect_blocks`, and a `detector.pt2` for one of
+    /// the device's targets must be here or in the detector release; it is fetched
+    /// (or found) and loaded on the pack.
+    #[cfg(all(feature = "torch", feature = "gpl-models"))]
+    fn torch_block_detector(
+        &self,
+        detector: &str,
+        placement: &Placement,
+        onnx: &std::path::Path,
+    ) -> Result<Arc<dyn bunko_ocr::blocks::BlockDetector>, String> {
+        if detector != models::ANIMETEXT {
+            return Err(format!("{detector} has no GPU route"));
+        }
+        let tb = self.torch()?;
+        if !tb.pack.detects_blocks() {
+            return Err(torch::DETECTOR_PACK_REASON.into());
+        }
+        let precision = Precision::Fp32;
+        let targets = Self::torch_targets(&tb, &placement.device, precision);
+        if !self
+            .store
+            .torch_package_obtainable(detector, precision.as_str(), &targets)
+        {
+            return Err(format!(
+                "no compiled {detector} package for {} here or in the {} release (it needs one of: {}){}",
+                placement.device,
+                bunko_ocr::models::torch_release_name_for(detector),
+                if targets.is_empty() {
+                    "none for this device".into()
+                } else {
+                    targets.join(", ")
+                },
+                if self.store.can_download() {
+                    ""
+                } else {
+                    "; downloads are off (MOKURO_MODELS_DOWNLOAD)"
+                }
+            ));
+        }
+        let pkg = self
+            .store
+            .ensure_torch_package(detector, precision.as_str(), &targets)
+            .map_err(|e| e.to_string())?;
+        let unpack_cache = self
+            .store
+            .options()
+            .root
+            .join(bunko_ocr::models::TORCH_DIR)
+            .join(".unpacked");
+        // The pack's preprocessing pool (the canvas becomes the input tensor on the host).
+        let threads = plan::cpu_engine_threads(
+            plan::physical_cpu_count(),
+            plan::performance_core_count(),
+            self.config.jobs,
+        ) as u32;
+        let reader = tb.detector(
+            &pkg.dir,
+            onnx,
+            &placement.device,
+            threads,
+            Some(&unpack_cache),
+        )?;
+        Ok(Arc::new(torch::detector::TorchBlockDetector::new(reader)))
     }
 
     /// The page reader on `detector`'s lines (`models::DETECTORS`).
@@ -2008,7 +2110,9 @@ impl EnginePipeline {
         let mut block_source: Option<(String, String)> = None;
         #[cfg(feature = "gpl-models")]
         if by_blocks {
-            let (loaded, source) = self.block_detector(detector, detect_workers)?;
+            // The detect stage stays on the CPU until open_session places it.
+            let (loaded, source, _detector_release) =
+                self.block_detector(detector, detect_workers, &Placement::cpu())?;
             (blocks, block_source) = (Some(loaded), source);
         }
         let reader = if by_blocks {
