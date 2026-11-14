@@ -536,17 +536,11 @@ impl Loaded {
         let Some(detect_blocks) = self.api.detect_blocks else {
             return Err("the OCR backend pack predates GPU block detection".into());
         };
-        let raw: Vec<BtCrop> = canvases
-            .iter()
-            .map(|(data, w, h)| BtCrop {
-                data: data.as_ptr(),
-                width: *w,
-                height: *h,
-            })
-            .collect();
+        // The pack reads width*height*3 bytes of each canvas, as of a crop.
+        let raw = bt_crops(canvases).map_err(|e| e.replacen("crop", "canvas", 1))?;
         let (mut out, mut err) = (std::ptr::null_mut(), std::ptr::null_mut());
         // SAFETY: `raw` holds `canvases.len()` entries and outlives the call; each
-        // canvas's bytes are width*height*3 (checked by the caller's Rgb).
+        // canvas's bytes are width*height*3 (checked by `bt_crops`).
         let status = unsafe {
             detect_blocks(
                 self.handle,

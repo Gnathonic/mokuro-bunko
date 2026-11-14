@@ -402,6 +402,32 @@ fn a_wrong_detect_blocks_count_is_an_error() {
     assert_eq!(e, "bt_detect_blocks returned 1 results for 2 canvases");
 }
 
+#[test]
+fn a_canvas_whose_bytes_do_not_match_its_size_is_refused() {
+    // The pack reads width*height*3 bytes of each canvas, as of a crop: a shorter slice
+    // is refused before the call.
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = pack_dir(tmp.path(), &manifest(BT_ABI_VERSION, std::env::consts::OS));
+    if !fixture_library(&dir, &detect_blocks_fixture("n")) {
+        return;
+    }
+    let pack = Pack::open(&dir, true).unwrap();
+    let h = pack
+        .load(
+            "animetext-blocks",
+            tmp.path(),
+            "fp32",
+            "cpu",
+            &Default::default(),
+        )
+        .unwrap();
+    let canvas = vec![114u8; 32 * 32 * 3];
+    let e = h
+        .detect_blocks(&[(&canvas, 32, 32), (&canvas[1..], 32, 32)], 0.3)
+        .unwrap_err();
+    assert_eq!(e, "canvas 1 has 3071 bytes for 32x32");
+}
+
 /// A real pack (`MOKURO_TORCH_PACK`) with fake libtorch libraries first on
 /// `LD_LIBRARY_PATH`: the loader must bind the pack's own. Run with
 /// `MOKURO_TORCH_PACK=<pack> cargo test -p bunko-engines --test torch_loader -- --ignored`.
