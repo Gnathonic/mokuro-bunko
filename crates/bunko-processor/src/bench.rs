@@ -15,10 +15,15 @@
 //! 2. for a balanced/speed row with more than one candidate format on the model's
 //!    device, one trial per candidate on the same sample, the fastest winning (a 5% tie
 //!    goes to the more accurate);
-//! 3. the width search: widen the stage the pipeline's own verdict names while it pays
+//! 3. for a text-box row (charspot-small, nar-small) whose engine stage the engines put
+//!    on a GPU and the row did not pin, one trial with the engine stage on the CPU (its
+//!    pool at its own derived widths): the faster placement wins, the GPU keeping a 5%
+//!    tie, and the width search starts from the winner. The text is the same on either
+//!    device, so this only picks where it is read;
+//! 4. the width search: widen the stage the pipeline's own verdict names while it pays
 //!    (≥ 3%), then give back what is not used while throughput holds (within 1% of the
-//!    peak); at most 8 trials (+ the precision phase) and 900 s;
-//! 4. every trial re-feeds the sample as one continuous run until its measured window
+//!    peak); at most 8 trials (+ the precision and placement phases) and 900 s;
+//! 5. every trial re-feeds the sample as one continuous run until its measured window
 //!    is ≥ 20 s (or 8 feeds), and the rate is `(M - 1) / (t_last - t_first)` over the
 //!    page emissions after the pipeline fill — never a stopwatch around anything.
 //!
@@ -217,6 +222,28 @@ fn ceiling_on(
     ceiling.max(derived).max(1)
 }
 
+/// The engine-stage placements a benchmark tries for this row: `[placed, "cpu"]` for a
+/// text-box recognizer (charspot-small, nar-small) that the engines `placed` on a GPU
+/// while the row left its engine stage unpinned (`asked` None or `auto`: a benchmark
+/// keeps the row's device pins), else none. On the CPU a text-box recognizer is a pool
+/// over every core, so a weak card can be slower than the host it sits in.
+fn engine_candidates(engine: &str, asked: Option<&str>, placed: &str) -> Vec<String> {
+    let textbox = matches!(engine, "charspot-small" | "nar-small");
+    let unpinned = asked.is_none_or(|a| a.is_empty() || a == "auto");
+    if textbox && unpinned && placed.starts_with("gpu") {
+        vec![placed.to_string(), "cpu".to_string()]
+    } else {
+        Vec::new()
+    }
+}
+
+/// Whether the CPU trial of [`engine_candidates`] wins: the GPU keeps a tie within
+/// [`policy::PRECISION_TIE`] (5%), as the more accurate format does in
+/// `pick_precision`.
+fn cpu_beats_gpu(gpu_pps: f64, cpu_pps: f64) -> bool {
+    gpu_pps < cpu_pps * (1.0 - policy::PRECISION_TIE)
+}
+
 /// Logical CPUs (SMT threads included).
 pub fn logical_cpu_count() -> usize {
     std::thread::available_parallelism()
@@ -413,6 +440,9 @@ pub struct BenchRun<'a> {
     /// The phase's candidates, in order.
     candidates: Vec<String>,
     precision_why: String,
+    /// The engine stage's device every runner opens with (the placement phase's CPU
+    /// trial, and every runner after it once the CPU won); None: the row's own.
+    engine_device: Option<String>,
     volumes: AtomicUsize,
 }
 
@@ -452,6 +482,7 @@ impl<'a> BenchRun<'a> {
             unrunnable: Vec::new(),
             candidates: Vec::new(),
             precision_why: String::new(),
+            engine_device: None,
             volumes: AtomicUsize::new(0),
         }
     }
@@ -504,6 +535,11 @@ impl<'a> BenchRun<'a> {
         }
         if let Some(p) = precision {
             apply_format(&mut spec, p);
+        }
+        if let Some(device) = &self.engine_device {
+            spec.pools
+                .stage_device
+                .insert("engine".to_string(), device.clone());
         }
         spec
     }
@@ -1125,6 +1161,141 @@ impl<'a> BenchRun<'a> {
             .map(|(_, t)| *t))
     }
 
+    /// How wide each stage may be made, for a runner at its `derived` widths: what the
+    /// engines say, else [`estimated_ceiling`] from the stage `report`.
+    fn ceilings_of(
+        &self,
+        runner: &dyn VolumeRunner,
+        report: Option<&PipelineReport>,
+        derived: &[u32],
+    ) -> Vec<u32> {
+        let budget = self
+            .config
+            .workers_budget
+            .unwrap_or_else(|| host_worker_budget(logical_cpu_count(), self.config.jobs))
+            .max(1);
+        let told = runner.width_ceilings();
+        self.keys
+            .iter()
+            .zip(derived)
+            .map(|(k, d)| match told.get(k) {
+                Some(c) => (*c).max(*d).max(1),
+                None => estimated_ceiling(
+                    report.and_then(|r| r.stages.iter().find(|s| &s.key == k)),
+                    &self.op.spec.engine,
+                    budget,
+                    *d,
+                ),
+            })
+            .collect()
+    }
+
+    /// `engine_phase(widths, measured, candidates)` for a text-box row on a GPU
+    /// ([`engine_candidates`]): the engine stage on the GPU (the current runner at
+    /// `widths`; `measured`, the precision phase's winner, when that phase already
+    /// measured it) against the same row with its engine stage on the CPU, opened at
+    /// its own derived widths (a CPU pool's widths are not a GPU stage's). The CPU wins
+    /// only by more than the 5% tie ([`cpu_beats_gpu`]); it then becomes the current
+    /// runner and every later one opens there, and the ceilings are its own. A CPU
+    /// that will not load, will not run or measures too short a window leaves the GPU.
+    /// The winning trial and the widths the search starts from.
+    fn engine_phase(
+        &mut self,
+        widths: &[u32],
+        measured: Option<usize>,
+        candidates: &[String],
+    ) -> Result<(usize, Vec<u32>), BenchAbort> {
+        let (Some(gpu), Some(cpu)) = (candidates.first(), candidates.get(1)) else {
+            return Err(BenchAbort::Fatal(format!(
+                "the placement phase needs a GPU and a CPU candidate, not {candidates:?}"
+            )));
+        };
+        tracing::info!(
+            "benchmark {}: placement trials -- engine on {}",
+            self.op.bid,
+            candidates.join(", ")
+        );
+        let gpu_trial = match measured {
+            Some(t) => t,
+            None => self.trial(widths, &format!("engine on {gpu}"))?,
+        };
+        // Say the GPU trial (unless the precision phase already said it) with its verdict.
+        let keep_gpu = |run: &mut Self| {
+            if measured.is_none() {
+                run.emit_trial(gpu_trial, true);
+            }
+            Ok((gpu_trial, widths.to_vec()))
+        };
+        if Instant::now() >= self.deadline {
+            tracing::info!(
+                "benchmark {}: out of time before trying the engine on {cpu}",
+                self.op.bid
+            );
+            return keep_gpu(self);
+        }
+        self.check()?;
+        let held = (
+            self.settled.take(),
+            self.precision.clone(),
+            self.engine_device.replace(cpu.clone()),
+        );
+        let restore = |run: &mut Self, gpu_runner: Option<Loaded>| {
+            run.current = None;
+            run.current = gpu_runner;
+            (run.settled, run.precision, run.engine_device) = held.clone();
+        };
+        let opened = match self.open(None, None) {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::warn!(
+                    "benchmark {}: the engine could not open on {cpu} ({e}); it stays on {gpu}",
+                    self.op.bid
+                );
+                (self.settled, self.precision, self.engine_device) = held.clone();
+                return keep_gpu(self);
+            }
+        };
+        let derived = opened.widths.clone();
+        let report = opened.runner.stats();
+        let ceilings = self.ceilings_of(&*opened.runner, report.as_ref(), &derived);
+        self.precision = opened.ready.precision.clone().or(self.precision.take());
+        let gpu_runner = self.current.replace(opened);
+        let cpu_trial = match self.trial(&derived, &format!("engine on {cpu}")) {
+            Ok(t) => t,
+            Err(BenchAbort::Fatal(e)) => {
+                tracing::warn!(
+                    "benchmark {}: the engine on {cpu} failed its trial ({e}); it stays on {gpu}",
+                    self.op.bid
+                );
+                restore(self, gpu_runner);
+                return keep_gpu(self);
+            }
+            Err(abort) => return Err(abort),
+        };
+        let (g, c) = (
+            self.trials[gpu_trial].pages_per_second(),
+            self.trials[cpu_trial].pages_per_second(),
+        );
+        let cpu_wins = self.decidable(cpu_trial, gpu_trial) && cpu_beats_gpu(g, c);
+        if measured.is_none() {
+            self.emit_trial(gpu_trial, !cpu_wins);
+        }
+        self.emit_trial(cpu_trial, cpu_wins);
+        tracing::info!(
+            "benchmark {}: engine on {gpu} {g:.3} pages/s, on {cpu} {c:.3}; it reads on {}",
+            self.op.bid,
+            if cpu_wins { cpu } else { gpu }
+        );
+        if !cpu_wins {
+            restore(self, gpu_runner);
+            return Ok((gpu_trial, widths.to_vec()));
+        }
+        // `settled` stays None: the CPU route runs what the row's mode resolves to there.
+        drop(gpu_runner);
+        self.ceilings = ceilings;
+        Ok((cpu_trial, derived))
+    }
+
     /// `_settle_precision`: every later runner runs `chosen` (loaded again when the
     /// phase ended on another candidate).
     fn settle(&mut self, chosen: &str, widths: &[u32]) -> Result<(), BenchAbort> {
@@ -1194,28 +1365,7 @@ impl<'a> BenchRun<'a> {
         };
         let derived = self.widths_of(&first.ready);
         let asked_devices = first.ready.stage_device.clone();
-        let budget = self
-            .config
-            .workers_budget
-            .unwrap_or_else(|| host_worker_budget(logical_cpu_count(), self.config.jobs))
-            .max(1);
-        let told = first.runner.width_ceilings();
-        self.ceilings = self
-            .keys
-            .iter()
-            .zip(&derived)
-            .map(|(k, d)| match told.get(k) {
-                Some(c) => (*c).max(*d).max(1),
-                None => estimated_ceiling(
-                    report
-                        .as_ref()
-                        .and_then(|r| r.stages.iter().find(|s| &s.key == k)),
-                    &self.op.spec.engine,
-                    budget,
-                    *d,
-                ),
-            })
-            .collect();
+        self.ceilings = self.ceilings_of(&*first.runner, report.as_ref(), &derived);
         self.precision = first.ready.precision.clone();
         let mut first = first;
         first.widths = derived.clone();
@@ -1242,7 +1392,25 @@ impl<'a> BenchRun<'a> {
         );
         let tunable = self.tunable(&derived) && !self.op.precision_only;
         let usable = self.precision_candidates();
-        let phase = usable.len();
+        let placements = if self.op.precision_only {
+            Vec::new()
+        } else {
+            engine_candidates(
+                &self.op.spec.engine,
+                self.op
+                    .spec
+                    .pools
+                    .stage_device
+                    .get("engine")
+                    .map(String::as_str),
+                asked_devices.get("engine").map_or("", String::as_str),
+            )
+        };
+        // The placement phase's GPU trial is the precision phase's winner when there is one.
+        let phase = usable.len()
+            + placements
+                .len()
+                .saturating_sub(usize::from(!usable.is_empty()));
         self.max_trials += phase;
         let mut ready = Map::new();
         ready.insert("startup_seconds".into(), r3(startup));
@@ -1264,11 +1432,21 @@ impl<'a> BenchRun<'a> {
             detail: ready,
         });
 
-        let winner = if phase > 0 {
-            self.precision_phase(&derived, &usable)?
-        } else {
+        let mut winner = if usable.is_empty() {
             None
+        } else {
+            self.precision_phase(&derived, &usable)?
         };
+        let mut derived = derived;
+        let mut tunable = tunable;
+        if !placements.is_empty() {
+            // When the CPU pool wins, the search starts from its own derivation and
+            // ceilings.
+            let (t, widths) = self.engine_phase(&derived, winner, &placements)?;
+            winner = Some(t);
+            derived = widths;
+            tunable = self.tunable(&derived);
+        }
         if let Some(p) = &self.precision {
             tracing::info!(
                 "benchmark {}: the recognizer runs at {p} from here on",
@@ -1486,6 +1664,47 @@ mod tests {
             ..pool.clone()
         };
         assert_eq!(estimated_ceiling(Some(&detect), "nar-small", 22, 4), 8);
+    }
+
+    fn stage(key: &str, device: &str, device_bound: bool) -> crate::pipeline::StageReport {
+        crate::pipeline::StageReport {
+            key: key.into(),
+            device: device.into(),
+            device_bound,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_gpu_text_box_engine_stage_is_capped_like_any_gpu_stage() {
+        let s = stage("engine", "gpu:0", true);
+        assert_eq!(ceiling_on(Some(&s), "nar-small", 6, 1, 24), 6);
+        assert_eq!(ceiling_on(Some(&s), "nar-small", 12, 1, 24), 8);
+    }
+
+    #[test]
+    fn a_gpu_text_box_engine_is_tried_on_the_cpu_too() {
+        assert_eq!(
+            engine_candidates("nar-small", None, "gpu:0"),
+            ["gpu:0", "cpu"]
+        );
+        assert_eq!(
+            engine_candidates("charspot-small", Some("auto"), "gpu:1"),
+            ["gpu:1", "cpu"]
+        );
+        assert!(engine_candidates("nar-small", Some("gpu:0"), "gpu:0").is_empty()); // pinned
+        assert!(engine_candidates("nar-small", Some("cpu"), "cpu").is_empty());
+        assert!(engine_candidates("nar-small", None, "cpu").is_empty());
+        assert!(engine_candidates("hayai-nova", None, "gpu:0").is_empty());
+    }
+
+    #[test]
+    fn the_gpu_keeps_a_five_percent_tie() {
+        assert!(!cpu_beats_gpu(10.0, 10.4)); // 10.0 >= 10.4 * 0.95
+        assert!(cpu_beats_gpu(10.0, 10.6)); // 10.0 <  10.07
+        assert!(cpu_beats_gpu(0.0, 1.0)); // a GPU trial that measured nothing
+        assert!(!cpu_beats_gpu(8.5, 6.0)); // the RX 9070 XT against a 24-core pool (spec §5)
+        assert!(!cpu_beats_gpu(0.0, 0.0)); // nothing measured either way: the GPU stays
     }
 
     /// The server can pick a volume of JPEG XL pages as the sample: its pages count.

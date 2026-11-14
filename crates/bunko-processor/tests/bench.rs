@@ -502,6 +502,111 @@ async fn a_cancel_ends_it_with_cancelled_and_exit() {
     link.shutdown().await;
 }
 
+/// A text-box row the engines put on a GPU: `(seen, opens)` of a benchmark where a page
+/// takes `gpu_ms` with the engine on the GPU and `cpu_ms` with it on the CPU.
+async fn placement_run(gpu_ms: u64, cpu_ms: u64, spec: RowSpec) -> (Seen, u64) {
+    let config = FakeConfig {
+        engines: vec!["nar-small".into()],
+        gpu_formats: Some(vec!["fp32".into()]),
+        page_delay: Duration::from_millis(gpu_ms),
+        cpu_page_delay: Some(Duration::from_millis(cpu_ms)),
+        ..Default::default()
+    };
+    let (seen, fake) = run(config, spec, false).await;
+    assert_eq!(seen.fatal, None);
+    assert_eq!(seen.exit, Some(Some(0)));
+    (seen, fake.opened())
+}
+
+fn placement_notes(seen: &Seen) -> Vec<(&str, bool, &str)> {
+    seen.trials
+        .iter()
+        .map(|t| {
+            (
+                t["note"].as_str().unwrap(),
+                t["accepted"] == true,
+                t["stage_device"]["engine"].as_str().unwrap(),
+            )
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_text_box_row_on_a_fast_gpu_stays_there() {
+    let (seen, _) = placement_run(4, 12, spec("nar-small", "auto-accuracy", &[])).await;
+    let ready = seen.ready.as_ref().unwrap();
+    assert_eq!(ready["stage_device"], json!({"engine": "gpu:0"}));
+    assert_eq!(
+        ready["max_trials"], 10,
+        "the placement phase brings two trials"
+    );
+    let notes = placement_notes(&seen);
+    assert_eq!(
+        &notes[..2],
+        [
+            ("engine on gpu:0", true, "gpu:0"),
+            ("engine on cpu", false, "cpu")
+        ],
+        "{:#?}",
+        seen.trials
+    );
+    assert!(notes[2..].iter().all(|n| n.2 == "gpu:0"), "{notes:?}");
+    let done = seen.done.unwrap();
+    assert_eq!(done["best"]["stage_device"], json!({}));
+    assert_eq!(done["best"]["trial"], 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_text_box_row_on_a_slow_gpu_reads_on_the_cpu() {
+    let (seen, opens) = placement_run(12, 4, spec("nar-small", "auto-accuracy", &[])).await;
+    let notes = placement_notes(&seen);
+    assert_eq!(
+        &notes[..2],
+        [
+            ("engine on gpu:0", false, "gpu:0"),
+            ("engine on cpu", true, "cpu")
+        ],
+        "{:#?}",
+        seen.trials
+    );
+    // Every later trial (the width search) runs the engine on the CPU too.
+    assert!(notes[2..].iter().all(|n| n.2 == "cpu"), "{notes:?}");
+    let done = seen.done.unwrap();
+    assert_eq!(done["best"]["stage_device"], json!({"engine": "cpu"}));
+    assert_eq!(done["best"]["trial"], 2);
+    // The search starts from the CPU trial: it is the baseline.
+    assert_eq!(
+        done["baseline"]["pages_per_second"],
+        seen.trials[1]["pages_per_second"]
+    );
+    assert_eq!(done["precision"], "fp32");
+    assert!(opens >= 2, "the first load and the CPU one: {opens}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pinned_or_cpu_text_box_row_has_no_placement_phase() {
+    let mut pinned = spec("nar-small", "auto-accuracy", &[]);
+    pinned
+        .pools
+        .stage_device
+        .insert("engine".into(), "gpu:0".into());
+    let (seen, _) = placement_run(12, 4, pinned).await;
+    assert_eq!(seen.ready.as_ref().unwrap()["max_trials"], 8);
+    assert_eq!(seen.trials[0]["note"], "auto");
+    assert!(placement_notes(&seen).iter().all(|n| n.2 == "gpu:0"));
+    assert_eq!(seen.done.unwrap()["best"]["stage_device"], json!({}));
+
+    // No GPU: the row is on the CPU already.
+    let config = FakeConfig {
+        engines: vec!["nar-small".into()],
+        page_delay: Duration::from_millis(4),
+        ..Default::default()
+    };
+    let (seen, _) = run(config, spec("nar-small", "auto-accuracy", &[]), false).await;
+    assert_eq!(seen.ready.as_ref().unwrap()["max_trials"], 8);
+    assert_eq!(seen.trials[0]["note"], "auto");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn models_that_will_not_load_and_a_missing_sample_are_fatal() {
     let config = FakeConfig {

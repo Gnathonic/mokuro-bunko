@@ -47,6 +47,9 @@ pub struct FakeConfig {
     /// Time per page at a resolved precision (instead of `page_delay`), for the
     /// precision engines (`hayai-nova`, `paddle-manga`).
     pub precision_page_delay: BTreeMap<String, Duration>,
+    /// Time per page when the engine runs on the CPU (instead of `page_delay`), for a
+    /// benchmark that tries a GPU row's engine stage on the CPU.
+    pub cpu_page_delay: Option<Duration>,
     /// The engine stage's width (`pools.stage_workers.engine`) divides the page time,
     /// up to this many workers; each worker past it slows a page by a quarter (0:
     /// widths change nothing).
@@ -297,10 +300,9 @@ struct FakeRunner {
 impl FakeRunner {
     fn page_delay(&self) -> Duration {
         let config = &self.pipeline.config;
-        let base = config
-            .precision_page_delay
-            .get(&self.precision)
-            .copied()
+        let cpu = config.cpu_page_delay.filter(|_| self.device == "cpu");
+        let base = cpu
+            .or_else(|| config.precision_page_delay.get(&self.precision).copied())
             .unwrap_or(config.page_delay);
         let useful = self.width.min(config.useful_width).max(1);
         // Workers past the useful width contend: each costs a quarter of a page.

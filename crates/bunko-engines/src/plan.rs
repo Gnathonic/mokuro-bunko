@@ -13,16 +13,18 @@
 //! that many threads over the one shared session. A libtorch recognizer on the CPU
 //! (hayai-nova, paddle-manga) stays at 1: one call already spreads over every core.
 //!
-//! The text-box recognizers (charspot-small, nar-small: ONNX Runtime, CPU only) read one
-//! block crop per call, too little work to keep a wide intra-op pool busy, so their
-//! engine stage is a pooled CPU stage instead: many workers over one shared session of
-//! one or two threads ([`textbox_session_threads`]). The job's cores ([`core_count`],
-//! SMT threads aside) are split between it and the detect stage by what a page costs
-//! each ([`textbox_engine_workers`], [`textbox_detect_workers`]); an explicit engine
-//! width leaves detect at its share of that default split. A 24-core host reads
-//! nar-small on AnimeText blocks about 3x faster that way than with one 8-thread
-//! worker, at half the CPU time a block. Width 0 (0.5.2's fused serial fallback) runs
-//! as 1.
+//! The text-box recognizers (charspot-small, nar-small) run on the CPU through ONNX
+//! Runtime, or on a GPU through the libtorch backend pack. On the CPU each call reads
+//! one block crop, too little work to keep a wide intra-op pool busy, so their engine
+//! stage is a pooled CPU stage there: many workers over one shared session of one or
+//! two threads ([`textbox_session_threads`]). The job's cores ([`core_count`], SMT
+//! threads aside) are split between it and the detect stage by what a page costs each
+//! ([`textbox_engine_workers`], [`textbox_detect_workers`]); an explicit engine width
+//! leaves detect at its share of that default split. A 24-core host reads nar-small on
+//! AnimeText blocks about 3x faster that way than with one 8-thread worker, at half the
+//! CPU time a block. On a GPU a page's blocks are one batched call, so the engine stage
+//! is device-bound like hayai-nova's, sized by its GPU figure ([`textbox_gpu_seconds`]).
+//! Width 0 (0.5.2's fused serial fallback) runs as 1.
 
 use std::collections::BTreeMap;
 
@@ -109,20 +111,34 @@ pub struct StagePlan {
 /// page), one detect worker keeps it fed, and each extra one only holds another
 /// decoded page and another detector working set in memory.
 ///
-/// The text-box recognizers' figure is one worker's page at one intra-op thread, which
-/// is also the CPU time the page costs ([`textbox_cpu_seconds`]).
+/// The text-box recognizers' CPU figure is one worker's page at one intra-op thread,
+/// which is also the CPU time the page costs ([`textbox_cpu_seconds`]); on a GPU it is
+/// the page's one batched call ([`textbox_gpu_seconds`]).
 fn stage_seconds(engine: &str, key: &str, declared: f64, gpu: bool) -> f64 {
     match (engine, key, gpu) {
         ("paddle-manga", STAGE_ENGINE, true) => 0.915,
         ("hayai-nova", STAGE_ENGINE, true) => 0.177,
         ("paddle-manga", STAGE_ENGINE, false) => 27.0,
         ("hayai-nova", STAGE_ENGINE, false) => 3.6,
-        (e, STAGE_ENGINE, _) => textbox_cpu_seconds(e).unwrap_or(declared),
+        (e, STAGE_ENGINE, true) => textbox_gpu_seconds(e).unwrap_or(declared),
+        (e, STAGE_ENGINE, false) => textbox_cpu_seconds(e).unwrap_or(declared),
         _ => declared,
     }
 }
 
-/// CPU seconds a page costs a text-box recognizer (CPU only) on one intra-op thread,
+/// Seconds a page costs a text-box recognizer on a GPU (libtorch, one batched call of
+/// the page's blocks), None for any other engine. The spike's figures on a 16-core
+/// desktop with an RX 9070 XT, 9.4 blocks a page; replaced by the gated targets'
+/// measured ones once they are built.
+pub fn textbox_gpu_seconds(engine: &str) -> Option<f64> {
+    match engine {
+        "nar-small" => Some(0.12),
+        "charspot-small" => Some(0.04),
+        _ => None,
+    }
+}
+
+/// CPU seconds a page costs a text-box recognizer on the CPU on one intra-op thread,
 /// None for any other engine. Measured on a 24-core host, 9.4 blocks a page: nar-small
 /// 0.13-0.19 s a block, charspot-small 0.035-0.047 (a 16-core desktop: 0.23, 0.05).
 pub fn textbox_cpu_seconds(engine: &str) -> Option<f64> {
@@ -429,8 +445,9 @@ pub fn plan(
         CPU_WORKERS_MAX
     };
     let ceiling = budget.clamp(1, cap);
-    // The engine stage's default width (only the fast-GPU hayai-nova case is 2: its
-    // device time per page is small next to its host side).
+    // The engine stage's default width (2 only for a cheap page on a fast GPU of a large
+    // host, hayai-nova or a text-box recognizer: its device time per page is small next
+    // to its host side).
     let engine_threads = |cost: f64| {
         if gpu && host.fast_gpu && host.physical_cores >= FAST_GPU_MIN_CORES && cost < 0.3 {
             FAST_GPU_ENGINE_THREADS
@@ -919,6 +936,52 @@ mod tests {
             graph_line(&p),
             "detect (cpu x6, queue 6) -> engine (gpu:0 x2, queue 2) -> post (cpu x1, queue 1)"
         );
+    }
+
+    #[test]
+    fn a_gpu_text_box_stage_uses_its_gpu_figure() {
+        let h = Host {
+            budget: 8,
+            physical_cores: 24,
+            jobs: 1,
+            fast_gpu: true,
+        };
+        let p = plan(
+            "nar-small",
+            Road::Reconciled,
+            "gpu:0",
+            &PoolsSpec::default(),
+            &h,
+        );
+        let e = p.iter().find(|s| s.key == STAGE_ENGINE).unwrap();
+        assert!(e.device_bound);
+        assert_eq!((e.seconds, e.workers), (0.12, 2));
+        let d = p.iter().find(|s| s.key == STAGE_DETECT).unwrap();
+        assert_eq!(d.workers, 8); // ceil(2 * 0.225 / (0.12 / 2)) = 8, the ceiling
+        let cpu = plan(
+            "nar-small",
+            Road::Reconciled,
+            "cpu",
+            &PoolsSpec::default(),
+            &h,
+        );
+        assert!(
+            !cpu.iter()
+                .find(|s| s.key == STAGE_ENGINE)
+                .unwrap()
+                .device_bound
+        );
+        // charspot-small's figure, and none for any other engine.
+        assert_eq!(textbox_gpu_seconds("charspot-small"), Some(0.04));
+        assert_eq!(textbox_gpu_seconds("hayai-nova"), None);
+        let c = plan(
+            "charspot-small",
+            Road::Reconciled,
+            "gpu:0",
+            &PoolsSpec::default(),
+            &h,
+        );
+        assert_eq!(c[1].seconds, 0.04);
     }
 
     #[test]
