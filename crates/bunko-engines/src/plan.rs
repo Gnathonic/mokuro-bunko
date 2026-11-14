@@ -145,11 +145,14 @@ fn stage_seconds(engine: &str, key: &str, declared: f64, gpu: bool) -> f64 {
 /// Seconds a page costs a text-box recognizer on a GPU (libtorch, one batched call of
 /// the page's blocks), None for any other engine. The spike's figures on a 16-core
 /// desktop with an RX 9070 XT, 9.4 blocks a page; replaced by the gated targets'
-/// measured ones once they are built.
+/// measured ones once they are built. charspot-small's is gated: its engine stage on one
+/// worker took 0.094 s a page on that desktop with AnimeText on the same GPU and 0.125 s
+/// with PP-OCR's line boxes (a test volume, 8.3 and 8.6 blocks a page), the slower card
+/// next to an RTX 4090 (which reads several times its crops a second).
 pub fn textbox_gpu_seconds(engine: &str) -> Option<f64> {
     match engine {
         "nar-small" => Some(0.12),
-        "charspot-small" => Some(0.04),
+        "charspot-small" => Some(0.1),
         _ => None,
     }
 }
@@ -1097,7 +1100,7 @@ mod tests {
                 .device_bound
         );
         // charspot-small's figure, and none for any other engine.
-        assert_eq!(textbox_gpu_seconds("charspot-small"), Some(0.04));
+        assert_eq!(textbox_gpu_seconds("charspot-small"), Some(0.1));
         assert_eq!(textbox_gpu_seconds("hayai-nova"), None);
         let c = plan(
             "charspot-small",
@@ -1107,7 +1110,7 @@ mod tests {
             &PoolsSpec::default(),
             &h,
         );
-        assert_eq!(c[1].seconds, 0.04);
+        assert_eq!(c[1].seconds, 0.1);
     }
 
     fn big() -> Host {
