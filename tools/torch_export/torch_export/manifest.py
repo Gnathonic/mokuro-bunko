@@ -55,6 +55,13 @@ def build_manifest(out: Path, tag: str, base_url: str | None = None, flat_dir: P
         rec = json.loads(rec_path.read_text())
         eng, prec, target = rec["engine"], rec["precision"], rec["target"]
         tdir = rec_path.parent
+        if "authors_weights" in rec:
+            # a package bound to its authors' weights (nar-small, ...): a release of its
+            # own, through textbox-manifest; its files are accounted for, not stray
+            seen.update(tdir / g["file"] for g in rec.get("graphs", {}).values())
+            print(f"{rec_path}: {eng} binds its authors' weights; left out (use textbox-manifest)",
+                  file=sys.stderr)
+            continue
         srcs = _sources(eng)
         lic = " AND ".join(sorted({s["licence"] for s in srcs}))
         weights = sorted(rec.get("weights", {}))

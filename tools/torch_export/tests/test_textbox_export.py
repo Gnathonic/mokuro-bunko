@@ -126,3 +126,29 @@ def test_weights_inside_is_refused(tmp_path):
     pkg("nar_embed.pt2", 10)  # the spike's naming: refused whatever its size
     with pytest.raises(SystemExit, match="nar_embed.pt2"):
         verify.refuse_embedded(tmp_path, lambda engine: 1000)
+
+
+def test_base_manifest_leaves_text_box_packages_out(tmp_path):
+    # build and manifest share the default out dir: a nar-small build there must not break
+    # the hayai/paddle release manifest, nor land in it (it has a release of its own)
+    import json
+
+    from torch_export.build import sha256
+
+    nar = tmp_path / "nar-small" / "fp32" / "linux-rocm-gfx1201"
+    nar.mkdir(parents=True)
+    _package(nar / "model.pt2", "model")
+    (nar / "build.json").write_text(json.dumps({
+        "engine": "nar-small", "precision": "fp32", "target": "linux-rocm-gfx1201", "io": "textbox-1",
+        "tool": "0.1.0", "torch": "2.13.0+rocm7.1",
+        "graphs": {"model": {"file": "model.pt2", "sha256": sha256(nar / "model.pt2")}},
+        "authors_weights": {"repo": T.NAR_PIN.repo, "revision": T.NAR_PIN.revision}}))
+    hayai = tmp_path / "hayai-nova" / "fp32" / "linux-rocm-gfx1201"
+    hayai.mkdir(parents=True)
+    _package(hayai / "vision.pt2", "vision")
+    (hayai / "build.json").write_text(json.dumps({
+        "engine": "hayai-nova", "precision": "fp32", "target": "linux-rocm-gfx1201", "io": 1,
+        "tool": "0.1.0", "torch": "2.13.0+rocm7.1",
+        "graphs": {"vision": {"file": "vision.pt2", "sha256": sha256(hayai / "vision.pt2")}}}))
+    m = manifest.build_manifest(tmp_path, "torch-models-v1")
+    assert [f["engine"] for f in m["files"]] == ["hayai-nova"]
