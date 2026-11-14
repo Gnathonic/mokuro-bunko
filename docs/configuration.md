@@ -1146,7 +1146,7 @@ ocr:
 | `engine` | — (required) | One of the [engines](#ocr-engines). |
 | `detector` | `ppocr-manga` | The [text detector](#ocr-detectors) of every engine but `ppocr-manga`: `ppocr-manga`, `ctd-lines`, or (for the engines that read blocks) `animetext-blocks`. Ignored (and stored as `null`) for the `ppocr-manga` engine, which brings its own. |
 | `patch_budget` | `512` | `256`, `384` or `512`: the resolution `hayai-nova` reads each line at, on every backend (libtorch, ncnn, WebGPU, the CPU). A backend pack from before 0.8.0 reads 512 only; at another budget its session stops with "update the OCR backend pack" (`mokuro-bunko install-ocr --force`). Reaches no other engine. |
-| `precision` | `auto-accuracy` | The row's [precision mode](#precision-modes), the same on every machine: `auto-accuracy`, `auto-balanced`, `auto-speed`, or `fp32` / `bf16` / `fp16` only. `ppocr-manga` fixes its own and ignores it. |
+| `precision` | `auto-accuracy` | The row's [precision mode](#precision-modes), the same on every machine: `auto-accuracy`, `auto-balanced`, `auto-speed`, or `fp32` / `bf16` / `fp16` only. `nar-small` has no `bf16` (a row error). `ppocr-manga` fixes its own and ignores it. |
 | `pools` | `{}` (derive) | Where each stage of this row runs and how wide. See [Pools](#pools-stages-and-devices). |
 
 **The order is the setting.** The queue runs the rows top to bottom: every
@@ -1322,7 +1322,7 @@ CPU. Nothing that runs on ONNX Runtime needs a backend pack.
 | `paddle-manga` | [PaddleOCR-VL 1.6 + manga LoRA](https://huggingface.co/sorryhyun/paddleocr-vl-1.6-manga-lora) | card recommended | The most accurate and the slowest; about 1.8 GB of model files in bf16/fp16, 3.6 GB in fp32, which the CPU and the default `auto-accuracy` mode run. Needs a detector. On the CPU about 40 s a page on 16 threads: there hayai-nova is the engine of choice. |
 | `ppocr-manga` | [PP-OCRv6 manga](https://huggingface.co/Kellenok/PP-OCRv6_manga) line detector + CTC recognizer, 23 MB | CPU only | Reads lines rather than bubbles, removes furigana, and reads scanned **novel** pages (as do the other engines on the `ppocr-manga` detector). Brings its own detector. |
 | `charspot-small` | [manga-ocr-charspot-small](https://huggingface.co/muscgab/manga-ocr-charspot-small), 44 MB | CPU only | Detects and classifies each character of a text block; no decoder, so it is fast on a CPU (about five times hayai-nova there), and it leaves furigana out by itself. Japanese only. Needs a detector, a line or a block one. Weights CC BY-NC-SA 4.0. |
-| `nar-small` | [manga-ocr-nar-small](https://huggingface.co/muscgab/manga-ocr-nar-small) `r16`: the author's 217 MB weights and a 0.7 MB graph from this project's `textbox-graphs-v1` release | card or CPU | Writes a text block in one pass (at most 160 characters). Japanese only. On an NVIDIA or AMD card with the libtorch backend pack it reads in fp32 with the same text as on the CPU, all of a page's blocks in one call, from a compiled graph of this project's `textbox-torch-v1` release (about 4 MB, no weights) bound to the same author's weights; elsewhere it reads on the CPU. Needs a detector, a line or a block one. The most accurate engine on JMangaBench_Read through Bunko's pipeline: 95.84 (90.6% of the boxes exact) on the `ppocr-manga` detector, 96.73 (92.1%) on `animetext-blocks`, where hayai-nova reads 94.58 (86.2%); see [MODELS.md](rust-port/MODELS.md) §8. Weights CC BY-NC-SA 4.0. |
+| `nar-small` | [manga-ocr-nar-small](https://huggingface.co/muscgab/manga-ocr-nar-small) `r16`: the author's 217 MB weights and a 0.7 MB graph from this project's `textbox-graphs-v1` release | card or CPU | Writes a text block in one pass (at most 160 characters). Japanese only. On an NVIDIA or AMD card with the libtorch backend pack it reads all of a page's blocks in one call, from a compiled graph of this project's `textbox-torch-v1` release (about 4 MB, no weights) bound to the same author's weights: at fp16 in every auto mode, the default included, or at fp32 with the same text as on the CPU when the row says `fp32` (see [Precision modes](#precision-modes)); elsewhere it reads on the CPU, at fp32. Needs a detector, a line or a block one. The most accurate engine on JMangaBench_Read through Bunko's pipeline: 95.84 (90.6% of the boxes exact) on the `ppocr-manga` detector, 96.73 (92.1%) on `animetext-blocks`, where hayai-nova reads 94.58 (86.2%); see [MODELS.md](rust-port/MODELS.md) §8. Weights CC BY-NC-SA 4.0. |
 
 **Licences.** `hayai-nova`, `paddle-manga`, `ppocr-manga` and the `ppocr-manga`
 detector are Apache-2.0 and are what a default configuration uses. The other models
@@ -1503,9 +1503,35 @@ that support it; every other machine is not eligible for the row and is never
 offered its volumes. When no connected machine can run it, the row is
 **held**: the admin card and the queue page (for admins) say "No connected
 machine can run …", and `.mokuro-queue.json` shows its jobs as `held`.
-`ppocr-manga` fixes its own precision and ignores the mode. Sidecars from
-hayai-nova and paddle-manga record the format they ran at in
-`ocr_engine.precision`.
+`ppocr-manga` fixes its own precision and ignores the mode, and so does
+`charspot-small` (always fp32). Sidecars from hayai-nova,
+paddle-manga and nar-small record the format they ran at in
+`ocr_engine.precision`. The format is a record, not part of the recipe:
+switching a row's mode, or a machine reading at another format than before,
+re-reads nothing.
+
+**nar-small** has the modes `auto-accuracy`, `auto-balanced`, `auto-speed`,
+`fp32` and `fp16`; it has no bf16, and a row that says `precision: bf16` for it
+(hand-edited, or copied from a hayai-nova row) is a row error:
+`ocr.generations[<i>]: nar-small has no bf16; use fp16 or an auto mode`. (The
+admin panel resets the mode to `auto-accuracy` when you switch a row's engine
+to one that lacks it, so only a hand-edited file meets the error.) Its fp16 is
+the author's own fp16 mode, the author's fp32 weights cast to fp16 when the
+card loads them, and it runs on a card only, never on the CPU:
+
+| nar-small mode | CPU | Card with nar's fp16 package | Card without it |
+|---|---|---|---|
+| `auto-accuracy` (default) | fp32 | fp16 | fp32 |
+| `auto-balanced`, `auto-speed` | fp32 | fp16, unless the benchmark finds fp32 more than 5% faster | fp32 |
+| `fp32` | fp32 | fp32 (the same text as on the CPU) | fp32 |
+| `fp16` | not eligible | fp16 | not eligible |
+
+So every auto mode, the default included, reads at fp16 on a card and at fp32
+on the CPU; `fp32` keeps full precision on a card too. A card whose fp16
+package did not pass Bunko's fp16 check is left without one and reads at fp32
+in every auto mode. If the card fails to load nar-small, an auto mode reads on
+the CPU at fp32 (and logs why); a forced `fp16`, which the CPU cannot read,
+reports both errors and the row backs off on that machine.
 
 #### Benchmark and tune
 
@@ -1527,14 +1553,16 @@ the result.
 - For an `auto-balanced` or `auto-speed` row it first runs one trial per
   format of the mode that the machine's card can use (auto-balanced: bf16,
   fp32; auto-speed: bf16, fp16, fp32; bf16 only where native, see
-  [Precision modes](#precision-modes)); the fastest wins, and two within 5%
-  count as a tie that goes to the more accurate format. A format with no
+  [Precision modes](#precision-modes); for `nar-small` both modes try fp16
+  and fp32); the fastest wins, and two within 5%
+  count as a tie that goes to the more accurate format (for `nar-small`, to
+  fp16, which reads as accurately and is its first candidate). A format with no
   compiled package for the card is skipped.
 - For a `nar-small` row whose engine stage went to a card without being
   pinned there (`stage_device.engine` unset or `auto`), it runs one trial with
   that stage on the card and one with it on the CPU, and keeps the faster
-  (a tie within 5% stays on the card). The text is the same on both; on a
-  slow card the CPU pool of a many-core host can be the faster.
+  (a tie within 5% stays on the card). At fp32 the text is the same on both;
+  on a slow card the CPU pool of a many-core host can be the faster.
 - It then tries pool widths, following the pipeline's own bottleneck: it
   widens the stage the pipeline says is in the way while that gains at least
   3%, then gives back workers that are not needed while the speed stays within

@@ -14,7 +14,9 @@
 //! so vision, prefill and step share one copy. CPU packages do the same (since
 //! 2026-10-08; packages built with `TORCH_EXPORT_CPU_EMBED=1` carry their weights: an
 //! empty map). Packages without the metadata (the shootout's) are I/O v1 with embedded
-//! weights.
+//! weights. A [`GraphSet`] whose graphs say `bunko.weights_dtype = "fp16"` (nar-small's
+//! fp16 packages, compiled over the authors' fp32 file) has its floating weights cast to
+//! fp16 at load; no fp16 copy of the weights exists on disk.
 
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
@@ -54,13 +56,30 @@ fn kind_of(dtype: &str) -> Option<Kind> {
     })
 }
 
+/// The kinds a weights cast converts (integer and bool tensors keep their kind).
+fn is_floating(kind: Kind) -> bool {
+    matches!(
+        kind,
+        Kind::Float | Kind::Double | Kind::BFloat16 | Kind::Half
+    )
+}
+
 impl Weights {
     /// Loads every tensor of `files` onto `dev`. On a GPU one tensor at a time (the host
     /// never holds more than one tensor's bytes). On the CPU each file's data is read
     /// into ONE buffer and its tensors are views of it -- the layout a package with its
     /// weights inside gets (AOTInductor's single constant blob), not hundreds of separate
     /// allocations.
-    pub fn load(files: &[PathBuf], dev: tch::Device) -> Result<Self, TorchError> {
+    ///
+    /// With `cast` (a package set marked `bunko.weights_dtype`, e.g. nar-small's fp16
+    /// packages over the authors' fp32 file) every floating tensor (F32, F64, BF16, F16)
+    /// becomes that kind once on `dev`; integer and bool tensors stay as stored. A cast
+    /// tensor is a new allocation, so the CPU blob views are skipped then.
+    pub fn load(
+        files: &[PathBuf],
+        dev: tch::Device,
+        cast: Option<Kind>,
+    ) -> Result<Self, TorchError> {
         let mut tensors = HashMap::new();
         let mut aliases = HashMap::new();
         for path in files {
@@ -79,7 +98,7 @@ impl Weights {
             let base = 8 + n as u64;
             // CPU: the whole data section in one buffer (the safetensors data offsets are
             // relative to it); tensors whose offset suits their dtype are views of it.
-            let blob = if dev == tch::Device::Cpu {
+            let blob = if dev == tch::Device::Cpu && cast.is_none() {
                 let end = header
                     .iter()
                     .filter(|(k, _)| *k != "__metadata__")
@@ -156,9 +175,14 @@ impl Weights {
                 f.seek(SeekFrom::Start(base + a))
                     .map_err(|e| err(e.to_string()))?;
                 f.read_exact(&mut bytes).map_err(|e| err(e.to_string()))?;
-                let t = Tensor::f_from_data_size(&bytes, &shape, kind)
+                let mut t = Tensor::f_from_data_size(&bytes, &shape, kind)
                     .map_err(|e| err(format!("{name}: {e}")))?
                     .to_device(dev);
+                if let Some(to) = cast.filter(|&to| to != kind && is_floating(kind)) {
+                    t = t
+                        .f_to_kind(to)
+                        .map_err(|e| err(format!("{name} to {to:?}: {e}")))?;
+                }
                 tensors.insert(name.clone(), t);
             }
         }
@@ -193,12 +217,14 @@ impl Drop for Weights {
 }
 
 /// Loads the weights files once onto `dev` and binds every graph whose `bunko.weights`
-/// map is not empty to them (each of its constants by its key). `None` when no graph
-/// has a map (weights inside the packages, or the shootout's packages).
+/// map is not empty to them (each of its constants by its key), cast to `cast` when the
+/// set asks for it ([`Weights::load`]). `None` when no graph has a map (weights inside
+/// the packages, or the shootout's packages).
 fn bind_all(
     graphs: &[&Aoti],
     weight_files: &[PathBuf],
     dev: tch::Device,
+    cast: Option<Kind>,
 ) -> Result<Option<Weights>, TorchError> {
     let maps: Vec<HashMap<String, String>> = graphs
         .iter()
@@ -217,7 +243,7 @@ fn bind_all(
             "the packages need their weights-*.safetensors files, none found".into(),
         ));
     }
-    let w = Weights::load(weight_files, dev)?;
+    let w = Weights::load(weight_files, dev, cast)?;
     for (g, map) in graphs.iter().zip(&maps) {
         if map.is_empty() {
             continue;
@@ -238,9 +264,9 @@ fn bind_all(
 }
 
 /// Package metadata keys this runtime does not act on yet: a graph that sets one would
-/// be bound wrongly, so the set is refused (the fp16 cast and the ONNX weights reader
-/// come with the routes that need them).
-const NOT_YET: [&str; 2] = ["bunko.weights_dtype", "bunko.weights_format"];
+/// be bound wrongly, so the set is refused (the ONNX weights reader comes with the route
+/// that needs it).
+const NOT_YET: [&str; 1] = ["bunko.weights_format"];
 
 /// The graphs of one package set by role (`model`; `vision`/`prefill`/`step`; ...),
 /// bound and ready to run. Unlike [`PackageSet`] it assumes no roles, and its I/O id
@@ -260,7 +286,8 @@ unsafe impl Sync for GraphSet {}
 impl GraphSet {
     /// Loads each `(role, path)` graph onto `at`, refuses the set unless every graph says
     /// `bunko.io = expect_io` and the graphs agree on `bunko.weights_dtype` and
-    /// `bunko.weights_format`, then binds them to `weight_files`.
+    /// `bunko.weights_format`, then binds them to `weight_files` (cast to fp16 when
+    /// `bunko.weights_dtype = "fp16"`, [`crate::graphmeta::weights_cast`]).
     pub fn load(
         graphs: &[(&str, &Path)],
         weight_files: &[PathBuf],
@@ -296,8 +323,15 @@ impl GraphSet {
                 )));
             }
         }
+        let dtype = meta("bunko.weights_dtype");
+        let dtype: Vec<Option<&str>> = dtype.iter().map(Option::as_deref).collect();
+        let cast = match crate::graphmeta::weights_cast(&dtype).map_err(TorchError::Load)? {
+            Some("fp16") => Some(Kind::Half),
+            Some(v) => return Err(TorchError::Load(format!("bunko.weights_dtype {v}"))),
+            None => None,
+        };
         let refs: Vec<&Aoti> = loaded.iter().map(|(_, g)| g).collect();
-        let weights = bind_all(&refs, weight_files, at.dev)?;
+        let weights = bind_all(&refs, weight_files, at.dev, cast)?;
         Ok(Self {
             graphs: loaded,
             weights,
@@ -375,7 +409,7 @@ impl PackageSet {
                 "package I/O versions {ios:?}: this runtime drives {IO_VERSIONS:?} and all three graphs must agree"
             )));
         }
-        let weights = bind_all(&[&vision, &prefill, &step], weight_files, at.dev)?;
+        let weights = bind_all(&[&vision, &prefill, &step], weight_files, at.dev, None)?;
         Ok(Self {
             vision,
             prefill,
@@ -409,5 +443,127 @@ pub fn split_decoder_out(
         Ok((first, Some(live), it.collect()))
     } else {
         Ok((first.argmax(-1, false), None, it.collect()))
+    }
+}
+
+#[cfg(all(test, feature = "libtorch"))]
+mod tests {
+    use super::*;
+
+    /// Writes a safetensors file of `(name, dtype, shape, bytes)` tensors: the 8-byte
+    /// little-endian header length, the JSON header, then the data.
+    fn write_safetensors(path: &Path, tensors: &[(&str, &str, &[i64], &[u8])]) {
+        let mut header = serde_json::Map::new();
+        let mut data = Vec::new();
+        for (name, dtype, shape, bytes) in tensors {
+            let a = data.len();
+            data.extend_from_slice(bytes);
+            header.insert(
+                name.to_string(),
+                serde_json::json!({"dtype": dtype, "shape": shape, "data_offsets": [a, data.len()]}),
+            );
+        }
+        let header = serde_json::to_vec(&header).unwrap();
+        let mut out = (header.len() as u64).to_le_bytes().to_vec();
+        out.extend_from_slice(&header);
+        out.extend_from_slice(&data);
+        std::fs::write(path, out).unwrap();
+    }
+
+    #[test]
+    fn weights_cast_to_half() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("w.safetensors");
+        write_safetensors(
+            &f,
+            &[
+                (
+                    "a",
+                    "F32",
+                    &[2],
+                    &[1.0f32.to_le_bytes(), 0.1f32.to_le_bytes()].concat(),
+                ),
+                ("b", "BF16", &[1], &0x4040u16.to_le_bytes()), // bf16 3.0
+                ("c", "I64", &[1], &7i64.to_le_bytes()),
+            ],
+        );
+        let w = Weights::load(&[f], tch::Device::Cpu, Some(tch::Kind::Half)).unwrap();
+        assert_eq!(w.get("a").unwrap().kind(), tch::Kind::Half);
+        assert_eq!(w.get("b").unwrap().kind(), tch::Kind::Half);
+        assert_eq!(w.get("c").unwrap().kind(), tch::Kind::Int64);
+        let a = Tensor::from_slice(&[1.0f32, 0.1]).to_kind(tch::Kind::Half);
+        assert!(w.get("a").unwrap().equal(&a));
+    }
+
+    /// Loads the package `pkg` on gpu:0, after the GPU half of the libtorch at
+    /// `$LIBTORCH` (the one the libtorch-feature tests link).
+    fn load_gpu_package(pkg: &std::ffi::OsStr) -> Aoti {
+        crate::runtime::init(&crate::abi::InitConfig {
+            lib_dir: std::env::var("LIBTORCH").ok().map(|d| format!("{d}/lib")),
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(crate::gpu::loaded(), "no GPU half of libtorch loaded");
+        Aoti::load(Path::new(pkg), 0).unwrap()
+    }
+
+    /// Binds the package `g` (on gpu:0) to the weights file `w` loaded with `cast`, by
+    /// its `bunko.weights` map, as [`bind_all`] does: the bind's error.
+    fn bind_with(g: &Aoti, w: &std::ffi::OsStr, cast: Option<Kind>) -> String {
+        let weights = Weights::load(&[PathBuf::from(w)], tch::Device::Cuda(0), cast).unwrap();
+        let map: HashMap<String, String> =
+            serde_json::from_str(&g.metadata("bunko.weights").unwrap()).unwrap();
+        let bound: Vec<(String, &Tensor)> = g
+            .constant_fqns()
+            .unwrap()
+            .into_iter()
+            .map(|fqn| {
+                let t = weights.get(&map[&fqn]).unwrap();
+                (fqn, t)
+            })
+            .collect();
+        g.bind(&bound).unwrap_err().to_string()
+    }
+
+    /// MOKURO_NAR_FP16_PACKAGE=<…/nar-small/fp16/linux-rocm-gfx1201/model.pt2> \
+    /// MOKURO_NAR_WEIGHTS=<model.safetensors> LIBTORCH=<dir> \
+    ///   cargo test -p bunko-torch --features libtorch --release --lib -- --ignored a_wrong_dtype_bind_is_refused
+    #[test]
+    #[ignore = "needs an fp16 nar package, the weights and a GPU (env vars)"]
+    fn a_wrong_dtype_bind_is_refused() {
+        let (Some(pkg), Some(w)) = (
+            std::env::var_os("MOKURO_NAR_FP16_PACKAGE"),
+            std::env::var_os("MOKURO_NAR_WEIGHTS"),
+        ) else {
+            eprintln!("skipping: MOKURO_NAR_FP16_PACKAGE or MOKURO_NAR_WEIGHTS is not set");
+            return;
+        };
+        let g = load_gpu_package(&pkg);
+        assert_eq!(g.metadata("bunko.weights_dtype").as_deref(), Some("fp16"));
+        // The authors' F32 tensors, NOT cast: what a pack without the cast would bind.
+        let err = bind_with(&g, &w, None);
+        assert!(err.contains("is F32, the package wants F16"), "{err}");
+    }
+
+    /// The other way round, with the fp32 package: weights cast to fp16 for it.
+    ///
+    /// MOKURO_NAR_PACKAGE=<…/nar-small/fp32/linux-rocm-gfx1201/model.pt2> \
+    /// MOKURO_NAR_WEIGHTS=<model.safetensors> LIBTORCH=<dir> \
+    ///   cargo test -p bunko-torch --features libtorch --release --lib -- --ignored an_fp16_bind_into_an_fp32_package_is_refused
+    #[test]
+    #[ignore = "needs an fp32 nar package, the weights and a GPU (env vars)"]
+    fn an_fp16_bind_into_an_fp32_package_is_refused() {
+        let (Some(pkg), Some(w)) = (
+            std::env::var_os("MOKURO_NAR_PACKAGE"),
+            std::env::var_os("MOKURO_NAR_WEIGHTS"),
+        ) else {
+            eprintln!("skipping: MOKURO_NAR_PACKAGE or MOKURO_NAR_WEIGHTS is not set");
+            return;
+        };
+        let g = load_gpu_package(&pkg);
+        assert_eq!(g.metadata("bunko.weights_dtype"), None);
+        let err = bind_with(&g, &w, Some(Kind::Half));
+        assert!(err.contains("is F16, the package wants F32"), "{err}");
+        assert!(err.contains("constant net."), "{err}");
     }
 }

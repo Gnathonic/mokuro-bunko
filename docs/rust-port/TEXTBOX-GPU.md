@@ -622,15 +622,21 @@ Text-box engines go through `runtime::place_runnable` with a text-box arm in `fo
 | nar-small mode | CPU (ONNX, fp32 only) | GPU with an fp16 package | GPU with only an fp32 package |
 |---|---|---|---|
 | `auto-accuracy` (default) | fp32 | **fp16** | fp32 |
-| `auto-balanced` | fp32 | **fp16** | fp32 |
-| `auto-speed` | fp32 | **fp16** | fp32 |
+| `auto-balanced` | fp32 | **fp16** (benchmark: fp32 only if > 5% faster) | fp32 |
+| `auto-speed` | fp32 | **fp16** (benchmark: fp32 only if > 5% faster) | fp32 |
 | `fp32` | fp32 | fp32 | fp32 |
 | `fp16` | not eligible (`PRECISION_REFUSAL`; the row is held where no machine runs it) | fp16 | not eligible |
 
-- Every auto mode resolves the same way: fp16 on a GPU that has nar's fp16 package, fp32 on
-  any other GPU and on the CPU. `candidates("nar-small", <auto mode>)` is `[fp16, fp32]`, and
-  the first format the device runs wins. nar's auto modes take no precision benchmark: on
-  the RX 9070 XT fp16 was about 17x faster than fp32 with the same JMangaBench_Read score.
+- Every auto mode prefers fp16: fp16 on a GPU that has nar's fp16 package, fp32 on any other
+  GPU and on the CPU. `candidates("nar-small", <auto mode>)` is `[fp16, fp32]` for all three.
+  `auto-accuracy` takes the first format the device runs, with no benchmark.
+  `auto-balanced` and `auto-speed` go through the existing precision benchmark
+  (`BENCHED_MODES`, `needs_bench` unchanged): on a GPU with both packages it tries fp16 and
+  fp32 and keeps fp16 unless fp32 is more than `PRECISION_TIE` (5%) faster, a tie going to
+  the earlier candidate; with no benchmark pick yet (or `ocr.autobench: false`) they run the
+  first format the device runs, fp16. On the CPU the only candidate left is fp32, so nothing
+  is benchmarked there. On the RX 9070 XT the spike measured fp16 about 17x faster than fp32
+  with the same JMangaBench_Read score, so the benchmark is expected to keep fp16.
 - **The fp16 gate** (§20.1, §20.4): on all 7,929 JMangaBench_Read crops, fp16's texts differ
   from fp32's in at most `floor(0.001 × n)` crops, and from the authors' own fp16 in at most
   `floor(0.001 × n)` crops; and `paired.py` shows no JMangaBench_Read loss against fp32. A

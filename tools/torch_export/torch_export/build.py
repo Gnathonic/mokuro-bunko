@@ -273,11 +273,11 @@ def build(engine: str, precision: str, t: Target, out: Path, io: int = IO_VERSIO
 
     if gs.authors_weights:
         pin = gs.authors_weights
-        meta_common.update(T.textbox_meta(pin, gs.max_batch))  # bunko.io = textbox-1 overrides str(io)
+        meta_common.update(T.textbox_meta(pin, gs.max_batch, gs.weights_dtype))  # bunko.io = textbox-1 overrides str(io)
         record["io"] = meta_common["io"]
         record["fused"] = None  # the authors' graph as written: no hayai/paddle GEMM fusion
         record["authors_weights"] = {"repo": pin.repo, "revision": pin.revision, "file": pin.file,
-                                     "sha256": pin.sha256, "size": pin.size}
+                                     "sha256": pin.sha256, "size": pin.size, "cast": gs.weights_dtype}
 
     if t.os == "windows" and sys.platform == "win32":
         from . import winpatch
@@ -354,11 +354,13 @@ def build(engine: str, precision: str, t: Target, out: Path, io: int = IO_VERSIO
 
 def _authors_maps(gs, eps: dict, path: Path | None) -> dict[str, dict[str, str]]:
     """role -> {constant FQN: key of the authors' weights file}; refuses a constant the
-    pinned file does not hold with the same shape and dtype (so no weight stays inside)."""
+    pinned file does not hold with the same shape and dtype (so no weight stays inside),
+    or, for a package the host binds cast (``gs.weights_dtype``), with the same shape and
+    the dtype of that cast."""
     import torch
     from safetensors import safe_open
 
-    from .textbox import authors_weight_map, check_pin, refuse_embedding
+    from .textbox import CASTS, authors_weight_map, check_pin, refuse_embedding
 
     refuse_embedding(os.environ)
     pin = gs.authors_weights
@@ -379,8 +381,10 @@ def _authors_maps(gs, eps: dict, path: Path | None) -> dict[str, dict[str, str]]
             consts[spec.target] = ep.state_dict.get(spec.target, ep.constants.get(spec.target))
         wanted = {fqn[len(prefix):]: (tuple(t.shape), _ST_DTYPE[str(t.dtype).removeprefix("torch.")])
                   for fqn, t in consts.items() if fqn.startswith(prefix) and isinstance(t, torch.Tensor)}
-        maps[g.role] = authors_weight_map(list(consts), prefix, stored, wanted)
-        log(f"  {g.role}: {len(maps[g.role])} constants bound from the authors' {pin.file} ({pin.repo}@{pin.revision[:8]})")
+        cast = CASTS[gs.weights_dtype] if gs.weights_dtype is not None else None
+        maps[g.role] = authors_weight_map(list(consts), prefix, stored, wanted, cast=cast)
+        how = f", cast to {cast} at load" if cast else ""
+        log(f"  {g.role}: {len(maps[g.role])} constants bound from the authors' {pin.file} ({pin.repo}@{pin.revision[:8]}){how}")
     return maps
 
 

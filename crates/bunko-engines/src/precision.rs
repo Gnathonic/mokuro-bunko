@@ -33,23 +33,11 @@ pub fn normalize_mode(mode: &str) -> String {
     }
 }
 
-/// `PRECISION_POLICY`: candidate formats per engine and auto mode, preferred first.
-/// Empty for engines whose precision is fixed (ppocr-manga).
-pub fn candidates(engine: &str, mode: &str) -> &'static [&'static str] {
-    match (engine, mode) {
-        ("hayai-nova", MODE_ACCURACY | MODE_BALANCED) => &["bf16", "fp32"],
-        ("hayai-nova", MODE_SPEED) => &["bf16", "fp16", "fp32"],
-        ("paddle-manga", MODE_ACCURACY) => &["fp32"],
-        ("paddle-manga", MODE_BALANCED) => &["bf16", "fp32"],
-        ("paddle-manga", MODE_SPEED) => &["bf16", "fp16", "fp32"],
-        _ => &[],
-    }
-}
-
-/// Whether precision modes apply to the engine at all.
-pub fn is_precision_engine(engine: &str) -> bool {
-    matches!(engine, "hayai-nova" | "paddle-manga")
-}
+/// `PRECISION_POLICY`: candidate formats per engine and mode, preferred first (empty
+/// for engines whose precision is fixed, such as ppocr-manga), and whether precision
+/// modes apply to an engine at all. One copy, in `bunko-sched`, which the library and
+/// the processor benchmark also resolve with.
+pub use bunko_sched::precision::{candidates, is_precision_engine};
 
 /// What a device runs on the ONNX recognizers: the CPU fp32 only, a GPU fp32 and fp16
 /// (never bf16, see the module docs).
@@ -170,6 +158,40 @@ mod tests {
     fn ok(r: Result<Option<Resolved>, String>) -> (Precision, String) {
         let r = r.expect("resolved").expect("a precision engine");
         (r.precision, r.why)
+    }
+
+    #[test]
+    fn the_engines_policy_is_the_schedulers() {
+        for e in ["hayai-nova", "paddle-manga", "nar-small", "charspot-small"] {
+            for m in [
+                MODE_ACCURACY,
+                MODE_BALANCED,
+                MODE_SPEED,
+                "fp32",
+                "bf16",
+                "fp16",
+            ] {
+                assert_eq!(
+                    candidates(e, m),
+                    bunko_sched::precision::candidates(e, m),
+                    "{e} {m}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn nar_auto_accuracy_is_fp16_on_a_gpu_and_fp32_on_the_cpu() {
+        let gpu = resolve("nar-small", MODE_ACCURACY, &["fp32", "fp16"], None, "")
+            .unwrap()
+            .unwrap();
+        assert_eq!(gpu.precision, Precision::Fp16);
+        let cpu = resolve("nar-small", MODE_ACCURACY, &["fp32"], None, "")
+            .unwrap()
+            .unwrap();
+        assert_eq!(cpu.precision, Precision::Fp32);
+        let err = resolve("nar-small", "fp16", &["fp32"], None, "").unwrap_err();
+        assert!(err.starts_with(PRECISION_REFUSAL), "{err}");
     }
 
     #[test]

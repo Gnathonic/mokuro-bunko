@@ -143,7 +143,10 @@ def build_textbox_manifest(out: Path, tag: str, engines: tuple[str, ...], pins: 
 
     ``pins[engine]`` is any object with ``repo`` and ``revision`` (the weights' source);
     when it also has ``size`` (``textbox.AuthorsWeights``), a package holding an entry
-    bigger than ``size // verify.EMBED_FRACTION`` is refused. Every build record under
+    bigger than ``size // verify.EMBED_FRACTION`` is refused, as is one whose metadata
+    disagrees with its precision directory (``verify.check_textbox_meta``: an fp16
+    package says ``bunko.weights_dtype = fp16``, an fp32 one says nothing; a
+    ``bunko.weights_sha256`` is the pin's). Every build record under
     ``out/<engine>/<precision>/<target>/build.json`` of the named engines is included:
     leave a target out of ``out`` to leave it out of the release. Writes
     ``out/<tag>.json`` (and, with ``flat_dir``, the assets under their flat names plus
@@ -151,7 +154,7 @@ def build_textbox_manifest(out: Path, tag: str, engines: tuple[str, ...], pins: 
     import zipfile
 
     from . import graphs as G
-    from .verify import weights_inside
+    from .verify import check_textbox_meta, package_meta, weights_inside
 
     out = Path(out)
     url = (base_url.rstrip("/") + "/{file}") if base_url else URL.replace("{tag}", tag)
@@ -196,6 +199,9 @@ def build_textbox_manifest(out: Path, tag: str, engines: tuple[str, ...], pins: 
                 size = getattr(pin, "size", None)
                 if size and weights_inside(p, size):
                     raise SystemExit(f"{p}: weights inside the package")
+                # an fp16 package of the authors' fp32 file says so (the host casts at load),
+                # an fp32 one does not: a package filed under the wrong precision is refused
+                check_textbox_meta(package_meta(p), prec, pin, p)
                 flat = f"{eng}_{prec}_{target}_{g['file']}"
                 rel = f"torch/{eng}/{prec}/{target}/{g['file']}"
                 row = {"engine": eng, "file": flat, "url": url.format(file=flat), "size": p.stat().st_size,

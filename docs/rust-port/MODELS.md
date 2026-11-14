@@ -220,7 +220,17 @@ a page's blocks in one batched call (`bt_read_chars`), with the same preprocessi
 as the CPU route (`bunko_vlm::textbox`), at fp32 with TF32 off, and gives the same ids
 as the author's fp32 PyTorch code: a target ships only once all 7,929 JMangaBench_Read
 crops read the same text on a card of that target (or, for a target with no card to
-test, on its verified neighbours), otherwise that GPU keeps the CPU route. The details
+test, on its verified neighbours), otherwise that GPU keeps the CPU route.
+
+Beside it, `torch/nar-small/fp16/<target>/model.pt2` is the author's own fp16 mode
+(`net.to(torch.float16)`, as their `PyTorchBackend(fp16=True)` runs it), compiled the same
+way and bound to the **same** fp32 file: the package says `bunko.weights_dtype = "fp16"`
+and the cdylib casts the file's floating tensors to fp16 on the card as it loads them, so
+no fp16 copy of the weights exists anywhere. Every auto precision mode of a `nar-small`
+row reads with it on a card that has one; a row set to `fp32` reads with the fp32
+package; the CPU always reads at fp32. An fp16 package ships for a target only once its
+texts differ from the author's fp16 and from fp32 on at most 0.1% of the 7,929 crops and
+it shows no paired JMangaBench_Read loss against fp32. The details
 are in [TORCH-BACKEND.md](TORCH-BACKEND.md#single-graph-engines) and
 [TEXTBOX-GPU.md](TEXTBOX-GPU.md).
 
@@ -228,7 +238,8 @@ The packages are published once as the pre-release `textbox-torch-v1` with a `NO
 and the author's Apache-2.0 `LICENSE`; the compiled-in manifest
 (`crates/bunko-ocr/src/textbox_torch_models.json`) lists them, and a sidecar read on
 the GPU names `textbox-torch-v1` as its export set where one read on the CPU names
-`textbox-graphs-v1`. Neither changes the engine revision: the ids are the same.
+`textbox-graphs-v1`. Neither changes the engine revision: at fp32 the ids are the same,
+and fp16 is recorded as `ocr_engine.precision = "fp16"`, which re-reads nothing.
 
 ## 3. The pipeline (`tools/onnx_export/`)
 

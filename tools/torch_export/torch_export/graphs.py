@@ -83,6 +83,9 @@ class Graphs:
     authors_weights: AuthorsWeights | None = None
     authors_file: Path | None = None
     max_batch: int | None = None  # the batch Dim's max (bunko.max_batch), authors' weights only
+    # authors' weights only: the dtype the host casts them to before binding
+    # (bunko.weights_dtype, "fp16"); None binds them as stored
+    weights_dtype: str | None = None
 
 
 class Autocast(nn.Module):

@@ -292,8 +292,10 @@ ocr:
   #                                BY-NC-SA 4.0, non-commercial); the most
   #                                accurate on JMangaBench_Read. Reads on an
   #                                NVIDIA or AMD card with the libtorch
-  #                                backend pack (fp32, the same text as on
-  #                                the CPU), else on the CPU
+  #                                backend pack (fp16 in every auto mode;
+  #                                fp32, the same text as on the CPU, when
+  #                                the row says fp32), else on the CPU at
+  #                                fp32
   #                The first three engines also read scanned NOVEL pages.
   #                The 0.5 engine `mokuro` was removed. A row that still names
   #                it is kept but retired: it never runs, loses `primary` and
@@ -324,7 +326,12 @@ ocr:
   #                  auto-speed     the fastest format each card runs well
   #                  fp32 / fp16 / bf16  that format only; a machine whose
   #                                 card cannot run it is never given the row
-  #                ppocr-manga ignores the mode.
+  #                nar-small has no bf16 (a row error). Every auto mode reads
+  #                it at fp16 on a card that has its fp16 package (balanced
+  #                and speed keep fp32 only if the benchmark finds it more
+  #                than 5% faster) and at fp32 on the CPU; fp16 runs on a card
+  #                only. ppocr-manga and charspot-small ignore the mode.
+  #                Sidecars record the format; changing it re-reads nothing.
   #   patch_budget resolution hayai-nova reads a line at (256/384/512).
   #                Reaches no other engine. 512 is the default.
   #   pools        per-stage tuning of THIS row, {} to derive it. Stage keys
