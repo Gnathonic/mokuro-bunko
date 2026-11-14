@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use bunko_engines::torch::{Pack, PackLoadError, discover};
-use bunko_torch::abi::{BT_ABI_VERSION, PACK_JSON, library_file_name};
+use bunko_torch::abi::{BT_ABI_VERSION, DetectOut, PACK_JSON, library_file_name};
 
 fn manifest(abi: u32, os: &str) -> serde_json::Value {
     serde_json::json!({
@@ -280,6 +280,100 @@ fn a_wrong_result_count_is_an_error() {
     let px = [0u8; 3];
     let e = h.read_chars(&[(&px, 1, 1), (&px, 1, 1)]).unwrap_err();
     assert!(e.contains("1 results for 2 crops"), "{e}");
+}
+
+/// `bt_detect_blocks` answering `count` (a Rust expression over `n`, the number of
+/// canvases) entries of `{"n":10,"cand":[[1,2,3,4,0.5]]}`.
+fn detect_blocks_fixture(count: &str) -> String {
+    let extra = r##"
+#[unsafe(no_mangle)] pub unsafe extern "C" fn bt_detect_blocks(_h: *mut std::ffi::c_void, _c: *const u8, n: usize, _min_score: f32, out: *mut *mut std::ffi::c_char, _e: *mut *mut std::ffi::c_char) -> i32 {
+    let one = r#"{"n":10,"cand":[[1,2,3,4,0.5]]}"#;
+    let v = vec![one; COUNT].join(",");
+    unsafe { *out = std::ffi::CString::new(format!("[{v}]")).unwrap().into_raw() };
+    let _ = n;
+    0
+}
+"##;
+    abi1_fixture(&extra.replace("COUNT", count))
+}
+
+#[test]
+fn a_pack_without_bt_detect_blocks_detects_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = pack_dir(tmp.path(), &manifest(BT_ABI_VERSION, std::env::consts::OS));
+    if !fixture_library(&dir, &abi1_fixture("")) {
+        return;
+    }
+    let pack = Pack::open(&dir, true).unwrap();
+    assert!(!pack.detects_blocks());
+    let h = pack
+        .load(
+            "animetext-blocks",
+            tmp.path(),
+            "fp32",
+            "cpu",
+            &Default::default(),
+        )
+        .unwrap();
+    let canvas = vec![114u8; 32 * 32 * 3];
+    let e = h.detect_blocks(&[(&canvas, 32, 32)], 0.3).unwrap_err();
+    assert_eq!(e, "the OCR backend pack predates GPU block detection");
+}
+
+#[test]
+fn bt_detect_blocks_results_come_back_per_canvas() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = pack_dir(tmp.path(), &manifest(BT_ABI_VERSION, std::env::consts::OS));
+    if !fixture_library(&dir, &detect_blocks_fixture("n")) {
+        return;
+    }
+    let pack = Pack::open(&dir, true).unwrap();
+    assert!(pack.detects_blocks());
+    // A pack with the detector need not read text boxes (each symbol is probed alone).
+    assert!(!pack.reads_chars());
+    let h = pack
+        .load(
+            "animetext-blocks",
+            tmp.path(),
+            "fp32",
+            "cpu",
+            &Default::default(),
+        )
+        .unwrap();
+    let canvas = vec![114u8; 32 * 64 * 3];
+    let r = h
+        .detect_blocks(&[(&canvas, 64, 32), (&canvas, 32, 64)], 0.3)
+        .unwrap();
+    let one = DetectOut {
+        n: 10,
+        cand: vec![[1.0, 2.0, 3.0, 4.0, 0.5]],
+    };
+    assert_eq!(r, [one.clone(), one]);
+}
+
+#[test]
+fn a_wrong_detect_blocks_count_is_an_error() {
+    // The fixture answers one entry whatever n is: results against the wrong pages.
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = pack_dir(tmp.path(), &manifest(BT_ABI_VERSION, std::env::consts::OS));
+    if !fixture_library(&dir, &detect_blocks_fixture("1")) {
+        return;
+    }
+    let pack = Pack::open(&dir, true).unwrap();
+    let h = pack
+        .load(
+            "animetext-blocks",
+            tmp.path(),
+            "fp32",
+            "cpu",
+            &Default::default(),
+        )
+        .unwrap();
+    let canvas = vec![114u8; 32 * 32 * 3];
+    let e = h
+        .detect_blocks(&[(&canvas, 32, 32), (&canvas, 32, 32)], 0.3)
+        .unwrap_err();
+    assert_eq!(e, "bt_detect_blocks returned 1 results for 2 canvases");
 }
 
 /// A real pack (`MOKURO_TORCH_PACK`) with fake libtorch libraries first on
