@@ -54,6 +54,47 @@ def test_meta():
         "weights_size": "217035140", "max_batch": "64"}
 
 
+# --- fp16 (plan 02 Task 3) ---
+
+
+def test_fp16_meta():
+    m = T.textbox_meta(T.NAR_PIN, 64, "fp16")
+    assert m["weights_dtype"] == "fp16" and m["weights_sha256"] == T.NAR_PIN.sha256
+    assert "weights_dtype" not in T.textbox_meta(T.NAR_PIN, 64)
+
+
+def test_texts_gate():
+    from torch_export import verify
+
+    assert verify.texts_gate(7, 7929) and not verify.texts_gate(8, 7929)
+    assert verify.texts_gate(0, 1)
+
+
+def test_cast_package_compares_shapes_only():
+    stored = {"a": ((2,), "F32")}
+    assert T.authors_weight_map(["net.a"], "net.", stored, {"a": ((2,), "F16")}, cast="F16") == {"net.a": "a"}
+
+
+def test_cast_package_still_refuses_a_wrong_shape_or_dtype():
+    stored = {"a": ((2,), "F32"), "i": ((1,), "I64")}
+    with pytest.raises(SystemExit, match="shape"):
+        T.authors_weight_map(["net.a"], "net.", stored, {"a": ((3,), "F16")}, cast="F16")
+    # a floating weight the graph wants in another dtype than the cast's
+    with pytest.raises(SystemExit, match="dtype F32 in the graph"):
+        T.authors_weight_map(["net.a"], "net.", stored, {"a": ((2,), "F32")}, cast="F16")
+    # the runtime casts floating tensors only: an integer one is bound as stored
+    with pytest.raises(SystemExit, match="dtype F16 in the graph"):
+        T.authors_weight_map(["net.i"], "net.", stored, {"i": ((1,), "F16")}, cast="F16")
+    assert T.authors_weight_map(["net.i"], "net.", stored, {"i": ((1,), "I64")}, cast="F16") == {"net.i": "i"}
+
+
+def test_fp16_compares_texts():
+    from torch_export import verify
+
+    chars = ["a", "b", "c"]  # end id 3
+    assert verify.text_of([0, 1, 3, 2], chars) == "ab"
+    assert verify.text_of([2, 2], chars) == "cc"
+
 # --- verify and manifest (Task 3) ---
 
 from torch_export import manifest, verify  # noqa: E402

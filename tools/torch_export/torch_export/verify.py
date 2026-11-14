@@ -14,13 +14,16 @@ The crop-level parity gate is the Rust harness (ltbench) on the real crop sets.
 
 Text-box engines (``textbox.PINS``: nar-small) take the crop-level gate here instead:
 
-    python -m torch_export.verify <out> nar-small fp32 <target> --crops DIR --expected FILE [--n N]
+    python -m torch_export.verify <out> nar-small fp32|fp16 <target> --crops DIR --expected FILE [--n N] [--batch B]
 
-binds the authors' pinned ``model.safetensors`` by ``bunko.weights``, feeds every crop
-(``--n``: the first N by name) as the authors' ``preprocess.py`` prepares it, 32 at a
-time, and compares the ids, up to and including the first end id, with ``--expected``
-(the JSON lines ``tools/textbox_export/check_parity.py --expected`` writes). Exit 0 only
-when every crop is identical (fp32 has no tolerance). Any package whose constants live
+binds the authors' pinned ``model.safetensors`` by ``bunko.weights`` (cast to F16 first
+when the package says ``bunko.weights_dtype = fp16``, as the host does), feeds every crop
+(``--n``: the first N by name) as the authors' ``preprocess.py`` prepares it, ``--batch``
+(32) at a time, and compares with ``--expected`` (the JSON lines
+``tools/textbox_export/check_parity.py --expected`` writes). fp32 compares the ids, up
+to and including the first end id, and exits 0 only when every crop is identical (fp32
+has no tolerance). fp16 compares the decoded texts and exits 0 when at most
+``floor(0.001 x crops)`` differ (``texts_gate``, TEXTBOX-GPU.md §11). Any package whose constants live
 inside it is refused before it is loaded (``weights_inside``), and
 ``python -m torch_export refuse-embedded DIR`` checks a whole build or staging tree.
 """
@@ -50,6 +53,20 @@ def same_ids(got: list[int], want: list[int], end: int) -> bool:
     from); ids past it are padding the reader never looks at. No end id: all of them."""
     n = want.index(end) + 1 if end in want else len(want)
     return len(got) >= n and list(got[:n]) == list(want[:n])
+
+
+def text_of(ids: list[int], chars: list[str]) -> str:
+    """The text ``ids`` spell: the characters before the first end id (``len(chars)``),
+    as ``tools/textbox_export/check_parity.py`` and the host decode them."""
+    end = len(chars)
+    ids = list(ids)
+    ids = ids[:ids.index(end)] if end in ids else ids
+    return "".join(chars[i] for i in ids if 0 <= i < end)
+
+
+def texts_gate(differ: int, crops: int, limit: float = 0.001) -> bool:
+    """fp16's crop gate: at most ``floor(crops x limit)`` texts differ (7 of 7,929)."""
+    return differ <= int(crops * limit)
 
 
 def weights_inside(pt2: Path, weights_size: int) -> bool:
@@ -141,6 +158,23 @@ def peak_rss_mb() -> float:
     return round(r / 2**20 if sys.platform == "darwin" else r / 2**10, 1)
 
 
+def cast_weights(weights: dict, keys, weights_dtype: str | None) -> None:
+    """The host's load-time cast (bunko-torch ``Weights::load``), in place: with
+    ``weights_dtype`` "fp16" every floating tensor of ``keys`` becomes float16, integer
+    and bool tensors stay as stored. In place so the caller keeps the cast tensors alive
+    (``load_constants(user_managed=True)`` binds their memory, it copies nothing)."""
+    import torch
+
+    if weights_dtype is None:
+        return
+    if weights_dtype != "fp16":
+        raise SystemExit(f"bunko.weights_dtype {weights_dtype}: this runtime casts to fp16 only")
+    for k in keys:
+        t = weights[k]
+        if t.is_floating_point() and t.dtype != torch.float16:
+            weights[k] = t.to(torch.float16)
+
+
 def load_pkg(path: Path, weights: dict, device_index: int):
     from torch._inductor import aoti_load_package
 
@@ -152,6 +186,7 @@ def load_pkg(path: Path, weights: dict, device_index: int):
         missing = [f for f in fqns if f not in wm]
         if missing:
             raise SystemExit(f"{path}: constants without a weights key: {missing[:5]}")
+        cast_weights(weights, {wm[f] for f in fqns}, meta.get("bunko.weights_dtype"))
         m.loader.load_constants({f: weights[wm[f]] for f in fqns}, False, True, True)
     return m, meta
 
@@ -177,6 +212,10 @@ def _verify_textbox(out: Path, engine: str, precision: str, target: str, crops: 
         raise SystemExit(f"{pkg}: no such package")
     if weights_inside(pkg, pin.size):
         raise SystemExit(f"{pkg}: weights inside the package")
+    if precision not in ("fp32", "fp16"):
+        raise SystemExit(f"{engine}: no crop gate for {precision} (fp32: ids, fp16: texts)")
+    if not 1 <= batch <= TB.MAX_BATCH:
+        raise SystemExit(f"batch {batch}: the package takes 1..{TB.MAX_BATCH} crops per call")
     want = {}
     with open(expected, encoding="utf-8") as f:
         for line in f:
@@ -198,7 +237,8 @@ def _verify_textbox(out: Path, engine: str, precision: str, target: str, crops: 
     sys.path.insert(0, str(snap))
     from manga_ocr_nar_small.preprocess import empty_inputs, preprocess
 
-    end = len(json.loads((snap / "nar_vocabulary_6817.json").read_text(encoding="utf-8"))["characters"])
+    chars = json.loads((snap / "nar_vocabulary_6817.json").read_text(encoding="utf-8"))["characters"]
+    end = len(chars)
     dev = torch.device(device, 0) if device == "cuda" else torch.device("cpu")
     weights = {}
     with safe_open(str(snap / pin.file), "pt") as s:
@@ -210,6 +250,16 @@ def _verify_textbox(out: Path, engine: str, precision: str, target: str, crops: 
             raise SystemExit(f"{pkg}: {key} is {meta.get(key)!r}, not {value!r}")
     if not json.loads(meta.get("bunko.weights", "{}")):
         raise SystemExit(f"{pkg}: no bunko.weights map: its constants are not bound to the authors' {pin.file}")
+    want_dtype = "fp16" if precision == "fp16" else None
+    if meta.get("bunko.weights_dtype") != want_dtype:
+        raise SystemExit(f"{pkg}: bunko.weights_dtype is {meta.get('bunko.weights_dtype')!r}, "
+                         f"a {precision} package says {want_dtype!r}")
+    if precision == "fp16":
+        def same(got, ids):
+            return text_of(got, chars) == text_of(ids, chars)
+    else:
+        def same(got, ids):
+            return same_ids(got, ids, end)
     identical, differ = 0, []
     t0 = time.time()
     with torch.no_grad():
@@ -222,20 +272,24 @@ def _verify_textbox(out: Path, engine: str, precision: str, target: str, crops: 
                                                    for k, v in buf.items()})
             ids = m(*(torch.from_numpy(buf[k]).to(dev) for k in ("P", "V", "R", "C", "H", "W"))).cpu().tolist()
             for p, got in zip(chunk, ids):
-                if same_ids(got, want[p.name], end):
+                if same(got, want[p.name]):
                     identical += 1
                 else:
                     differ.append(p.name)
     print(f"{len(files)} crops in {time.time() - t0:.1f}s, batch {batch}", file=sys.stderr)
-    return {"crops": len(files), "identical": identical, "differ": differ}, [m, weights]
+    passed = texts_gate(len(differ), len(files)) if precision == "fp16" else identical == len(files)
+    res = {"crops": len(files), "identical": identical, "differ": differ, "batch": batch,
+           "compared": "texts" if precision == "fp16" else "ids", "passed": passed}
+    return res, [m, weights]
 
 
 def verify_textbox(out: Path, engine: str, precision: str, target: str, crops: Path, expected: Path,
-                   device: str, n: int | None = None) -> dict:
-    """A text-box package against the authors' ids, crop by crop:
-    ``{"crops": n, "identical": k, "differ": [file, ...]}``. Refuses (SystemExit) a
-    package with weights inside before loading it."""
-    res, held = _verify_textbox(out, engine, precision, target, crops, expected, device, n)
+                   device: str, n: int | None = None, batch: int = 32) -> dict:
+    """A text-box package against the authors' output, crop by crop:
+    ``{"crops": n, "identical": k, "differ": [file, ...], "passed": bool, ...}`` (fp32:
+    ids, every crop; fp16: texts, ``texts_gate``). Refuses (SystemExit) a package with
+    weights inside before loading it."""
+    res, held = _verify_textbox(out, engine, precision, target, crops, expected, device, n, batch)
     _release(held)
     return res
 
@@ -282,6 +336,7 @@ def main(argv=None) -> int:
     ap.add_argument("--crops", type=Path, help="text-box engines: a directory of crop images")
     ap.add_argument("--expected", type=Path, help="text-box engines: check_parity.py --expected JSON lines")
     ap.add_argument("--n", type=int, default=None, help="text-box engines: only the first N crops by name")
+    ap.add_argument("--batch", type=int, default=32, help="text-box engines: crops per call")
     a = ap.parse_args(argv)
     from .__main__ import _imports
 
@@ -291,9 +346,10 @@ def main(argv=None) -> int:
     if a.engine in PINS:
         if a.crops is None or a.expected is None:
             raise SystemExit(f"{a.engine}: --crops and --expected are required")
-        res, held = _verify_textbox(a.out, a.engine, a.precision, a.target, a.crops, a.expected, a.device, a.n)
+        res, held = _verify_textbox(a.out, a.engine, a.precision, a.target, a.crops, a.expected, a.device, a.n,
+                                    a.batch)
         print(json.dumps(res), flush=True)
-        return _finish(0 if res["identical"] == res["crops"] else 1, held)
+        return _finish(0 if res["passed"] else 1, held)
     import torch
 
     from . import graphs as G

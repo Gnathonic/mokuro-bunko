@@ -9,6 +9,12 @@ commit and binds at load (package metadata ``bunko.weights`` maps FQN -> key). T
 exporter refuses to write a package whose constants are not all keys of that file with
 the same shape and dtype, and refuses the weights-inside layouts
 (``TORCH_EXPORT_WIN_EMBED``, ``TORCH_EXPORT_CPU_EMBED``) outright.
+
+nar-small fp16 is the authors' own fp16 mode (``net.to(torch.float16)``, what their
+``PyTorchBackend(fp16=True)`` runs) bound to the same fp32 file: its constants are F16
+under the authors' keys, the package says ``bunko.weights_dtype = fp16``, and the host
+casts each floating tensor to F16 on the device at load. No fp16 copy of the weights is
+written anywhere.
 """
 
 from __future__ import annotations
@@ -32,6 +38,8 @@ IO = "textbox-1"  # package I/O id (bunko.io), checked by the cdylib's GraphSet:
 MAX_BATCH = 64  # the package's largest batch (bunko.max_batch)
 EMBED_VARS = ("TORCH_EXPORT_WIN_EMBED", "TORCH_EXPORT_CPU_EMBED")
 SNAPSHOT_VAR = "TORCH_EXPORT_NAR_SNAPSHOT"
+# nar-small's builds and the dtype each runs in (no bf16: the authors have no bf16 mode)
+NAR_PRECISIONS = {"fp32": torch.float32, "fp16": torch.float16}
 
 
 @dataclass(frozen=True)
@@ -72,14 +80,23 @@ def check_pin(path: Path, pin: AuthorsWeights) -> None:
         raise SystemExit(f"{path}: sha256 {got}, pinned {pin.sha256} ({pin.repo}@{pin.revision} {pin.file})")
 
 
+# safetensors dtypes the host casts when a package asks for it (bunko-torch
+# ``Weights::load``: F64, F32 and BF16 become F16; an F16 tensor stays as stored)
+FLOATING = ("F64", "F32", "BF16", "F16")
+# bunko.weights_dtype -> the safetensors dtype the host casts floating tensors to
+CASTS = {"fp16": "F16"}
+
+
 def authors_weight_map(fqns: list[str], prefix: str, stored: dict[str, tuple[tuple[int, ...], str]],
-                       wanted: dict[str, tuple[tuple[int, ...], str]]) -> dict[str, str]:
+                       wanted: dict[str, tuple[tuple[int, ...], str]], cast: str | None = None) -> dict[str, str]:
     """constant FQN -> the authors' key (the FQN minus ``prefix``).
 
     ``stored``: the weights file's header, key -> (shape, safetensors dtype name);
     ``wanted``: the exported program's constants by the same key. Every constant must be
     a key of the file with the same shape and dtype: anything else would be a weight left
-    inside the package, or a binding that reads the wrong bytes."""
+    inside the package, or a binding that reads the wrong bytes. ``cast`` (``"F16"``): a
+    package the host binds cast (``bunko.weights_dtype``): a floating tensor of the file
+    must be wanted as ``cast``, anything else as stored, which is what the host binds."""
     out = {}
     for fqn in fqns:
         if not fqn.startswith(prefix):
@@ -92,8 +109,10 @@ def authors_weight_map(fqns: list[str], prefix: str, stored: dict[str, tuple[tup
         (s_shape, s_dt), (w_shape, w_dt) = stored[key], wanted[key]
         if tuple(s_shape) != tuple(w_shape):
             raise SystemExit(f"{fqn}: shape {tuple(w_shape)} in the graph, {tuple(s_shape)} in the authors' file")
-        if s_dt != w_dt:
-            raise SystemExit(f"{fqn}: dtype {w_dt} in the graph, {s_dt} in the authors' file")
+        bound = cast if cast is not None and s_dt in FLOATING else s_dt
+        if bound != w_dt:
+            how = f"{s_dt} in the authors' file" + (f", bound as {bound}" if bound != s_dt else "")
+            raise SystemExit(f"{fqn}: dtype {w_dt} in the graph, {how}")
         out[fqn] = key
     return out
 
@@ -106,10 +125,17 @@ def refuse_embedding(env: Mapping[str, str]) -> None:
                              "the authors' weights are never put inside a package")
 
 
-def textbox_meta(pin: AuthorsWeights, max_batch: int) -> dict[str, str]:
-    """Package metadata (build.py adds the ``bunko.`` prefix)."""
-    return {"io": IO, "source": f"{pin.repo}@{pin.revision}", "weights_sha256": pin.sha256,
+def textbox_meta(pin: AuthorsWeights, max_batch: int, weights_dtype: str | None = None) -> dict[str, str]:
+    """Package metadata (build.py adds the ``bunko.`` prefix). ``weights_dtype``
+    (``"fp16"``): the host casts the authors' floating tensors to it before binding;
+    absent, it binds them as stored."""
+    if weights_dtype is not None and weights_dtype not in CASTS:
+        raise SystemExit(f"weights_dtype {weights_dtype}: the host casts to {sorted(CASTS)} only")
+    meta = {"io": IO, "source": f"{pin.repo}@{pin.revision}", "weights_sha256": pin.sha256,
             "weights_size": str(pin.size), "max_batch": str(max_batch)}
+    if weights_dtype is not None:
+        meta["weights_dtype"] = weights_dtype
+    return meta
 
 
 def _export_nar():
@@ -229,14 +255,28 @@ class NarGraph(nn.Module):
         return (F.linear(hidden, net.tok.weight[:6818]) + net.bias).argmax(-1)
 
 
+def _as(model: nn.Module, dtype: torch.dtype) -> nn.Module:
+    """``model.to(dtype)`` unless every floating tensor already is: build.py hands the
+    fake export a copy of the cast real model, and ``Module.to`` on FakeTensor
+    parameters swaps them even when nothing changes, which they refuse."""
+    ts = [t for t in (*model.parameters(), *model.buffers()) if t.is_floating_point()]
+    return model if all(t.dtype == dtype for t in ts) else model.to(dtype)
+
+
 def nar_small(prec: str, device: torch.device, io: int, model=None, **kw) -> Graphs:
     """nar-small r16 as one graph (role ``model``), dynamic batch 1..MAX_BATCH.
 
     ``model`` None: the authors' repository at the pin, from ``TORCH_EXPORT_NAR_SNAPSHOT``
     or the Hugging Face cache (fetched once), every pinned file checked. ``io`` and the
-    hayai/paddle options in ``kw`` do not apply (the package's I/O id is ``textbox-1``)."""
-    if prec != "fp32":
-        raise SystemExit(f"nar-small: no {prec} build yet (fp32 only)")
+    hayai/paddle options in ``kw`` do not apply (the package's I/O id is ``textbox-1``).
+
+    ``prec`` fp32, or fp16: the authors' fp16 mode, ``net.to(torch.float16)`` as their
+    ``MangaOcrNarSmallNet.load(dtype=torch.float16)`` does after loading the fp32 file;
+    ``NarGraph`` takes the run dtype from the weights, so every derived constant is
+    computed in fp16 as their ``prepare()`` computes it. The inputs stay f32 (the graph
+    casts P), so both packages have the same I/O."""
+    if prec not in NAR_PRECISIONS:
+        raise SystemExit(f"nar-small: no {prec} build (has {sorted(NAR_PRECISIONS)})")
     snap = None
     if model is None:
         E = _export_nar()
@@ -244,7 +284,7 @@ def nar_small(prec: str, device: torch.device, io: int, model=None, **kw) -> Gra
         E.check_pins(snap)
         model = E.load_net(snap)
     drop_recomputed_buffers(model)
-    model = _to(model.eval(), device)
+    model = _as(_to(model.eval(), device), NAR_PRECISIONS[prec])
     wrap = NarGraph(model).eval()
     b, n = 3, 324
     ex = (torch.zeros(b, n, 588), torch.ones(b, n), torch.zeros(b, n, dtype=torch.int32),
@@ -253,4 +293,5 @@ def nar_small(prec: str, device: torch.device, io: int, model=None, **kw) -> Gra
     B = Dim("b", min=1, max=MAX_BATCH)
     graph = Graph("model", wrap, ex, ({0: B},) * 6)
     return Graphs("nar-small", prec, io, model, [graph], authors_weights=NAR_PIN,
-                  authors_file=snap / NAR_PIN.file if snap is not None else None, max_batch=MAX_BATCH)
+                  authors_file=snap / NAR_PIN.file if snap is not None else None, max_batch=MAX_BATCH,
+                  weights_dtype="fp16" if prec == "fp16" else None)
