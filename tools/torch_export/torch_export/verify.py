@@ -23,6 +23,17 @@ time, and compares the ids, up to and including the first end id, with ``--expec
 when every crop is identical (fp32 has no tolerance). Any package whose constants live
 inside it is refused before it is loaded (``weights_inside``), and
 ``python -m torch_export refuse-embedded DIR`` checks a whole build or staging tree.
+
+The AnimeText detector (``detector.PINS``: animetext-blocks) takes the page-level gate:
+
+    python -m torch_export.verify <out> animetext-blocks fp32 <target> --pages DIR|LIST --onnx FILE
+
+letterboxes every page as the host does (``canvas``), runs it through the package (its
+constants bound from the pinned ONNX file by ``bunko.weights``) and through ONNX Runtime
+on the CPU, one page a call, turns both outputs into blocks with one port of the host's
+``blocks_from_output`` and compares them (``verify_detector``). Exit 0 only when every
+page has the same block set, every matched corner is within 0.01 page px and no crop
+edge (``crop_edges``) moved.
 """
 
 from __future__ import annotations
@@ -43,6 +54,8 @@ from typing import Callable
 # 43,860,012 B).
 EMBED_FRACTION = 4
 IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg")
+PAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp", ".avif", ".bmp")
+WORST_CORNER = 0.01  # page px: the detector gate's largest corner difference
 
 
 def same_ids(got: list[int], want: list[int], end: int) -> bool:
@@ -50,6 +63,28 @@ def same_ids(got: list[int], want: list[int], end: int) -> bool:
     from); ids past it are padding the reader never looks at. No end id: all of them."""
     n = want.index(end) + 1 if end in want else len(want)
     return len(got) >= n and list(got[:n]) == list(want[:n])
+
+
+def crop_edges(b) -> tuple[int, int, int, int]:
+    """The pixels a block's crop starts and ends at (as ``page.rs`` crops):
+    ``(floor(x0), floor(y0), ceil(x1), ceil(y1))``."""
+    import math
+
+    return math.floor(b[0]), math.floor(b[1]), math.ceil(b[2]), math.ceil(b[3])
+
+
+def package_constants(pt2: Path) -> list[str]:
+    """The constant FQNs a ``.pt2`` asks for at load (``constants_info_[i].original_fqn``
+    in its wrapper source), in order."""
+    import re
+
+    with zipfile.ZipFile(pt2) as z:
+        srcs = [n for n in z.namelist() if n.endswith(".wrapper.cpp")]
+        if len(srcs) != 1:
+            raise SystemExit(f"{pt2}: {len(srcs)} wrapper sources; cannot list the package's constants")
+        text = z.read(srcs[0]).decode("utf-8", "replace")
+    found = re.findall(r'constants_info_\[(\d+)\]\.original_fqn = "([^"]*)"', text)
+    return [f for _, f in sorted(found, key=lambda x: int(x[0]))]
 
 
 def weights_inside(pt2: Path, weights_size: int) -> bool:
@@ -94,11 +129,14 @@ def refuse_embedded(root: Path, weights_size_of: Callable[[str], int]) -> int:
 
 
 def pinned_size(engine: str) -> int:
-    """The pinned weights file's size of ``engine``; the smallest pinned size for an
-    engine without a pin (the strictest limit)."""
+    """The pinned weights file's size of ``engine`` (the authors' weights, or the ONNX
+    file a detector binds); the smallest pinned size for an engine without a pin (the
+    strictest limit)."""
+    from .detector import PINS as DETECTOR_PINS
     from .textbox import PINS
 
-    return PINS[engine].size if engine in PINS else min(p.size for p in PINS.values())
+    pins = {**PINS, **DETECTOR_PINS}
+    return pins[engine].size if engine in pins else min(p.size for p in pins.values())
 
 
 def load_weights(pdir: Path, device):
@@ -240,6 +278,239 @@ def verify_textbox(out: Path, engine: str, precision: str, target: str, crops: P
     return res
 
 
+# --- the AnimeText detector: page-level gate -------------------------------------------
+
+SIDE, STRIDE, PAD_BYTE = 640, 32, 114  # bunko-ocr animetext.rs
+MIN_SCORE, OVERLAP, PARTS, INSIDE, MIN_SIDE = 0.3, 0.5, 2, 0.8, 4.0
+
+
+def input_size(width: int, height: int) -> tuple[float, int, int, int, int]:
+    """bunko-ocr ``animetext::input_size``: (scale, scaled w, scaled h, canvas w, canvas h)."""
+    scale = SIDE / max(width, height, 1)
+
+    def fit(v):  # Python's round() is round-half-even, as py::round_int
+        return min(max(round(v * scale), 1), SIDE)
+
+    w, h = fit(width), fit(height)
+    return scale, w, h, -(-w // STRIDE) * STRIDE, -(-h // STRIDE) * STRIDE
+
+
+def _area_weights(n: int, src: int):
+    """bunko-ocr ``fit``'s spans as an ``[n, src]`` matrix: each output pixel's share of
+    each source pixel it covers."""
+    import math
+
+    import numpy as np
+
+    f = src / n
+    m = np.zeros((n, src), np.float64)
+    for i in range(n):
+        a, b = i * f, min((i + 1) * f, src)
+        i0, i1 = math.floor(a), max(min(math.ceil(b), src), 1)
+        m[i, i0:i1] = 1.0
+        m[i, i0] = 1.0 - (a - i0)
+        if i1 - 1 > i0:
+            m[i, i1 - 1] = 1.0 - (i1 - b)
+    return m
+
+
+def canvas(rgb):
+    """A page (``[h, w, 3]`` uint8 RGB) on the detector's canvas, as bunko-ocr
+    ``animetext::canvas`` makes it: ``(chw f32 0..1, scale, (page w, page h))``, or None for
+    a page of zero width or height. A shrunk page is area-averaged (``fit``); a page
+    stretched up is resampled bilinearly by PIL (the gate compares the two routes on the
+    same canvas, so the resampler only has to give a realistic page)."""
+    import numpy as np
+
+    ph, pw = rgb.shape[:2]
+    if pw == 0 or ph == 0:
+        return None
+    scale, w, h, cw, ch = input_size(pw, ph)
+    if w >= pw or h >= ph:
+        from PIL import Image
+
+        small = np.asarray(Image.fromarray(rgb).resize((w, h), Image.BILINEAR))
+    else:
+        wy, wx = _area_weights(h, ph), _area_weights(w, pw)
+        norm = wy.sum(1)[:, None] * wx.sum(1)[None, :]
+        small = np.stack([wy @ rgb[:, :, c].astype(np.float64) @ wx.T / norm for c in range(3)], -1)
+        small = np.floor(small + 0.5).clip(0, 255).astype(np.uint8)
+    c = np.full((ch, cw, 3), PAD_BYTE, np.uint8)
+    c[:h, :w] = small
+    return (c.transpose(2, 0, 1).astype(np.float32) / np.float32(255.0)), scale, (pw, ph)
+
+
+def _area(b):
+    return max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
+
+
+def _inter(a, b):
+    return max(0.0, min(a[2], b[2]) - max(a[0], b[0])) * max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+
+
+def blocks_from_output(out, scale: float, page: tuple[int, int]) -> list[tuple[list[float], float]]:
+    """bunko-ocr ``animetext::blocks_from_output`` on a ``[5, N]`` output, in f32:
+    ``[(bbox [x0, y0, x1, y1] in page px, score)]``."""
+    import numpy as np
+
+    out = np.asarray(out, np.float32)
+    pw, ph, s = np.float32(page[0]), np.float32(page[1]), np.float32(scale)
+    two = np.float32(2.0)
+    found = []
+    for i in range(out.shape[1]):
+        cx, cy, w, h, score = out[:, i]
+        if score < np.float32(MIN_SCORE):
+            continue
+        b = [float(np.clip((cx - w / two) / s, 0, pw)), float(np.clip((cy - h / two) / s, 0, ph)),
+             float(np.clip((cx + w / two) / s, 0, pw)), float(np.clip((cy + h / two) / s, 0, ph))]
+        if b[2] - b[0] >= MIN_SIDE and b[3] - b[1] >= MIN_SIDE:
+            found.append((b, float(score)))
+    found.sort(key=lambda t: -t[1])  # stable, as sort_by
+    kept = []
+    for b in found:
+        if not any((lambda sh, un: un > 0 and sh / un > OVERLAP)(_inter(k[0], b[0]), _area(k[0]) + _area(b[0]) - _inter(k[0], b[0]))
+                   for k in kept):
+            kept.append(b)
+
+    def wraps(o):
+        return sum(1 for i in kept if 0 < _area(i[0]) < _area(o[0]) and _inter(i[0], o[0]) / _area(i[0]) >= INSIDE) >= PARTS
+
+    kept = [b for b in kept if not wraps(b)]
+
+    def part(i):
+        a = _area(i[0])
+        return any(_area(o[0]) > a > 0 and _inter(i[0], o[0]) / a >= INSIDE for o in kept)
+
+    return [b for b in kept if not part(b)]
+
+
+def compare_blocks(ref, got) -> tuple[bool, float, int]:
+    """(same block set, largest corner difference, crop edges moved). Blocks pair up by
+    the largest overlap (each used once); a set differs when the counts differ or a pair
+    overlaps by IoU 0.9 or less."""
+    if len(ref) != len(got):
+        return False, float("inf"), 0
+    used, worst, moved = set(), 0.0, 0
+    for b, _ in ref:
+        best = max(((_inter(b, g[0]) / (_area(b) + _area(g[0]) - _inter(b, g[0]) + 1e-12), j)
+                    for j, g in enumerate(got) if j not in used), default=(0.0, -1))
+        if best[0] <= 0.9:
+            return False, float("inf"), 0
+        used.add(best[1])
+        g = got[best[1]][0]
+        worst = max(worst, max(abs(x - y) for x, y in zip(b, g)))
+        moved += sum(x != y for x, y in zip(crop_edges(b), crop_edges(g)))
+    return True, worst, moved
+
+
+def page_files(pages: Path) -> list[Path]:
+    """A directory's page images (recursively, sorted), or a list file's (one path a line,
+    relative to the list's directory; blank lines and ``#`` comments skipped)."""
+    pages = Path(pages)
+    if pages.is_dir():
+        files = sorted(p for p in pages.rglob("*") if p.suffix.lower() in PAGE_SUFFIXES)
+    elif pages.is_file():
+        files = []
+        for line in pages.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                p = Path(line)
+                files.append(p if p.is_absolute() else pages.parent / p)
+        absent = [str(p) for p in files if not p.is_file()]
+        if absent:
+            raise SystemExit(f"{pages}: {len(absent)} listed pages do not exist, first {absent[:3]}")
+    else:
+        raise SystemExit(f"{pages}: no such directory or page list")
+    if not files:
+        raise SystemExit(f"{pages}: no pages")
+    return files
+
+
+def _verify_detector(out: Path, target: str, pages: Path, onnx_file: Path, device: str, engine: str = "animetext-blocks"):
+    """``verify_detector``'s work; also returns what it holds loaded (package, weights)."""
+    import numpy as np
+    import onnxruntime as ort
+    import torch
+    from PIL import Image
+
+    from . import detector as D
+
+    pin = D.PINS.get(engine)
+    if pin is None:
+        raise SystemExit(f"{engine}: not a detector engine (those are {sorted(D.PINS)})")
+    pkg = Path(out) / engine / "fp32" / target / "detector.pt2"
+    if not pkg.is_file():
+        raise SystemExit(f"{pkg}: no such package")
+    if weights_inside(pkg, pin.size):
+        raise SystemExit(f"{pkg}: weights inside the package")
+    files = page_files(pages)
+    D.check_pin(onnx_file, pin)
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+    dev = torch.device(device, 0) if device == "cuda" else torch.device("cpu")
+    with zipfile.ZipFile(pkg) as z:
+        meta_src = [n for n in z.namelist() if n.endswith(".wrapper_metadata.json")]
+        meta = json.loads(z.read(meta_src[0])) if len(meta_src) == 1 else {}
+    wm = json.loads(meta.get("bunko.weights", "{}"))
+    for key, value in (("bunko.io", D.IO), ("bunko.weights_format", "onnx"), ("bunko.weights_sha256", pin.sha256),
+                       ("bunko.ultralytics", D.ULTRALYTICS_VERSION)):
+        if meta.get(key) != value:
+            raise SystemExit(f"{pkg}: {key} is {meta.get(key)!r}, not {value!r}")
+    unbound = sorted(set(package_constants(pkg)) - set(wm))
+    if unbound:
+        raise SystemExit(f"{pkg}: constants without an ONNX initializer: {unbound[:5]}")
+    arrays = D.onnx_arrays(onnx_file, set(wm.values()))
+    weights = {name: torch.from_numpy(a).to(dev) for name, a in arrays.items()}
+    del arrays
+    m, _ = load_pkg(pkg, weights, dev.index if dev.type == "cuda" else -1)
+    so = ort.SessionOptions()
+    sess = ort.InferenceSession(str(onnx_file), so, providers=["CPUExecutionProvider"])
+    res = {"pages": 0, "identical_sets": 0, "worst_corner": 0.0, "edges_moved": 0, "blocks": 0, "differ": []}
+    t0 = time.time()
+    with torch.no_grad():
+        for p in files:
+            with Image.open(p) as im:
+                rgb = np.asarray(im.convert("RGB"))
+            res["pages"] += 1
+            c = canvas(rgb)
+            if c is None:  # no blocks on either route
+                res["identical_sets"] += 1
+                continue
+            x, scale, page = c
+            ref = sess.run(["output0"], {"images": x[None]})[0][0]
+            got = m(torch.from_numpy(x[None]).to(dev))
+            got = (got[0] if isinstance(got, (tuple, list)) else got)[0].float().cpu().numpy()
+            rb, gb = blocks_from_output(ref, scale, page), blocks_from_output(got, scale, page)
+            same, worst, moved = compare_blocks(rb, gb)
+            res["blocks"] += len(rb)
+            if same:
+                res["identical_sets"] += 1
+                res["worst_corner"] = max(res["worst_corner"], worst)
+                res["edges_moved"] += moved
+            if not same or worst > WORST_CORNER or moved:
+                name = str(p.relative_to(pages)) if Path(pages).is_dir() else str(p)
+                res["differ"].append({"page": name, "onnx": rb, "package": gb})
+    print(f"{res['pages']} pages in {time.time() - t0:.1f}s, one a call", file=sys.stderr)
+    return res, [m, weights]
+
+
+def detector_passes(res: dict) -> bool:
+    return (res["identical_sets"] == res["pages"] and res["worst_corner"] <= WORST_CORNER
+            and res["edges_moved"] == 0)
+
+
+def verify_detector(out: Path, target: str, pages: Path, onnx: Path, device: str) -> dict:
+    """The AnimeText package against ONNX Runtime on the CPU, page by page:
+    ``{"pages", "identical_sets", "worst_corner", "edges_moved", "blocks", "differ"}``
+    (``blocks``: the ONNX route's block count over all pages; ``differ``: the pages that
+    fail, with both block sets). Passing (``detector_passes``):
+    ``identical_sets == pages``, ``worst_corner <= 0.01``, ``edges_moved == 0``. Refuses
+    (SystemExit) a package with weights inside before loading it."""
+    res, held = _verify_detector(out, target, pages, onnx, device)
+    _release(held)
+    return res
+
+
 def _release(held: list) -> None:
     # free the packages before the weights they bind (the runtime's order: PackageSet
     # drops its graphs before its Weights): ``held`` lists packages first, one at a time
@@ -282,11 +553,23 @@ def main(argv=None) -> int:
     ap.add_argument("--crops", type=Path, help="text-box engines: a directory of crop images")
     ap.add_argument("--expected", type=Path, help="text-box engines: check_parity.py --expected JSON lines")
     ap.add_argument("--n", type=int, default=None, help="text-box engines: only the first N crops by name")
+    ap.add_argument("--pages", type=Path, help="detector: a directory of page images, or a list file of them")
+    ap.add_argument("--onnx", type=Path, help="detector: the pinned ONNX file the package binds")
     a = ap.parse_args(argv)
     from .__main__ import _imports
 
     _imports()
+    from .detector import PINS as DETECTOR_PINS
     from .textbox import PINS
+
+    if a.engine in DETECTOR_PINS:
+        if a.pages is None or a.onnx is None:
+            raise SystemExit(f"{a.engine}: --pages and --onnx are required")
+        if a.precision != "fp32":
+            raise SystemExit(f"{a.engine}: fp32 only")
+        res, held = _verify_detector(a.out, a.target, a.pages, a.onnx, a.device, a.engine)
+        print(json.dumps({**res, "differ": res["differ"][:3], "differ_pages": [d["page"] for d in res["differ"]]}), flush=True)
+        return _finish(0 if detector_passes(res) else 1, held)
 
     if a.engine in PINS:
         if a.crops is None or a.expected is None:

@@ -13,10 +13,13 @@
                                   torch-models.json over everything under --out
   textbox-manifest -e E1,E2 [--out DIR] [--tag TAG] [--licence L] [--base-url URL] [--flat DIR]
                                   <tag>.json of the packages that bind their authors'
-                                  weights (textbox-torch-v1): rows of those engines only
+                                  weights (textbox-torch-v1; detector-torch-v1 with
+                                  -e animetext-blocks --licence AGPL-3.0): rows of those
+                                  engines only
   verify OUT ENGINE PREC TARGET [...]
                                   python -m torch_export.verify (text-box engines:
-                                  --crops DIR --expected FILE, the crop-level gate)
+                                  --crops DIR --expected FILE, the crop-level gate;
+                                  animetext-blocks: --pages DIR|LIST --onnx FILE)
   refuse-embedded DIR...          exit 1 on the first .pt2 with its weights inside
                                   (*_embed.pt2, or an entry > pinned weights / 4)
   fetch-windows-cross             download the pinned Windows wheels + llvm-mingw used to
@@ -30,6 +33,9 @@ checked against it), HF_HUB_OFFLINE (default 1: models come from the HF cache),
 TORCH_EXPORT_CPU_EMBED=1 (CPU targets: the old frozen layout, weights inside the package),
 TORCH_EXPORT_WIN_EMBED=1 (cross-built Windows GPU targets: weights inside),
 TORCH_EXPORT_OBJDUMP (the GNU objdump the checks run; default objdump).
+animetext-blocks also reads TORCH_EXPORT_ANIMETEXT_ONNX (the pinned ONNX file; default the
+Hugging Face cache at the pin) and TORCH_EXPORT_DETECTOR_PYLIB (requirements-detector.txt
+installed with pip --no-deps --target; or put that directory on PYTHONPATH).
 """
 
 from __future__ import annotations
@@ -152,10 +158,11 @@ def cmd_manifest(a) -> int:
 
 
 def cmd_textbox_manifest(a) -> int:
+    from .detector import PINS as DETECTOR_PINS
     from .manifest import build_textbox_manifest
     from .textbox import PINS
 
-    build_textbox_manifest(Path(a.out), a.tag, tuple(a.engine.split(",")), PINS, a.licence, a.base_url,
+    build_textbox_manifest(Path(a.out), a.tag, tuple(a.engine.split(",")), {**PINS, **DETECTOR_PINS}, a.licence, a.base_url,
                            Path(a.flat) if a.flat else None)
     return 0
 
