@@ -383,20 +383,34 @@ def _verify_charspot(out: Path, precision: str, target: str, crops: Path, expect
                 raise SystemExit(f"{p}: {key} is {meta.get(key)!r}, not {value!r}")
         if not json.loads(meta.get("bunko.weights", "{}")):
             raise SystemExit(f"{p}: no bunko.weights map: its constants are not bound to the authors' {pin.file}")
+    if dev.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(dev)
     t0 = time.time()
     with torch.no_grad():
         got = charspot_read(files, held[0], held[1], core, out_str, dev, batch, snap)
-    identical, differ = 0, []
+    took = time.time() - t0
+    identical, differ, moved = 0, [], 0.0
     for p, g in zip(files, got):
         if same_chars(g, want[p.name]):
             identical += 1
+            moved = max([moved, *(abs(float(a) - float(b)) for gc, wc in zip(g["chars"], want[p.name]["chars"])
+                                  for a, b in zip(gc[1:5], wc[1:5]))])
         else:
             differ.append(p.name)
-    print(f"{len(files)} crops in {time.time() - t0:.1f}s, canvas batch {batch}", file=sys.stderr)
+    print(f"{len(files)} crops in {took:.1f}s, canvas batch {batch}", file=sys.stderr)
     by_name = {p.name: g for p, g in zip(files, got)}
     for name in differ[:5]:
         print(f"  {name}: {by_name[name]['text']!r} / expected {want[name]['text']!r}", file=sys.stderr)
-    return {"crops": len(files), "identical": identical, "differ": differ}, [*held, weights]
+    res = {"crops": len(files), "identical": identical, "differ": differ, "batch": batch,
+           "passed": identical == len(files),
+           # the whole loop: crops decoded and prepared on the CPU, both graphs, the decode
+           "crops_per_s": round(len(files) / took, 1) if took > 0 else None,
+           # over the crops that read the same
+           "largest_move_px": moved,
+           # torch's caching allocator during the read (the bound weights included)
+           "torch_peak_reserved_mb": round(torch.cuda.max_memory_reserved(dev) / 2**20) if dev.type == "cuda"
+           else None}
+    return res, [*held, weights]
 
 
 def verify_textbox(out: Path, engine: str, precision: str, target: str, crops: Path, expected: Path,

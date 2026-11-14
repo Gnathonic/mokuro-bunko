@@ -1339,4 +1339,155 @@ mod tests {
         assert_eq!(r[1].0, "y");
         assert_eq!(r[1].1, vec![("y".to_string(), [0.0, 0.0, 16.0, 16.0], 0.9)]);
     }
+
+    /// The Rust decode against the authors' `core.py` on real maps (TEXTBOX-GPU.md §20.2):
+    /// for every row of `MOKURO_CHARSPOT_DUMPS` (`tools/textbox_export/charspot_dump.py`'s
+    /// JSON lines; the gate uses at least 1,000 crops), [`charspot_detect`] on the crop's
+    /// maps gives the dump's boxes, scores and geometry bit for bit, in the same order
+    /// (or nothing where the dump has `"detected": null`), and [`charspot_chain`] on the
+    /// dump's tail scores gives its sequence. The dump must be written with exp in f64
+    /// (`"exp": "f64"`, the script's default): numpy's own f32 exp differs from it in the
+    /// last bits. Each number is an f32 written exactly, so parsing it as f64 and casting
+    /// gives the same bits. The variable is this test's own:
+    /// `MOKURO_CHARSPOT_DUMPS=<file> cargo test -p bunko-vlm --release --lib -- --ignored --exact textbox::tests::charspot_decode_parity`.
+    #[test]
+    #[ignore = "needs charspot_dump.py's output (MOKURO_CHARSPOT_DUMPS)"]
+    fn charspot_decode_parity() {
+        use std::io::BufRead;
+
+        let path = std::env::var_os("MOKURO_CHARSPOT_DUMPS")
+            .unwrap_or_else(|| panic!("MOKURO_CHARSPOT_DUMPS is not set"));
+        let file = std::fs::File::open(&path)
+            .unwrap_or_else(|e| panic!("{}: {e}", Path::new(&path).display()));
+        fn f32s(v: &serde_json::Value) -> Vec<f32> {
+            v.as_array()
+                .unwrap_or_else(|| panic!("not an array: {v}"))
+                .iter()
+                .map(|x| x.as_f64().unwrap_or_else(|| panic!("not a number: {x}")) as f32)
+                .collect()
+        }
+        fn quads(v: &serde_json::Value) -> Vec<[f32; 4]> {
+            v.as_array()
+                .unwrap_or_else(|| panic!("not an array: {v}"))
+                .iter()
+                .map(|q| <[f32; 4]>::try_from(f32s(q)).expect("four numbers"))
+                .collect()
+        }
+        // Bit for bit: NaN equals NaN with the same bits, and -0.0 differs from 0.0.
+        fn bits(v: &[f32]) -> Vec<u32> {
+            v.iter().map(|x| x.to_bits()).collect()
+        }
+        fn quad_bits(v: &[[f32; 4]]) -> Vec<[u32; 4]> {
+            v.iter().map(|q| q.map(f32::to_bits)).collect()
+        }
+
+        let (mut crops, mut found, mut chars) = (0usize, 0usize, 0usize);
+        let mut differ = Vec::new();
+        for line in std::io::BufReader::new(file).lines() {
+            let line = line.unwrap();
+            if line.trim().is_empty() {
+                continue;
+            }
+            let row: serde_json::Value = serde_json::from_str(&line).unwrap();
+            let name = row["file"].as_str().unwrap_or("?").to_string();
+            assert_eq!(
+                row["exp"].as_str(),
+                Some("f64"),
+                "{name}: a dump written with numpy's own exp (--numpy-exp) cannot match bit for \
+                 bit; write it again without --numpy-exp"
+            );
+            crops += 1;
+            let dim =
+                |k: &str| row[k].as_u64().unwrap_or_else(|| panic!("{name}: no {k}")) as usize;
+            let (h8, w8) = (dim("height"), dim("width"));
+            let (heat, boxes, ruby) = (f32s(&row["heat"]), f32s(&row["box"]), f32s(&row["ruby"]));
+            assert_eq!(
+                (heat.len(), boxes.len(), ruby.len()),
+                (h8 * w8, 4 * h8 * w8, h8 * w8),
+                "{name}: map sizes"
+            );
+            let maps = DenseMaps {
+                heat: &heat,
+                boxes: &boxes,
+                ruby: &ruby,
+                height: h8,
+                width: w8,
+            };
+            let got = charspot_detect(&maps, h8, w8);
+            let want = &row["detected"];
+            let det = match (got, want.is_null()) {
+                (None, true) => continue,
+                (Some(g), true) => {
+                    differ.push(format!(
+                        "{name}: {} characters, the authors' detect keeps none",
+                        g.boxes.len()
+                    ));
+                    continue;
+                }
+                (None, false) => {
+                    differ.push(format!(
+                        "{name}: no characters, the authors' detect keeps some"
+                    ));
+                    continue;
+                }
+                (Some(g), false) => g,
+            };
+            found += 1;
+            let (wb, ws, wg) = (
+                quads(&want["boxes"]),
+                f32s(&want["scores"]),
+                quads(&want["geo"]),
+            );
+            if det.boxes.len() != wb.len() {
+                differ.push(format!(
+                    "{name}: {} characters kept, the authors' detect keeps {}",
+                    det.boxes.len(),
+                    wb.len()
+                ));
+                continue;
+            }
+            chars += wb.len();
+            let (gb, gs, gg) = (
+                quad_bits(&det.boxes),
+                bits(&det.scores),
+                quad_bits(&det.geo),
+            );
+            let (eb, es, eg) = (quad_bits(&wb), bits(&ws), quad_bits(&wg));
+            if let Some(k) =
+                (0..wb.len()).find(|&k| gb[k] != eb[k] || gs[k] != es[k] || gg[k] != eg[k])
+            {
+                differ.push(format!(
+                    "{name}: character {k} differs: box {:?} / {:?}, score {:?} / {:?}, geo {:?} / {:?}",
+                    det.boxes[k], wb[k], det.scores[k], ws[k], det.geo[k], wg[k]
+                ));
+            }
+            let n = wb.len();
+            let (pair, start, end) = (f32s(&row["pair"]), f32s(&row["start"]), f32s(&row["end"]));
+            assert_eq!(
+                (pair.len(), start.len(), end.len()),
+                (n * n, n, n),
+                "{name}: tail score sizes"
+            );
+            let seq: Vec<usize> = row["seq"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{name}: no seq"))
+                .iter()
+                .map(|k| k.as_u64().expect("an index") as usize)
+                .collect();
+            let chain = charspot_chain(&pair, &start, &end);
+            if chain != seq {
+                differ.push(format!("{name}: chain {chain:?}, the authors' {seq:?}"));
+            }
+        }
+        eprintln!(
+            "charspot decode: {crops} crops ({found} with characters, {chars} characters), {} differ",
+            differ.len()
+        );
+        assert!(crops > 0, "no rows in {}", Path::new(&path).display());
+        assert!(
+            differ.is_empty(),
+            "{} of {crops} crops differ: {differ:#?}",
+            differ.len()
+        );
+    }
 }

@@ -34,6 +34,20 @@ MOKURO_NAR_VOCAB=<nar_vocabulary_6817.json> \
 # charspot-small (the same environment, plus onnxruntime and torch for the dump)
 python charspot_reference.py --crops <JMangaBench_Read crops> --out OUT/charspot-expected.jsonl [--n N]
 python charspot_dump.py --crops <JMangaBench_Read crops> --out OUT/charspot-dump.jsonl --n 1000
+# Bunko's Rust decode on the dumped maps: boxes, scores and geometry bit for bit, the chain exact
+MOKURO_CHARSPOT_DUMPS=OUT/charspot-dump.jsonl \
+  cargo test -p bunko-vlm --release --lib -- --ignored --exact textbox::tests::charspot_decode_parity
+# the GPU route through a backend pack (one GPU test per process, under the GPU lock)
+MOKURO_TORCH_PACK=<pack> MOKURO_CHARSPOT_TORCH_PACKAGE=<dir with dense.pt2 and tail.pt2> \
+MOKURO_CHARSPOT_WEIGHTS=<model.safetensors> MOKURO_CHARSPOT_VOCAB=<vocab.json> \
+MOKURO_CHARSPOT_PARITY_CROPS=<crops> MOKURO_CHARSPOT_PARITY_EXPECTED=OUT/charspot-expected.jsonl \
+  cargo test -p bunko-engines --features nc-models --release --lib -- --ignored --exact \
+  torch::textbox::tests::charspot_torch_parity --nocapture
+# one target's gate bundle for a test machine (no weights in it; its run.sh fetches and
+# checks them), and the charspot section of the release NOTICE.md (tools/torch_export)
+python -m torch_export.charspot_gate bundle --out BUILD -t TARGET --crops <crops> \
+    --expected OUT/charspot-expected.jsonl --commit <exporter commit> --dest <new dir>
+python -m torch_export.charspot_gate notice --commit <exporter commit> --manifest STAGE/textbox-torch-v1.json
 ```
 
 2026-11-11: `nar-small_r16_graph.onnx`, 714,861 bytes, sha256
