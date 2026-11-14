@@ -383,9 +383,19 @@ pub fn engine_ids(engine: &str, precision: Precision) -> Vec<&'static str> {
 
 /// Manifest ids a recognizer reads at `precision` with the backends of this build:
 /// the libtorch host files, and the ONNX graphs when the ONNX recognizers are built.
+/// A text-box recognizer reads its ONNX files on the CPU in every build, and with the
+/// libtorch backend its GPU route's host files too (each listed once).
 pub fn recognizer_ids(engine: &str, precision: Precision) -> Vec<&'static str> {
     if textbox_engine(engine) {
-        return textbox_ids(engine);
+        let mut ids = textbox_ids(engine);
+        if cfg!(feature = "torch") {
+            for id in torch_host_ids(engine, precision) {
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+        }
+        return ids;
     }
     let mut ids = Vec::new();
     if cfg!(feature = "torch") {
@@ -418,12 +428,26 @@ pub fn list_ids(engine: &str) -> Vec<&'static str> {
 
 /// Every device-independent file a machine should fetch ahead of time for `engine`
 /// (or every engine): PP-OCR, the engine's fp32 set and, with a GPU, its fp16 set
-/// too. The compiled libtorch packages depend on the device: see
-/// `EnginePipeline::prefetch`.
+/// too. A text-box engine has one set: its ONNX files and, with a GPU, its GPU route's
+/// host files ([`recognizer_ids`] at fp32). The compiled libtorch packages depend on
+/// the device: see `EnginePipeline::prefetch`.
 pub fn download_plan(engine: Option<&str>, gpu: bool) -> Vec<&'static str> {
     let mut ids = ppocr_ids();
     for &e in ENGINES {
         if engine.is_some_and(|want| want != e) {
+            continue;
+        }
+        if textbox_engine(e) {
+            let set = if gpu {
+                recognizer_ids(e, Precision::Fp32)
+            } else {
+                textbox_ids(e)
+            };
+            for id in set {
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
             continue;
         }
         let mut precisions = vec![Precision::Fp32];
@@ -670,5 +694,32 @@ mod tests {
         assert!(
             vulkan_host_ids(HAYAI, &["ncnn", "webgpu"]).contains(&"hayai-nova/token-embeddings")
         );
+    }
+    /// A GPU host's plan holds the text-box GPU route's host files (Q21); a CPU-only
+    /// plan holds the ONNX route's files alone.
+    #[cfg(all(feature = "nc-models", feature = "torch"))]
+    #[test]
+    fn a_gpu_plan_holds_the_text_box_host_files() {
+        let host = torch_host_ids(NAR, Precision::Fp32);
+        assert_eq!(
+            host,
+            [
+                bunko_ocr::models::NAR_VOCABULARY,
+                bunko_ocr::models::NAR_WEIGHTS
+            ]
+        );
+        let ids = recognizer_ids(NAR, Precision::Fp32);
+        assert!(host.iter().all(|id| ids.contains(id)), "{ids:?}");
+        assert_eq!(
+            ids.iter()
+                .filter(|id| **id == bunko_ocr::models::NAR_WEIGHTS)
+                .count(),
+            1
+        );
+        let gpu = download_plan(Some(NAR), true);
+        assert!(host.iter().all(|id| gpu.contains(id)), "{gpu:?}");
+        let mut cpu = ppocr_ids();
+        cpu.extend(textbox_ids(NAR));
+        assert_eq!(download_plan(Some(NAR), false), cpu);
     }
 }

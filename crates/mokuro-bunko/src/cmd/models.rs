@@ -365,49 +365,56 @@ pub fn plan(target: &OcrTarget, rows: &[(String, String)], open_backend: bool) -
                 modes.push("auto-accuracy");
             }
             modes.dedup();
-            match (&pipeline, &backend) {
-                (Some(p), Ok(())) => {
-                    for mode in modes {
-                        match p.package_plan(engine, mode) {
-                            Ok(pp) => {
-                                for id in pp.package_ids.iter().map(String::as_str) {
-                                    add(id);
-                                    if let Some(dir) = &pp.package {
-                                        let name = id.rsplit('/').next().unwrap_or(id);
-                                        let at = bunko_ocr::models::torch_graph_path(dir, name)
-                                            .or_else(|| dir.parent().map(|p| p.join(name)))
-                                            .filter(|p| p.exists());
-                                        if let Some(at) = at {
-                                            fallbacks.push((id.to_string(), at));
-                                        }
+            // A text-box engine reads on the CPU without a backend pack: its plan is
+            // that route's.
+            let planner = match (&pipeline, &backend) {
+                (Some(p), Ok(())) => Some(p),
+                (Some(p), Err(_)) if models::textbox_engine(engine) => Some(p),
+                (_, Err(e)) => {
+                    package_error = Some(format!("compiled packages: {e}"));
+                    None
+                }
+                (None, Ok(())) => None,
+            };
+            if let Some(p) = planner {
+                for mode in modes {
+                    match p.package_plan(engine, mode) {
+                        Ok(pp) => {
+                            for id in pp.package_ids.iter().map(String::as_str) {
+                                add(id);
+                                if let Some(dir) = &pp.package {
+                                    let name = id.rsplit('/').next().unwrap_or(id);
+                                    let at = bunko_ocr::models::torch_graph_path(dir, name)
+                                        .or_else(|| dir.parent().map(|p| p.join(name)))
+                                        .filter(|p| p.exists());
+                                    if let Some(at) = at {
+                                        fallbacks.push((id.to_string(), at));
                                     }
                                 }
-                                for id in &pp.host_ids {
-                                    add(id);
-                                }
-                                let pkg = PlanPackage {
-                                    mode: mode.to_string(),
-                                    precision: pp.need.precision.as_str().to_string(),
-                                    device: pp.need.device.clone(),
-                                    label: pp.need.label.clone(),
-                                    target: pp.target.clone(),
-                                    present: pp.package.is_some(),
-                                    fallback: pp.need.fallback.clone(),
-                                };
-                                if !packages.iter().any(|q: &PlanPackage| {
-                                    q.precision == pkg.precision
-                                        && q.device == pkg.device
-                                        && q.target == pkg.target
-                                }) {
-                                    packages.push(pkg);
-                                }
                             }
-                            Err(e) => package_error = Some(e),
+                            for id in &pp.host_ids {
+                                add(id);
+                            }
+                            let pkg = PlanPackage {
+                                mode: mode.to_string(),
+                                precision: pp.need.precision.as_str().to_string(),
+                                device: pp.need.device.clone(),
+                                label: pp.need.label.clone(),
+                                target: pp.target.clone(),
+                                present: pp.package.is_some(),
+                                fallback: pp.need.fallback.clone(),
+                            };
+                            if !packages.iter().any(|q: &PlanPackage| {
+                                q.precision == pkg.precision
+                                    && q.device == pkg.device
+                                    && q.target == pkg.target
+                            }) {
+                                packages.push(pkg);
+                            }
                         }
+                        Err(e) => package_error = Some(e),
                     }
                 }
-                (_, Err(e)) => package_error = Some(format!("compiled packages: {e}")),
-                (None, Ok(())) => {}
             }
         }
         let files = ids
@@ -674,7 +681,7 @@ pub fn download(target: &OcrTarget, engine: Option<&str>) -> CmdResult {
     let rows = wanted_rows(target, engine);
     let recognizer_rows: Vec<(&str, &str)> = rows
         .iter()
-        .filter(|(e, _)| e == models::HAYAI || e == models::PADDLE)
+        .filter(|(e, _)| e != models::PPOCR && models::ENGINES.contains(&e.as_str()))
         .map(|(e, m)| (e.as_str(), m.as_str()))
         .collect();
     let gpu = bunko_ocr::runtime::ep_compiled().len() > 1;
@@ -728,7 +735,9 @@ pub fn download(target: &OcrTarget, engine: Option<&str>) -> CmdResult {
         let pipeline = bunko_engines::EnginePipeline::new(
             target.engine_config(Backend::parse(&target.backend_preference())),
         );
-        match pipeline.torch().map(drop).or_else(|e| {
+        // Without a backend the text-box rows still read on the CPU (their ONNX files):
+        // only the other recognizers' packages fail.
+        let rows: Vec<(&str, &str)> = match pipeline.torch().map(drop).or_else(|e| {
             if pipeline.vulkan_pairings().is_empty() {
                 Err(e)
             } else {
@@ -736,33 +745,42 @@ pub fn download(target: &OcrTarget, engine: Option<&str>) -> CmdResult {
             }
         }) {
             Err(e) => {
-                println!(
-                    "  compiled packages: FAILED: the OCR backend is not installed ({e}); run 'mokuro-bunko install-ocr'"
-                );
-                failed.push("compiled packages (no OCR backend)".into());
+                if recognizer_rows
+                    .iter()
+                    .any(|(r, _)| !models::textbox_engine(r))
+                {
+                    println!(
+                        "  compiled packages: FAILED: the OCR backend is not installed ({e}); run 'mokuro-bunko install-ocr'"
+                    );
+                    failed.push("compiled packages (no OCR backend)".into());
+                }
+                recognizer_rows
+                    .iter()
+                    .copied()
+                    .filter(|(r, _)| models::textbox_engine(r))
+                    .collect()
             }
-            Ok(_) => {
-                for (e, r) in pipeline.prefetch_rows(&recognizer_rows) {
-                    step(e);
-                    match r {
-                        Ok(p) => {
-                            println!(
-                                "  {e:<14} {} on {} ({}): {} [{}]",
-                                p.need.precision,
-                                p.need.device,
-                                p.need.label,
-                                p.package.display(),
-                                p.target
-                            );
-                            if let Some(why) = &p.need.fallback {
-                                println!("  {e:<14} note: running on the CPU: {why}");
-                            }
-                        }
-                        Err(err) => {
-                            println!("  {e:<14} FAILED: {err}");
-                            failed.push(format!("{e} compiled package"));
-                        }
+            Ok(_) => recognizer_rows.clone(),
+        };
+        for (e, r) in pipeline.prefetch_rows(&rows) {
+            step(e);
+            match r {
+                Ok(p) => {
+                    println!(
+                        "  {e:<14} {} on {} ({}): {} [{}]",
+                        p.need.precision,
+                        p.need.device,
+                        p.need.label,
+                        p.package.display(),
+                        p.target
+                    );
+                    if let Some(why) = &p.need.fallback {
+                        println!("  {e:<14} note: running on the CPU: {why}");
                     }
+                }
+                Err(err) => {
+                    println!("  {e:<14} FAILED: {err}");
+                    failed.push(format!("{e} compiled package"));
                 }
             }
         }

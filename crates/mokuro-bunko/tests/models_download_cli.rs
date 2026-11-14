@@ -51,3 +51,27 @@ fn ppocr_only_config_needs_no_backend() {
         "{text}"
     );
 }
+
+/// A nar-small row reads on the CPU without a backend pack: no "compiled packages"
+/// failure, only its own files (offline here, so they fail, late and counted).
+#[cfg(feature = "nc-models")]
+#[test]
+fn a_text_box_config_needs_no_backend() {
+    let env = Env::new();
+    env.write_config(
+        "ocr:\n  generations:\n    - {id: g-1, name: nar-small, engine: nar-small, primary: true, enabled: true}\n",
+    );
+    let out = env
+        .cmd()
+        .env("MOKURO_MODELS_DOWNLOAD", "0")
+        .args(["models", "download"])
+        .output()
+        .unwrap();
+    let text = stdout(&out);
+    assert!(!out.status.success(), "{text}");
+    assert!(text.contains("nar-small/graph-r16"), "{text}");
+    assert!(!text.contains("compiled packages"), "{text}");
+    assert!(!text.contains("hayai-nova"), "{text}");
+    // The row's CPU route is fetched (and fails: offline, nothing here).
+    assert!(text.contains("nar-small      FAILED"), "{text}");
+}

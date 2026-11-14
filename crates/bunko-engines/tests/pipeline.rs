@@ -454,3 +454,32 @@ fn refusals_before_loading() {
     s.detector = Some("ctd".into());
     assert!(p.open(&s).err().unwrap().contains("unknown detector ctd"));
 }
+
+/// No backend pack: a nar-small row's need is the CPU (its ONNX route) at fp32, with no
+/// package targets, and says why it is not on a GPU.
+#[cfg(all(feature = "nc-models", feature = "torch"))]
+#[test]
+fn a_text_box_need_without_a_pack_is_the_cpu() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = pipeline(tmp.path());
+    let need = p.need_for("nar-small", "auto-accuracy").unwrap();
+    assert_eq!(
+        (need.device.as_str(), need.precision),
+        ("cpu", bunko_vlm::Precision::Fp32)
+    );
+    assert!(need.targets.is_empty());
+    assert!(need.fallback.is_some());
+    // Its plan is the ONNX route: the graph and the weights it binds, and the vocabulary.
+    let plan = p.package_plan("nar-small", "auto-accuracy").unwrap();
+    assert_eq!(plan.target.as_deref(), Some("onnx"));
+    assert_eq!(
+        plan.package_ids,
+        ["nar-small/graph-r16", "nar-small/weights-r16"]
+    );
+    assert_eq!(plan.host_ids, ["nar-small/vocabulary"]);
+    if std::env::var_os("MOKURO_MODELS_DIR").is_none() {
+        let st = p.package_status_for("nar-small", "auto-accuracy").unwrap();
+        assert!(st.package.is_none() && !st.ready());
+        assert_eq!(st.missing_host_files, ["nar-small/vocabulary"]);
+    }
+}

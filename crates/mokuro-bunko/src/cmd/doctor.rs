@@ -612,7 +612,8 @@ fn check_backend(target: &crate::ocr_target::OcrTarget) -> Check {
 }
 
 /// The compiled libtorch packages the enabled generations need on this machine's
-/// device (`EnginePipeline::package_status_for`, each row's precision mode), and what
+/// device (`EnginePipeline::package_status_for`, each row's precision mode; a text-box
+/// row that reads on the CPU needs none: its ONNX files are the Models check's), and what
 /// the backend set for its runtime (an RX 6600's `HSA_OVERRIDE_GFX_VERSION`, a usable
 /// `TMPDIR`) or turned off (the GPU, with no usable temporary folder at all). FAIL
 /// when a row's package (with the weights it binds) or one of its host files is not on
@@ -630,7 +631,7 @@ fn check_packages(
         .generations
         .iter()
         .filter(|g| g.enabled && g.retired.is_none())
-        .filter(|g| g.engine == models::HAYAI || g.engine == models::PADDLE)
+        .filter(|g| g.engine != models::PPOCR && models::ENGINES.contains(&g.engine.as_str()))
         .map(|g| (g.engine.clone(), g.precision.clone()))
         .collect();
     if rows.is_empty() {
@@ -651,8 +652,16 @@ fn check_packages(
         .chain(tb.pack.warnings.iter().cloned())
         .collect();
     let (mut present, mut missing, mut cannot) = (Vec::new(), Vec::new(), Vec::new());
+    let mut on_cpu = Vec::new();
     for (engine, mode) in &rows {
         match pipeline.package_status_for(engine, mode) {
+            // The text-box engines' CPU route (ONNX Runtime): no compiled package.
+            Ok(st) if models::textbox_engine(engine) && st.need.device == "cpu" => {
+                on_cpu.push(match &st.need.fallback {
+                    Some(why) => format!("{engine} reads on the CPU ({why})"),
+                    None => format!("{engine} reads on the CPU"),
+                })
+            }
             Ok(st) if st.ready() => present.push(format!(
                 "{engine} {} on {} ({})",
                 st.need.precision, st.need.device, st.need.label
@@ -685,6 +694,7 @@ fn check_packages(
     if !cannot.is_empty() {
         detail.push(format!("NOT RUNNABLE HERE: {}", cannot.join("; ")));
     }
+    detail.extend(on_cpu);
     detail.extend(notes);
     let detail = detail.join("; ");
     Some(if !cannot.is_empty() {

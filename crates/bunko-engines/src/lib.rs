@@ -834,9 +834,10 @@ impl EnginePipeline {
     }
 
     /// Why no recognizer of `engine` can load in this process: no libtorch backend pack
-    /// loaded and no ONNX recognizers built in. None when one can.
+    /// loaded and no ONNX recognizers built in. None when one can, and always for a
+    /// text-box engine (it reads on the CPU with ONNX Runtime in every build).
     fn no_recognizer_backend(&self, engine: &str) -> Option<String> {
-        if self.torch_loaded() || cfg!(feature = "onnx-vlm") {
+        if models::textbox_engine(engine) || self.torch_loaded() || cfg!(feature = "onnx-vlm") {
             return None;
         }
         #[cfg(feature = "torch")]
@@ -920,9 +921,14 @@ impl EnginePipeline {
 
     /// Whether a recognizer backend can run `engine` here (for `describe`).
     fn recognizer_ready(&self, engine: &str, devices: &[Device]) -> bool {
-        // The text-box recognizers need their files and nothing else.
+        // The text-box recognizers: their ONNX files for the CPU, or a GPU that runs
+        // them through the libtorch pack.
         if models::textbox_engine(engine) {
-            return models::obtainable(&self.store, &models::textbox_ids(engine));
+            return models::obtainable(&self.store, &models::textbox_ids(engine))
+                || devices.iter().any(|d| {
+                    let (placement, _) = runtime::place(Some(&d.id), devices);
+                    placement.is_gpu() && !self.textbox_formats(engine, &placement).is_empty()
+                });
         }
         #[cfg(feature = "torch")]
         if self.torch().is_ok() {
@@ -964,6 +970,9 @@ impl EnginePipeline {
     /// runs on here, as [`default_need`](Self::default_need).
     #[cfg(feature = "torch")]
     pub fn need_for(&self, engine: &str, mode: &str) -> Result<EngineNeed, String> {
+        if models::textbox_engine(engine) {
+            return self.textbox_need(engine, mode);
+        }
         // Without a libtorch pack the Vulkan pack's GPUs still have a plan.
         let tb = match self.torch() {
             Ok(tb) => Some(tb),
@@ -1006,6 +1015,57 @@ impl EnginePipeline {
         })
     }
 
+    /// [`need_for`](Self::need_for) of a text-box engine: the GPU its placement picks
+    /// over [`textbox_formats`](Self::textbox_formats) at fp32 with that device's
+    /// package targets, else the CPU (the ONNX route, no targets). With no libtorch pack
+    /// the CPU is the need and `fallback` says why; a pack without `bt_read_chars` says
+    /// [`torch::TEXTBOX_PACK_REASON`].
+    #[cfg(feature = "torch")]
+    fn textbox_need(&self, engine: &str, mode: &str) -> Result<EngineNeed, String> {
+        let engine: &'static str = models::ENGINES
+            .iter()
+            .copied()
+            .find(|e| *e == engine)
+            .ok_or_else(|| format!("{engine} has no recognizer"))?;
+        // One format (fp32) in this release: every mode resolves to it.
+        let _ = mode;
+        let devices = self.devices();
+        let (placement, mut fallback) =
+            runtime::place_runnable(None, &devices, |pl| self.textbox_formats(engine, pl));
+        let tb = self.torch();
+        match &tb {
+            Err(e) => {
+                fallback.get_or_insert_with(|| e.clone());
+            }
+            Ok(tb) if !tb.pack.reads_chars() && fallback.is_some() => {
+                fallback = Some(torch::TEXTBOX_PACK_REASON.to_string());
+            }
+            Ok(_) => {}
+        }
+        let label = devices
+            .iter()
+            .find(|d| d.id == placement.device)
+            .map_or_else(|| placement.device.clone(), |d| d.label.clone());
+        if self.textbox_formats(engine, &placement).is_empty() {
+            return Err(format!(
+                "{engine}'s files are not here and downloads are off (MOKURO_MODELS_DOWNLOAD)"
+            ));
+        }
+        let precision = Precision::Fp32;
+        let targets = match &tb {
+            Ok(tb) if placement.is_gpu() => Self::torch_targets(tb, &placement.device, precision),
+            _ => Vec::new(),
+        };
+        Ok(EngineNeed {
+            engine,
+            device: placement.device,
+            label,
+            precision,
+            targets,
+            fallback,
+        })
+    }
+
     /// Fetch what the default rows of `engine` (or every recognizer engine) need on
     /// this machine ([`default_need`](Self::default_need)): host files, the compiled
     /// package (unpacked) and its shared weights. Other precisions and devices are
@@ -1015,8 +1075,10 @@ impl EnginePipeline {
         &self,
         engine: Option<&str>,
     ) -> Vec<(&'static str, Result<Prefetched, String>)> {
-        let rows: Vec<(&str, &str)> = [models::HAYAI, models::PADDLE]
-            .into_iter()
+        let rows: Vec<(&str, &str)> = models::ENGINES
+            .iter()
+            .copied()
+            .filter(|e| *e != models::PPOCR)
             .filter(|e| engine.is_none_or(|want| want == *e))
             .map(|e| (e, precision::MODE_ACCURACY))
             .collect();
@@ -1032,6 +1094,15 @@ impl EnginePipeline {
     ) -> Vec<(&'static str, Result<Prefetched, String>)> {
         let mut out: Vec<(&'static str, Result<Prefetched, String>)> = Vec::new();
         for &(engine, mode) in rows {
+            if models::textbox_engine(engine)
+                && let Some(e) = models::ENGINES.iter().copied().find(|e| *e == engine)
+            {
+                let r = self
+                    .need_for(e, mode)
+                    .and_then(|need| self.prefetch_textbox(e, need));
+                out.push((e, r));
+                continue;
+            }
             let e: &'static str = match engine {
                 models::HAYAI => models::HAYAI,
                 models::PADDLE => models::PADDLE,
@@ -1070,6 +1141,49 @@ impl EnginePipeline {
             out.push((e, r));
         }
         out
+    }
+
+    /// [`prefetch_rows`](Self::prefetch_rows) of a text-box row. On a GPU: the package
+    /// for its targets, the GPU route's host files and the ONNX files (the CPU route, the
+    /// fallback when the GPU cannot start, is then free); on the CPU: the ONNX files,
+    /// the graph reported as the package.
+    #[cfg(feature = "torch")]
+    fn prefetch_textbox(
+        &self,
+        engine: &'static str,
+        need: EngineNeed,
+    ) -> Result<Prefetched, String> {
+        if need.device != Placement::cpu().device {
+            let pkg = self
+                .store
+                .ensure_torch_package(engine, need.precision.as_str(), &need.targets)
+                .map_err(|err| err.to_string())?;
+            let files =
+                models::torch_host_files(&self.store, engine, need.precision, pkg.dir.clone())?;
+            // The CPU route's files are fetched by the download plan too: a failure
+            // here is that route's, not the GPU's.
+            if let Err(e) = models::ensure_all(&self.store, &models::textbox_ids(engine)) {
+                warn!("{engine}: the CPU route's files: {e}");
+            }
+            return Ok(Prefetched {
+                need,
+                package: pkg.dir,
+                target: pkg.target,
+                host_files: std::iter::once(files.tokenizer)
+                    .chain(files.weights)
+                    .collect(),
+            });
+        }
+        let mut files = models::ensure_all(&self.store, &models::textbox_ids(engine))?.into_iter();
+        let graph = files
+            .next()
+            .ok_or_else(|| format!("{engine} has no ONNX graph"))?;
+        Ok(Prefetched {
+            need,
+            package: graph.path,
+            target: TEXTBOX_CPU_TARGET.to_string(),
+            host_files: files.map(|f| f.path).collect(),
+        })
     }
 
     /// Fetch the graphs of the Vulkan runtimes paired with libtorch GPU `device` for
@@ -1215,6 +1329,34 @@ impl EnginePipeline {
     #[cfg(feature = "torch")]
     pub fn package_plan(&self, engine: &str, mode: &str) -> Result<PackagePlan, String> {
         let need = self.need_for(engine, mode)?;
+        if models::textbox_engine(need.engine) && need.device == Placement::cpu().device {
+            // The ONNX route: the graph and the weights it binds are the package, the
+            // vocabulary the host file (`textbox_ids`: graph, vocabulary, weights).
+            let ids = models::textbox_ids(need.engine);
+            let host_ids: Vec<&'static str> = ids.iter().copied().skip(1).take(1).collect();
+            let package_ids: Vec<String> = ids
+                .iter()
+                .filter(|id| !host_ids.contains(id))
+                .map(|id| id.to_string())
+                .collect();
+            let package = package_ids
+                .iter()
+                .map(|id| self.store.locate(id))
+                .collect::<Option<Vec<PathBuf>>>()
+                .and_then(|paths| {
+                    paths
+                        .first()
+                        .and_then(|p| p.parent())
+                        .map(std::path::Path::to_path_buf)
+                });
+            return Ok(PackagePlan {
+                need,
+                target: Some(TEXTBOX_CPU_TARGET.to_string()),
+                package_ids,
+                package,
+                host_ids,
+            });
+        }
         if self.is_vulkan_device(&need.device) {
             let pl = runtime::place(Some(&need.device), &self.devices()).0;
             let rt = self
@@ -2086,6 +2228,11 @@ pub(crate) fn textbox_gpu_formats(
         .filter(|p| built.contains(p))
         .collect()
 }
+
+/// The target a text-box row on the CPU names (its ONNX route) in
+/// [`PackagePlan::target`] and [`Prefetched::target`].
+#[cfg(feature = "torch")]
+const TEXTBOX_CPU_TARGET: &str = "onnx";
 
 /// Whether the reason a text-box row reads on the CPU (a pack without
 /// `bt_read_chars`) has been logged in this process: once is enough.
