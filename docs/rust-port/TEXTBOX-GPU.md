@@ -22,9 +22,9 @@ Give `nar-small` and `charspot-small` (muscgab; weights CC BY-NC-SA 4.0, built b
 built behind `gpl-models`) a GPU route through Bunko's existing libtorch backend pack, the
 way `hayai-nova` and `paddle-manga` already run.
 
-ONNX Runtime on the CPU stays the route everywhere else, and the fallback. A host with a
-GPU and an older pack fetches the new pack by itself (§16); until it is in, the CPU route
-serves.
+ONNX Runtime on the CPU stays the route everywhere else, and the fallback. Backend packs
+are tied to the release: 0.8.0 loads only its own pack, and installs it before the backend
+starts (§16).
 
 Why AnimeText too: with the engine on a big GPU the pace moves to the block detector on the
 CPU. The shipped pooled CPU detector reached 8.3-9.1 pages/s at 2.4-2.9 CPU-s a page on the
@@ -36,11 +36,25 @@ pages/s on the 24-core host (`crates/bunko-engines/src/plan.rs:156` doc comment 
 1. **Both text-box engines, before the 0.8.0 tag, in one pack update.** nar-small (r16) goes
    first end to end, then charspot-small.
 2. **AnimeText also gets the libtorch GPU route, in the same pack update.**
-3. **Precision: fp32 packages for both engines, plus an fp16 option for nar-small** (§11).
+3. **Precision: fp32 packages for both engines, plus fp16 packages for nar-small** (§11).
    charspot-small and AnimeText are fp32 only.
-4. **Packs update themselves.** A host with an older backend pack gets the new pack
-   automatically when it has a GPU and an enabled row uses one of these engines or the
-   detector. The CPU route is the silent fallback until the new pack is in (§16).
+4. **Packs tied to releases.** This replaces the first answer, "packs update themselves"
+   (O3 below, §16).
+
+Owner answers (2026-11-13, final):
+
+- **O1 (was §22 Q1): yes.** The weightless AnimeText `.pt2` set is published as the separate
+  pre-release `detector-torch-v1`, with the AGPL-3.0 text and a NOTICE, and used only by
+  `gpl-models` builds. The export script's commit is public before it is published.
+- **O2 (was §22 Q5): fp16 on GPUs.** nar-small's auto modes resolve to fp16 on a GPU and to
+  fp32 on the CPU (§11). The fp16 gate still applies (§20.1, §20.4). Precision stays
+  provenance: switching re-reads nothing.
+- **O3 (was §22 Q4): packs tied to releases.** In the owner's words: "for now, backend packs
+  should be tied to the version releases. If the pack doesn't match what the release
+  expects, it shouldn't start it. So this problem shouldn't be able to come up." The lead's
+  reading, which the owner reviews: a release names the pack it needs; at start a pack that
+  does not match is not loaded, and the matching pack is installed before the backend
+  starts. Packs change only with a release, and nothing swaps under running OCR (§16).
 
 Standing rules that apply throughout:
 
@@ -54,13 +68,13 @@ Standing rules that apply throughout:
 - **No `ENGINE_REVISIONS` bump** for nar-small (2), charspot-small (1) or any detector. The
   GPU route is gated on parity with the CPU route (§20). A bump would re-OCR every sealed
   sidecar (`crates/bunko-layout/src/sidecar.rs:30-42` [v]).
-- **`OLDEST_PACK_RELEASE` stays "0.7.4"** (`crates/bunko-torch/src/abi.rs:253` [v]):
-  hayai-only hosts keep their pack.
+- **`OLDEST_PACK_RELEASE` moves once**, from "0.7.4" to "0.8.0-beta.1", in the commit that
+  completes the 0.8 cdylib (L11, §16).
 - Name no deployment, host or machine anywhere.
 
-The original design's other recommendations stand as decided unless the owner says
-otherwise (§22): the target set (CUDA sm_75/sm_80 on Linux and Windows, six ROCm gfx
-targets), the new pre-releases for the `.pt2` files, and landing before 0.8.0.
+The original design's other recommendations stand as decided: the target set (CUDA
+sm_75/sm_80 on Linux and Windows, six ROCm gfx targets), the new pre-releases for the
+`.pt2` files, and landing before 0.8.0.
 
 Lead calls after the builder check (2026-11-13; the owner reviews them):
 
@@ -76,17 +90,27 @@ Lead calls after the builder check (2026-11-13; the owner reviews them):
   measured figures into `textbox_gpu_seconds` and `DETECT_GPU_SECONDS`.
 - **L4 Publishing order.** Everything is staged and tested through
   `MOKURO_TORCH_MODELS_MIRROR`. The owner publishes `textbox-torch-v1` once, after plans 01-03
-  pass their gates, and `detector-torch-v1` once, after plan 04, if the owner approves it
-  (§22 Q1). No release is added to later. `textbox-graphs-v1` goes out first (§17).
-- **L5 A GPU host with no pack** (was §22 Q2): a background fetch while the CPU route serves
-  (`Need::Refresh` with `have: None`).
-- **L6 The refresh switch** (was §22 Q3): `MOKURO_OCR_AUTO_INSTALL`, on by default.
-- **L7 hayai budgets ride the refresh** (was §22 Q6): yes on GPU variants; the cpu pack keeps
-  today's "update the OCR backend pack" error.
+  pass their gates, and `detector-torch-v1` once, after plan 04 (O1). No release is added to
+  later. `textbox-graphs-v1` goes out first (§17).
+- **L5, L6, L7: lapsed under O3.** They were the background fetch for a GPU host with no
+  pack, the refresh switch, and hayai budgets riding the refresh. With packs tied to
+  releases there is no refresh. A host with no pack installs one as today, and the floor
+  bump also brings hayai's budgets below 512 to every host.
 - **L8 Targets and release names** (was §22 Q7): adopted as listed above;
   `textbox-torch-v1`, `detector-torch-v1`.
 - **L9 An engine-stage CPU candidate.** The benchmark tries `stage_device.engine = cpu` beside
   the GPU for text-box rows, so a weak GPU never makes a row slower than the CPU pool (§12).
+
+Lead calls after the owner's answers (the owner reviews them):
+
+- **L10 AnimeText counts as a pack user.** On a GPU host, a row whose detector is
+  `animetext-blocks` needs the GPU pack (`needs_backend`), because AnimeText now has a GPU
+  route. On a CPU-only host nothing changes (§16).
+- **L11 The floor's value.** `OLDEST_PACK_RELEASE` becomes the workspace version at the time
+  of the commit, `"0.8.0-beta.1"`, with no workspace version change (§16).
+- **L12 charspot's limits on the GPU.** A crop with more than the tail graph's 1,024
+  characters reads on the CPU route, logged, never an error. charspot's GPU route does not
+  prefetch `model.onnx` (§7.4, §10.4).
 
 ## 3. Goals, non-goals, anti-goals
 
@@ -100,7 +124,7 @@ Lead calls after the builder check (2026-11-13; the owner reviews them):
 4. Every host that cannot use a GPU route falls back silently and correctly to the CPU
    ONNX route (§13).
 5. The planner and the benchmark size GPU text-box and GPU detect stages correctly (§12).
-6. Old packs on GPU hosts are replaced automatically, for about 1 MB of download (§16).
+6. 0.8.0 never loads an older pack; it installs its own before the backend starts (§16).
 
 **Non-goals**
 
@@ -199,17 +223,15 @@ cdylib plus `licenses/`, 136 files, 1,980,951 B) compress to 858,994 B with `zst
 Re-hashing the 4,948 `lib/` files of an installed pack against a new `pack.json` and
 hard-linking them into a staging directory took 9.0 s (warm cache, NVMe) and about 2.7 MB of
 new disk; verifying all 5,084 files took 3.6 s more. The per-file check caught a substituted
-cdylib. cu130 and Windows packs were not available to compare.
+cdylib. cu130 and Windows packs were not available to compare. These numbers were for a thin
+refresh that O3 dropped (§16); they are kept as a record.
 
-## 6. The ABI and pack capabilities (one table for every route)
+## 6. The ABI and the optional symbols
 
-`BT_ABI_VERSION` stays 1. Three optional symbols are added; the host looks each up with
+`BT_ABI_VERSION` stays 1. Two optional symbols are added; the host looks each up with
 `Pack::optional_symbol` when the pack opens and keeps the pointer in its `Api`.
 
 ```c
-// The pack's capabilities beyond ABI 1: a static JSON array of strings (never freed).
-const char *bt_features(void);
-
 // Text-box engines: one entry per crop, in crop order.
 //   json_out: [{"text":"...","chars":[["字",x0,y0,x1,y1,score], ...] | null}, ...]
 //   boxes in crop pixels; "chars" is null for nar-small.
@@ -227,24 +249,18 @@ int32_t bt_detect_blocks(void *handle, const BtCrop *canvases, size_t n, float m
 on the wrong kind of handle (`bt_read` / `bt_read_chars` on a detector, `bt_detect_blocks`
 on a recognizer) returns `BT_ERR_ARG`.
 
-**Features.** `crates/bunko-torch/src/abi.rs` gets the one list:
+**What each symbol means.**
 
-| feature | means the pack has |
+| symbol | means the pack has |
 |---|---|
-| `read-chars-1` | `bt_read_chars`; `bt_load` of nar-small (fp32, and fp16 through `bunko.weights_dtype`) and charspot-small; the shim's dtype check |
-| `detect-blocks-1` | `bt_detect_blocks`; `bt_load` of animetext-blocks; weights bound from an ONNX file (`bunko.weights_format = "onnx"`) |
-| `hayai-budgets-1` | hayai-nova at patch budgets below 512 (since f1c22975) |
+| `bt_read_chars` | `bt_load` of nar-small (fp32, and fp16 through `bunko.weights_dtype`) and charspot-small; the shim's dtype check |
+| `bt_detect_blocks` | `bt_load` of animetext-blocks; weights bound from an ONNX file (`bunko.weights_format = "onnx"`) |
 
-- `bt_features` is the runtime truth. `Pack::features()` reads it once at `Pack::open`; a
-  pack without the symbol (every 0.7.4-0.7.12 pack) has an empty set.
-- `pack.json` gains `"features": [...]` (`serde(default, skip_serializing_if = "Vec::is_empty")`
-  in both `PackManifest` structs). `xtask torch-pack` fills it by parsing `BT_FEATURES` from
-  `abi.rs`, as it already reads `BT_ABI_VERSION`. The installer, doctor and the admin
-  overview read this copy without loading a pack.
-- Each route still checks its own symbol. A pack whose features claim a route whose symbol
-  is missing is logged (`warn!`) and that route stays on the CPU.
-- Each feature joins `BT_FEATURES` in the commit that adds its route, so `pack.json` never
-  claims a route the pack lacks.
+- Each route checks its own symbol. A pack without it runs that route on the CPU, with the
+  reason logged. Once the floor moves (§16), only a development pack, or a local pack
+  stamped 0.8.0-beta.1 that was built before the new cdylib, can lack them; the symbols
+  stay as defence in depth.
+- `pack.json` lists no features. The release decides which pack a host has (§16).
 
 **Package I/O ids** (`bunko.io`, a string, checked by `GraphSet::load`; `IO_VERSIONS` is
 untouched): `textbox-1` (nar-small, charspot-small) and `detect-1` (AnimeText). `bt_info`
@@ -340,6 +356,9 @@ That is the ONNX graph's I/O plus a batch dim, so Bunko's `nar_input` feeds it u
   padding's mask false (the graph needs N ≥ 2). A part always takes at least one row, so a row
   with `n0 > 512` still runs. Both rules are checked against the authors' `backends/cuda.py` at
   the pin, and a test covers `n0 > 512`.
+- A crop with more than 1,024 characters (the tail graph's largest N) reads on the CPU route
+  for that crop, with a log line, never an error (L12). The CPU route's `model.onnx` is
+  then fetched on demand.
 - fp32 only (the authors' fp16 differs on 3/100 texts).
 
 ### 7.5 AnimeText
@@ -489,7 +508,8 @@ devices (the format loops list only hayai and paddle).
 
 **Pack guard.** These changes touch `bunko-torch`, `bunko-vlm` and `bunko-ocr`, so
 `crates/bunko-torch/tests/pack-inputs.txt` is re-blessed in each change
-(`BUNKO_BLESS=1 cargo test -p bunko-torch --test pack_inputs`). The floor stays.
+(`BUNKO_BLESS=1 cargo test -p bunko-torch --test pack_inputs`). The floor moves once, after
+plans 02-04 have merged (§16).
 
 ## 10. Host integration (`crates/bunko-engines`)
 
@@ -525,8 +545,8 @@ Text-box engines go through `runtime::place_runnable` with a text-box arm in `fo
 - An explicit `gpu:<n>` that cannot run the engine falls back with the reason logged, as
   hayai does (`runtime::place_runnable`).
 - A pack without `bt_read_chars` gives the reason "the OCR backend pack predates GPU text-box
-  reading; it updates itself (see doctor), or `mokuro-bunko install-ocr --refresh`". A
-  reason to note, not an error.
+  reading; update the OCR backend pack (`mokuro-bunko install-ocr --force`)". A reason to
+  note, not an error.
 - Precision: the text-box arm resolves `precision::resolve(engine, mode, formats, pick, why)`
   after placing, as hayai does (§11).
 
@@ -569,6 +589,8 @@ Text-box engines go through `runtime::place_runnable` with a text-box arm in `fo
   `cmd/models.rs` accept text-box engines; `EngineNeed.fallback` names the CPU ONNX route.
   Prefetch fetches what the plan picks: on a GPU host the `.pt2` plus the weights (and nar's
   0.7 MB ONNX graph too, since its weights are shared and the fallback is then free).
+  charspot's GPU route does not prefetch `model.onnx` (44 MB); if the GPU load fails, the CPU
+  fallback fetches it on demand (L12).
 - `no_recognizer_backend` never demands a pack for text-box engines.
 - `torch::runnable_formats` also loops over the text-box engines. Where a GPU's format
   exists only for some engines (nar fp16; hayai and paddle bf16), `format_engines` records
@@ -581,7 +603,7 @@ Text-box engines go through `runtime::place_runnable` with a text-box arm in `fo
 - New rows from `detector_torch_models.json` (cfg `gpl-models`); `detector_ids` is unchanged
   (CPU) and `detector_torch_ids(device)` covers the GPU route.
 
-## 11. Precision: the fp16 option for nar-small
+## 11. Precision: nar-small at fp16 on GPUs (O2)
 
 - **nar-small becomes a precision engine.** `precision: true` in the registry
   (`engines.rs:187-202`). `EngineSpec` gains `precision_formats: &[&str]`: nar
@@ -597,21 +619,27 @@ Text-box engines go through `runtime::place_runnable` with a text-box arm in `fo
   become re-exports of `bunko-sched`'s, as `bf16_native` already is, so the tables cannot
   drift.
 
-| nar-small mode | CPU (ONNX, fp32 only) | GPU with fp32 and fp16 packages |
-|---|---|---|
-| `auto-accuracy` (default) | fp32 | **fp32** |
-| `auto-balanced` | fp32 (one candidate, no benchmark) | benchmark `[fp32, fp16]`: fp16 only when more than 5% faster |
-| `auto-speed` | fp32 | benchmark `[fp16, fp32]`: fp16 unless fp32 is more than 5% faster |
-| `fp32` | fp32 | fp32 |
-| `fp16` | not eligible (`PRECISION_REFUSAL`; the row is held where no machine runs it) | fp16 |
+| nar-small mode | CPU (ONNX, fp32 only) | GPU with an fp16 package | GPU with only an fp32 package |
+|---|---|---|---|
+| `auto-accuracy` (default) | fp32 | **fp16** | fp32 |
+| `auto-balanced` | fp32 | **fp16** | fp32 |
+| `auto-speed` | fp32 | **fp16** | fp32 |
+| `fp32` | fp32 | fp32 | fp32 |
+| `fp16` | not eligible (`PRECISION_REFUSAL`; the row is held where no machine runs it) | fp16 | not eligible |
 
+- Every auto mode resolves the same way: fp16 on a GPU that has nar's fp16 package, fp32 on
+  any other GPU and on the CPU. `candidates("nar-small", <auto mode>)` is `[fp16, fp32]`, and
+  the first format the device runs wins. nar's auto modes take no precision benchmark: on
+  the RX 9070 XT fp16 was about 17x faster than fp32 with the same JMangaBench_Read score.
+- **The fp16 gate** (§20.1, §20.4): on all 7,929 JMangaBench_Read crops, fp16's texts differ
+  from fp32's in at most `floor(0.001 × n)` crops, and from the authors' own fp16 in at most
+  `floor(0.001 × n)` crops; and `paired.py` shows no JMangaBench_Read loss against fp32. A
+  target whose fp16 package fails the gate ships fp32 only, so its GPU resolves to fp32.
 - A nar row with `bf16` is a row error ("nar-small has no bf16; use fp16 or an auto mode");
   `precision_pick` must be one of the engine's formats.
 - With an auto mode a GPU load failure falls back to the CPU at fp32. A forced `fp16` that
   the CPU cannot take reports both errors (`gpu_then_cpu_error`) and the row backs off on
   this machine, as a forced hayai fp16 does today.
-- The processor benchmark needs no logic change: `precision_candidates` turns on through
-  `is_precision_engine`.
 - The sidecar records `ocr_engine.precision = "fp16"`. That is provenance, not identity:
   upgrades key on `(engine, revision)` only, so switching a row re-reads nothing.
 - charspot-small stays fp32 only; it keeps `precision: false`.
@@ -649,8 +677,9 @@ Text-box engines go through `runtime::place_runnable` with a text-box arm in `fo
 
 | host | text-box engines | AnimeText | note |
 |---|---|---|---|
-| cu130 / rocm7.1 pack with `read-chars-1` / `detect-blocks-1`, supported GPU, packages obtainable | GPU | GPU | |
-| 0.7.4-0.7.12 pack (no symbols) | CPU | CPU | reason in the log and doctor; the pack refreshes itself (§16) |
+| cu130 / rocm7.1 pack of 0.8.0 (`bt_read_chars` / `bt_detect_blocks`), supported GPU, packages obtainable | GPU | GPU | |
+| 0.7.x pack | not loaded | not loaded | outside the floor: 0.8.0's pack is installed before the backend starts (§16) |
+| development pack, or a local 0.8.0-beta.1 pack built before the new cdylib (no symbols) | CPU | CPU | reason in the log and doctor |
 | cpu pack, Vulkan-only pack, macOS, no pack | CPU | CPU | |
 | GPU target with no package (a gfx not built) | CPU | CPU | `place_runnable` reason |
 | GPU load or bind fails (VRAM, driver) | CPU | CPU | `warn!`, at session start |
@@ -690,7 +719,11 @@ The fallback keeps the CPU pool sizing from #106 (`textbox_recognizer`).
   `TORCH-BACKEND.md` (single-graph engines, `bunko.weights_dtype`, `bunko.weights_format`),
   `PACKAGING.md` §8, `docs/deployment.md`, README and CHANGELOG.
 
-## 16. Pack refresh: automatic backend-pack updates (owner decision 4)
+## 16. Packs tied to releases (owner decision O3)
+
+A release names the pack it needs. At start a pack outside that range is not loaded, and the
+release's own pack is installed before the backend starts. Packs change only with a release,
+and nothing swaps under running OCR.
 
 ### 16.1 What is true today
 
@@ -711,217 +744,74 @@ The fallback keeps the CPU pool sizing from #106 (`textbox_recognizer`).
   are nar-small or charspot-small installs a 437 MB cpu pack its ONNX route never uses
   (`install_ocr.rs:130-140` [v]).
 
-### 16.2 Which rows need which feature
+### 16.2 The floor moves to 0.8.0-beta.1 (L11)
 
-One shared function in `crates/bunko-engines/src/models.rs`:
+`OLDEST_PACK_RELEASE` goes from "0.7.4" to "0.8.0-beta.1", the workspace version at the time
+of the commit. The workspace version does not change. The commit lands after plans 02-04 have
+merged, since it is the one that completes the 0.8 cdylib.
 
-```rust
-/// Pack features the GPU route of a row needs (empty: none, or no GPU route in this build).
-pub fn torch_features_for(engine: &str, detector: Option<&str>, patch_budget: u32) -> Vec<&'static str>
-```
+Why this value is right (`abi::release_opens_pack`: a pack opens when
+`floor <= pack <= release`, a leading `v` ignored, an empty version always):
 
-nar-small and charspot-small → `read-chars-1` (cfg `nc-models`); detector `animetext-blocks`
-→ `detect-blocks-1` (cfg `gpl-models`); hayai-nova with a budget other than 512 →
-`hayai-budgets-1`. The installer, doctor and `open_session`'s reasons all use it.
+- It refuses every 0.7.x pack, which lack the new routes and hayai's budgets below 512.
+- It passes abi.rs's own check that the floor is not later than `CARGO_PKG_VERSION`. A floor
+  of "0.8.0" would fail it while the workspace is a beta.
+- 0.8.0 opens it: semver orders `0.8.0-beta.1 < 0.8.0`.
+- No pack of 0.8.0-beta.1 was ever published; the version was never tagged. Local packs
+  stamped 0.8.0-beta.1 that predate the new cdylib still open. Their missing
+  `bt_read_chars` / `bt_detect_blocks` send those rows to the CPU, and test machines get
+  rebuilt packs anyway.
 
-hayai budgets ride the refresh (L7): on a GPU variant, today's hard "update the OCR backend
-pack" error for a hayai row below budget 512 becomes a self-healing refresh. On the cpu pack
-(rule 2) it stays the error.
+The same floor fixes hayai-nova at patch budgets 256 and 384: every published pack 0.8.0 opens
+has them. A local 0.8.0-beta.1 pack built before f1c22975 keeps today's "update the OCR
+backend pack" error for those budgets (`pack_budget_error`).
 
-### 16.3 When a host refreshes
+### 16.3 At start
 
-`install_ocr::need()` gets a new non-blocking outcome between `Satisfied` and `Extra`:
+A pack outside the floor is not loaded: the loader refuses it (`check_release`), and
+`find_installed` / `already_fits` do not count it. `need()` then returns `Need::Install`, and
+the existing install path runs: the server or processor starts serving at once, runs
+`install-ocr --if-needed` in a child, and starts its local OCR on the backend when the install
+ends (`ocr_install.rs` module docs). Docker's entrypoint runs the same `--if-needed`. With
+`MOKURO_OCR_AUTO_INSTALL=false` the missing pack is a problem with an Install button, as today.
 
-```rust
-Need::Refresh { variant: String, have: Option<String>, lacks: Vec<String>, rows: Vec<String> }
-```
+### 16.4 Release updates
 
-It is returned when all of these hold:
+`update.auto`, `processor.auto_update` and Docker bring the matching pack before the new
+version runs OCR. bunko-update installs a release as one unit: the new binary's
+`update prefetch` keeps the installed pack only when `pack_this_release_keeps` says the new
+release opens it, and otherwise stages the release's own pack. The switch then moves binary
+and pack together, with the existing probe and rollback (`autoupdate.rs` module docs). A
+binary replaced by hand, or a recreated container, takes the start path of §16.3.
 
-1. Local OCR is on.
-2. The wanted variant (`wanted_choice`) is `cu130` or `rocm7.1`. `ocr.backend: cpu` never
-   refreshes.
-3. Either a pack of that variant that this release opens is installed and lacks a needed
-   feature (`have: Some(..)`), or no pack is installed and every runnable row that wants the
-   GPU pack also runs without one (text-box rows, AnimeText rows; `have: None`, a full
-   archive through the same lane, fetched in the background while the CPU route serves;
-   lead call L5). Rows that cannot run without a pack (hayai, paddle) keep today's blocking
-   `Need::Install`.
-4. The pack may be refreshed. This is two conditions, not one `replaceable` flag:
-   - A development pack (`bunko_version` empty) or a pack set by `MOKURO_TORCH_PACK` never
-     refreshes.
-   - A release pack outside the role's own `backends_dir()` (the bundled directory, `/opt`, a
-     processor's fallback directory) is not replaced in place, but it still refreshes: the new
-     pack is installed into the own directory (a thin refresh linking from the found pack, or
-     the full archive), which `discover` searches first. `pack_swap::at_start` then finds no
-     `<name>` there and only renames `.next-<name>` into place.
-5. The host has a GPU the pack serves: AMD, the hwdetect `gfx`, mapped through the same HSA
-   override rule as `prepare_rocm_env` (gfx1032 → gfx1030), is in the pack's
-   `requires.gpu_archs` and the torch manifests have a package for it (a gfx1032 test covers
-   this); NVIDIA, always (sm_75 and sm_80 packages cover Turing on; hwdetect has no `sm_`).
-6. A runnable row needs a feature the pack lacks: `torch_features_for(row) \ pack.json.features`
-   is not empty. Library: `config.ocr.generations` (`.runnable()`), with `detector`,
-   `patch_budget` and `pools.stage_device`; a row whose engine stage (or, for
-   `detect-blocks-1`, detect stage) is pinned to `cpu` does not count. Processor:
-   `library-engines.json`, which gains `detector` and `patch_budget` (§16.7).
-7. This release's signed `release.json` lists a pack for the variant with those features
-   (`BackendArtifact.features`), checked in the child before any download; otherwise the
-   outcome is "nothing to fetch for this release", recorded and retried daily.
-8. No standing failure in `<backends>/.pack-refresh.json` is due later.
-9. Automatic installs are on (`MOKURO_OCR_AUTO_INSTALL`, default on; lead call L6) and
-   `MOKURO_OCR_PACK_REFRESH` is not `off`. When only this rule fails the outcome is still
-   `Need::Refresh` but it is offered (doctor, the admin button, the CLI), never fetched by
-   itself.
+### 16.5 The Vulkan pack
 
-It is evaluated wherever `need()` runs: the server's start, a settings save, the end of an
-install (refresh first, then Extra), and each processor registration.
+The Vulkan pack goes through the same floor (`vulkan.rs` reads it with
+`loader::read_manifest`). An older Vulkan pack beside a current libtorch pack becomes
+`Need::Extra`: about 20 MB again, fetched in the background, or waited for when it is the
+machine's only GPU route (`route: true`).
 
-**Side fix.** `needs_backend` counts only rows that cannot run without a pack (hayai, paddle).
-Text-box and AnimeText rows reach a pack only through rule 3, and only for a GPU variant: a
-CPU-only host with such rows installs no pack.
+### 16.6 Which rows need a pack (`needs_backend`)
 
-### 16.4 Fetching: thin refresh, full archive as fallback
+- hayai-nova and paddle-manga rows need a pack on every host, as today.
+- A text-box row (nar-small, charspot-small) needs one only when the wanted variant is a GPU
+  variant (`cu130`, `rocm7.1`). A CPU-only host with such rows installs no pack. This fixes
+  the side finding of §16.1.
+- A row whose detector is `animetext-blocks` needs one on a GPU host too (L10). On a CPU-only
+  host nothing changes. Today the registry pairs `animetext-blocks` only with nar-small and
+  charspot-small (`engines::mismatch`; ppocr-manga brings its own detector), so such a row is
+  already counted as a text-box row. The detector check keeps the rule right if that changes.
+- A processor needs one always, as today.
 
-New child mode `install-ocr --if-needed --refresh` (background) and `install-ocr --refresh`
-(by hand), holding `.install.lock`:
+`needs_backend` takes the variant `need()` is about to install, so the rule is decided where
+the variant is known.
 
-1. Read the signed `release.json` entry `backends[TARGET][variant]`; check
-   `features ⊇ lacks` and `requires` (driver).
-2. Prefer the thin archive when the entry has `thin` (and a pack is installed): check space
-   for `thin.size + 64 MiB`, download it with resume, check its sha256, unpack into
-   `<backends>/.next-<name>/` (`pack.json`, the cdylib, `licenses/`), then take every other
-   file from the installed pack with `backend::link_from_installed`: the installed file must
-   hash to the new `pack.json`'s sha256 and size, then it is hard-linked, or copied where links
-   fail (after a space check for the installed size). External files go through the existing
-   `reuse_external`.
-3. Fall back to the full archive (today's `stage()`) when a file is in neither, or when no pack
-   is installed.
-4. Verify every file (`verify_files`, `make_links`). The trust chain is unchanged: the signed
-   `release.json` → the thin archive's sha256 → its `pack.json` → each file's sha256, linked
-   ones included.
-5. Probe in the child with `MOKURO_TORCH_PACK=<.next dir>`: the pack loads, finds this GPU and
-   reports `Pack::features() ⊇ lacks`. Otherwise delete `.next-<name>` and fail.
-6. Fetch the new routes' model files with that pack (nar ~3.7 MB of `.pt2`; charspot ~5.8 MB
-   plus 44 MB of the authors' weights; AnimeText ~5.1 MB): the child runs `prefetch_rows` for
-   the rows behind `lacks` with `MOKURO_TORCH_PACK` set to the staged directory (fp32, plus fp16
-   for nar when its mode benchmarks it).
-7. Write `<backends>/.swap-at-start.json` (a `pack_swap::SwapRecord`)
-   `{name, staged, from, to, features, at}`.
-8. Never touch the installed pack. A full install, `--force` or a release switch deletes
-   `.next-*` and the record.
+### 16.7 The probes stay
 
-| path | download | disk while staged |
-|---|---|---|
-| thin refresh | about 0.9 MB plus the routes' models | about 3 MB (`lib/` hard-linked) |
-| copy fallback | about 0.9 MB | + the installed size (cu130 ~2.5 GiB [i], rocm ~6.8 GiB) |
-| full archive | 364,667,883 B (cu130 linux), 336,140,073 B (cu130 windows), ~3.2 GB (rocm) | archive + pack |
-
-### 16.5 Swapping without disrupting OCR
-
-The swap always happens at a process start, before anything loads a pack; until then the
-running OCR keeps the old pack and the CPU route for these rows.
-
-- **No pack loaded in this process** (`torch::backend_if_open().is_none()`): swap now,
-  `forget_failure()`, bump `finished`.
-- **A pack is loaded and `MOKURO_OCR_PACK_REFRESH=auto`** (default): restart at a quiet moment.
-  Server: a new `MachineHooks.restart_when_quiet: Arc<dyn Fn(String) + Send + Sync>`,
-  factored out of `UpdateService::auto_install`'s quiet loop (hold new claims everywhere, wait
-  for in-flight claims and uploads). A release update that starts meanwhile wins and drops the
-  staged refresh. Processor: a "pack staged" `watch` in `ServeOptions`; the serve loop drains
-  as for an update and returns a new `ServeExit::Restart(String)`, and `cmd/processor.rs`
-  re-execs. If re-exec fails: a problem "restart this processor to use the GPU route".
-- **`MOKURO_OCR_PACK_REFRESH=next-start`**: no restart; swapped at the next start.
-
-`pack_swap::at_start(root)` (new, beside `pack_removal`; called after `pack_removal::at_start`
-in `serve.rs` and at the top of `processor serve`):
-
-1. Read `.swap-at-start.json`; drop it if `to` is not this binary's version or `.next-<name>`
-   is incomplete (`pack_complete`).
-2. Rename `<name>` → `.prev-<name>`, then `.next-<name>` → `<name>`. If a rename fails (Windows:
-   another process holds the DLLs), undo, keep the record and log "the OCR backend pack update
-   waits: <dir> is in use by another process; it is swapped in at the next start".
-3. Probe in a child (`install-ocr --probe`). On failure: `<name>` → `.failed-<name>`,
-   `.prev-<name>` → `<name>`, delete `.failed`, write a lasting `.pack-refresh.json`
-   `{variant, bunko_version, target, gpu, failures, lasting: true, message}` and raise a
-   warning problem; the machine runs on as before.
-4. On success delete `.prev-<name>` and the record; log "OCR backend pack updated to the
-   <variant> pack of <to> (adds …)".
-
-`.pack-refresh.json` also carries the back-off of refreshes that fail before staging, with
-`ExtraAttempt`'s shape and waits: 5, 15 and 60 min, then daily; "nothing to fetch for this
-release" waits a day at once; a lasting failure waits until the release, target or GPU
-changes; a manual start clears it.
-
-The refresh publishes **no** `OcrInstall` state, like the Extra fetch: the server's OCR never
-stops and a processor never pauses as "installing".
-
-### 16.6 Release updates and Docker
-
-- `update.auto` / `processor.auto_update`: `prefetch` stops keeping an installed pack that
-  lacks a feature the rows need (rules 2-6); it stages a pack instead (thin when possible),
-  and the release switch brings binary and pack together with one restart and the existing
-  probe and rollback.
-- Docker's `serve` runs the same background installer, so a container updated to 0.8.0 with an
-  old pack in `/data/backends` refreshes about 1 MB and restarts at a quiet moment.
-  `BAKE_PACK=1` images install the refreshed pack into `/data/backends` (rule 4).
-
-### 16.7 Remote processors
-
-- `EngineWant` gains `detector: Option<String>` and `patch_budget: Option<u32>` (both
-  `serde(default, skip_serializing_if = …)`), filled by the library's registry. Old processors
-  ignore them; from an old library a processor assumes `ppocr-manga` and 512.
-- `wants.rs` stores them; `on_engines` → `start_if_needed` evaluates `Need::Refresh` as the
-  server does. A processor does not know the library's per-machine `stage_device` pins, so it
-  ignores them (a false refresh costs about 1 MB and one drain).
-- Reports (optional, ignored by old libraries): `HostInfo.backend_pack: Option<String>`,
-  `HostInfo.pack_features: Vec<String>`, `UpdateReport.kind: Option<String>` = `"pack"`.
-- Scheduling needs nothing new: a processor lists GPU formats for nar-small only once the new
-  pack is loaded, because `engine_formats` applies the full text-box test, `bt_read_chars`
-  included, and builds `format_engines` for GPU devices only (§10.4). Until then the library
-  places those rows on its CPU or elsewhere.
-- The refresh runs even with `processor.auto_update` off: it brings this release's own pack,
-  not a new release.
-
-### 16.8 What people see
-
-- Log: "OCR backend: the installed cu130 pack (0.7.12) cannot run nar-small on the GPU (needs
-  read-chars-1); fetching this release's pack (0.9 MB) in the background; nar-small runs on the
-  CPU meanwhile", then "…staged and checked; restarting at a quiet moment to load it", then at
-  start "OCR backend pack updated: cu130 for 0.8.0 (adds read-chars-1)".
-- Admin → This server → OCR card: `overview().backend.need.refresh = {variant, lacks, rows,
-  text, state: available|fetching|staged|waiting-quiet|failed, next_at, message}`; an "Update
-  pack" button (a manual start that clears the back-off); a staged `.next-` shown as "update
-  staged, swapped in at the next start".
-- doctor: a check "OCR backend features": pass; warn (self-healing) "the cu130 pack of 0.7.12
-  cannot run nar-small on the GPU; it runs on the CPU until the pack updates (automatic:
-  <state>; or `mokuro-bunko install-ocr --refresh`)"; warn + needs_you for a lasting failure
-  or `MOKURO_OCR_AUTO_INSTALL=false`.
-- CLI: `install-ocr --refresh`; `install-ocr --list` prints each pack's features and what is
-  missing; `--force` keeps its meaning.
-
-### 16.9 Release and packaging changes
-
-- `xtask torch-pack` writes `features` into `pack.json` and a second archive,
-  `mokuro-bunko-backend-<ver>-<platform>-<variant>.thin.tar.zst`: `pack.json` first, then every
-  file outside `lib_dir`.
-- That name would parse as variant `cu130.thin` today. `parse_pack_name` skips any
-  `.thin.tar.zst`, and `collect_backends` reads the thin archives separately to fill
-  `BackendArtifact.thin`.
-- `xtask manifest`: `BackendArtifact` gains `features: Vec<String>` and
-  `thin: Option<ThinArtifact { url, sha256, size }>`, both `serde(default)`; 0.7.x installers
-  ignore them. `xtask verify` checks the thin archive. `release.yml` uploads the 3-6 extra
-  assets of about 1 MB each: its `dist/*.tar.zst*` glob already takes them, so no workflow
-  changes. `publish.yml` only un-drafts the release.
-- PACKAGING.md §8: "A feature an older pack lacks does not move the floor: the pack lists its
-  `features`, and a host whose enabled rows need one it lacks fetches its release's pack (thin
-  refresh)."
-
-### 16.10 Opt-out
-
-`MOKURO_OCR_AUTO_INSTALL=false` turns every automatic fetch off (the refresh is then offered
-only). `MOKURO_OCR_PACK_REFRESH=auto|next-start|off` (env only, default `auto`). Without any
-setting, `ocr.backend: cpu`, a row pinned to `cpu`, `MOKURO_TORCH_PACK` and a development pack
-also keep a host from refreshing.
+The optional symbols (§6) and the install probe (`install-ocr --probe`) stay as defence in
+depth: a development pack, or a local 0.8.0-beta.1 pack built before the new cdylib, runs the
+new routes on the CPU with the reason logged. The update's probe and rollback stay as they
+are.
 
 ## 17. What is published, and by whom
 
@@ -930,7 +820,7 @@ also keep a host from refreshing.
 | `textbox-graphs-v1` (nar's weightless ONNX graph, #102) | done | **owner** |
 | `textbox-torch-v1`: nar fp32 + fp16 and charspot fp32 `.pt2` for 10 targets, `NOTICE.md`, the authors' `LICENSE`; sha256 and sizes pinned in `textbox_torch_models.json` | an agent builds (Linux CUDA via fakegpu, ROCm, Windows CUDA cross-built), stages the assets and a publish script, verifies the sha256 after upload | **owner** (`gh release create --prerelease`); a re-export is a new tag |
 | `detector-torch-v1`: AnimeText fp32 `.pt2` for 10 targets, `NOTICE.md`, the AGPL-3.0 text | same | **owner** |
-| backend packs with the new cdylib, `features` and the thin archives | `release.yml` at the 0.8.0 tag | **owner**: tag, then `publish.yml` |
+| backend packs with the new cdylib, built after the floor moved (§16) | `release.yml` at the 0.8.0 tag | **owner**: tag, then `publish.yml` |
 | branches and PRs | agents, locally | **owner** |
 
 No authors' weights are uploaded anywhere, and no package with weights inside is staged.
@@ -944,8 +834,8 @@ No authors' weights are uploaded anywhere, and no package with weights inside is
    while its GPU is idle. Code work does not wait for them; publishing does.
 4. The owner publishes `textbox-torch-v1` once, after plans 01-03 pass their gates (nar fp32
    and fp16, charspot). No partial release that is later added to.
-5. The owner publishes `detector-torch-v1` once, after plan 04, if the owner approves it
-   (§22 Q1).
+5. The owner publishes `detector-torch-v1` once, after plan 04 (O1: yes), once the export
+   script's commit is public.
 6. The compiled-in manifests are filled after publication and before the 0.8.0 tag.
 
 ## 18. Effect on users
@@ -953,9 +843,11 @@ No authors' weights are uploaded anywhere, and no package with weights inside is
 - **Model downloads for the GPU routes**: nar ~3.7 MB of `.pt2` (weights shared with the CPU
   route); charspot ~5.8 MB plus the authors' 44 MB safetensors; AnimeText ~5.1 MB (the ONNX
   file is already there).
-- **Backend pack**: fresh installs get the 0.8.0 pack. Upgraders on a GPU with these rows fetch
-  about 1 MB (thin refresh) and restart once at a quiet moment. hayai-only hosts keep their
-  pack (the floor stays 0.7.4), unless a hayai row asks for a patch budget below 512.
+- **Backend pack**: every host that has a pack downloads 0.8.0's pack once, hayai-only hosts
+  included: with an automatic update before the switch, otherwise at the first start of
+  0.8.0, before OCR uses the backend (§16). Hosts with a Vulkan pack fetch it again too
+  (about 20 MB). A CPU-only host whose rows are only text-box engines no longer installs the
+  cpu pack.
 - **Releases sizes** (from v0.7.12 [v]): linux cu130 364,667,883 B; windows cu130 336,140,073 B;
   linux rocm7.1 1,992,294,400 + 1,235,713,627 B.
 
@@ -966,8 +858,8 @@ No authors' weights are uploaded anywhere, and no package with weights inside is
    §20.5).
 2. **fp32 on ROCm is BLAS-bound.** nar fp32 runs about 8.5 pages/s on an RX 9070 XT; AnimeText
    fp32 is MIOpen-bound. RDNA2/3 cards may be slower than the CPU pool on big hosts; the
-   benchmark's `detect: cpu` and `engine: cpu` candidates (§12) and the fp16 option for nar
-   cover it.
+   benchmark's `detect: cpu` and `engine: cpu` candidates (§12) and fp16 nar, the GPU
+   default (§11), cover it.
 3. **charspot decode parity.** The authors' ONNX does NMS and the chain in-graph; the GPU route
    uses the Rust port. Gate on texts and boxes over ≥ 1,000 crops.
 4. **Batch numerics.** nar fp32 ids were identical on 1,024 crops at b32 only. Gate at b1, b8
@@ -980,10 +872,11 @@ No authors' weights are uploaded anywhere, and no package with weights inside is
    batch; the detector stays on the CPU under 4 GiB.
 8. **The protobuf walker is new parsing code** in the pack: size check before parsing, bounded
    lengths, fixture tests.
-9. **Pack refresh on Windows**: renaming a pack another process holds; hard-linking a loaded
-   DLL (guess: `CreateHardLinkW` works on a loaded image). Both have a fallback (keep the
-   record; copy).
-10. **AGPL artefact** (`detector-torch-v1`): see §22.
+9. **Every upgrade downloads a full pack.** Moving the floor makes every 0.7.x host fetch
+   0.8.0's pack (sizes in §18), hayai-only hosts included. That is the price of O3: no host
+   ever runs a pack its release does not expect.
+10. **AGPL artefact** (`detector-torch-v1`): published under O1, with the AGPL-3.0 text and a
+   NOTICE, only for `gpl-models` builds.
 
 ## 20. Tests and verification gates
 
@@ -992,8 +885,10 @@ No authors' weights are uploaded anywhere, and no package with weights inside is
    the project's `paired.py`. A "0.1%" limit is `floor(0.001 × n)` of that set's own count.
    - nar fp32: all ids up to and including the first end id (6817) identical to the authors'
      fp32 PyTorch on all 7,929 JMangaBench_Read block crops.
-   - nar fp16: texts against the authors' fp16 on all 7,929 crops, at most 7 differing
-     (`floor(0.001 × 7,929)`; measured 2). Ids past the end id are not compared.
+   - nar fp16: on all 7,929 crops, texts differ from our fp32 package's in at most 7 crops
+     and from the authors' fp16 (`PyTorchBackend(fp16=True)`) in at most 7 crops
+     (`floor(0.001 × 7,929)`; measured 4 and 2). Ids past the end id are not compared. With
+     (4), this is the fp16 gate of §11; a target that fails it ships fp32 only.
    - charspot: texts identical to the authors' ONNX, boxes within 0.5 px, order identical, on
      ≥ 1,000 crops.
    - AnimeText: identical block sets against ONNX Runtime CPU on ≥ 300 real pages (DB test
@@ -1001,7 +896,8 @@ No authors' weights are uploaded anywhere, and no package with weights inside is
      within 0.01 page px, no crop edge moved (`floor`/`ceil` as `page.rs`).
    - **A failed fp32 gate (L1).** That target is left out of the manifest, so that GPU uses
      the CPU route, and the failure goes to the owner. It never bumps a revision, and it never
-     ships under a looser tolerance without the owner's sign-off. fp16 has its own gate (4).
+     ships under a looser tolerance without the owner's sign-off. fp16 has its own gate
+     (above and 4).
    - **Which targets are verified (L2).** On real cards: gfx1201, gfx1030, gfx1032 (through
      the gfx1030 override), and sm_80 on Linux and on Windows. Every file copied to a test
      machine is hash-checked there. gfx1100, gfx1101, gfx1102, gfx1200 and sm_75 (Linux and
@@ -1014,9 +910,11 @@ No authors' weights are uploaded anywhere, and no package with weights inside is
 3. **Route parity.** One test volume through the CPU and the GPU routes: byte-identical
    sidecar text at fp32 (nar, charspot, AnimeText); the count of differing fp16 nar lines goes
    in the CHANGELOG.
-4. **fp16 accuracy.** On full JMangaBench_Read (Hard only as a tie-breaker), fp16's composite
-   is not below fp32's under `paired.py` (the 95% CI reaches 0; EM losses ≤ wins + 7, which is
-   `floor(0.001 × 7,789)` keys). Batch stability at b1, b8, b32 on all 7,929 crops.
+4. **fp16 accuracy: no paired JMangaBench_Read loss.** On full JMangaBench_Read (Hard only as
+   a tie-breaker), fp16's composite is not below fp32's under `paired.py` (the 95% CI reaches
+   0; EM losses ≤ wins + 7, which is `floor(0.001 × 7,789)` keys). Batch stability at b1, b8,
+   b32 on all 7,929 crops. fp16 is the GPU default (O2), so this gate decides what most GPU
+   hosts read with.
 5. **Speed and the NVIDIA gate.** On the 24-core host with an RTX 4090 (the lead runs it, while
    its GPU is idle; L3) and on the RX 9070 XT: crops/s per batch for each package, pages/s end
    to end, which stage bounds, GPU utilisation; AnimeText b1/b4/b8 (decides the combiner); nar
@@ -1025,17 +923,19 @@ No authors' weights are uploaded anywhere, and no package with weights inside is
    hayai and paddle sm_80 output on a test volume with the new pack. The lead puts the
    measured figures into `textbox_gpu_seconds` and `DETECT_GPU_SECONDS`. sm_75 has no test
    card (L2).
-6. **Fallback matrix** (§13) with a dev pack, a 0.7.12 pack, the cpu pack, `ocr.backend: cpu`
+6. **Fallback matrix** (§13) with a dev pack without the symbols, a 0.7.12 pack (refused, then
+   replaced), the cpu pack, `ocr.backend: cpu`
    and a forced load failure (the weights file truncated in a scratch model store): each OCRs
    correctly with the reason logged.
 7. **Unit tests** in each plan; every `cargo test` runs with `XDG_CONFIG_HOME` and
    `XDG_DATA_HOME` redirected.
 8. **Live check** on a local trial server only: install the 0.7.12 rocm7.1 pack; serve the dev
    release (`MOKURO_BACKEND_MANIFEST`, `MOKURO_TORCH_MODELS_MIRROR`); add a nar-small row on
-   AnimeText; expect about 1 MB fetched, a restart at a quiet moment, the swap, `.prev` gone,
-   the row on `gpu:0`, detect on `gpu:0`, and the admin and doctor states at each step. Then a
-   processor on its own storage, and `MOKURO_OCR_PACK_REFRESH=next-start`. Checks on any real
-   deployment belong to the separate ops project, never this repository's sessions.
+   AnimeText; expect the 0.7.12 pack refused, the dev release's pack installed before any GPU
+   row reads, the 0.7.12 pack removed, the row on `gpu:0`, detect on `gpu:0`, and doctor's
+   "OCR backend" check passing. Then `install-ocr --if-needed` over a 0.7.12 pack (Docker's
+   path), and a processor on its own storage. Checks on any real deployment belong to the
+   separate ops project, never this repository's sessions.
 
 ## 21. Build order and plans
 
@@ -1045,29 +945,15 @@ No authors' weights are uploaded anywhere, and no package with weights inside is
 | 02 nar-small fp16 | §7.3 fp16, §9.2 cast + dtype check, §11 | 01 | 2 days |
 | 03 charspot-small | §7.4, §9.3-9.4 charspot, §15 charspot | 01 | 3 days |
 | 04 AnimeText on the GPU | §7.5, §9.2 ONNX weights, §9.3 detector, §10.3, §12 detect, §15 detector | 01 | 5-6 days |
-| 05 pack refresh | §6 features, §16 | 01-04 merged for the final feature list | 4-5 days |
+| 05 packs tied to releases | §16: Task 1 `needs_backend` (§16.6, L10), Task 2 the floor (§16.2, L11), then docs and a live check | 02-04 merged | 1-2 days |
 
 02, 03 and 04 each run on their own branch and worktree off 01, and they merge one at a time;
 all three edit `package.rs`, `runtime.rs`, `abi.rs`, `ffi.rs`, `open_session` and
-`bunko-vlm/src/textbox.rs`. `pack-inputs.txt` is re-blessed after each merge. 05 can start
-after 01; each feature joins `BT_FEATURES` in the commit that adds its route (§6), so 05 lists
-only routes that have landed. The 0.8.0 tag needs all five; one pack update carries all of it.
+`bunko-vlm/src/textbox.rs`. `pack-inputs.txt` is re-blessed after each merge. 05's Tasks 1
+and 2 land after 02-04 have merged; Task 2 moves the floor in the commit that completes the
+0.8 cdylib. Its docs follow. The 0.8.0 tag needs all five; one pack carries all of it.
 
 ## 22. Open questions for the owner
 
-The spec assumes the recommended answer to each; a different answer changes only the named
-part. The questions keep their original numbers. Q2, Q3, Q6 and Q7 are settled as lead calls
-L5-L8 (§2).
-
-- **Q1. AGPL `.pt2`.** The weightless AnimeText `.pt2` is compiled from Ultralytics' AGPL-3.0
-  model code (the mirrored ONNX already declares AGPL-3.0 in its metadata). Publish it in a
-  separate pre-release `detector-torch-v1` with the AGPL-3.0 text and a NOTICE, used only by
-  `gpl-models` builds? Recommended: yes. The alternative is no GPU route for AnimeText.
-- **Q4. Restart when the refreshed pack is staged.** Restart by itself at a quiet moment (new OCR
-  claims held on every machine until the running volumes and uploads finish, as `update.auto`
-  does), or wait for the next start? Recommended: restart by itself; `MOKURO_OCR_PACK_REFRESH=
-  next-start` keeps the waiting per host.
-- **Q5. nar-small's default on GPUs.** Keep `auto-accuracy` at fp32 (recommended, as decided), and
-  say in docs and admin that AMD users should pick `auto-balanced` or `fp16`? On an RX 9070 XT
-  fp32 nar is about 8.5 pages/s, close to the CPU pool, and fp16 about 140, with the same
-  JMangaBench_Read score. NVIDIA fp32 is not measured yet.
+None remain. Q1, Q4 and Q5 are answered as O1, O3 and O2; Q2, Q3, Q6 and Q7 were settled as
+lead calls L5-L8, and L5-L7 lapsed under O3 (§2).
