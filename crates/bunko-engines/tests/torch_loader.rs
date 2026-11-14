@@ -282,6 +282,32 @@ fn a_wrong_result_count_is_an_error() {
     assert!(e.contains("1 results for 2 crops"), "{e}");
 }
 
+#[test]
+fn a_crop_whose_bytes_do_not_match_its_size_is_refused() {
+    // Both reads hand the crops' raw pointers to the pack, which reads width*height*3
+    // bytes of each: a shorter (or longer) slice is refused before the call.
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = pack_dir(tmp.path(), &manifest(BT_ABI_VERSION, std::env::consts::OS));
+    if !fixture_library(&dir, &read_chars_fixture("n")) {
+        return;
+    }
+    let pack = Pack::open(&dir, true).unwrap();
+    let h = pack
+        .load("nar-small", tmp.path(), "fp32", "cpu", &Default::default())
+        .unwrap();
+    let px = [0u8; 3];
+    let short = [0u8; 2];
+    let e = h.read_chars(&[(&px, 1, 1), (&short, 1, 1)]).unwrap_err();
+    assert!(e.contains("crop 1 has 2 bytes for 1x1"), "{e}");
+    let e = h.read(&[(&short, 1, 1)], None).unwrap_err();
+    assert!(e.contains("crop 0 has 2 bytes for 1x1"), "{e}");
+    let e = h.read_chars(&[(&px, 1, 2)]).unwrap_err();
+    assert!(e.contains("crop 0 has 3 bytes for 1x2"), "{e}");
+    // An empty crop (no width or no height) reads no bytes: it passes, as before.
+    let r = h.read_chars(&[(&[], 0, 7), (&px, 1, 1)]).unwrap();
+    assert_eq!(r.len(), 2);
+}
+
 /// A real pack (`MOKURO_TORCH_PACK`) with fake libtorch libraries first on
 /// `LD_LIBRARY_PATH`: the loader must bind the pack's own. Run with
 /// `MOKURO_TORCH_PACK=<pack> cargo test -p bunko-engines --test torch_loader -- --ignored`.

@@ -29,10 +29,7 @@ impl TorchTextbox {
     /// Each crop's text (and its characters' boxes, for an engine that has them), in
     /// crop order. The pack splits the crops into batches of its own.
     pub fn read_chars(&self, crops: &[&Rgb]) -> Result<Vec<CharsRead>, VlmError> {
-        let raw: Vec<(&[u8], u32, u32)> = crops
-            .iter()
-            .map(|c| (c.data.as_slice(), c.width as u32, c.height as u32))
-            .collect();
+        let raw = super::raw_crops(crops).map_err(VlmError::Runtime)?;
         self.handle.read_chars(&raw).map_err(VlmError::Runtime)
     }
 }

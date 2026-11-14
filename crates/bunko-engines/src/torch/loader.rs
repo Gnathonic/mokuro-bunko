@@ -212,6 +212,29 @@ fn take(api_free: FreeStrFn, p: *mut c_char) -> Option<String> {
     Some(s)
 }
 
+/// The crops as the C ABI takes them. The pack reads width*height*3 bytes behind each
+/// pointer, so a crop whose slice holds another count is refused here (an empty crop,
+/// of no width or no height, reads none).
+fn bt_crops(crops: &[(&[u8], u32, u32)]) -> Result<Vec<BtCrop>, String> {
+    crops
+        .iter()
+        .enumerate()
+        .map(|(i, &(data, w, h))| {
+            let want = (w as usize)
+                .checked_mul(h as usize)
+                .and_then(|n| n.checked_mul(3));
+            if w > 0 && h > 0 && want != Some(data.len()) {
+                return Err(format!("crop {i} has {} bytes for {w}x{h}", data.len()));
+            }
+            Ok(BtCrop {
+                data: data.as_ptr(),
+                width: w,
+                height: h,
+            })
+        })
+        .collect()
+}
+
 fn cstring(s: &str, what: &str) -> Result<CString, String> {
     CString::new(s).map_err(|_| format!("{what} contains a NUL byte"))
 }
@@ -427,17 +450,10 @@ impl Loaded {
         {
             return Err(format!("{} caps for {} crops", c.len(), crops.len()));
         }
-        let raw: Vec<BtCrop> = crops
-            .iter()
-            .map(|(data, w, h)| BtCrop {
-                data: data.as_ptr(),
-                width: *w,
-                height: *h,
-            })
-            .collect();
+        let raw = bt_crops(crops)?;
         let (mut out, mut err) = (std::ptr::null_mut(), std::ptr::null_mut());
         // SAFETY: `raw` and `caps` hold `crops.len()` entries and outlive the call; each
-        // crop's bytes are width*height*3 (checked by the caller's Rgb).
+        // crop's bytes are width*height*3 (checked by `bt_crops`).
         let status = unsafe {
             (self.api.read)(
                 self.handle,
@@ -472,17 +488,10 @@ impl Loaded {
         let Some(read_chars) = self.api.read_chars else {
             return Err("the OCR backend pack predates GPU text-box reading".into());
         };
-        let raw: Vec<BtCrop> = crops
-            .iter()
-            .map(|(data, w, h)| BtCrop {
-                data: data.as_ptr(),
-                width: *w,
-                height: *h,
-            })
-            .collect();
+        let raw = bt_crops(crops)?;
         let (mut out, mut err) = (std::ptr::null_mut(), std::ptr::null_mut());
         // SAFETY: `raw` holds `crops.len()` entries and outlives the call; each crop's
-        // bytes are width*height*3 (checked by the caller's Rgb).
+        // bytes are width*height*3 (checked by `bt_crops`).
         let status =
             unsafe { read_chars(self.handle, raw.as_ptr(), raw.len(), &mut out, &mut err) };
         let out = take(self.api.free_str, out);

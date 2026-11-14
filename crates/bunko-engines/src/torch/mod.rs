@@ -638,9 +638,49 @@ pub fn recognizer_info(
     }
 }
 
+/// A crop as the pack's reads take it: its bytes, width and height.
+pub(crate) type RawCrop<'a> = (&'a [u8], u32, u32);
+
+/// `crops` as the pack's reads take them (`Loaded::read`, `Loaded::read_chars`): the
+/// bytes and the size, refused when a side does not fit the C ABI's `u32`.
+pub(crate) fn raw_crops<'a>(crops: &[&'a bunko_vlm::Rgb]) -> Result<Vec<RawCrop<'a>>, String> {
+    crops
+        .iter()
+        .enumerate()
+        .map(
+            |(i, c)| match (u32::try_from(c.width), u32::try_from(c.height)) {
+                (Ok(w), Ok(h)) => Ok((c.data.as_slice(), w, h)),
+                _ => Err(format!("crop {i} is {}x{}: too large", c.width, c.height)),
+            },
+        )
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A crop's size goes to the pack as `u32`: one that does not fit is refused, not
+    /// truncated.
+    #[test]
+    fn raw_crops_refuse_a_size_beyond_u32() {
+        let ok = bunko_vlm::Rgb {
+            width: 2,
+            height: 1,
+            data: vec![0; 6],
+        };
+        assert_eq!(raw_crops(&[&ok]).unwrap(), [(&ok.data[..], 2, 1)]);
+        #[cfg(target_pointer_width = "64")]
+        {
+            let wide = bunko_vlm::Rgb {
+                width: u32::MAX as usize + 1,
+                height: 1,
+                data: Vec::new(),
+            };
+            let e = raw_crops(&[&ok, &wide]).unwrap_err();
+            assert!(e.starts_with("crop 1 is 4294967296x1"), "{e}");
+        }
+    }
 
     /// The refusals of the packs before 0.8.0 (their exact texts) ask for a pack update;
     /// anything else, the new packs' own budget check included, is left alone.

@@ -32,10 +32,7 @@ impl TorchRecognizer {
         crops: &[&Rgb],
         caps: Option<&[u32]>,
     ) -> Result<Vec<String>, VlmError> {
-        let raw: Vec<(&[u8], u32, u32)> = crops
-            .iter()
-            .map(|c| (c.data.as_slice(), c.width as u32, c.height as u32))
-            .collect();
+        let raw = super::raw_crops(crops).map_err(VlmError::Runtime)?;
         self.handle.read(&raw, caps).map_err(VlmError::Runtime)
     }
 }
