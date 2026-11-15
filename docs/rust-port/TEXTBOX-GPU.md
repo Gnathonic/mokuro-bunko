@@ -112,6 +112,14 @@ Lead calls after the owner's answers (the owner reviews them):
   characters reads on the CPU route, logged, never an error. charspot's GPU route does not
   prefetch `model.onnx` (§7.4, §10.4).
 
+Owner ruling after the AnimeText gates (2026-11-14):
+
+- **O4 Crop edges round to the nearest pixel.** "Don't force rounding up or down. Use normal
+  rounding." A block's crop edges were `floor` x0/y0 and `ceil` x1/y1, so an fp32 edge of
+  53.0 on one route and 53.000015 on the other cropped a pixel apart. Every edge now rounds
+  half away from zero, clamped to the page, and a box on the page keeps at least one pixel
+  each way. The gate's tolerance is unchanged (§20).
+
 ## 3. Goals, non-goals, anti-goals
 
 **Goals**
@@ -119,7 +127,8 @@ Lead calls after the owner's answers (the owner reviews them):
 1. On an NVIDIA (cu130 pack) or AMD (rocm7.1 pack) GPU, a nar-small or charspot-small row,
    and an AnimeText detect stage, run on the GPU with no step beyond having the pack.
 2. At fp32 the GPU output equals the CPU ONNX route: nar ids and charspot texts identical,
-   AnimeText block sets identical with corners within 0.01 page px and no crop edge moved.
+   AnimeText block sets identical with corners within 0.01 page px and no crop edge moved
+   (a block's crop edges round to the nearest pixel, half away from zero: §20).
 3. A page's blocks are read in one batched call on the GPU.
 4. Every host that cannot use a GPU route falls back silently and correctly to the CPU
    ONNX route (§13).
@@ -207,7 +216,7 @@ the mirrored file, byte for byte):
 | weightless compile | 88.7 s, 5,098,341 B; 236.2 MB bound at load from the ONNX file (all 460 initializers `raw_data`) |
 | parity vs ONNX CPU, 30 pages (448x640) | identical block sets 30/30 at b1/b4/b8; worst corner Δ 0.0002 page px; score Δ ≤ 5.9e-5; b1 vs b8 raw Δ 7.6e-4 |
 | mixed canvases, 23 pages (448x640, 640x480, 640x640) | 23/23 identical, worst corner Δ 0.0005 px |
-| crop edges, 60 pages, 2,304 edges (floor x0,y0 / ceil x1,y1) | 0 edges move a pixel |
+| crop edges, 60 pages, 2,304 edges (floor x0,y0 / ceil x1,y1, the rule then; crops now round to the nearest pixel) | 0 edges move a pixel |
 | speed, 448x640, H2D + run + D2H, GPU idle | b1 19.1-21.5, b4 22.1, b8 22.0 pages/s; 44.1 ms device time a page |
 | where the time goes (b4) | 84% MIOpen GEMM convolutions (small-tile fp32 Tensile), 5.7% `naive_conv`, Triton < 2% |
 | CPU on the same box | ONNX 1 session x 16 threads 5.5 pages/s; the shipped pooled detector 8.3-9.1 |
@@ -900,7 +909,11 @@ No authors' weights are uploaded anywhere, and no package with weights inside is
      ≥ 1,000 crops.
    - AnimeText: identical block sets against ONNX Runtime CPU on ≥ 300 real pages (DB test
      volumes plus JMangaBench_Read pages, spreads and odd canvases), every matched corner
-     within 0.01 page px, no crop edge moved (`floor`/`ceil` as `page.rs`).
+     within 0.01 page px, no crop edge moved. A crop edge is the block's edge rounded to
+     the nearest pixel (half away from zero), clamped to the page, with at least one pixel
+     each way (`page.rs` `block_crop`; `verify.crop_edges` keeps the same rule). It was
+     `floor` x0/y0 and `ceil` x1/y1 until an fp32 edge of 53.0 on a GPU and 53.000015 on
+     the CPU moved a crop by a pixel; rounding to the nearest pixel takes both to 53.
    - **A failed fp32 gate (L1).** That target is left out of the manifest, so that GPU uses
      the CPU route, and the failure goes to the owner. It never bumps a revision, and it never
      ships under a looser tolerance without the owner's sign-off. fp16 has its own gate

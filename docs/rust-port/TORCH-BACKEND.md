@@ -407,8 +407,11 @@ differing at fp16.
 | `linux-rocm-gfx1100`, `gfx1101`, `gfx1102`, `gfx1200` | built, unverified | none; shipped because the verified neighbours passed |
 | `linux-cuda-sm_75`, `windows-cuda-sm_75` | built, unverified | none; exercised only through PTX JIT on newer cards |
 
-The AnimeText detector (`detector-torch-v1`) has no target list yet. It waits on a decision
-about the parity tolerance. A target without a package detects on the CPU.
+The AnimeText detector (`detector-torch-v1`) has no target list yet. Its gate keeps its
+tolerance (corners within 0.01 page px, no crop edge moved), and its crop edges now round
+to the nearest pixel instead of `floor`/`ceil` (TEXTBOX-GPU.md §20), so the packages are
+gated again under that rule; the stage step fills in the list. A target without a package
+detects on the CPU.
 
 #### Runtime libraries the packages need (for the packs, stream C)
 

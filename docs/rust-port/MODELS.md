@@ -259,8 +259,9 @@ and fp16 is recorded as `ocr_engine.precision = "fp16"`, which re-reads nothing.
 
 Which targets carry these packages, and which of them were verified on a card, is the
 table in [TORCH-BACKEND.md](TORCH-BACKEND.md#verified-targets-of-the-text-box-packages-textbox-torch-v1).
-The detector's target list is not settled (§2.5): it waits on a decision about the parity
-tolerance, and a target without a detector package detects on the CPU.
+The detector's target list is not settled (§2.5): it is filled in once the packages pass
+the gate again with crop edges rounded to the nearest pixel, and a target without a
+detector package detects on the CPU.
 
 ### 2.5 The `detector-torch-v1` release: AnimeText on a GPU
 
@@ -287,7 +288,8 @@ post-processing both routes share (`bunko_ocr::animetext::blocks_from_output`).
 A target ships only when its gate passes on a card of that target (or, for a target
 with no card to test, on its verified neighbours from the same exporter commit): the
 same block set as ONNX Runtime on the CPU on every one of at least 300 pages, every
-corner within 0.01 page px, and no crop edge moved. A target that fails is left out,
+corner within 0.01 page px, and no crop edge moved (a block's crop edges round to the
+nearest pixel, half away from zero, on both routes). A target that fails is left out,
 and that GPU detects on the CPU.
 
 The package is compiled Ultralytics code, so it is **AGPL-3.0**, and it goes only in its
