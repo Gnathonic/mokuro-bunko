@@ -7,6 +7,8 @@
 //! - [`Recognizer`], [`RecognizerInfo`], [`CropSet`], [`read_flat`]: the recognizer seam.
 //! - the model facts and host helpers: [`hayai`], [`paddle`], [`detok`], [`npy`],
 //!   [`resample`], [`pyfmt`].
+//! - [`animetext`]: the AnimeText block detector's input tensor, which its ONNX route
+//!   (`bunko-ocr`) and its libtorch route share.
 //!
 //! 0.7 runs the recognizers on libtorch (`bunko-torch`, loaded at run time by
 //! `bunko-engines`). The ONNX Runtime recognizers are kept behind the non-default
@@ -16,6 +18,7 @@
 //! - [`RecognizerCache`]: one recognizer per (engine, assets, device, precision), shared by
 //!   any number of worker threads.
 
+pub mod animetext;
 pub mod crop;
 pub mod detok;
 pub mod device;
@@ -27,6 +30,7 @@ pub mod pyfmt;
 pub mod resample;
 #[cfg(feature = "onnx-vlm")]
 pub mod runtime;
+pub mod textbox;
 pub mod warp;
 
 #[cfg(feature = "onnx-vlm")]

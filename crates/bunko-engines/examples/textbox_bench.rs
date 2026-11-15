@@ -26,8 +26,12 @@
 //! cycling over its inputs, to see what one does to the other on a shared CPU.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+#[cfg(feature = "gpl-models")]
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(feature = "gpl-models")]
+use std::time::Duration;
+use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 use bunko_engines::textbox::{Charspot, NarSmall};
@@ -164,6 +168,7 @@ fn load_crops(dir: &Path, n: usize) -> Result<Vec<Rgb>> {
 
 /// Every k-th page of the archives, `n` of them, decoded to BGR (and the mean decode
 /// time per page, one thread).
+#[cfg(feature = "gpl-models")]
 fn load_pages(archives: &[String], n: usize) -> Result<(Vec<bunko_ocr::image::BgrImage>, f64)> {
     let mut raw = Vec::new();
     for a in archives {

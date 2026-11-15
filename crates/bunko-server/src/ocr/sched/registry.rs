@@ -559,14 +559,18 @@ impl Scheduler {
         })
     }
 
-    /// The engines (with their precision modes) of the enabled generations, once each:
-    /// what a registering processor downloads models for.
+    /// The engines (with their precision modes and any detector other than the default)
+    /// of the enabled generations, once each: what a registering processor downloads
+    /// models for.
     fn wanted_engines(&self) -> Vec<bunko_proto::EngineWant> {
         let mut out: Vec<bunko_proto::EngineWant> = Vec::new();
         for g in self.settings.rows.iter().filter(|g| g.runnable()) {
+            let detector = g.effective_detector();
             let want = bunko_proto::EngineWant {
                 engine: g.engine.clone(),
                 precision: g.precision.clone(),
+                detector: (detector != bunko_core::engines::DEFAULT_DETECTOR)
+                    .then(|| detector.to_string()),
             };
             if !out.contains(&want) {
                 out.push(want);

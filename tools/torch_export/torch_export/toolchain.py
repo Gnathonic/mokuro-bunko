@@ -113,18 +113,26 @@ def windows_cross(work: Path) -> dict[str, str]:
         d = imp.with_name("nvcuda.def")
         d.write_text("LIBRARY nvcuda.dll\nEXPORTS\n" + "".join(f"  {x}\n" for x in syms))
         subprocess.run([str(mingw / "x86_64-w64-mingw32-dlltool"), "-d", str(d), "-l", str(imp), "-D", "nvcuda.dll"], check=True)
-    # inductor drives "x86_64-w64-mingw32-g++" with GCC-only flags; llvm-mingw is clang:
-    # a wrapper drops the flags clang rejects
     wrap = win / "wrap"
     wrap.mkdir(exist_ok=True)
     for tool in ("g++", "gcc"):
         w = wrap / f"x86_64-w64-mingw32-{tool}"
-        w.write_text("#!/bin/sh\n# drop GCC-only flags inductor passes\nfor a in \"$@\"; do shift; case \"$a\" in "
-                     "-fno-tree-loop-vectorize|-fexcess-precision=fast) ;; *) set -- \"$@\" \"$a\";; esac; done\n"
-                     f"exec {mingw}/x86_64-w64-mingw32-{tool} \"$@\"\n")
+        w.write_text(mingw_wrapper(mingw, tool))
         w.chmod(0o755)
     return {"PATH": f"{wrap}{os.pathsep}{mingw}{os.pathsep}{os.environ['PATH']}", "WINDOWS_CUDA_HOME": str(cuda),
             "TORCH_EXPORT_WIN_TORCHLIB": str(lib)}
+
+
+def mingw_wrapper(mingw: Path, tool: str) -> str:
+    """The shell wrapper inductor runs as ``x86_64-w64-mingw32-<tool>``. Inductor drives it
+    with GCC-only flags, and llvm-mingw is clang, so the wrapper drops the flags clang
+    rejects. It also defines ``_USE_MATH_DEFINES``: a GPU package with a host kernel
+    (AnimeText's folded ``stride``) compiles a ``.kernel.cpp`` that includes
+    ``cpp_prefix.h``, whose ``PhiloxRNGEngine.h`` uses ``M_PI``, and MinGW's math.h hides
+    ``M_PI`` under ``-std=c++20`` unless that macro is set (as MSVC's does)."""
+    return ("#!/bin/sh\n# drop GCC-only flags inductor passes; M_PI as on MSVC\nfor a in \"$@\"; do shift; case \"$a\" in "
+            "-fno-tree-loop-vectorize|-fexcess-precision=fast) ;; *) set -- \"$@\" \"$a\";; esac; done\n"
+            f"exec {mingw}/x86_64-w64-mingw32-{tool} -D_USE_MATH_DEFINES \"$@\"\n")
 
 
 def fetch_windows_cross(work: Path = WORK) -> None:

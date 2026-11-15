@@ -365,49 +365,56 @@ pub fn plan(target: &OcrTarget, rows: &[(String, String)], open_backend: bool) -
                 modes.push("auto-accuracy");
             }
             modes.dedup();
-            match (&pipeline, &backend) {
-                (Some(p), Ok(())) => {
-                    for mode in modes {
-                        match p.package_plan(engine, mode) {
-                            Ok(pp) => {
-                                for id in pp.package_ids.iter().map(String::as_str) {
-                                    add(id);
-                                    if let Some(dir) = &pp.package {
-                                        let name = id.rsplit('/').next().unwrap_or(id);
-                                        let at = bunko_ocr::models::torch_graph_path(dir, name)
-                                            .or_else(|| dir.parent().map(|p| p.join(name)))
-                                            .filter(|p| p.exists());
-                                        if let Some(at) = at {
-                                            fallbacks.push((id.to_string(), at));
-                                        }
+            // A text-box engine reads on the CPU without a backend pack: its plan is
+            // that route's.
+            let planner = match (&pipeline, &backend) {
+                (Some(p), Ok(())) => Some(p),
+                (Some(p), Err(_)) if models::textbox_engine(engine) => Some(p),
+                (_, Err(e)) => {
+                    package_error = Some(format!("compiled packages: {e}"));
+                    None
+                }
+                (None, Ok(())) => None,
+            };
+            if let Some(p) = planner {
+                for mode in modes {
+                    match p.package_plan(engine, mode) {
+                        Ok(pp) => {
+                            for id in pp.package_ids.iter().map(String::as_str) {
+                                add(id);
+                                if let Some(dir) = &pp.package {
+                                    let name = id.rsplit('/').next().unwrap_or(id);
+                                    let at = bunko_ocr::models::torch_graph_path(dir, name)
+                                        .or_else(|| dir.parent().map(|p| p.join(name)))
+                                        .filter(|p| p.exists());
+                                    if let Some(at) = at {
+                                        fallbacks.push((id.to_string(), at));
                                     }
                                 }
-                                for id in &pp.host_ids {
-                                    add(id);
-                                }
-                                let pkg = PlanPackage {
-                                    mode: mode.to_string(),
-                                    precision: pp.need.precision.as_str().to_string(),
-                                    device: pp.need.device.clone(),
-                                    label: pp.need.label.clone(),
-                                    target: pp.target.clone(),
-                                    present: pp.package.is_some(),
-                                    fallback: pp.need.fallback.clone(),
-                                };
-                                if !packages.iter().any(|q: &PlanPackage| {
-                                    q.precision == pkg.precision
-                                        && q.device == pkg.device
-                                        && q.target == pkg.target
-                                }) {
-                                    packages.push(pkg);
-                                }
                             }
-                            Err(e) => package_error = Some(e),
+                            for id in &pp.host_ids {
+                                add(id);
+                            }
+                            let pkg = PlanPackage {
+                                mode: mode.to_string(),
+                                precision: pp.need.precision.as_str().to_string(),
+                                device: pp.need.device.clone(),
+                                label: pp.need.label.clone(),
+                                target: pp.target.clone(),
+                                present: pp.package.is_some(),
+                                fallback: pp.need.fallback.clone(),
+                            };
+                            if !packages.iter().any(|q: &PlanPackage| {
+                                q.precision == pkg.precision
+                                    && q.device == pkg.device
+                                    && q.target == pkg.target
+                            }) {
+                                packages.push(pkg);
+                            }
                         }
+                        Err(e) => package_error = Some(e),
                     }
                 }
-                (_, Err(e)) => package_error = Some(format!("compiled packages: {e}")),
-                (None, Ok(())) => {}
             }
         }
         let files = ids
@@ -607,11 +614,17 @@ pub fn wanted_rows(target: &OcrTarget, engine: Option<&str>) -> Vec<(String, Str
         (Some(e), _) => vec![(e.to_string(), "auto-accuracy".to_string())],
         (None, _) if target.role == Role::Processor => {
             match bunko_processor::wants::read(&target.storage) {
-                Some(wants) => wants
-                    .into_iter()
-                    .filter(|w| models::ENGINES.contains(&w.engine.as_str()))
-                    .map(|w| (w.engine, w.precision))
-                    .collect(),
+                Some(wants) => {
+                    // One row per (engine, mode): the wants may differ only by detector.
+                    let mut rows: Vec<(String, String)> = Vec::new();
+                    for w in wants {
+                        let row = (w.engine, w.precision);
+                        if models::ENGINES.contains(&row.0.as_str()) && !rows.contains(&row) {
+                            rows.push(row);
+                        }
+                    }
+                    rows
+                }
                 None => vec![(models::PPOCR.to_string(), "auto-accuracy".to_string())],
             }
         }
@@ -627,6 +640,44 @@ pub fn wanted_rows(target: &OcrTarget, engine: Option<&str>) -> Vec<(String, Str
             .map(|e| (e.to_string(), "auto-accuracy".to_string()))
             .collect(),
     }
+}
+
+/// The detectors other than PP-OCR the wanted rows read with, as `(engine, precision
+/// mode, detector, the row's detect stage device)`: the library's enabled generations,
+/// or what a processor's library named (no stage device: auto). None for `--engine` or
+/// a library that did not say.
+pub fn wanted_detectors(
+    target: &OcrTarget,
+    engine: Option<&str>,
+) -> Vec<(String, String, String, Option<String>)> {
+    let mut out: Vec<(String, String, String, Option<String>)> = Vec::new();
+    let mut push = |row: (String, String, String, Option<String>)| {
+        if row.2 != models::PPOCR && !out.contains(&row) {
+            out.push(row);
+        }
+    };
+    match (engine, target.library.as_ref()) {
+        (Some(_), _) => {}
+        (None, _) if target.role == Role::Processor => {
+            for w in bunko_processor::wants::read(&target.storage).unwrap_or_default() {
+                if let Some(d) = w.detector {
+                    push((w.engine, w.precision, d, None));
+                }
+            }
+        }
+        (None, Some(cfg)) if target.role == Role::Library => {
+            for g in cfg.ocr.generations.iter().filter(|g| g.runnable()) {
+                push((
+                    g.engine.clone(),
+                    g.precision.clone(),
+                    g.effective_detector().to_string(),
+                    g.pools.stage_device.get("detect").cloned(),
+                ));
+            }
+        }
+        (None, _) => {}
+    }
+    out
 }
 
 /// The device-independent files those rows need: PP-OCR (every engine reads lines with
@@ -674,11 +725,20 @@ pub fn download(target: &OcrTarget, engine: Option<&str>) -> CmdResult {
     let rows = wanted_rows(target, engine);
     let recognizer_rows: Vec<(&str, &str)> = rows
         .iter()
-        .filter(|(e, _)| e == models::HAYAI || e == models::PADDLE)
+        .filter(|(e, _)| e != models::PPOCR && models::ENGINES.contains(&e.as_str()))
         .map(|(e, m)| (e.as_str(), m.as_str()))
         .collect();
     let gpu = bunko_ocr::runtime::ep_compiled().len() > 1;
-    let ids = planned_ids(&rows, gpu);
+    let mut ids = planned_ids(&rows, gpu);
+    // The detectors' files (both routes of a block detector read its ONNX file).
+    let detectors = wanted_detectors(target, engine);
+    for (_, _, d, _) in &detectors {
+        for id in models::detector_ids(d) {
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+    }
     // The same plan as `models list` and the admin panel: host files and packages.
     let total = plan(target, &rows, true).total.to_download;
     println!(
@@ -728,7 +788,9 @@ pub fn download(target: &OcrTarget, engine: Option<&str>) -> CmdResult {
         let pipeline = bunko_engines::EnginePipeline::new(
             target.engine_config(Backend::parse(&target.backend_preference())),
         );
-        match pipeline.torch().map(drop).or_else(|e| {
+        // Without a backend the text-box rows still read on the CPU (their ONNX files):
+        // only the other recognizers' packages fail.
+        let rows: Vec<(&str, &str)> = match pipeline.torch().map(drop).or_else(|e| {
             if pipeline.vulkan_pairings().is_empty() {
                 Err(e)
             } else {
@@ -736,34 +798,73 @@ pub fn download(target: &OcrTarget, engine: Option<&str>) -> CmdResult {
             }
         }) {
             Err(e) => {
-                println!(
-                    "  compiled packages: FAILED: the OCR backend is not installed ({e}); run 'mokuro-bunko install-ocr'"
-                );
-                failed.push("compiled packages (no OCR backend)".into());
+                if recognizer_rows
+                    .iter()
+                    .any(|(r, _)| !models::textbox_engine(r))
+                {
+                    println!(
+                        "  compiled packages: FAILED: the OCR backend is not installed ({e}); run 'mokuro-bunko install-ocr'"
+                    );
+                    failed.push("compiled packages (no OCR backend)".into());
+                }
+                recognizer_rows
+                    .iter()
+                    .copied()
+                    .filter(|(r, _)| models::textbox_engine(r))
+                    .collect()
             }
-            Ok(_) => {
-                for (e, r) in pipeline.prefetch_rows(&recognizer_rows) {
-                    step(e);
-                    match r {
-                        Ok(p) => {
-                            println!(
-                                "  {e:<14} {} on {} ({}): {} [{}]",
-                                p.need.precision,
-                                p.need.device,
-                                p.need.label,
-                                p.package.display(),
-                                p.target
-                            );
-                            if let Some(why) = &p.need.fallback {
-                                println!("  {e:<14} note: running on the CPU: {why}");
-                            }
-                        }
-                        Err(err) => {
-                            println!("  {e:<14} FAILED: {err}");
-                            failed.push(format!("{e} compiled package"));
-                        }
+            Ok(_) => recognizer_rows.clone(),
+        };
+        for (e, r) in pipeline.prefetch_rows(&rows) {
+            step(e);
+            match r {
+                Ok(p) => {
+                    println!(
+                        "  {e:<14} {} on {} ({}): {} [{}]",
+                        p.need.precision,
+                        p.need.device,
+                        p.need.label,
+                        p.package.display(),
+                        p.target
+                    );
+                    if let Some(why) = &p.need.fallback {
+                        println!("  {e:<14} note: running on the CPU: {why}");
                     }
                 }
+                // A row whose precision no device here can run (a forced fp16 row on a
+                // CPU-only machine) is never sent here: the library gives it to another
+                // machine. Nothing to fetch, and nothing failed.
+                Err(err) if err.contains(bunko_engines::precision::PRECISION_REFUSAL) => {
+                    println!("  {e:<14} skipped: this machine does not run that row ({err})");
+                }
+                Err(err) => {
+                    println!("  {e:<14} FAILED: {err}");
+                    failed.push(format!("{e} compiled package"));
+                }
+            }
+        }
+        // A block detector's compiled package on the GPU a session would detect on.
+        // Only noted when it fails: the detector reads on the CPU without it.
+        #[cfg(feature = "gpl-models")]
+        for (e, mode, d, asked) in &detectors {
+            let Some(need) = pipeline.detector_need(e, mode, d, asked.as_deref()) else {
+                continue;
+            };
+            match pipeline.prefetch_detector(&need) {
+                Ok(Some(dir)) => println!(
+                    "  {d:<14} fp32 on {} (beside {e}): {}",
+                    need.device,
+                    dir.display()
+                ),
+                Ok(None) => {
+                    if let Some(why) = &need.fallback {
+                        println!("  {d:<14} note: detecting on the CPU: {why}");
+                    }
+                }
+                Err(err) => println!(
+                    "  {d:<14} note: its package for {} could not be fetched ({err}); it detects on the CPU until it is",
+                    need.device
+                ),
             }
         }
     }
@@ -956,5 +1057,39 @@ mod tests {
             "{:?}",
             hayai.details
         );
+    }
+
+    /// A processor's wants that differ only by detector are one row to fetch for, and
+    /// the detector they name is wanted (an older library names none).
+    #[test]
+    fn a_processor_wants_its_rows_detectors() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = OcrTarget {
+            role: Role::Processor,
+            storage: dir.path().to_path_buf(),
+            processor_config: None,
+            library: None,
+            reason: String::new(),
+        };
+        let want = |detector: Option<&str>| bunko_proto::EngineWant {
+            engine: models::PADDLE.into(),
+            precision: "auto-accuracy".into(),
+            detector: detector.map(str::to_string),
+        };
+        bunko_processor::wants::write(dir.path(), &[want(None), want(Some("ctd-lines"))]).unwrap();
+        assert_eq!(
+            wanted_rows(&target, None),
+            [(models::PADDLE.to_string(), "auto-accuracy".to_string())]
+        );
+        assert_eq!(
+            wanted_detectors(&target, None),
+            [(
+                models::PADDLE.to_string(),
+                "auto-accuracy".to_string(),
+                "ctd-lines".to_string(),
+                None
+            )]
+        );
+        assert!(wanted_detectors(&target, Some(models::PADDLE)).is_empty());
     }
 }

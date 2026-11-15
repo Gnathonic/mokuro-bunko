@@ -1,4 +1,6 @@
-"""The three graphs per engine (vision, decoder prefill, decoder step) as exportable modules.
+"""The graphs of each engine as exportable modules (``ROLES``): the vision-language
+recognizers here (vision, decoder prefill, decoder step); the text-box recognizers in
+``textbox.py``; the AnimeText block detector in ``detector.py``.
 
 The arithmetic is the onnx_export functional modules' (``tools/onnx_export``: same
 weights, same host-computed inputs as spec §5/§6), driven the way the 0.5.2 runner
@@ -30,14 +32,25 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 import torch
 from torch import nn
 from torch.export import Dim
 
+if TYPE_CHECKING:
+    from .detector import OnnxPin
+    from .textbox import AuthorsWeights
+
 DT = {"fp32": torch.float32, "bf16": torch.bfloat16, "fp16": torch.float16}
-ROLES = ("vision", "prefill", "step")
+# the graphs (packages) of each engine, by role
+ROLES: dict[str, tuple[str, ...]] = {
+    "hayai-nova": ("vision", "prefill", "step"),
+    "paddle-manga": ("vision", "prefill", "step"),
+    "nar-small": ("model",),
+    "charspot-small": ("dense", "tail"),
+    "animetext-blocks": ("detector",),
+}
 
 HAYAI_EOS, HAYAI_PAD = 16002, 16000
 PADDLE_EOS, PADDLE_FILL = 2, 0
@@ -65,6 +78,20 @@ class Graphs:
     meta: dict[str, str] = field(default_factory=dict)
     # weights the graph wrappers own (not model parameters), by blob key
     extra: dict[str, torch.Tensor] = field(default_factory=dict)
+    # set: the packages bind the authors' own weights file (textbox.py) and no
+    # weights-<group>.safetensors is written; authors_file is the local copy the real
+    # (CPU) model was loaded from (None when the builder was handed a model)
+    authors_weights: AuthorsWeights | None = None
+    authors_file: Path | None = None
+    max_batch: int | None = None  # the batch Dim's max (bunko.max_batch), authors' weights only
+    # authors' weights only: the dtype the host casts them to before binding
+    # (bunko.weights_dtype, "fp16"); None binds them as stored
+    weights_dtype: str | None = None
+    # set: the packages bind an ONNX file's initializers (detector.py: AnimeText) and no
+    # weights-<group>.safetensors is written; onnx_file is the local copy the real (CPU)
+    # model was loaded from (None when the builder was handed a model)
+    onnx_weights: OnnxPin | None = None
+    onnx_file: Path | None = None
 
 
 class Autocast(nn.Module):
@@ -376,4 +403,23 @@ def paddle(prec: str, device: torch.device, io: int, model=None, fuse: bool = Fa
     return out
 
 
-BUILDERS = {"hayai-nova": hayai, "paddle-manga": paddle}
+def nar_small(*a, **kw) -> Graphs:
+    from .textbox import nar_small as build
+
+    return build(*a, **kw)
+
+
+def charspot_small(*a, **kw) -> Graphs:
+    from .textbox import charspot_small as build
+
+    return build(*a, **kw)
+
+
+def animetext_blocks(*a, **kw) -> Graphs:
+    from .detector import animetext_blocks as build
+
+    return build(*a, **kw)
+
+
+BUILDERS = {"hayai-nova": hayai, "paddle-manga": paddle, "nar-small": nar_small, "charspot-small": charspot_small,
+            "animetext-blocks": animetext_blocks}

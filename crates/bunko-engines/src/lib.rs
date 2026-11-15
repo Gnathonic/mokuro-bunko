@@ -207,13 +207,29 @@ pub struct PackagePlan {
     pub host_ids: Vec<&'static str>,
 }
 
-/// What [`EnginePipeline::prefetch`] put in place for an engine.
+/// What [`EnginePipeline::prefetch_rows`] put in place for an engine.
 #[derive(Debug, Clone)]
 pub struct Prefetched {
     pub need: EngineNeed,
     pub package: PathBuf,
     pub target: String,
     pub host_files: Vec<PathBuf>,
+}
+
+/// Where a text-box row's block detector runs on this machine
+/// ([`EnginePipeline::detector_need`]).
+#[cfg(all(feature = "torch", feature = "gpl-models"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetectorNeed {
+    pub detector: String,
+    /// `cpu` or `gpu:<n>`.
+    pub device: String,
+    /// Why the CPU though a GPU was asked for or is here (as a session warns it).
+    pub fallback: Option<String>,
+    /// The targets of its fp32 package on that GPU, best first (none on the CPU).
+    pub targets: Vec<String>,
+    /// That package, when it is fully here.
+    pub package: Option<PathBuf>,
 }
 
 /// Overrides `<storage>/backends` (where backend packs are looked for).
@@ -228,9 +244,11 @@ pub struct EnginePipeline {
     /// The PP-OCR pair of a line detector (its id first), shared by every session on
     /// that detector that needs no more detect workers than it has sessions.
     ppocr: Mutex<Option<(String, usize, Weak<PpocrPageReader>)>>,
-    /// The loaded block detector (its id first), shared by the sessions on it.
+    /// The loaded block detectors by detector and device (`cpu`, `gpu:<n>`), shared by
+    /// the sessions on them.
     #[cfg(feature = "gpl-models")]
-    block_detector: Mutex<Option<(String, Weak<bunko_ocr::animetext::AnimeText>)>>,
+    #[allow(clippy::type_complexity)]
+    block_detectors: Mutex<Vec<((String, String), Weak<dyn bunko_ocr::blocks::BlockDetector>)>>,
     /// The loaded text-box recognizers by engine and session threads, shared by their
     /// sessions.
     #[cfg(feature = "nc-models")]
@@ -250,7 +268,7 @@ impl EnginePipeline {
             recognizers: RecognizerCache::new(Arc::new(OrtSessionFactory)),
             ppocr: Mutex::new(None),
             #[cfg(feature = "gpl-models")]
-            block_detector: Mutex::new(None),
+            block_detectors: Mutex::new(Vec::new()),
             #[cfg(feature = "nc-models")]
             textbox: Mutex::new(Vec::new()),
             loading: Mutex::new(()),
@@ -563,23 +581,58 @@ impl EnginePipeline {
 
     /// The devices for the catalog: with the libtorch backend each device lists only the
     /// formats a recognizer can run on it here (its compute formats with a package on
-    /// disk or downloadable for hayai-nova or paddle-manga), not every format it computes
-    /// in (a Turing card computes bf16 but no bf16 package exists for it).
+    /// disk or downloadable for one of the recognizer engines), not every format it
+    /// computes in (a Turing card computes bf16 but no bf16 package exists for it). A
+    /// GPU's format that only some engines run there (hayai-nova's bf16, a gfx with
+    /// hayai-nova packages and no nar-small one, a Vulkan runtime) lists those engines
+    /// in `format_engines`. A text-box engine counts on a GPU only by the whole test of
+    /// its placement ([`textbox_gpu_formats`]): an old pack without `bt_read_chars`
+    /// offers it no GPU format.
     pub fn catalog_devices(&self) -> Vec<Device> {
         #[cfg_attr(not(feature = "torch"), allow(unused_mut))]
         let mut devices = self.devices();
         #[cfg(feature = "torch")]
+        let recognizers: Vec<&'static str> = models::ENGINES
+            .iter()
+            .copied()
+            .filter(|e| *e != models::PPOCR)
+            .collect();
+        #[cfg(feature = "torch")]
         if let Ok(tb) = self.torch() {
+            let reads_chars = tb.pack.reads_chars();
+            let host_files = |e: &str| {
+                models::obtainable(&self.store, &models::torch_host_ids(e, Precision::Fp32))
+            };
             for d in devices
                 .iter_mut()
                 .filter(|d| d.provider.as_deref() != Some("vulkan"))
             {
-                d.formats = torch::runnable_formats(&tb.report, &d.id, |engine, p, targets| {
-                    self.store.torch_package_obtainable(engine, p, targets)
-                });
+                let cpu = d.id == "cpu";
+                let (formats, only) =
+                    torch::engine_formats(&tb.report, &d.id, &recognizers, |engine, p, targets| {
+                        if !models::textbox_engine(engine) {
+                            return self.store.torch_package_obtainable(engine, p, targets);
+                        }
+                        // The text-box engines read on the CPU with ONNX Runtime.
+                        if cpu {
+                            return p == "fp32"
+                                && models::obtainable(&self.store, &models::textbox_ids(engine));
+                        }
+                        let packaged: Vec<&'static str> = ["fp32", "bf16", "fp16"]
+                            .into_iter()
+                            .filter(|f| {
+                                *f == p && self.store.torch_package_obtainable(engine, p, targets)
+                            })
+                            .collect();
+                        !textbox_gpu_formats(engine, reads_chars, &packaged, host_files(engine))
+                            .is_empty()
+                    });
+                d.formats = formats;
+                d.format_engines.extend(only);
             }
         }
-        // The Vulkan runtimes' formats (either engine), after the device's own.
+        // The Vulkan runtimes' formats (hayai-nova and paddle-manga), after the device's
+        // own.
         #[cfg(feature = "torch")]
         for d in &mut devices {
             if d.id == "cpu" {
@@ -589,19 +642,10 @@ impl EnginePipeline {
             let mut by: std::collections::BTreeMap<&'static str, Vec<String>> = Default::default();
             for engine in [models::HAYAI, models::PADDLE] {
                 for f in self.vulkan_formats(engine, &pl) {
-                    if !d.formats.iter().any(|x| x == f) {
-                        d.formats.push(f.to_string());
-                    }
                     by.entry(f).or_default().push(engine.to_string());
                 }
             }
-            // A Vulkan format only some engines run here (WebGPU has no paddle-manga):
-            // the library and the benchmark offer it to those engines only.
-            for (f, engines) in by {
-                if f.contains('@') && engines.len() < 2 {
-                    d.format_engines.insert(f.to_string(), engines);
-                }
-            }
+            add_vulkan_formats(d, by, &recognizers);
         }
         devices
     }
@@ -617,6 +661,9 @@ impl EnginePipeline {
     /// The formats `engine` can run in on `placement`: what the device computes in
     /// and what this machine has (or may download) the files for.
     fn formats(&self, engine: &str, placement: &runtime::Placement) -> Vec<&'static str> {
+        if models::textbox_engine(engine) {
+            return self.textbox_formats(engine, placement);
+        }
         if placement.provider == "vulkan" {
             #[cfg(feature = "torch")]
             return self.vulkan_formats(engine, placement);
@@ -635,6 +682,163 @@ impl EnginePipeline {
         }
         let _ = engine;
         precision::supported(placement.is_gpu()).to_vec()
+    }
+
+    /// The formats text-box `engine` runs in on `placement`: on the CPU, fp32 when its
+    /// ONNX files are here or downloadable; on a libtorch GPU, [`textbox_gpu_formats`]
+    /// over the device's formats with a package here or in the release; on a Vulkan GPU
+    /// (or with no libtorch pack) none.
+    fn textbox_formats(&self, engine: &str, placement: &Placement) -> Vec<&'static str> {
+        if !placement.is_gpu() {
+            return if models::obtainable(&self.store, &models::textbox_ids(engine)) {
+                vec!["fp32"]
+            } else {
+                Vec::new()
+            };
+        }
+        if placement.provider == "vulkan" {
+            return Vec::new();
+        }
+        #[cfg(feature = "torch")]
+        if let Ok(tb) = self.torch() {
+            let packaged = torch::device_formats(&tb.report, &placement.device, |p, targets| {
+                self.store.torch_package_obtainable(engine, p, targets)
+            });
+            let host_files = models::obtainable(
+                &self.store,
+                &models::torch_host_ids(engine, Precision::Fp32),
+            );
+            return textbox_gpu_formats(engine, tb.pack.reads_chars(), &packaged, host_files);
+        }
+        Vec::new()
+    }
+
+    /// Whether the loaded libtorch pack reads text boxes (`bt_read_chars`); `None` with
+    /// no libtorch pack.
+    #[cfg(feature = "nc-models")]
+    fn pack_reads_chars(&self) -> Option<bool> {
+        #[cfg(feature = "torch")]
+        if let Ok(tb) = self.torch() {
+            return Some(tb.pack.reads_chars());
+        }
+        None
+    }
+
+    /// Log why a text-box row reads on the CPU although a GPU was asked for or is here
+    /// (`why`, from [`runtime::place_runnable`]; [`textbox_cpu_reason`] picks the pack's
+    /// reason where it is the cause). A row that pinned its engine stage to a GPU is
+    /// warned about on every session; an unpinned row runs on the CPU as planned, noted
+    /// once per process per reason ([`textbox_cpu_note`]).
+    #[cfg(feature = "nc-models")]
+    fn note_textbox_on_cpu(
+        &self,
+        engine: &str,
+        asked: Option<&str>,
+        devices: &[Device],
+        why: &str,
+    ) {
+        let (reason, pack) = textbox_cpu_reason(asked, devices, self.pack_reads_chars(), why);
+        match textbox_cpu_note(engine, asked, &reason, pack) {
+            None => warn!("{engine}: running on the CPU: {reason}"),
+            Some(key) => {
+                if TEXTBOX_CPU_NOTED.lock().insert(key) {
+                    info!("{engine}: reading on the CPU: {reason}");
+                }
+            }
+        }
+    }
+
+    /// nar-small or charspot-small on a libtorch GPU at `precision` (fp32, or nar-small's
+    /// fp16): the package for the device's targets, the authors' weights and vocabulary
+    /// (the same fp32 file at either precision: an fp16 package casts it at load), one
+    /// `bt_read_chars` per page. Also the export set its package comes from (the sidecar's
+    /// provenance).
+    #[cfg(all(feature = "torch", feature = "nc-models"))]
+    fn torch_textbox(
+        &self,
+        engine: &str,
+        placement: &Placement,
+        precision: Precision,
+    ) -> Result<(Arc<dyn Recognizer>, String), String> {
+        let engine: &'static str = match engine {
+            models::NAR => models::NAR,
+            models::CHARSPOT => models::CHARSPOT,
+            other => return Err(format!("{other} is no text-box recognizer")),
+        };
+        let (repo, _) = models::textbox_source(engine)
+            .ok_or_else(|| format!("{engine} has no pinned source"))?;
+        let tb = self.torch()?;
+        let targets = Self::torch_targets(&tb, &placement.device, precision);
+        let pkg = self
+            .store
+            .ensure_torch_package(engine, precision.as_str(), &targets)
+            .map_err(|e| e.to_string())?;
+        // The sidecar names the authors' pin only when their files are the pinned ones.
+        let pinned = models::ensure_all(&self.store, &models::torch_host_ids(engine, precision))?
+            .iter()
+            .all(|f| f.verified);
+        let mut files = models::torch_host_files(&self.store, engine, precision, pkg.dir)?;
+        files.unpack_cache = Some(
+            self.store
+                .options()
+                .root
+                .join(bunko_ocr::models::TORCH_DIR)
+                .join(".unpacked"),
+        );
+        // The pack's preprocessing pool (the crops are cut and resized on the host).
+        let threads = plan::cpu_engine_threads(
+            plan::physical_cpu_count(),
+            plan::performance_core_count(),
+            self.config.jobs,
+        ) as u32;
+        let max_batch =
+            torch::textbox_max_batch(tb.device(&placement.device).and_then(|d| d.vram_mb));
+        let reader = tb.textbox(
+            engine,
+            precision,
+            &placement.device,
+            &files,
+            threads,
+            max_batch,
+        )?;
+        let device: bunko_vlm::Device = placement
+            .device
+            .parse()
+            .map_err(|e: bunko_vlm::VlmError| e.to_string())?;
+        let info = bunko_vlm::RecognizerInfo {
+            engine,
+            recognizer: repo,
+            repos: models::textbox_source(engine)
+                .filter(|_| pinned)
+                .into_iter()
+                .collect(),
+            precision,
+            device,
+            token_caps: false,
+            second_read: false,
+            default_max_tokens: 0,
+            batch: reader.info.batch as usize,
+            patch_budget: None,
+        };
+        let mut rec = textbox::TextboxRecognizer::with_reader(engine, reader, info);
+        // L12: a charspot-small crop with more characters than its tail graph holds is
+        // left to the CPU route, loaded (and its ONNX file fetched) on first need.
+        if engine == models::CHARSPOT {
+            let store = self.store.clone();
+            rec = rec.with_cpu_route(textbox::lazy_cpu_route(move || {
+                let files = models::ensure_all(&store, &models::textbox_ids(models::CHARSPOT))
+                    .map_err(bunko_vlm::VlmError::Asset)?;
+                let opts = RuntimeOptions {
+                    intra_threads: threads as usize,
+                    targets: vec![ExecutionTarget::Cpu],
+                    copies: 1,
+                    spinning: false,
+                };
+                textbox::Charspot::load(&files[0].path, &files[1].path, &opts)
+            }));
+        }
+        let rec: Arc<dyn Recognizer> = Arc::new(rec);
+        Ok((rec, bunko_ocr::models::torch_release_name_for(engine)))
     }
 
     /// The error of a row whose engine has no compiled package for `placement`'s device
@@ -678,9 +882,10 @@ impl EnginePipeline {
     }
 
     /// Why no recognizer of `engine` can load in this process: no libtorch backend pack
-    /// loaded and no ONNX recognizers built in. None when one can.
+    /// loaded and no ONNX recognizers built in. None when one can, and always for a
+    /// text-box engine (it reads on the CPU with ONNX Runtime in every build).
     fn no_recognizer_backend(&self, engine: &str) -> Option<String> {
-        if self.torch_loaded() || cfg!(feature = "onnx-vlm") {
+        if models::textbox_engine(engine) || self.torch_loaded() || cfg!(feature = "onnx-vlm") {
             return None;
         }
         #[cfg(feature = "torch")]
@@ -764,9 +969,14 @@ impl EnginePipeline {
 
     /// Whether a recognizer backend can run `engine` here (for `describe`).
     fn recognizer_ready(&self, engine: &str, devices: &[Device]) -> bool {
-        // The text-box recognizers need their files and nothing else.
+        // The text-box recognizers: their ONNX files for the CPU, or a GPU that runs
+        // them through the libtorch pack.
         if models::textbox_engine(engine) {
-            return models::obtainable(&self.store, &models::textbox_ids(engine));
+            return models::obtainable(&self.store, &models::textbox_ids(engine))
+                || devices.iter().any(|d| {
+                    let (placement, _) = runtime::place(Some(&d.id), devices);
+                    placement.is_gpu() && !self.textbox_formats(engine, &placement).is_empty()
+                });
         }
         #[cfg(feature = "torch")]
         if self.torch().is_ok() {
@@ -808,6 +1018,9 @@ impl EnginePipeline {
     /// runs on here, as [`default_need`](Self::default_need).
     #[cfg(feature = "torch")]
     pub fn need_for(&self, engine: &str, mode: &str) -> Result<EngineNeed, String> {
+        if models::textbox_engine(engine) {
+            return self.textbox_need(engine, mode);
+        }
         // Without a libtorch pack the Vulkan pack's GPUs still have a plan.
         let tb = match self.torch() {
             Ok(tb) => Some(tb),
@@ -850,25 +1063,70 @@ impl EnginePipeline {
         })
     }
 
-    /// Fetch what the default rows of `engine` (or every recognizer engine) need on
-    /// this machine ([`default_need`](Self::default_need)): host files, the compiled
-    /// package (unpacked) and its shared weights. Other precisions and devices are
-    /// fetched when a session first needs them. One result per engine.
+    /// [`need_for`](Self::need_for) of a text-box engine: the GPU its placement picks
+    /// over [`textbox_formats`](Self::textbox_formats) at the precision `mode` resolves
+    /// to there (nar-small: fp16 in every auto mode on a GPU with an fp16 package, O2)
+    /// with that device's package targets, else the CPU (the ONNX route, fp32, no
+    /// targets). With no libtorch pack the CPU is the need and `fallback` says why; a
+    /// pack without `bt_read_chars` says [`torch::TEXTBOX_PACK_REASON`] when that is the
+    /// cause ([`textbox_cpu_reason`]). A forced format the device cannot run is the
+    /// precision refusal.
     #[cfg(feature = "torch")]
-    pub fn prefetch(
-        &self,
-        engine: Option<&str>,
-    ) -> Vec<(&'static str, Result<Prefetched, String>)> {
-        let rows: Vec<(&str, &str)> = [models::HAYAI, models::PADDLE]
-            .into_iter()
-            .filter(|e| engine.is_none_or(|want| want == *e))
-            .map(|e| (e, precision::MODE_ACCURACY))
-            .collect();
-        self.prefetch_rows(&rows)
+    fn textbox_need(&self, engine: &str, mode: &str) -> Result<EngineNeed, String> {
+        let engine: &'static str = models::ENGINES
+            .iter()
+            .copied()
+            .find(|e| *e == engine)
+            .ok_or_else(|| format!("{engine} has no recognizer"))?;
+        let devices = self.devices();
+        let (placement, mut fallback) =
+            runtime::place_runnable(None, &devices, |pl| self.textbox_formats(engine, pl));
+        let tb = self.torch();
+        match &tb {
+            Err(e) => {
+                fallback.get_or_insert_with(|| e.clone());
+            }
+            Ok(tb) => {
+                fallback = fallback.map(|why| {
+                    textbox_cpu_reason(None, &devices, Some(tb.pack.reads_chars()), &why).0
+                });
+            }
+        }
+        let label = devices
+            .iter()
+            .find(|d| d.id == placement.device)
+            .map_or_else(|| placement.device.clone(), |d| d.label.clone());
+        let formats = self.textbox_formats(engine, &placement);
+        if formats.is_empty() {
+            return Err(format!(
+                "{engine}'s files are not here and downloads are off (MOKURO_MODELS_DOWNLOAD)"
+            ));
+        }
+        let formats = precision::auto_formats(mode, formats, false);
+        let precision = precision::resolve(engine, mode, &formats, None, "")?
+            .map_or(Precision::Fp32, |r| r.precision);
+        let targets = match &tb {
+            Ok(tb) if placement.is_gpu() => Self::torch_targets(tb, &placement.device, precision),
+            _ => Vec::new(),
+        };
+        Ok(EngineNeed {
+            engine,
+            device: placement.device,
+            label,
+            precision,
+            targets,
+            fallback,
+        })
     }
 
-    /// [`prefetch`](Self::prefetch) for the given rows: `(engine, precision mode)`
-    /// (the enabled generations). Rows of engines without a recognizer are skipped.
+    /// Fetch what the given rows need on this machine: `(engine, precision mode)`, the
+    /// enabled generations (so an opt-in engine, such as the non-commercial text-box
+    /// ones, is fetched only for a row that uses it). Per row: the host files, the
+    /// compiled package (unpacked) and its shared weights, for the device and precision
+    /// [`need_for`](Self::need_for) picks, and a text-box row's other formats its mode
+    /// can resolve to there (a benchmarked mode's fp16 and fp32 packages); other
+    /// precisions and devices are fetched when a session first needs them. Rows of
+    /// engines without a recognizer are skipped.
     #[cfg(feature = "torch")]
     pub fn prefetch_rows(
         &self,
@@ -876,6 +1134,15 @@ impl EnginePipeline {
     ) -> Vec<(&'static str, Result<Prefetched, String>)> {
         let mut out: Vec<(&'static str, Result<Prefetched, String>)> = Vec::new();
         for &(engine, mode) in rows {
+            if models::textbox_engine(engine)
+                && let Some(e) = models::ENGINES.iter().copied().find(|e| *e == engine)
+            {
+                let r = self
+                    .need_for(e, mode)
+                    .and_then(|need| self.prefetch_textbox(e, mode, need));
+                out.push((e, r));
+                continue;
+            }
             let e: &'static str = match engine {
                 models::HAYAI => models::HAYAI,
                 models::PADDLE => models::PADDLE,
@@ -914,6 +1181,73 @@ impl EnginePipeline {
             out.push((e, r));
         }
         out
+    }
+
+    /// [`prefetch_rows`](Self::prefetch_rows) of a text-box row in precision `mode`. On a
+    /// GPU: the package for its targets at the precision it resolves to, the GPU route's
+    /// host files, the CPU route's files that are cheap beside them
+    /// ([`models::textbox_fallback_ids`]: nar-small's, so its fallback when the GPU
+    /// cannot start is free; none of charspot-small's, whose ONNX file the CPU route
+    /// fetches when it is reached, L12), and the packages of the other formats the mode
+    /// can resolve to there ([`textbox_prefetch_formats`]: a benchmarked mode tries fp16
+    /// and fp32), whose failure is only logged; on the CPU: the ONNX files, the graph
+    /// reported as the package.
+    #[cfg(feature = "torch")]
+    fn prefetch_textbox(
+        &self,
+        engine: &'static str,
+        mode: &str,
+        need: EngineNeed,
+    ) -> Result<Prefetched, String> {
+        if need.device != Placement::cpu().device {
+            let pkg = self
+                .store
+                .ensure_torch_package(engine, need.precision.as_str(), &need.targets)
+                .map_err(|err| err.to_string())?;
+            let placement = runtime::place(Some(&need.device), &self.devices()).0;
+            let formats = self.textbox_formats(engine, &placement);
+            for f in textbox_prefetch_formats(engine, mode, &formats) {
+                if f == need.precision.as_str() {
+                    continue;
+                }
+                let targets = self.torch().ok().and_then(|tb| {
+                    tb.device(&need.device)
+                        .map(|d| bunko_ocr::models::torch_targets(&d.kind, &d.arch, &d.isa, &f))
+                });
+                if let Err(e) = self.store.ensure_torch_package(
+                    engine,
+                    &f,
+                    targets.as_deref().unwrap_or_default(),
+                ) {
+                    warn!("{engine}: the {f} package for {}: {e}", need.device);
+                }
+            }
+            let files =
+                models::torch_host_files(&self.store, engine, need.precision, pkg.dir.clone())?;
+            // A failure here is the CPU route's, not the GPU's.
+            let fallback = models::textbox_fallback_ids(engine);
+            if let Err(e) = models::ensure_all(&self.store, &fallback) {
+                warn!("{engine}: the CPU route's files: {e}");
+            }
+            return Ok(Prefetched {
+                need,
+                package: pkg.dir,
+                target: pkg.target,
+                host_files: std::iter::once(files.tokenizer)
+                    .chain(files.weights)
+                    .collect(),
+            });
+        }
+        let mut files = models::ensure_all(&self.store, &models::textbox_ids(engine))?.into_iter();
+        let graph = files
+            .next()
+            .ok_or_else(|| format!("{engine} has no ONNX graph"))?;
+        Ok(Prefetched {
+            need,
+            package: graph.path,
+            target: TEXTBOX_CPU_TARGET.to_string(),
+            host_files: files.map(|f| f.path).collect(),
+        })
     }
 
     /// Fetch the graphs of the Vulkan runtimes paired with libtorch GPU `device` for
@@ -1059,6 +1393,34 @@ impl EnginePipeline {
     #[cfg(feature = "torch")]
     pub fn package_plan(&self, engine: &str, mode: &str) -> Result<PackagePlan, String> {
         let need = self.need_for(engine, mode)?;
+        if models::textbox_engine(need.engine) && need.device == Placement::cpu().device {
+            // The ONNX route: the graph and the weights it binds are the package, the
+            // vocabulary the host file (`textbox_ids`: graph, vocabulary, weights).
+            let ids = models::textbox_ids(need.engine);
+            let host_ids: Vec<&'static str> = ids.iter().copied().skip(1).take(1).collect();
+            let package_ids: Vec<String> = ids
+                .iter()
+                .filter(|id| !host_ids.contains(id))
+                .map(|id| id.to_string())
+                .collect();
+            let package = package_ids
+                .iter()
+                .map(|id| self.store.locate(id))
+                .collect::<Option<Vec<PathBuf>>>()
+                .and_then(|paths| {
+                    paths
+                        .first()
+                        .and_then(|p| p.parent())
+                        .map(std::path::Path::to_path_buf)
+                });
+            return Ok(PackagePlan {
+                need,
+                target: Some(TEXTBOX_CPU_TARGET.to_string()),
+                package_ids,
+                package,
+                host_ids,
+            });
+        }
         if self.is_vulkan_device(&need.device) {
             let pl = runtime::place(Some(&need.device), &self.devices()).0;
             let rt = self
@@ -1145,18 +1507,25 @@ impl EnginePipeline {
         &self.config
     }
 
-    /// The block detector `detector` (`models::block_detector`), loaded once, and the
-    /// pinned `(repo, revision)` of its file when it is the pinned one.
+    /// The block detector `detector` (`models::block_detector`) for `placement`, loaded
+    /// once per device, the pinned `(repo, revision)` of its file when it is the pinned
+    /// one, and the export set of its compiled package when it runs on a GPU
+    /// ([`bunko_ocr::models::DETECTOR_TORCH_RELEASE`]). On a GPU placement AnimeText
+    /// runs on the pack (`bt_detect_blocks`) when it can; any reason it cannot is
+    /// warned about and the detector loads on the CPU (ONNX Runtime), as everywhere
+    /// else. Both routes read the same ONNX file.
     #[cfg(feature = "gpl-models")]
     #[allow(clippy::type_complexity)]
     fn block_detector(
         &self,
         detector: &str,
         copies: usize,
+        placement: &Placement,
     ) -> Result<
         (
             Arc<dyn bunko_ocr::blocks::BlockDetector>,
             Option<(String, String)>,
+            Option<String>,
         ),
         String,
     > {
@@ -1165,12 +1534,39 @@ impl EnginePipeline {
         let source = file
             .verified
             .then(|| (repo.to_string(), revision.to_string()));
-        let mut slot = self.block_detector.lock();
-        if let Some((of, weak)) = slot.as_ref()
-            && of == detector
-            && let Some(d) = weak.upgrade()
-        {
-            return Ok((d, source));
+        // Held across a load: a second session on the same detector waits for it.
+        let mut slots = self.block_detectors.lock();
+        slots.retain(|(_, w)| w.strong_count() > 0);
+        let cached =
+            |slots: &[((String, String), Weak<dyn bunko_ocr::blocks::BlockDetector>)],
+             device: &str| {
+                slots
+                    .iter()
+                    .find(|((d, dev), _)| d == detector && dev == device)
+                    .and_then(|(_, w)| w.upgrade())
+            };
+        #[cfg(feature = "torch")]
+        if placement.is_gpu() {
+            let release = || Some(bunko_ocr::models::torch_release_name_for(detector));
+            if let Some(d) = cached(&slots, &placement.device) {
+                return Ok((d, source, release()));
+            }
+            match self.torch_block_detector(detector, placement, &file.path) {
+                Ok(d) => {
+                    slots.push((
+                        (detector.to_string(), placement.device.clone()),
+                        Arc::downgrade(&d),
+                    ));
+                    return Ok((d, source, release()));
+                }
+                Err(why) => warn!("{detector}: detecting on the CPU: {why}"),
+            }
+        }
+        #[cfg(not(feature = "torch"))]
+        let _ = placement;
+        let cpu = Placement::cpu().device;
+        if let Some(d) = cached(&slots, &cpu) {
+            return Ok((d, source, None));
         }
         let opts = RuntimeOptions {
             intra_threads: plan::SESSION_THREADS + 2 * (copies.max(1) - 1),
@@ -1178,12 +1574,214 @@ impl EnginePipeline {
             copies,
             spinning: false,
         };
-        let loaded = Arc::new(
+        let loaded: Arc<dyn bunko_ocr::blocks::BlockDetector> = Arc::new(
             bunko_ocr::animetext::AnimeText::load(&file.path, &opts)
                 .map_err(|e| format!("could not load AnimeText: {e}"))?,
         );
-        *slot = Some((detector.to_string(), Arc::downgrade(&loaded)));
-        Ok((loaded, source))
+        slots.push(((detector.to_string(), cpu), Arc::downgrade(&loaded)));
+        Ok((loaded, source, None))
+    }
+
+    /// Where the detect stage of a row reading with `detector` would run beside an engine
+    /// on `engine_device` ([`pick_detect_device`] over this host's
+    /// [`detect_candidates`](Self::detect_candidates)), and why not on a GPU when it
+    /// could have been. The CPU for a line detector.
+    #[cfg(feature = "gpl-models")]
+    fn detect_pick(
+        &self,
+        spec: &RowSpec,
+        detector: &str,
+        engine_device: &str,
+    ) -> (String, Option<String>) {
+        if models::block_detector(detector) {
+            return pick_detect_device(
+                spec.pools
+                    .stage_device
+                    .get(STAGE_DETECT)
+                    .map(String::as_str),
+                engine_device,
+                self.config.backend == Backend::Cpu,
+                &self.detect_candidates(detector),
+            );
+        }
+        (Placement::cpu().device, None)
+    }
+
+    /// The GPUs block detector `detector` might run on: the pack's GPUs that
+    /// `ocr.backend` allows, with their memory and whether the detector runs there (the
+    /// pack has `bt_detect_blocks` and an fp32 package for the device is obtainable).
+    /// None without a libtorch pack, and none for a detector with no GPU route.
+    #[cfg(feature = "gpl-models")]
+    fn detect_candidates(&self, detector: &str) -> Vec<DetectCandidate> {
+        self.detect_gpus(detector, |p, targets| {
+            self.store.torch_package_obtainable(detector, p, targets)
+        })
+    }
+
+    /// [`detect_candidates`](Self::detect_candidates) with `has_package(precision,
+    /// targets)` deciding whether a device's package counts as there.
+    #[cfg(feature = "gpl-models")]
+    fn detect_gpus(
+        &self,
+        detector: &str,
+        has_package: impl Fn(&str, &[String]) -> bool,
+    ) -> Vec<DetectCandidate> {
+        #[cfg(feature = "torch")]
+        if detector == models::ANIMETEXT
+            && let Ok(tb) = self.torch()
+        {
+            let detects = tb.pack.detects_blocks();
+            return tb
+                .report
+                .devices
+                .iter()
+                .filter(|d| d.id != "cpu" && self.config.backend.allows(&d.kind))
+                .map(|d| DetectCandidate {
+                    id: d.id.clone(),
+                    vram_mb: d.vram_mb,
+                    runs: detects
+                        && torch::device_formats(&tb.report, &d.id, &has_package).contains(&"fp32"),
+                })
+                .collect();
+        }
+        let _ = (detector, has_package);
+        Vec::new()
+    }
+
+    /// Where the block detector of a text-box row (`engine` in precision `mode`, reading
+    /// with `detector`, its detect stage asked for `asked`: the row's
+    /// `pools.stage_device.detect`) runs on this machine once its compiled package is
+    /// here, as a session picks it ([`pick_detect_device`]): a GPU when the pack detects
+    /// blocks and the release has an AnimeText package for one, else the CPU. None for
+    /// another engine or a line detector, and for a row this machine does not run (the
+    /// precision refusal). `models download` fetches the package ahead of the
+    /// first session ([`prefetch_detector`](Self::prefetch_detector)); `doctor` reports
+    /// it.
+    #[cfg(all(feature = "torch", feature = "gpl-models"))]
+    pub fn detector_need(
+        &self,
+        engine: &str,
+        mode: &str,
+        detector: &str,
+        asked: Option<&str>,
+    ) -> Option<DetectorNeed> {
+        if !models::textbox_engine(engine) || !models::block_detector(detector) {
+            return None;
+        }
+        // The engine's device (the CPU when it cannot place yet: its files are the
+        // Models check's); a row whose precision nothing here runs is not run here.
+        let engine_device = match self.need_for(engine, mode) {
+            Ok(need) => need.device,
+            Err(e) if e.contains(precision::PRECISION_REFUSAL) => return None,
+            Err(_) => Placement::cpu().device,
+        };
+        let gpus = self.detect_gpus(detector, |p, targets| {
+            self.store.torch_package_known(detector, p, targets)
+        });
+        let (device, fallback) = pick_detect_device(
+            asked,
+            &engine_device,
+            self.config.backend == Backend::Cpu,
+            &gpus,
+        );
+        let (targets, package) = match self.torch() {
+            Ok(tb) if device != Placement::cpu().device => {
+                let targets = Self::torch_targets(&tb, &device, Precision::Fp32);
+                let package = self
+                    .store
+                    .torch_package_present(detector, Precision::Fp32.as_str(), &targets)
+                    .map(|p| p.dir);
+                (targets, package)
+            }
+            _ => (Vec::new(), None),
+        };
+        Some(DetectorNeed {
+            detector: detector.to_string(),
+            device,
+            fallback,
+            targets,
+            package,
+        })
+    }
+
+    /// Fetch (or find) the compiled package of a [`DetectorNeed`] on a GPU, unpacked:
+    /// its directory. None on the CPU, whose route reads only the ONNX file (a host
+    /// file of the row, fetched with the others).
+    #[cfg(all(feature = "torch", feature = "gpl-models"))]
+    pub fn prefetch_detector(&self, need: &DetectorNeed) -> Result<Option<PathBuf>, String> {
+        if need.device == Placement::cpu().device {
+            return Ok(None);
+        }
+        self.store
+            .ensure_torch_package(&need.detector, Precision::Fp32.as_str(), &need.targets)
+            .map(|p| Some(p.dir))
+            .map_err(|e| e.to_string())
+    }
+
+    /// AnimeText on the libtorch GPU of `placement`, binding `onnx` (the CPU route's
+    /// file): the pack must export `bt_detect_blocks`, and a `detector.pt2` for one of
+    /// the device's targets must be here or in the detector release; it is fetched
+    /// (or found) and loaded on the pack.
+    #[cfg(all(feature = "torch", feature = "gpl-models"))]
+    fn torch_block_detector(
+        &self,
+        detector: &str,
+        placement: &Placement,
+        onnx: &std::path::Path,
+    ) -> Result<Arc<dyn bunko_ocr::blocks::BlockDetector>, String> {
+        if detector != models::ANIMETEXT {
+            return Err(format!("{detector} has no GPU route"));
+        }
+        let tb = self.torch()?;
+        if !tb.pack.detects_blocks() {
+            return Err(torch::DETECTOR_PACK_REASON.into());
+        }
+        let precision = Precision::Fp32;
+        let targets = Self::torch_targets(&tb, &placement.device, precision);
+        if !self
+            .store
+            .torch_package_obtainable(detector, precision.as_str(), &targets)
+        {
+            return Err(format!(
+                "no compiled {detector} package for {} here or in the {} release (it needs one of: {}){}",
+                placement.device,
+                bunko_ocr::models::torch_release_name_for(detector),
+                if targets.is_empty() {
+                    "none for this device".into()
+                } else {
+                    targets.join(", ")
+                },
+                if self.store.can_download() {
+                    ""
+                } else {
+                    "; downloads are off (MOKURO_MODELS_DOWNLOAD)"
+                }
+            ));
+        }
+        let pkg = self
+            .store
+            .ensure_torch_package(detector, precision.as_str(), &targets)
+            .map_err(|e| e.to_string())?;
+        let unpack_cache = self
+            .store
+            .options()
+            .root
+            .join(bunko_ocr::models::TORCH_DIR)
+            .join(".unpacked");
+        // The pack's preprocessing pool (the canvas becomes the input tensor on the host).
+        let threads = plan::cpu_engine_threads(
+            plan::physical_cpu_count(),
+            plan::performance_core_count(),
+            self.config.jobs,
+        ) as u32;
+        let reader = tb.detector(
+            &pkg.dir,
+            onnx,
+            &placement.device,
+            threads,
+            Some(&unpack_cache),
+        )?;
+        Ok(Arc::new(torch::detector::TorchBlockDetector::new(reader)))
     }
 
     /// The page reader on `detector`'s lines (`models::DETECTORS`).
@@ -1572,8 +2170,8 @@ impl EnginePipeline {
         // Where the recognizer runs, and in which format.
         let mut placement = Placement::cpu();
         let mut resolved = None;
-        // The text-box recognizers run on the CPU in one format: nothing to place or
-        // to resolve, and no backend pack involved.
+        // The text-box recognizers place, load and fall back in their own arm below (a
+        // GPU through the pack, else the ONNX pool on the CPU), in one format each.
         let textbox = models::textbox_engine(engine);
         if road == Road::Reconciled && !textbox {
             // No recognizer backend: nothing here knows the GPUs (unless `ocr.backend:
@@ -1614,15 +2212,71 @@ impl EnginePipeline {
             fast_gpu: placement.is_gpu() && self.bf16_native(placement),
         };
         let mut recognizer = None;
+        // The export set of a text-box recognizer's files (provenance), when they are ours.
+        #[allow(unused_mut)]
+        let mut textbox_release: Option<String> = None;
         #[cfg(feature = "nc-models")]
         if textbox {
-            // The session's threads follow the engine stage's planned width.
-            let host = host_of(&placement);
-            let workers = plan::plan(engine, road, &placement.device, &spec.pools, &host)
-                .iter()
-                .find(|s| s.key == plan::STAGE_ENGINE)
-                .map_or(1, |s| s.workers);
-            recognizer = Some(self.textbox_recognizer(engine, workers)?);
+            let (p, why) = runtime::place_runnable(
+                spec.pools
+                    .stage_device
+                    .get(plan::STAGE_ENGINE)
+                    .map(String::as_str),
+                &devices,
+                |pl| self.textbox_formats(engine, pl),
+            );
+            if let Some(why) = why {
+                let asked = spec.pools.stage_device.get(plan::STAGE_ENGINE);
+                self.note_textbox_on_cpu(engine, asked.map(String::as_str), &devices, &why);
+            }
+            placement = p;
+            // The row's precision there (nar-small; charspot-small fixes its own): on a
+            // GPU every auto mode takes fp16 where it has an fp16 package (O2), on the CPU
+            // (an fp32-only route, whose missing files are its loader's error) fp32. A
+            // forced format the device cannot run is the precision refusal. Never through
+            // `resolved`: the text-box engines stay off the generic recognizer path.
+            let resolve_on = |pl: &Placement| {
+                let formats = if pl.is_gpu() {
+                    self.textbox_formats(engine, pl)
+                } else {
+                    vec!["fp32"]
+                };
+                precision::resolve(
+                    engine,
+                    &spec.precision,
+                    &precision::auto_formats(&spec.precision, formats, false),
+                    spec.precision_pick.as_deref(),
+                    &spec.precision_why,
+                )
+            };
+            #[allow(unused_mut)]
+            let mut textbox_precision = resolve_on(&placement)?;
+            #[cfg(feature = "torch")]
+            if placement.is_gpu() {
+                let at = textbox_precision
+                    .as_ref()
+                    .map_or(Precision::Fp32, |r| r.precision);
+                match self.torch_textbox(engine, &placement, at) {
+                    Ok((rec, release)) => {
+                        recognizer = Some(rec);
+                        textbox_release = Some(release);
+                    }
+                    Err(e) => {
+                        let gpu = placement.device.clone();
+                        warn!("{engine} could not start on {gpu} ({e}); reading on the CPU");
+                        placement = Placement::cpu();
+                        // An auto mode reads at fp32 there; a forced fp16 cannot, and the
+                        // GPU's error is the one to fix: say both, the GPU's first.
+                        textbox_precision = resolve_on(&placement)
+                            .map_err(|cpu| gpu_then_cpu_error(engine, &gpu, &e, &cpu))?;
+                    }
+                }
+            }
+            if let Some(r) = &textbox_precision {
+                info!("{engine} precision: {} ({})", r.precision, r.why);
+            }
+            // On the CPU the ONNX pool loads below, once the detect stage's device is
+            // known: its threads follow the final plan.
         }
         if let Some(r) = &resolved {
             match self.recognizer(spec, &placement, r.precision, r.backend.as_deref()) {
@@ -1664,19 +2318,77 @@ impl EnginePipeline {
         }
 
         let host = host_of(&placement);
-        let stages = plan::plan(engine, road, &placement.device, &spec.pools, &host);
-        let detect_workers = stages
-            .iter()
-            .find(|s| s.key == STAGE_DETECT)
-            .map_or(1, |s| s.workers) as usize;
+        let detect_width = |stages: &[plan::StagePlan]| {
+            stages
+                .iter()
+                .find(|s| s.key == STAGE_DETECT)
+                .map_or(1, |s| s.workers) as usize
+        };
+        // The plan with the detect stage on the CPU: the plan unless the block detector
+        // loads on a GPU, and its detect width the CPU detector's copies either way (a
+        // GPU detector that cannot load falls back to them).
+        let cpu_stages = plan::plan(engine, road, &placement.device, "cpu", &spec.pools, &host);
+        // Where the detect stage runs: the GPU the block detector loaded on, else the CPU.
+        #[allow(unused_mut)]
+        let mut detect_device = Placement::cpu().device;
         #[allow(unused_mut)]
         let mut blocks: Option<Arc<dyn bunko_ocr::blocks::BlockDetector>> = None;
         #[allow(unused_mut)]
         let mut block_source: Option<(String, String)> = None;
+        // The export set of the block detector's compiled package, when it runs on a GPU.
+        #[allow(unused_mut)]
+        let mut detector_release: Option<String> = None;
         #[cfg(feature = "gpl-models")]
         if by_blocks {
-            let (loaded, source) = self.block_detector(detector, detect_workers)?;
-            (blocks, block_source) = (Some(loaded), source);
+            // The detect stage follows the engine's GPU when the detector runs there.
+            let backend_cpu = self.config.backend == Backend::Cpu;
+            let (device, why) = self.detect_pick(spec, detector, &placement.device);
+            match why {
+                // Asked for by the configuration: no news.
+                Some(why) if backend_cpu => info!("{detector}: detecting on the CPU: {why}"),
+                Some(why) => warn!("{detector}: detecting on the CPU: {why}"),
+                None => {}
+            }
+            let detect_placement = if device == Placement::cpu().device {
+                Placement::cpu()
+            } else {
+                runtime::place(Some(&device), &devices).0
+            };
+            let (loaded, source, release) =
+                self.block_detector(detector, detect_width(&cpu_stages), &detect_placement)?;
+            // A release only when it loaded on the GPU; a failed load detects on the CPU.
+            if release.is_some() {
+                detect_device = detect_placement.device.clone();
+            }
+            (blocks, block_source, detector_release) = (Some(loaded), source, release);
+        }
+        let stages = if detect_device == Placement::cpu().device {
+            cpu_stages
+        } else {
+            plan::plan(
+                engine,
+                road,
+                &placement.device,
+                &detect_device,
+                &spec.pools,
+                &host,
+            )
+        };
+        let detect_workers = detect_width(&stages);
+        // A text-box row the GPU did not take: the ONNX pool on the CPU. The session's
+        // threads follow the engine stage's width in the final plan, which leaves more
+        // cores to the pool when the block detector loaded on a GPU, and fewer when it
+        // could not and detects on the CPU after all.
+        #[cfg(feature = "nc-models")]
+        if textbox && recognizer.is_none() {
+            let workers = stages
+                .iter()
+                .find(|s| s.key == plan::STAGE_ENGINE)
+                .map_or(1, |s| s.workers);
+            recognizer = Some(self.textbox_recognizer(engine, workers)?);
+            // nar-small's CPU graph is ours; charspot-small runs its authors' own.
+            textbox_release =
+                (engine == models::NAR).then(|| bunko_ocr::models::TEXTBOX_RELEASE.to_string());
         }
         let reader = if by_blocks {
             None
@@ -1698,20 +2410,27 @@ impl EnginePipeline {
                 weights.push((repo.to_string(), rev.to_string()));
             }
             // The export set the recognizer's files come from: the torch package release
-            // for the libtorch recognizers, models-v1 for the ONNX ones. The text-box
-            // recognizers run their authors' own files: no export set.
-            if !textbox {
+            // for the libtorch recognizers, models-v1 for the ONNX ones; for a text-box
+            // recognizer its arm's (`textbox-torch-v1` on a GPU, `textbox-graphs-v1` for
+            // nar-small on the CPU, none for charspot-small's own files). One entry for
+            // our sets (spec §14).
+            let recognizer_release = if textbox {
+                textbox_release.clone()
+            } else {
                 let vulkan = placement.provider == "vulkan"
                     || resolved.as_ref().is_some_and(|r| r.backend.is_some());
-                let release = if vulkan {
+                Some(if vulkan {
                     bunko_ocr::models::vulkan_release_name()
                 } else if self.torch_loaded() {
                     bunko_ocr::models::torch_release_name()
                 } else {
                     bunko_ocr::models_release::RELEASE.to_string()
-                };
-                weights.push((models::EXPORT_REPO.to_string(), release));
-            }
+                })
+            };
+            weights.extend(models::export_entry(
+                detector_release.as_deref(),
+                recognizer_release.as_deref(),
+            ));
         }
         let (stage_workers, queue_capacity) = plan::tables(&stages);
         let pipeline = plan::graph_line(&stages);
@@ -1820,6 +2539,238 @@ fn gpu_then_cpu_error(engine: &str, gpu: &str, on_gpu: &str, on_cpu: &str) -> St
     format!("{engine} could not start on {gpu}: {on_gpu}; nor on the CPU: {on_cpu}")
 }
 
+/// Add the Vulkan runtimes' formats of a GPU (`by`: format → the engines a runtime
+/// runs in it there) to its catalog entry, after its own. A format only some of
+/// `recognizers` run there (WebGPU has no paddle-manga; the text-box engines have no
+/// Vulkan runtime) lists those engines in `format_engines`, so the library and the
+/// benchmark offer it to them only. A format libtorch runs too on that GPU also serves
+/// libtorch's engines there; a GPU only the Vulkan pack drives (provider `vulkan`) has
+/// no libtorch format: its listed `fp32` is the runtimes'.
+#[cfg_attr(not(feature = "torch"), allow(dead_code))]
+fn add_vulkan_formats(
+    d: &mut Device,
+    by: std::collections::BTreeMap<&'static str, Vec<String>>,
+    recognizers: &[&str],
+) {
+    let libtorch = d.provider.as_deref() != Some("vulkan");
+    for (f, engines) in by {
+        let mut serving: Vec<String> = match d.format_engines.get(f) {
+            Some(only) => only.clone(),
+            None if libtorch && d.formats.iter().any(|x| x == f) => {
+                recognizers.iter().map(|e| e.to_string()).collect()
+            }
+            None => Vec::new(),
+        };
+        for e in engines {
+            if !serving.contains(&e) {
+                serving.push(e);
+            }
+        }
+        if !d.formats.iter().any(|x| x == f) {
+            d.formats.push(f.to_string());
+        }
+        if serving.len() < recognizers.len() {
+            serving.sort_by_key(|e| recognizers.iter().position(|r| r == e));
+            d.format_engines.insert(f.to_string(), serving);
+        } else {
+            d.format_engines.remove(f);
+        }
+    }
+}
+
+/// The formats a text-box engine's libtorch packages are built in (never bf16):
+/// nar-small fp32 and fp16 (the authors' fp16 mode, bound to their fp32 weights cast at
+/// load), charspot-small fp32. Empty for any other engine.
+#[cfg_attr(not(feature = "torch"), allow(dead_code))]
+pub(crate) fn textbox_precisions(engine: &str) -> &'static [&'static str] {
+    match engine {
+        "nar-small" => &["fp32", "fp16"],
+        "charspot-small" => &["fp32"],
+        _ => &[],
+    }
+}
+
+/// The formats a text-box row of `engine` in precision `mode` can resolve to on a device
+/// that runs it in `device_formats` ([`EnginePipeline::textbox_formats`]): the packages
+/// its prefetch fetches (Q21). What `bunko_sched::precision::resolve_mode` finds usable
+/// there (an `auto-accuracy` row one format, a benchmarked mode each candidate), empty
+/// when the row cannot run there; fp32 for an engine with a fixed precision
+/// (charspot-small).
+#[cfg_attr(not(feature = "torch"), allow(dead_code))]
+pub(crate) fn textbox_prefetch_formats(
+    engine: &str,
+    mode: &str,
+    device_formats: &[&str],
+) -> Vec<String> {
+    if !precision::is_precision_engine(engine) {
+        return vec!["fp32".to_string()];
+    }
+    let set: std::collections::BTreeSet<String> =
+        device_formats.iter().map(|f| f.to_string()).collect();
+    let r = bunko_sched::precision::resolve_mode(engine, mode, Some(&set), None, "");
+    if r.eligible { r.usable } else { Vec::new() }
+}
+
+/// The formats a text-box engine runs in on a libtorch GPU: none unless the pack reads
+/// text boxes (`bt_read_chars`, `reads_chars`) and the host files are here or
+/// downloadable (`host_files`); else the formats with a package for the device
+/// (`packaged`, as [`torch::device_formats`] lists them) that the engine is built in
+/// ([`textbox_precisions`]), in `packaged` order.
+#[cfg_attr(not(feature = "torch"), allow(dead_code))]
+pub(crate) fn textbox_gpu_formats(
+    engine: &str,
+    reads_chars: bool,
+    packaged: &[&'static str],
+    host_files: bool,
+) -> Vec<&'static str> {
+    if !(reads_chars && host_files) {
+        return Vec::new();
+    }
+    let built = textbox_precisions(engine);
+    packaged
+        .iter()
+        .copied()
+        .filter(|p| built.contains(p))
+        .collect()
+}
+
+/// The least GPU memory (MiB) on which the block detector runs beside a text-box engine:
+/// on a smaller card it stays on the CPU rather than risk running out of memory.
+#[cfg(feature = "gpl-models")]
+pub(crate) const DETECT_GPU_MIN_VRAM_MB: u64 = 4096;
+
+/// A GPU the detect stage might run on.
+#[cfg(feature = "gpl-models")]
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DetectCandidate {
+    /// `gpu:<n>`.
+    pub id: String,
+    /// Device memory in MiB, when the pack knows it.
+    pub vram_mb: Option<u64>,
+    /// The detector runs there: the pack has `bt_detect_blocks` and an fp32 package for
+    /// one of the device's targets is here or downloadable.
+    pub runs: bool,
+}
+
+/// Where the block detector runs (`cpu` or `gpu:<n>`) and, when that is the CPU though
+/// a GPU was asked for or is here, why. `asked` is the row's `pools.stage_device.detect`;
+/// `engine_device` where its recognizer runs; `backend_cpu` whether `ocr.backend` is
+/// `cpu`. A GPU qualifies when it [`runs`](DetectCandidate::runs) the detector and has
+/// at least [`DETECT_GPU_MIN_VRAM_MB`] (unknown memory counts as enough). `auto` (or
+/// nothing) takes the engine's GPU when it qualifies, else the first that does.
+#[cfg(feature = "gpl-models")]
+pub(crate) fn pick_detect_device(
+    asked: Option<&str>,
+    engine_device: &str,
+    backend_cpu: bool,
+    gpus: &[DetectCandidate],
+) -> (String, Option<String>) {
+    let cpu = |why: Option<String>| ("cpu".to_string(), why);
+    if backend_cpu {
+        return cpu(Some("ocr.backend is cpu".into()));
+    }
+    let unfit = |g: &DetectCandidate| -> Option<String> {
+        if !g.runs {
+            return Some(format!(
+                "{} has no AnimeText package it can run (or the pack has no GPU block detection)",
+                g.id
+            ));
+        }
+        match g.vram_mb {
+            Some(v) if v < DETECT_GPU_MIN_VRAM_MB => Some(format!(
+                "{} has {v} MiB of memory; detecting on a GPU needs {DETECT_GPU_MIN_VRAM_MB}",
+                g.id
+            )),
+            _ => None,
+        }
+    };
+    let asked = asked.map(|s| s.trim().to_ascii_lowercase());
+    match asked.as_deref() {
+        None | Some("") | Some("auto") => {
+            if gpus.is_empty() {
+                return cpu(None);
+            }
+            let engine_gpu = gpus.iter().filter(|g| g.id == engine_device);
+            let mut why = Vec::new();
+            for g in engine_gpu.chain(gpus.iter().filter(|g| g.id != engine_device)) {
+                match unfit(g) {
+                    None => return (g.id.clone(), None),
+                    Some(w) => why.push(w),
+                }
+            }
+            cpu(Some(why.join("; ")))
+        }
+        Some("cpu") => cpu(None),
+        Some(other) => {
+            let want = match other {
+                "gpu" | "cuda" => "gpu:0".to_string(),
+                o => o.replace("cuda:", "gpu:"),
+            };
+            match gpus.iter().find(|g| g.id == want) {
+                None => cpu(Some(format!("{want} is not a GPU of this machine"))),
+                Some(g) => match unfit(g) {
+                    None => (g.id.clone(), None),
+                    why => cpu(why),
+                },
+            }
+        }
+    }
+}
+
+/// The target a text-box row on the CPU names (its ONNX route) in
+/// [`PackagePlan::target`] and [`Prefetched::target`].
+#[cfg(feature = "torch")]
+const TEXTBOX_CPU_TARGET: &str = "onnx";
+
+/// Why a text-box row reads on the CPU, as [`runtime::place_runnable`] reported it
+/// (`why`): the pack's own reason ([`torch::TEXTBOX_PACK_REASON`]) only when the device
+/// the row was placed on is a libtorch GPU and the loaded pack has no `bt_read_chars`
+/// (`pack_reads_chars` is `None` with no libtorch pack); any other reason (a pinned GPU
+/// this machine lacks, a GPU only the Vulkan pack drives, no package for the device)
+/// as given. `true` with the pack's reason.
+#[cfg_attr(not(feature = "torch"), allow(dead_code))]
+pub(crate) fn textbox_cpu_reason(
+    asked: Option<&str>,
+    devices: &[Device],
+    pack_reads_chars: Option<bool>,
+    why: &str,
+) -> (String, bool) {
+    let (p, _) = runtime::place(asked, devices);
+    if pack_reads_chars == Some(false) && p.is_gpu() && p.provider != "vulkan" {
+        #[cfg(feature = "torch")]
+        return (torch::TEXTBOX_PACK_REASON.to_string(), true);
+    }
+    (why.to_string(), false)
+}
+
+/// How a text-box row's CPU placement is logged: `None`, a warning on every session,
+/// when the row pinned its engine stage to a GPU; otherwise the key of a note logged
+/// once per process (the pack's reason once for every engine, any other reason once per
+/// engine and reason, which names the device).
+#[cfg_attr(not(feature = "nc-models"), allow(dead_code))]
+pub(crate) fn textbox_cpu_note(
+    engine: &str,
+    asked: Option<&str>,
+    reason: &str,
+    pack_reason: bool,
+) -> Option<String> {
+    let pinned = asked
+        .map(|a| a.trim().to_ascii_lowercase())
+        .is_some_and(|a| !matches!(a.as_str(), "" | "auto" | "cpu"));
+    if pinned {
+        None
+    } else if pack_reason {
+        Some("pack".to_string())
+    } else {
+        Some(format!("{engine}\n{reason}"))
+    }
+}
+
+/// The text-box CPU notes already logged in this process ([`textbox_cpu_note`]'s keys).
+#[cfg(feature = "nc-models")]
+static TEXTBOX_CPU_NOTED: std::sync::LazyLock<Mutex<std::collections::HashSet<String>>> =
+    std::sync::LazyLock::new(Default::default);
+
 #[cfg(test)]
 mod backends_dirs_tests {
     use super::*;
@@ -1841,6 +2792,279 @@ mod backends_dirs_tests {
         assert!(msg.contains(precision::PRECISION_REFUSAL), "{msg}");
     }
 
+    /// A text-box engine runs on a GPU only through a pack that has `bt_read_chars`,
+    /// with its host files obtainable, and only in the formats it has packages for and
+    /// computes in (nar-small fp32 and fp16, charspot-small fp32; never bf16).
+    #[test]
+    fn textbox_gpu_formats_need_read_chars() {
+        assert!(textbox_gpu_formats("nar-small", false, &["fp32", "fp16"], true).is_empty());
+        assert!(textbox_gpu_formats("nar-small", true, &["fp32"], false).is_empty());
+        assert_eq!(
+            textbox_gpu_formats("nar-small", true, &["fp32"], true),
+            ["fp32"]
+        );
+        assert_eq!(
+            textbox_gpu_formats("charspot-small", true, &["fp32"], true),
+            ["fp32"]
+        );
+        assert!(textbox_gpu_formats("hayai-nova", true, &["fp32"], true).is_empty());
+        assert_eq!(textbox_precisions("nar-small"), ["fp32", "fp16"]);
+        assert!(textbox_precisions("paddle-manga").is_empty());
+    }
+
+    /// The pack's reason only where it is the cause: a libtorch GPU the row was placed
+    /// on, under a pack without `bt_read_chars`. A pinned GPU this machine lacks and a
+    /// GPU only the Vulkan pack drives keep their own reason.
+    #[test]
+    fn a_text_box_cpu_reason_names_its_cause() {
+        let dev = |id: &str, provider: &str| Device {
+            format_engines: Default::default(),
+            id: id.into(),
+            label: id.into(),
+            formats: vec!["fp32".into()],
+            provider: Some(provider.into()),
+            arch: None,
+        };
+        let rocm = [dev("cpu", "cpu"), dev("gpu:0", "rocm")];
+        let vulkan = [dev("cpu", "cpu"), dev("gpu:0", "vulkan")];
+        let why = "gpu:0 (gpu:0) has no compiled package for this engine here";
+        #[cfg(feature = "torch")]
+        {
+            let pack = (torch::TEXTBOX_PACK_REASON.to_string(), true);
+            assert_eq!(textbox_cpu_reason(None, &rocm, Some(false), why), pack);
+            assert_eq!(
+                textbox_cpu_reason(Some("auto"), &rocm, Some(false), why),
+                pack
+            );
+            assert_eq!(
+                textbox_cpu_reason(Some("gpu:0"), &rocm, Some(false), why),
+                pack
+            );
+        }
+        let own = |w: &str| (w.to_string(), false);
+        // The pack reads text boxes: the GPU has no package for the engine.
+        assert_eq!(textbox_cpu_reason(None, &rocm, Some(true), why), own(why));
+        // No libtorch pack at all.
+        assert_eq!(textbox_cpu_reason(None, &rocm, None, why), own(why));
+        // A pinned GPU this machine lacks.
+        let gone = "gpu:5 is not a device of this machine";
+        assert_eq!(
+            textbox_cpu_reason(Some("gpu:5"), &rocm, Some(false), gone),
+            own(gone)
+        );
+        // A GPU only the Vulkan pack drives.
+        assert_eq!(
+            textbox_cpu_reason(None, &vulkan, Some(false), why),
+            own(why)
+        );
+    }
+
+    /// A row pinned to a GPU is warned about every time; an unpinned row is noted once
+    /// per process per reason, and the pack's reason once for every engine.
+    #[test]
+    fn a_text_box_cpu_note_warns_only_for_a_pin() {
+        assert_eq!(
+            textbox_cpu_note("nar-small", Some("gpu:0"), "r", false),
+            None
+        );
+        assert_eq!(
+            textbox_cpu_note("nar-small", Some(" GPU:1 "), "r", true),
+            None
+        );
+        let note = |asked| textbox_cpu_note("nar-small", asked, "r", false);
+        assert_eq!(note(None), Some("nar-small\nr".to_string()));
+        assert_eq!(note(Some("auto")), note(None));
+        assert_eq!(note(Some("")), note(None));
+        assert_ne!(
+            textbox_cpu_note("charspot-small", None, "r", false),
+            note(None)
+        );
+        assert_eq!(
+            textbox_cpu_note("nar-small", None, "r", true),
+            textbox_cpu_note("charspot-small", None, "other", true)
+        );
+    }
+
+    /// nar-small runs at fp16 on a GPU with an fp16 package; charspot-small has fp32
+    /// only.
+    #[test]
+    fn nar_takes_fp16_on_a_gpu_and_charspot_does_not() {
+        assert_eq!(
+            textbox_gpu_formats("nar-small", true, &["fp32", "bf16", "fp16"], true),
+            ["fp32", "fp16"]
+        );
+        assert_eq!(
+            textbox_gpu_formats("charspot-small", true, &["fp32", "bf16", "fp16"], true),
+            ["fp32"]
+        );
+    }
+
+    /// Review Focus 5: charspot-small runs on a GPU only with its GPU route's host
+    /// files (the authors' safetensors and vocabulary) here or downloadable.
+    #[test]
+    fn charspot_gpu_needs_its_weights_file() {
+        assert!(textbox_gpu_formats("charspot-small", true, &["fp32"], false).is_empty());
+        assert_eq!(
+            textbox_gpu_formats("charspot-small", true, &["fp32", "bf16", "fp16"], true),
+            ["fp32"]
+        );
+    }
+
+    /// Q21, O2: a text-box row prefetches the packages its mode can resolve to on the
+    /// device: fp16 for auto-accuracy on a GPU with an fp16 package, both for the
+    /// benchmarked modes, fp32 where there is no fp16 package, nothing for a forced
+    /// format the device cannot run.
+    #[test]
+    fn textbox_prefetch_takes_what_the_mode_can_resolve_to() {
+        let both = ["fp32", "fp16"];
+        assert_eq!(
+            textbox_prefetch_formats("nar-small", "auto-accuracy", &both),
+            ["fp16"]
+        );
+        assert_eq!(
+            textbox_prefetch_formats("nar-small", "auto-balanced", &both),
+            ["fp16", "fp32"]
+        );
+        assert_eq!(
+            textbox_prefetch_formats("nar-small", "auto-speed", &both),
+            ["fp16", "fp32"]
+        );
+        assert_eq!(
+            textbox_prefetch_formats("nar-small", "fp32", &both),
+            ["fp32"]
+        );
+        // no fp16 package there
+        assert_eq!(
+            textbox_prefetch_formats("nar-small", "auto-accuracy", &["fp32"]),
+            ["fp32"]
+        );
+        assert!(textbox_prefetch_formats("nar-small", "fp16", &["fp32"]).is_empty());
+        assert_eq!(
+            textbox_prefetch_formats("charspot-small", "auto-accuracy", &["fp32"]),
+            ["fp32"]
+        );
+    }
+
+    /// The same through a model store: offline, with the ONNX file and the vocabulary
+    /// but not the safetensors, the GPU route's host files are not obtainable (so a
+    /// package on disk is not enough) while the CPU route is; with the safetensors
+    /// here they are.
+    #[cfg(feature = "nc-models")]
+    #[test]
+    fn an_offline_host_without_charspot_safetensors_reads_it_on_the_cpu() {
+        use bunko_ocr::models::{Manifest, ModelStore, StoreOptions};
+        let tmp = tempfile::tempdir().unwrap();
+        let over = tmp.path().join("over");
+        std::fs::create_dir_all(&over).unwrap();
+        for f in ["charspot-small_model.onnx", "charspot-small_vocab.json"] {
+            std::fs::write(over.join(f), b"x").unwrap();
+        }
+        let store = ModelStore::new(
+            StoreOptions {
+                root: tmp.path().join("models"),
+                override_dir: Some(over.clone()),
+                download: false,
+            },
+            Manifest::builtin(),
+        );
+        let gpu = || {
+            models::obtainable(
+                &store,
+                &models::torch_host_ids(models::CHARSPOT, Precision::Fp32),
+            )
+        };
+        assert!(models::obtainable(
+            &store,
+            &models::textbox_ids(models::CHARSPOT)
+        ));
+        assert!(!gpu());
+        assert!(textbox_gpu_formats(models::CHARSPOT, true, &["fp32"], gpu()).is_empty());
+        std::fs::write(over.join("charspot-small_model.safetensors"), b"x").unwrap();
+        assert!(gpu());
+        assert_eq!(
+            textbox_gpu_formats(models::CHARSPOT, true, &["fp32"], gpu()),
+            ["fp32"]
+        );
+    }
+
+    /// The Vulkan formats in the catalog: a GPU only the Vulkan pack drives runs no
+    /// text-box engine, a qualified format beside libtorch serves its runtimes' engines
+    /// only, and a libtorch format the runtimes also run keeps libtorch's engines.
+    #[test]
+    fn vulkan_formats_name_their_engines() {
+        let all = ["hayai-nova", "paddle-manga", "charspot-small", "nar-small"];
+        let two = |a: &str, b: &str| vec![a.to_string(), b.to_string()];
+        let by = |pairs: &[(&'static str, &[&str])]| -> std::collections::BTreeMap<&'static str, Vec<String>> {
+            pairs
+                .iter()
+                .map(|(f, e)| (*f, e.iter().map(|x| x.to_string()).collect()))
+                .collect()
+        };
+        // A GPU only the Vulkan pack drives: its fp32 is hayai's and paddle's.
+        let mut d = Device {
+            id: "gpu:1".into(),
+            formats: vec!["fp32".into()],
+            provider: Some("vulkan".into()),
+            ..Default::default()
+        };
+        add_vulkan_formats(
+            &mut d,
+            by(&[
+                ("fp32", &["hayai-nova", "paddle-manga"]),
+                ("fp32@webgpu", &["hayai-nova"]),
+            ]),
+            &all,
+        );
+        assert_eq!(d.formats, ["fp32", "fp32@webgpu"]);
+        assert_eq!(
+            d.format_engines.get("fp32"),
+            Some(&two("hayai-nova", "paddle-manga"))
+        );
+        assert_eq!(
+            d.format_engines.get("fp32@webgpu"),
+            Some(&vec!["hayai-nova".to_string()])
+        );
+        // Without the text-box engines in the build, both engines are every engine.
+        let mut d = Device {
+            id: "gpu:1".into(),
+            provider: Some("vulkan".into()),
+            ..Default::default()
+        };
+        add_vulkan_formats(
+            &mut d,
+            by(&[("fp32", &["hayai-nova", "paddle-manga"])]),
+            &["hayai-nova", "paddle-manga"],
+        );
+        assert_eq!(d.formats, ["fp32"]);
+        assert!(d.format_engines.is_empty());
+        // Beside libtorch: fp32 (every engine there) stays unlisted; nar-only fp16
+        // gains nothing; the qualified format is the runtime's engines'.
+        let mut d = Device {
+            id: "gpu:0".into(),
+            formats: vec!["fp32".into(), "fp16".into()],
+            provider: Some("rocm".into()),
+            format_engines: [("fp16".to_string(), vec!["nar-small".to_string()])]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        add_vulkan_formats(
+            &mut d,
+            by(&[("fp32@ncnn", &["hayai-nova", "paddle-manga"])]),
+            &all,
+        );
+        assert_eq!(d.formats, ["fp32", "fp16", "fp32@ncnn"]);
+        assert!(!d.format_engines.contains_key("fp32"));
+        assert_eq!(
+            d.format_engines.get("fp32@ncnn"),
+            Some(&two("hayai-nova", "paddle-manga"))
+        );
+        assert_eq!(
+            d.format_engines.get("fp16"),
+            Some(&vec!["nar-small".to_string()])
+        );
+    }
+
     #[test]
     fn sibling_then_fallbacks_each_once() {
         if std::env::var_os(BACKENDS_DIR_ENV).is_some() {
@@ -1852,6 +3076,84 @@ mod backends_dirs_tests {
         assert_eq!(
             c.backends_dirs(),
             vec![PathBuf::from("/p/backends"), PathBuf::from("/lib/backends")]
+        );
+    }
+}
+
+#[cfg(all(test, feature = "gpl-models"))]
+mod detect_device_tests {
+    use super::*;
+
+    fn gpu(id: &str, vram: u64, runs: bool) -> DetectCandidate {
+        DetectCandidate {
+            id: id.into(),
+            vram_mb: Some(vram),
+            runs,
+        }
+    }
+
+    #[test]
+    fn detect_follows_the_engines_gpu() {
+        let g = [gpu("gpu:0", 16384, true), gpu("gpu:1", 24576, true)];
+        assert_eq!(pick_detect_device(None, "gpu:1", false, &g).0, "gpu:1");
+        assert_eq!(
+            pick_detect_device(Some("auto"), "cpu", false, &g).0,
+            "gpu:0"
+        );
+        assert_eq!(
+            pick_detect_device(Some("cpu"), "gpu:0", false, &g),
+            ("cpu".into(), None)
+        );
+        assert_eq!(pick_detect_device(None, "gpu:0", true, &g).0, "cpu");
+    }
+
+    #[test]
+    fn a_small_gpu_keeps_detect_on_the_cpu() {
+        let (d, why) = pick_detect_device(None, "gpu:0", false, &[gpu("gpu:0", 3072, true)]);
+        assert_eq!(d, "cpu");
+        assert!(why.unwrap().contains("4096"));
+    }
+
+    #[test]
+    fn an_absent_gpu_falls_back_to_the_cpu() {
+        let (d, why) =
+            pick_detect_device(Some("gpu:1"), "gpu:0", false, &[gpu("gpu:0", 16384, true)]);
+        assert_eq!(d, "cpu");
+        assert!(why.unwrap().contains("gpu:1"));
+        assert_eq!(
+            pick_detect_device(None, "cpu", false, &[]),
+            ("cpu".into(), None)
+        );
+    }
+
+    /// Unknown memory counts as enough; an unfit engine GPU gives way to one that
+    /// qualifies; a GPU without the detector's package is never picked, and says why.
+    #[test]
+    fn the_first_gpu_that_qualifies_detects() {
+        let unknown = DetectCandidate {
+            id: "gpu:0".into(),
+            vram_mb: None,
+            runs: true,
+        };
+        assert_eq!(
+            pick_detect_device(None, "gpu:0", false, std::slice::from_ref(&unknown)),
+            ("gpu:0".into(), None)
+        );
+        let g = [gpu("gpu:0", 16384, true), gpu("gpu:1", 2048, true)];
+        assert_eq!(
+            pick_detect_device(Some("auto"), "gpu:1", false, &g),
+            ("gpu:0".into(), None)
+        );
+        let (d, why) = pick_detect_device(Some("cuda:1"), "gpu:0", false, &g);
+        assert_eq!(d, "cpu");
+        assert!(why.unwrap().contains("gpu:1 has 2048 MiB"));
+        let none = [gpu("gpu:0", 16384, false)];
+        let (d, why) = pick_detect_device(None, "gpu:0", false, &none);
+        assert_eq!(d, "cpu");
+        assert!(why.unwrap().contains("no AnimeText package"));
+        assert_eq!(
+            pick_detect_device(Some("gpu:0"), "gpu:0", true, &g),
+            ("cpu".into(), Some("ocr.backend is cpu".into()))
         );
     }
 }

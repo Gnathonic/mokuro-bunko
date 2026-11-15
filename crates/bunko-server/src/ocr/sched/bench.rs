@@ -2011,6 +2011,17 @@ mod tests {
             json!({"detect": "cpu", "engine": "gpu:0"}),
             "a pin the runner did not honour is replaced by where it ran"
         );
+        // A text-box row left on auto whose CPU trial beat the GPU: the result names the
+        // CPU, so "Apply these settings" (the only way it reaches the row, per machine)
+        // says "engine on CPU" and the user pins it knowingly. A later benchmark honours
+        // that pin; a placement the benchmark chose is not kept apart from a user's pin.
+        let auto = BTreeMap::from([("engine".to_string(), "auto".to_string())]);
+        let t = placement_to_apply(
+            &auto,
+            Some(&json!({"engine": "cpu"})),
+            Some(&json!({"engine": "cpu"})),
+        );
+        assert_eq!(Value::Object(t), json!({"engine": "cpu"}));
     }
 
     /// A stored `.cbz` of `pages` members `NNN.<suffix>`.

@@ -49,6 +49,8 @@ crc32fast = "1"
 memmap2 = "0.9"
 unicode-normalization = "0.1"
 bunko-thumb = { path = "../bunko-thumb" }
+# The canvas → tensor step AnimeText shares with the libtorch route.
+bunko-vlm.workspace = true
 mozjpeg = { version = "0.10", optional = true }
 ureq = { version = "3", optional = true, default-features = false, features = ["rustls"] }
 

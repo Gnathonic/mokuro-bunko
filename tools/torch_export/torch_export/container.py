@@ -7,7 +7,11 @@ needs no GPU (GPU targets compile against fake devices, fakegpu.py).
 Mounts: the tool sources (read-only), the 0.5.2 reference sources (read-only), the
 Hugging Face cache (read-only), the work dir (venvs, caches, cuda-home), the output dir,
 and, for ROCm targets, ROCM_HOME (read-only; HIP headers for the wrapper). Venvs are
-created inside the container on first use from requirements-<variant>.txt.
+created inside the container on first use from requirements-<variant>.txt. When set,
+``TORCH_EXPORT_ANIMETEXT_ONNX`` (the detector's ONNX file) and
+``TORCH_EXPORT_DETECTOR_PYLIB`` (requirements-detector.txt installed with ``--no-deps
+--target``) are mounted read-only too. The exporter's commit is read here (the container
+has no git checkout) and passed in as ``TORCH_EXPORT_COMMIT`` / ``TORCH_EXPORT_DIRTY``.
 """
 
 from __future__ import annotations
@@ -71,6 +75,14 @@ def run_build(argv: list[str], variant: str, out: Path, work: Path, backend: str
     for k in ("TORCH_EXPORT_INDUCTOR_OPTS", "TORCH_EXPORT_FUSE", "TORCH_EXPORT_CPU_EMBED", "TORCH_EXPORT_SKIP_CHECKS", "TORCH_EXPORT_ROCM_ARCHS", "TORCH_EXPORT_NO_FLASH"):
         if k in os.environ:
             env[k] = os.environ[k]
+    from .build import exporter_commit
+
+    commit, dirty = exporter_commit()
+    env["TORCH_EXPORT_COMMIT"], env["TORCH_EXPORT_DIRTY"] = commit, "1" if dirty else "0"
+    for var, at in (("TORCH_EXPORT_ANIMETEXT_ONNX", "/detector/animetext.onnx"), ("TORCH_EXPORT_DETECTOR_PYLIB", "/detector/pylib")):
+        if os.environ.get(var):
+            vols.append(f"{Path(os.environ[var]).resolve()}:{at}:ro")
+            env[var] = at
     if backend == "rocm":
         rocm = os.environ.get("ROCM_HOME", "/opt/rocm")
         vols.append(f"{Path(rocm).resolve()}:/opt/rocm:ro")

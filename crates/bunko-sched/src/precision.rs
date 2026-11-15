@@ -3,10 +3,12 @@
 //! `bench_pick` / `resolution_entry` and `remote/profiles.py` `stale_bench_reason`;
 //! spec ocr-generations-bench §3, §6.6).
 //!
-//! The policy table is the same one the engines resolve with (`bunko-engines`
-//! `precision::candidates`); it is repeated here because this crate is pure and the
-//! library (lite build) has no engines. A "supported" set is what a machine's model
-//! device computes in, as it reported it; `None` means nobody reported it.
+//! The policy table ([`candidates`], [`is_precision_engine`]) has one copy, here: the
+//! engines re-export it (`bunko-engines` `precision`), and the library (lite build,
+//! no engines) uses it directly. [`engine_modes`] is a static table of this crate's,
+//! held equal to the `bunko-core` registry by a test (bunko-core is only a
+//! dev-dependency). A "supported" set is what a machine's model device computes in, as
+//! it reported it; `None` means nobody reported it.
 
 use std::collections::BTreeSet;
 
@@ -26,6 +28,8 @@ pub const MODE_SPEED: &str = "auto-speed";
 pub const DEFAULT_MODE: &str = MODE_ACCURACY;
 /// Every mode, in the admin panel's order.
 pub const MODES: [&str; 6] = [MODE_ACCURACY, MODE_BALANCED, MODE_SPEED, FP32, BF16, FP16];
+/// nar-small's modes: no bf16 (its fp16 is the authors' fp32 weights cast at load).
+pub const NAR_MODES: [&str; 5] = [MODE_ACCURACY, MODE_BALANCED, MODE_SPEED, FP32, FP16];
 /// The modes a per-machine benchmark decides.
 pub const BENCHED_MODES: [&str; 2] = [MODE_BALANCED, MODE_SPEED];
 /// Two candidates this close in pages/s are a tie, won by the earlier (more accurate).
@@ -101,7 +105,7 @@ pub fn is_benched(mode: &str) -> bool {
 
 /// Engines whose row's mode decides a precision (`PRECISION_ENGINES`).
 pub fn is_precision_engine(engine: &str) -> bool {
-    matches!(engine, "hayai-nova" | "paddle-manga")
+    matches!(engine, "hayai-nova" | "paddle-manga" | "nar-small")
 }
 
 /// `normalize_precision_mode`: blank / `auto` → the default; None for an unknown mode.
@@ -115,12 +119,14 @@ pub fn normalize_mode(value: Option<&str>) -> Option<&'static str> {
     MODES.iter().find(|m| **m == text).copied()
 }
 
-/// `engine_modes(engine)`: every mode for a precision engine, none otherwise.
+/// `engine_modes(engine)`: the modes a row of `engine` may ask for (every mode for
+/// hayai-nova and paddle-manga, [`NAR_MODES`] for nar-small), none for an engine whose
+/// precision is fixed. The same as `bunko_core::engines::engine_modes`.
 pub fn engine_modes(engine: &str) -> &'static [&'static str] {
-    if is_precision_engine(engine) {
-        &MODES
-    } else {
-        &[]
+    match engine {
+        "nar-small" => &NAR_MODES,
+        e if is_precision_engine(e) => &MODES,
+        _ => &[],
     }
 }
 
@@ -181,6 +187,13 @@ pub fn candidates(engine: &str, mode: &str) -> &'static [&'static str] {
         return &[];
     }
     match (engine, mode) {
+        // nar-small first: it has no bf16, so the forced arms below must not answer.
+        // Every auto mode prefers fp16 (owner answer O2): on a GPU with an fp16
+        // package it reads at fp16, elsewhere at fp32.
+        ("nar-small", MODE_ACCURACY | MODE_BALANCED | MODE_SPEED) => &[FP16, FP32],
+        ("nar-small", FP32) => &[FP32],
+        ("nar-small", FP16) => &[FP16],
+        ("nar-small", _) => &[],
         (_, FP32) => &[FP32],
         (_, BF16) => &[BF16],
         (_, FP16) => &[FP16],
@@ -570,6 +583,91 @@ mod tests {
         assert_eq!(r.why, "decided at start (card not reported)");
         let r = resolve_mode("ppocr-manga", "fp16", Some(&cpu), None, "");
         assert_eq!((r.precision, r.why.as_str()), (None, "fixed by the engine"));
+    }
+
+    #[test]
+    fn nar_small_modes_and_candidates() {
+        assert!(is_precision_engine("nar-small"));
+        assert_eq!(candidates("nar-small", MODE_ACCURACY), [FP16, FP32]);
+        assert_eq!(candidates("nar-small", MODE_BALANCED), [FP16, FP32]);
+        assert_eq!(candidates("nar-small", MODE_SPEED), [FP16, FP32]);
+        assert_eq!(candidates("nar-small", FP32), [FP32]);
+        assert_eq!(candidates("nar-small", FP16), [FP16]);
+        assert!(candidates("nar-small", BF16).is_empty());
+        assert_eq!(
+            engine_modes("nar-small"),
+            [MODE_ACCURACY, MODE_BALANCED, MODE_SPEED, FP32, FP16]
+        );
+        assert_eq!(engine_modes("hayai-nova"), MODES);
+        assert!(engine_modes("charspot-small").is_empty());
+    }
+
+    #[test]
+    fn nar_resolves_fp32_on_the_cpu_in_every_auto_mode() {
+        let cpu: BTreeSet<String> = [FP32.to_string()].into();
+        for m in [MODE_ACCURACY, MODE_BALANCED, MODE_SPEED] {
+            assert_eq!(
+                resolve_mode("nar-small", m, Some(&cpu), None, "")
+                    .precision
+                    .as_deref(),
+                Some(FP32),
+                "{m}"
+            );
+        }
+        assert!(!resolve_mode("nar-small", FP16, Some(&cpu), None, "").eligible);
+    }
+
+    // O2: every auto mode is fp16 on a GPU; a GPU without an fp16 package (its fp16 gate
+    // failed) is fp32 in every auto mode, still eligible.
+    #[test]
+    fn nar_resolves_fp16_on_a_gpu_in_every_auto_mode() {
+        let gpu: BTreeSet<String> = [FP32.to_string(), FP16.to_string()].into();
+        for m in [MODE_ACCURACY, MODE_BALANCED, MODE_SPEED] {
+            let r = resolve_mode("nar-small", m, Some(&gpu), None, "");
+            assert_eq!(
+                (r.precision.as_deref(), r.eligible),
+                (Some(FP16), true),
+                "{m}"
+            );
+        }
+        assert_eq!(
+            resolve_mode("nar-small", MODE_ACCURACY, Some(&gpu), None, "").usable,
+            [FP16]
+        );
+        assert_eq!(
+            resolve_mode("nar-small", MODE_BALANCED, Some(&gpu), None, "").usable,
+            [FP16, FP32]
+        );
+        // a benchmark that found fp32 more than 5% faster keeps it
+        assert_eq!(
+            resolve_mode("nar-small", MODE_SPEED, Some(&gpu), Some(FP32), "benchmark")
+                .precision
+                .as_deref(),
+            Some(FP32)
+        );
+        let no_fp16: BTreeSet<String> = [FP32.to_string(), BF16.to_string()].into();
+        for m in [MODE_ACCURACY, MODE_BALANCED, MODE_SPEED] {
+            let r = resolve_mode("nar-small", m, Some(&no_fp16), None, "");
+            assert_eq!(
+                (r.precision.as_deref(), r.eligible),
+                (Some(FP32), true),
+                "{m}"
+            );
+        }
+    }
+
+    // The static table stays equal to the registry (bunko-core is a dev-dependency).
+    #[test]
+    fn engine_modes_equal_the_registry() {
+        for e in bunko_core::engines::ENGINES {
+            assert_eq!(
+                engine_modes(e.id),
+                bunko_core::engines::engine_modes(e.id).as_slice(),
+                "{}",
+                e.id
+            );
+            assert_eq!(is_precision_engine(e.id), e.precision, "{}", e.id);
+        }
     }
 
     #[test]

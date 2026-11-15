@@ -14,7 +14,7 @@ what they do. The design documents it summarises are in
 |---|---|---|
 | Scheduler | the server process (all builds) | One actor that owns every piece of OCR state: it keeps an index of what is owed, claims `(volume, generation)` jobs for each lane, collects sidecars, records failures. Its state is mutated one message at a time, with no locks around scheduling. |
 | Processor | the server process (full build, "local") or another machine (`mokuro-bunko processor serve`) | Receives open-session and volume operations, runs the OCR pipeline, answers with events and the finished sidecar. The local processor is the same code as a remote one, wired over in-process channels, and the scheduler treats it as a machine named `local`. |
-| Engines | inside a processor (full build only) | `hayai-nova` and `paddle-manga` on libtorch (the backend pack `install-ocr` installs), `ppocr-manga` and the PP-OCR detector on ONNX Runtime on the CPU, plus the layout step that turns reads into the sidecar. |
+| Engines | inside a processor (full build only) | `hayai-nova` and `paddle-manga` on libtorch (the backend pack `install-ocr` installs), `nar-small` and `charspot-small` on libtorch on a card that has a package for them and on ONNX Runtime on the CPU elsewhere, the `animetext-blocks` detector likewise (its `detect` stage follows the engine's card), `ppocr-manga` and the line detectors on ONNX Runtime on the CPU, plus the layout step that turns reads into the sidecar. |
 
 The lite build has no engines: `ocr.local_processing` is forced off, the
 queue holds with "no processor" until a remote processor connects, and the
@@ -231,6 +231,18 @@ one loaded model of one thread each, taking the job's physical cores in
 proportion to what a page costs it next to the detect stage (about 15 of 24
 for `nar-small`, 7 of 24 for `charspot-small`; a core counts once, SMT
 threads aside), the detect stage sized to the rest of that default split.
+On a card, the engine stage of `nar-small` and `charspot-small` is like any
+other recognizer's: one loaded model, a page's blocks read in one call (split
+into the package's batches, at most 64 blocks, or 8 on a card with less than
+4 GB). `charspot-small` reads at fp32 with the same text as the CPU pool;
+`nar-small` reads at fp32 with the same text, or at fp16 (every auto precision
+mode on a card that has nar's fp16 package; see
+[Precision modes](#precision-modes)). Where it cannot run on the card (no
+backend pack, a development pack without text-box reading, no package for that card, its
+host files missing with downloads off, a failed load) it falls back to the
+CPU pool and logs why. A `charspot-small` block with more than 1,024
+characters, more than its second graph reads at once, is read on the CPU
+alone (its ONNX file is fetched then if it is not here) and logged.
 The other stages get pools sized from the host. Widths and queue depths only
 change speed. Moving the engine to another device can change the sidecar:
 under an automatic precision mode, a device without native bf16 can resolve
@@ -296,9 +308,16 @@ forced `fp32` / `bf16` / `fp16`. `ppocr-manga` fixes its own and ignores it.
   *not eligible* and is never offered the row. A row that no connected
   machine can run is **held**, and the admin card, the queue page (admins)
   and `.mokuro-queue.json` (jobs in state `held`) say so.
-- `hayai-nova` and `paddle-manga` sidecars record the resolved precision in
-  `ocr_engine.precision`; `ppocr-manga` sidecars (and older sidecars) have no
-  precision key.
+- `nar-small` has fp32 and fp16 only (no bf16; a row asking for bf16 is a
+  row error). Its candidates are fp16 then fp32 in every auto mode, so it
+  reads at fp16 on a card with its fp16 package and at fp32 on the CPU;
+  `auto-balanced` and `auto-speed` still benchmark the two and keep fp32 only
+  if it is more than 5% faster. fp16 runs on a card only: a forced `fp16`
+  makes CPU-only machines not eligible.
+- `hayai-nova`, `paddle-manga` and `nar-small` sidecars record the resolved
+  precision in `ocr_engine.precision`; `ppocr-manga` sidecars (and older
+  sidecars) have no precision key. The precision is not
+  part of what decides a re-read: changing it re-reads nothing.
 
 ## Benchmarks
 
@@ -582,7 +601,9 @@ the source model revisions; the recognizers' host files are in the `models-v1`
 release. The PP-OCR files, and the opt-in models (`ctd-lines`, `charspot-small`,
 `nar-small`), are fetched from their authors' repositories at a pinned revision
 and checked against the hashes compiled into the program; `nar-small`'s ONNX graph,
-which holds no weights, comes from this project's `textbox-graphs-v1` release. A full build downloads what it needs into
+which holds no weights, comes from this project's `textbox-graphs-v1` release, and its
+compiled libtorch graphs for the GPU route, which hold none either and bind the same
+author's `model.safetensors` at load, from the `textbox-torch-v1` release. A full build downloads what it needs into
 `<storage>/models/`, verifies it and unpacks the packages there (see
 [configuration](configuration.md#ocr-models) and
 [`rust-port/TORCH-BACKEND.md`](rust-port/TORCH-BACKEND.md)). Every source
@@ -638,8 +659,10 @@ buys 4, 5 or 6 patch rows across the glyph at 256, 384 or 512. Every
 backend reads at all three: libtorch's packages keep a static axis of 512
 patches, and a smaller budget resizes the crop for it and masks the rest of
 the axis; ncnn and WebGPU run each crop at its own patch count. Backend packs
-from before 0.8.0 read 512 only (libtorch and ncnn refuse 256 and 384), and
-the session then asks for a pack update (`mokuro-bunko install-ocr --force`).
+from before 0.8.0 read 512 only (libtorch and ncnn refuse 256 and 384); 0.8.0
+does not load them and installs its own (backend packs are tied to the
+release). A development pack that still reads 512 only makes the session ask
+for a pack update (`mokuro-bunko install-ocr --force`).
 The memory difference across the whole range is small next to the model
 itself, so lowering the budget saves time, not memory. 512 is the default rather than the model card's 384 because on the
 model author's own benchmark 384 reads worse than the previous hayai model

@@ -10,6 +10,20 @@ use bunko_engines::torch::abi::{BT_ABI_VERSION, PACK_JSON, library_file_name};
 /// Installs a fake pack in `<storage>/backends` reporting the CPU and, when `gpu`, an
 /// sm_80 CUDA card. False when there is no rustc.
 pub fn fake_pack(storage: &Path, gpu: bool) -> bool {
+    fake_pack_with(storage, gpu, "")
+}
+
+/// [`fake_pack`] whose library also exports the 0.8 GPU block detection entry point
+/// (`bt_detect_blocks`, never called here).
+pub fn fake_pack_detecting(storage: &Path, gpu: bool) -> bool {
+    fake_pack_with(
+        storage,
+        gpu,
+        "#[unsafe(no_mangle)] pub extern \"C\" fn bt_detect_blocks() -> i32 { -1 }\n",
+    )
+}
+
+fn fake_pack_with(storage: &Path, gpu: bool, extra: &str) -> bool {
     let dir = storage.join("backends/torch-cpu-2.13.0");
     std::fs::create_dir_all(dir.join("lib")).unwrap();
     let (arch, isa) = match std::env::consts::ARCH {
@@ -40,7 +54,7 @@ pub fn fake_pack(storage: &Path, gpu: bool) -> bool {
 #[unsafe(no_mangle)] pub extern "C" fn bt_info() -> i32 {{ -1 }}
 #[unsafe(no_mangle)] pub extern "C" fn bt_read() -> i32 {{ -1 }}
 #[unsafe(no_mangle)] pub extern "C" fn bt_free() {{}}
-"##
+{extra}"##
     );
     let rs = dir.join("fixture.rs");
     std::fs::write(&rs, src).unwrap();

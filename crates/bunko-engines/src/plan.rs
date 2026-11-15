@@ -13,16 +13,18 @@
 //! that many threads over the one shared session. A libtorch recognizer on the CPU
 //! (hayai-nova, paddle-manga) stays at 1: one call already spreads over every core.
 //!
-//! The text-box recognizers (charspot-small, nar-small: ONNX Runtime, CPU only) read one
-//! block crop per call, too little work to keep a wide intra-op pool busy, so their
-//! engine stage is a pooled CPU stage instead: many workers over one shared session of
-//! one or two threads ([`textbox_session_threads`]). The job's cores ([`core_count`],
-//! SMT threads aside) are split between it and the detect stage by what a page costs
-//! each ([`textbox_engine_workers`], [`textbox_detect_workers`]); an explicit engine
-//! width leaves detect at its share of that default split. A 24-core host reads
-//! nar-small on AnimeText blocks about 3x faster that way than with one 8-thread
-//! worker, at half the CPU time a block. Width 0 (0.5.2's fused serial fallback) runs
-//! as 1.
+//! The text-box recognizers (charspot-small, nar-small) run on the CPU through ONNX
+//! Runtime, or on a GPU through the libtorch backend pack. On the CPU each call reads
+//! one block crop, too little work to keep a wide intra-op pool busy, so their engine
+//! stage is a pooled CPU stage there: many workers over one shared session of one or
+//! two threads ([`textbox_session_threads`]). The job's cores ([`core_count`], SMT
+//! threads aside) are split between it and the detect stage by what a page costs each
+//! ([`textbox_engine_workers`], [`textbox_detect_workers`]); an explicit engine width
+//! leaves detect at its share of that default split. A 24-core host reads nar-small on
+//! AnimeText blocks about 3x faster that way than with one 8-thread worker, at half the
+//! CPU time a block. On a GPU a page's blocks are one batched call, so the engine stage
+//! is device-bound like hayai-nova's, sized by its GPU figure ([`textbox_gpu_seconds`]).
+//! Width 0 (0.5.2's fused serial fallback) runs as 1.
 
 use std::collections::BTreeMap;
 
@@ -62,6 +64,21 @@ pub const SOURCE_EXTRA: u32 = 2;
 /// block detection, 0.8-1.0 on a 24-core host and 1.05-1.3 on a 16-core desktop
 /// (a test volume, 9.4 blocks a page); it sizes the stage's share of the cores.
 pub const DETECT_CPU_SECONDS: f64 = 0.9;
+/// Seconds the detect stage spends on a page when the block detector runs on a GPU
+/// (AnimeText on the pack, one page a call), which sizes its pace beside the engine. The
+/// spike's figure on a 16-core desktop with an RX 9070 XT; replaced by the gated
+/// targets' measured ones.
+pub const DETECT_GPU_SECONDS: f64 = 0.045;
+/// CPU seconds a page costs the host side of a GPU detect stage (decoding the page,
+/// the letterboxed canvas, the blocks): what it takes from a text-box CPU pool's cores
+/// in place of [`DETECT_CPU_SECONDS`].
+pub const DETECT_GPU_HOST_SECONDS: f64 = 0.04;
+/// Workers of a GPU detect stage by default: two keep the card fed while one prepares
+/// its next page.
+pub const DETECT_GPU_WORKERS: u32 = 2;
+/// Workers of a GPU detect stage at most (an explicit width or a benchmark's search):
+/// each one holds a page on the card.
+pub const DETECT_GPU_WORKERS_MAX: u32 = 4;
 /// Intra-op threads of a text-box recognizer's session at most (the models' own
 /// packages stop at eight: more does not help them).
 pub const TEXTBOX_THREADS_MAX: usize = 8;
@@ -109,20 +126,38 @@ pub struct StagePlan {
 /// page), one detect worker keeps it fed, and each extra one only holds another
 /// decoded page and another detector working set in memory.
 ///
-/// The text-box recognizers' figure is one worker's page at one intra-op thread, which
-/// is also the CPU time the page costs ([`textbox_cpu_seconds`]).
+/// The text-box recognizers' CPU figure is one worker's page at one intra-op thread,
+/// which is also the CPU time the page costs ([`textbox_cpu_seconds`]); on a GPU it is
+/// the page's one batched call ([`textbox_gpu_seconds`]).
 fn stage_seconds(engine: &str, key: &str, declared: f64, gpu: bool) -> f64 {
     match (engine, key, gpu) {
         ("paddle-manga", STAGE_ENGINE, true) => 0.915,
         ("hayai-nova", STAGE_ENGINE, true) => 0.177,
         ("paddle-manga", STAGE_ENGINE, false) => 27.0,
         ("hayai-nova", STAGE_ENGINE, false) => 3.6,
-        (e, STAGE_ENGINE, _) => textbox_cpu_seconds(e).unwrap_or(declared),
+        (e, STAGE_ENGINE, true) => textbox_gpu_seconds(e).unwrap_or(declared),
+        (e, STAGE_ENGINE, false) => textbox_cpu_seconds(e).unwrap_or(declared),
+        (_, STAGE_DETECT, true) => DETECT_GPU_SECONDS,
         _ => declared,
     }
 }
 
-/// CPU seconds a page costs a text-box recognizer (CPU only) on one intra-op thread,
+/// Seconds a page costs a text-box recognizer on a GPU (libtorch, one batched call of
+/// the page's blocks), None for any other engine. The spike's figures on a 16-core
+/// desktop with an RX 9070 XT, 9.4 blocks a page; replaced by the gated targets'
+/// measured ones once they are built. charspot-small's is gated: its engine stage on one
+/// worker took 0.094 s a page on that desktop with AnimeText on the same GPU and 0.125 s
+/// with PP-OCR's line boxes (a test volume, 8.3 and 8.6 blocks a page), the slower card
+/// next to an RTX 4090 (which reads several times its crops a second).
+pub fn textbox_gpu_seconds(engine: &str) -> Option<f64> {
+    match engine {
+        "nar-small" => Some(0.12),
+        "charspot-small" => Some(0.1),
+        _ => None,
+    }
+}
+
+/// CPU seconds a page costs a text-box recognizer on the CPU on one intra-op thread,
 /// None for any other engine. Measured on a 24-core host, 9.4 blocks a page: nar-small
 /// 0.13-0.19 s a block, charspot-small 0.035-0.047 (a 16-core desktop: 0.23, 0.05).
 pub fn textbox_cpu_seconds(engine: &str) -> Option<f64> {
@@ -140,13 +175,15 @@ pub fn core_share(physical_cores: usize, jobs: usize) -> usize {
 
 /// The default width of a text-box recognizer's engine stage on the CPU: its part of
 /// the job's `share` of physical cores, split with the detect stage by what a page
-/// costs each (`engine_cost` against [`DETECT_CPU_SECONDS`]), at one worker a core.
+/// costs each on the CPU (`engine_cost` against `detect_cost`: [`DETECT_CPU_SECONDS`],
+/// or [`DETECT_GPU_HOST_SECONDS`] when the detect stage runs on a GPU), at one worker a
+/// core.
 /// Measured nar-small widths at one thread over one session: 24-core host 82-89 blocks/s
 /// at 16-20 workers against 18 with today's one 8-thread worker; the plateau sets in
 /// at the free physical cores (SMT siblings add CPU time a block, not blocks).
-pub fn textbox_engine_workers(engine_cost: f64, share: usize) -> u32 {
+pub fn textbox_engine_workers(engine_cost: f64, detect_cost: f64, share: usize) -> u32 {
     let share = share.max(1);
-    let part = engine_cost / (engine_cost + DETECT_CPU_SECONDS);
+    let part = engine_cost / (engine_cost + detect_cost);
     ((share as f64 * part).round() as u32).clamp(1, share as u32)
 }
 
@@ -380,15 +417,23 @@ pub fn pooled_engine(stage: &StagePlan) -> bool {
     stage.key == STAGE_ENGINE && !stage.device_bound && !stage.device.starts_with("gpu")
 }
 
-/// The stages of a road with their widths and capacities for this run.
+/// The stages of a road with their widths and capacities for this run. `engine_device`
+/// is where the recognizer runs, `detect_device` where the block detector does (`cpu`,
+/// or the GPU it loaded on: AnimeText on the pack). A GPU detect stage is a small pool
+/// of workers over the one detector ([`DETECT_GPU_WORKERS`], at most
+/// [`DETECT_GPU_WORKERS_MAX`]), not device-bound; on the engine's own GPU its page adds
+/// to the engine's period. The line road's detect stage also reads, so it stays on the
+/// CPU whatever `detect_device` says.
 pub fn plan(
     engine: &str,
     road: Road,
     engine_device: &str,
+    detect_device: &str,
     pools: &PoolsSpec,
     host: &Host,
 ) -> Vec<StagePlan> {
     let gpu = engine_device.starts_with("gpu");
+    let detect_gpu = road == Road::Reconciled && detect_device.starts_with("gpu");
     let budget = host.budget;
     // A text-box recognizer on the CPU: its engine stage is pooled, not device-bound.
     let textbox = if gpu {
@@ -405,7 +450,11 @@ pub fn plan(
             (
                 STAGE_DETECT,
                 "detect + CTC read",
-                "cpu".into(),
+                if detect_gpu {
+                    detect_device.to_string()
+                } else {
+                    "cpu".into()
+                },
                 false,
                 0.225,
             ),
@@ -429,8 +478,9 @@ pub fn plan(
         CPU_WORKERS_MAX
     };
     let ceiling = budget.clamp(1, cap);
-    // The engine stage's default width (only the fast-GPU hayai-nova case is 2: its
-    // device time per page is small next to its host side).
+    // The engine stage's default width (2 only for a cheap page on a fast GPU of a large
+    // host, hayai-nova or a text-box recognizer: its device time per page is small next
+    // to its host side).
     let engine_threads = |cost: f64| {
         if gpu && host.fast_gpu && host.physical_cores >= FAST_GPU_MIN_CORES && cost < 0.3 {
             FAST_GPU_ENGINE_THREADS
@@ -440,7 +490,13 @@ pub fn plan(
     };
     let share = host.share();
     // A text-box engine stage's default width: its part of the cores.
-    let textbox_default = textbox.map(|cost| textbox_engine_workers(cost, share));
+    // Beside a GPU detect stage the CPU pool gives up only the detect stage's host side.
+    let detect_cost = if detect_gpu {
+        DETECT_GPU_HOST_SECONDS
+    } else {
+        DETECT_CPU_SECONDS
+    };
+    let textbox_default = textbox.map(|cost| textbox_engine_workers(cost, detect_cost, share));
     // Its width: the explicit one, else the default.
     let textbox_width = textbox_default.map(|w| {
         pools
@@ -450,14 +506,21 @@ pub fn plan(
             .unwrap_or(w)
             .clamp(1, MAX_POOLED_WORKERS)
     });
-    // The pace: the device-bound stage's period, or the text-box engine pool's.
+    // The pace: the device-bound stage's period, or the text-box engine pool's. A GPU
+    // detect stage on the engine's own GPU shares its time: the page's detection adds
+    // to the engine's period.
+    let shared_gpu = if detect_gpu && gpu && detect_device == engine_device {
+        DETECT_GPU_SECONDS
+    } else {
+        0.0
+    };
     let bound = match (textbox, textbox_width) {
         (Some(cost), Some(w)) => cost / f64::from(w),
         _ => declared
             .iter()
             .zip(&costs)
             .filter(|(d, _)| d.3)
-            .map(|(_, c)| *c / f64::from(engine_threads(*c)))
+            .map(|(_, c)| *c / f64::from(engine_threads(*c)) + shared_gpu)
             .fold(0.0f64, f64::max),
     };
     let pace = if bound > 0.0 {
@@ -475,8 +538,11 @@ pub fn plan(
         .iter()
         .zip(&costs)
         .map(|(d, &cost)| {
+            let detect_on_gpu = d.0 == STAGE_DETECT && detect_gpu;
             let derived = if d.3 {
                 engine_threads(cost)
+            } else if detect_on_gpu {
+                DETECT_GPU_WORKERS
             } else if d.2.starts_with("gpu") {
                 1
             } else if let (STAGE_ENGINE, Some(w)) = (d.0, textbox_width) {
@@ -495,6 +561,8 @@ pub fn plan(
             let explicit = pools.stage_workers.get(d.0).copied();
             let max = if d.3 {
                 if gpu { MAX_ENGINE_THREADS } else { 1 }
+            } else if detect_on_gpu {
+                DETECT_GPU_WORKERS_MAX
             } else {
                 MAX_POOLED_WORKERS
             };
@@ -531,8 +599,9 @@ pub fn plan(
 /// budget and the road's cap; the engine stage on a GPU up to [`MAX_ENGINE_THREADS`]
 /// (bounded by the budget: each engine thread needs a host thread), a libtorch one on the
 /// CPU 1; a text-box recognizer's pooled engine stage up to the job's physical cores
-/// (past them a worker adds CPU time a block, not blocks). Never below the width the
-/// plan already gave a stage.
+/// (past them a worker adds CPU time a block, not blocks); a GPU detect stage up to
+/// [`DETECT_GPU_WORKERS_MAX`] (and the budget). Never below the width the plan already
+/// gave a stage.
 pub fn width_ceilings(stages: &[StagePlan], host: &Host) -> BTreeMap<String, u32> {
     let line = !stages.iter().any(|s| s.key == STAGE_ENGINE);
     let cap = if line {
@@ -545,6 +614,8 @@ pub fn width_ceilings(stages: &[StagePlan], host: &Host) -> BTreeMap<String, u32
         .map(|s| {
             let ceiling = if pooled_engine(s) {
                 host.share() as u32
+            } else if s.key == STAGE_DETECT && s.device.starts_with("gpu") {
+                host.budget.clamp(1, DETECT_GPU_WORKERS_MAX)
             } else if s.device_bound {
                 if s.device.starts_with("gpu") {
                     host.budget.clamp(1, MAX_ENGINE_THREADS)
@@ -608,24 +679,52 @@ mod tests {
     fn derived_widths_match_the_measured_ones() {
         let none = PoolsSpec::default();
         // hayai-nova on a GPU: detect 3 (25.7% idle at 1, 0.8% at 3), engine 1, post 1.
-        let p = plan("hayai-nova", Road::Reconciled, "gpu:0", &none, &host(3));
+        let p = plan(
+            "hayai-nova",
+            Road::Reconciled,
+            "gpu:0",
+            "cpu",
+            &none,
+            &host(3),
+        );
         assert_eq!(widths(&p), vec![(3, 4), (1, 1), (1, 1)]);
         assert_eq!(
             graph_line(&p),
             "detect (cpu x3, queue 4) -> engine (gpu:0 x1, queue 1) -> post (cpu x1, queue 1)"
         );
         // paddle-manga: the card is the bottleneck, one detect worker is enough.
-        let p = plan("paddle-manga", Road::Reconciled, "gpu:0", &none, &host(6));
+        let p = plan(
+            "paddle-manga",
+            Road::Reconciled,
+            "gpu:0",
+            "cpu",
+            &none,
+            &host(6),
+        );
         assert_eq!(widths(&p), vec![(1, 4), (1, 1), (1, 1)]);
         // A CPU engine is slow enough that one detect worker keeps it fed.
-        let p = plan("hayai-nova", Road::Reconciled, "cpu", &none, &host(6));
+        let p = plan(
+            "hayai-nova",
+            Road::Reconciled,
+            "cpu",
+            "cpu",
+            &none,
+            &host(6),
+        );
         assert_eq!(widths(&p), vec![(1, 4), (1, 1), (1, 1)]);
-        let p = plan("paddle-manga", Road::Reconciled, "cpu", &none, &host(6));
+        let p = plan(
+            "paddle-manga",
+            Road::Reconciled,
+            "cpu",
+            "cpu",
+            &none,
+            &host(6),
+        );
         assert_eq!(widths(&p), vec![(1, 4), (1, 1), (1, 1)]);
         // ppocr-manga: detect takes the ceiling (0.5.2's 4), the layout one worker.
-        let p = plan("ppocr-manga", Road::Line, "cpu", &none, &host(7));
+        let p = plan("ppocr-manga", Road::Line, "cpu", "cpu", &none, &host(7));
         assert_eq!(widths(&p), vec![(4, 4), (1, 1)]);
-        let p = plan("ppocr-manga", Road::Line, "cpu", &none, &host(1));
+        let p = plan("ppocr-manga", Road::Line, "cpu", "cpu", &none, &host(1));
         assert_eq!(widths(&p), vec![(1, 1), (1, 1)]);
     }
 
@@ -639,7 +738,7 @@ mod tests {
                 jobs: 1,
                 fast_gpu: fast,
             };
-            graph_line(&plan(engine, Road::Reconciled, "gpu:0", &none, &h))
+            graph_line(&plan(engine, Road::Reconciled, "gpu:0", "cpu", &none, &h))
         };
         // 8-core/16-thread hosts (5800X + RTX 4060, 5800X + RDNA2): detect 3, was 1.
         assert!(
@@ -678,13 +777,34 @@ mod tests {
         pools.stage_workers.insert("detect".into(), 6);
         pools.stage_workers.insert("engine".into(), 12);
         pools.queue_capacity.insert("post".into(), 8);
-        let p = plan("hayai-nova", Road::Reconciled, "gpu:0", &pools, &host(3));
+        let p = plan(
+            "hayai-nova",
+            Road::Reconciled,
+            "gpu:0",
+            "cpu",
+            &pools,
+            &host(3),
+        );
         assert_eq!(widths(&p), vec![(6, 6), (8, 8), (1, 8)]);
-        let p = plan("hayai-nova", Road::Reconciled, "cpu", &pools, &host(3));
+        let p = plan(
+            "hayai-nova",
+            Road::Reconciled,
+            "cpu",
+            "cpu",
+            &pools,
+            &host(3),
+        );
         assert_eq!(p[1].workers, 1, "the CPU engine stage is one worker");
         assert_eq!(p[0].workers, 6, "an explicit width still wins on the CPU");
         pools.stage_workers.insert("detect".into(), 0);
-        let p = plan("hayai-nova", Road::Reconciled, "cpu", &pools, &host(3));
+        let p = plan(
+            "hayai-nova",
+            Road::Reconciled,
+            "cpu",
+            "cpu",
+            &pools,
+            &host(3),
+        );
         assert_eq!(p[0].workers, 1);
     }
 
@@ -697,10 +817,10 @@ mod tests {
             jobs: 1,
             fast_gpu: false,
         };
-        let p = plan("hayai-nova", Road::Reconciled, "gpu:0", &none, &h);
+        let p = plan("hayai-nova", Road::Reconciled, "gpu:0", "cpu", &none, &h);
         let c = width_ceilings(&p, &h);
         assert_eq!((c["detect"], c["engine"], c["post"]), (6, 6, 6));
-        let p = plan("hayai-nova", Road::Reconciled, "cpu", &none, &h);
+        let p = plan("hayai-nova", Road::Reconciled, "cpu", "cpu", &none, &h);
         assert_eq!(
             width_ceilings(&p, &h)["engine"],
             1,
@@ -712,13 +832,13 @@ mod tests {
             jobs: 1,
             fast_gpu: true,
         };
-        let p = plan("hayai-nova", Road::Reconciled, "gpu:0", &none, &big);
+        let p = plan("hayai-nova", Road::Reconciled, "gpu:0", "cpu", &none, &big);
         let c = width_ceilings(&p, &big);
         assert_eq!(
             (c["detect"], c["engine"]),
             (CPU_WORKERS_MAX, MAX_ENGINE_THREADS)
         );
-        let p = plan("ppocr-manga", Road::Line, "cpu", &none, &big);
+        let p = plan("ppocr-manga", Road::Line, "cpu", "cpu", &none, &big);
         assert_eq!(width_ceilings(&p, &big)["detect"], LINE_WORKERS_MAX);
         // a small host: never below what the plan already runs
         let small = Host {
@@ -729,7 +849,14 @@ mod tests {
         };
         let mut pools = PoolsSpec::default();
         pools.stage_workers.insert("detect".into(), 3);
-        let p = plan("hayai-nova", Road::Reconciled, "gpu:0", &pools, &small);
+        let p = plan(
+            "hayai-nova",
+            Road::Reconciled,
+            "gpu:0",
+            "cpu",
+            &pools,
+            &small,
+        );
         assert_eq!(width_ceilings(&p, &small)["detect"], 3);
     }
 
@@ -779,7 +906,7 @@ mod tests {
         for (engine, hosts) in cases {
             for (physical, jobs, engine_workers, detect_workers) in hosts {
                 let h = smt(physical, jobs);
-                let p = plan(engine, Road::Reconciled, "cpu", &none, &h);
+                let p = plan(engine, Road::Reconciled, "cpu", "cpu", &none, &h);
                 let at = format!("{engine} on {physical} cores, {jobs} job(s)");
                 assert_eq!(
                     widths(&p),
@@ -812,6 +939,7 @@ mod tests {
                 "nar-small",
                 Road::Reconciled,
                 "cpu",
+                "cpu",
                 &none,
                 &smt(24, 1)
             )),
@@ -821,6 +949,7 @@ mod tests {
             graph_line(&plan(
                 "nar-small",
                 Road::Reconciled,
+                "cpu",
                 "cpu",
                 &none,
                 &smt(16, 1)
@@ -836,10 +965,10 @@ mod tests {
         // An explicit engine width is honoured, and detect keeps the width the default
         // engine width gives it: a benchmark that widened only the engine pins only
         // the engine, and the next session runs the detect width it measured.
-        let auto = plan("nar-small", Road::Reconciled, "cpu", &pools, &big);
+        let auto = plan("nar-small", Road::Reconciled, "cpu", "cpu", &pools, &big);
         for engine in [12, 16, 1] {
             pools.stage_workers.insert("engine".into(), engine);
-            let p = plan("nar-small", Road::Reconciled, "cpu", &pools, &big);
+            let p = plan("nar-small", Road::Reconciled, "cpu", "cpu", &pools, &big);
             assert_eq!((p[0].workers, p[1].workers), (auto[0].workers, engine));
         }
         let single = cpu_engine_threads(24, None, 1);
@@ -866,20 +995,34 @@ mod tests {
             1
         );
         pools.stage_workers.insert("engine".into(), 0);
-        let p = plan("nar-small", Road::Reconciled, "cpu", &pools, &big);
+        let p = plan("nar-small", Road::Reconciled, "cpu", "cpu", &pools, &big);
         assert_eq!(p[1].workers, 1, "0 runs as 1");
         // Past the cores up to the pooled maximum; the benchmark may go as far.
         pools.stage_workers.insert("engine".into(), 30);
-        let p = plan("charspot-small", Road::Reconciled, "cpu", &pools, &big);
+        let p = plan(
+            "charspot-small",
+            Road::Reconciled,
+            "cpu",
+            "cpu",
+            &pools,
+            &big,
+        );
         assert_eq!(p[1].workers, 30);
         assert_eq!(width_ceilings(&p, &big)["engine"], 30);
         pools.stage_workers.insert("engine".into(), 500);
-        let p = plan("charspot-small", Road::Reconciled, "cpu", &pools, &big);
+        let p = plan(
+            "charspot-small",
+            Road::Reconciled,
+            "cpu",
+            "cpu",
+            &pools,
+            &big,
+        );
         assert_eq!(p[1].workers, MAX_POOLED_WORKERS);
         // An explicit detect width still wins beside it.
         pools.stage_workers.insert("detect".into(), 3);
         pools.stage_workers.insert("engine".into(), 16);
-        let p = plan("nar-small", Road::Reconciled, "cpu", &pools, &big);
+        let p = plan("nar-small", Road::Reconciled, "cpu", "cpu", &pools, &big);
         assert_eq!(widths(&p), vec![(3, 4), (16, 16), (1, 1)]);
     }
 
@@ -898,13 +1041,13 @@ mod tests {
         let none = PoolsSpec::default();
         let big = smt(24, 1);
         for engine in ["hayai-nova", "paddle-manga"] {
-            let p = plan(engine, Road::Reconciled, "cpu", &none, &big);
+            let p = plan(engine, Road::Reconciled, "cpu", "cpu", &none, &big);
             assert_eq!(widths(&p), vec![(1, 4), (1, 1), (1, 1)], "{engine}");
             assert!(p[1].device_bound && !pooled_engine(&p[1]));
             assert_eq!(width_ceilings(&p, &big)["engine"], 1, "{engine}");
             let mut pools = PoolsSpec::default();
             pools.stage_workers.insert("engine".into(), 12);
-            let p = plan(engine, Road::Reconciled, "cpu", &pools, &big);
+            let p = plan(engine, Road::Reconciled, "cpu", "cpu", &pools, &big);
             assert_eq!(
                 p[1].workers, 1,
                 "{engine}: the CPU engine stage is one worker"
@@ -914,11 +1057,118 @@ mod tests {
             fast_gpu: true,
             ..big
         };
-        let p = plan("hayai-nova", Road::Reconciled, "gpu:0", &none, &fast);
+        let p = plan("hayai-nova", Road::Reconciled, "gpu:0", "cpu", &none, &fast);
         assert_eq!(
             graph_line(&p),
             "detect (cpu x6, queue 6) -> engine (gpu:0 x2, queue 2) -> post (cpu x1, queue 1)"
         );
+    }
+
+    #[test]
+    fn a_gpu_text_box_stage_uses_its_gpu_figure() {
+        let h = Host {
+            budget: 8,
+            physical_cores: 24,
+            jobs: 1,
+            fast_gpu: true,
+        };
+        let p = plan(
+            "nar-small",
+            Road::Reconciled,
+            "gpu:0",
+            "cpu",
+            &PoolsSpec::default(),
+            &h,
+        );
+        let e = p.iter().find(|s| s.key == STAGE_ENGINE).unwrap();
+        assert!(e.device_bound);
+        assert_eq!((e.seconds, e.workers), (0.12, 2));
+        let d = p.iter().find(|s| s.key == STAGE_DETECT).unwrap();
+        assert_eq!(d.workers, 8); // ceil(2 * 0.225 / (0.12 / 2)) = 8, the ceiling
+        let cpu = plan(
+            "nar-small",
+            Road::Reconciled,
+            "cpu",
+            "cpu",
+            &PoolsSpec::default(),
+            &h,
+        );
+        assert!(
+            !cpu.iter()
+                .find(|s| s.key == STAGE_ENGINE)
+                .unwrap()
+                .device_bound
+        );
+        // charspot-small's figure, and none for any other engine.
+        assert_eq!(textbox_gpu_seconds("charspot-small"), Some(0.1));
+        assert_eq!(textbox_gpu_seconds("hayai-nova"), None);
+        let c = plan(
+            "charspot-small",
+            Road::Reconciled,
+            "gpu:0",
+            "cpu",
+            &PoolsSpec::default(),
+            &h,
+        );
+        assert_eq!(c[1].seconds, 0.1);
+    }
+
+    fn big() -> Host {
+        Host {
+            budget: 8,
+            physical_cores: 24,
+            jobs: 1,
+            fast_gpu: true,
+        }
+    }
+
+    #[test]
+    fn a_gpu_detect_stage_beside_a_gpu_engine() {
+        let p = plan(
+            "nar-small",
+            Road::Reconciled,
+            "gpu:0",
+            "gpu:0",
+            &PoolsSpec::default(),
+            &big(),
+        );
+        let d = p.iter().find(|s| s.key == STAGE_DETECT).unwrap();
+        assert_eq!(
+            (d.device.as_str(), d.device_bound, d.workers, d.seconds),
+            ("gpu:0", false, 2, 0.045)
+        );
+    }
+
+    #[test]
+    fn a_gpu_detect_stage_leaves_the_cores_to_a_cpu_pool() {
+        assert_eq!(textbox_engine_workers(1.5, DETECT_CPU_SECONDS, 24), 15);
+        assert_eq!(textbox_engine_workers(1.5, DETECT_GPU_HOST_SECONDS, 24), 23);
+        let p = plan(
+            "nar-small",
+            Road::Reconciled,
+            "cpu",
+            "gpu:0",
+            &PoolsSpec::default(),
+            &big(),
+        );
+        assert_eq!(
+            p.iter().find(|s| s.key == STAGE_ENGINE).unwrap().workers,
+            23
+        );
+        assert_eq!(p.iter().find(|s| s.key == STAGE_DETECT).unwrap().workers, 2);
+    }
+
+    #[test]
+    fn a_gpu_detect_stage_widens_to_four_at_most() {
+        let p = plan(
+            "nar-small",
+            Road::Reconciled,
+            "gpu:0",
+            "gpu:0",
+            &PoolsSpec::default(),
+            &big(),
+        );
+        assert_eq!(width_ceilings(&p, &big())["detect"], 4);
     }
 
     #[test]

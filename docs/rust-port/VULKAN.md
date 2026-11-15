@@ -167,7 +167,8 @@ fp32 on the CPU reads from them (`examples/vulkan_check golden`). Any difference
 runtime on that device (cached until runtime/pack/driver/model change). libtorch itself is
 the reference and is not self-tested. hayai-nova's goldens are read at patch budget 512: a
 recognizer for 256 or 384 self-tests a load at 512 first, then loads at its own budget, and
-the verdict serves every budget. A pack from before 0.8.0 refuses budgets other than 512;
+the verdict serves every budget. A pack from before 0.8.0 refuses budgets other than 512
+(0.8.0 loads no such pack: it installs its own; a development pack can still be one);
 that refusal is no verdict against the runtime (the session asks for a pack update).
 
 Checking a runtime by hand: `MOKURO_VULKAN_PACK=… MOKURO_VULKAN_MODELS_DIR=…

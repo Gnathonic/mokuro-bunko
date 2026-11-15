@@ -16,15 +16,30 @@ are the same bytes for every target, GPU or CPU (the build checks it).
 (oneDNN/MKL-prepacked weights folded into the graph) with its weights inside, as
 ``TORCH_EXPORT_WIN_EMBED=1`` does for cross-built Windows GPU targets.
 
+Engines that bind the authors' own weights file (``textbox.PINS``: nar-small,
+charspot-small) write no weights files: ``bunko.weights`` maps each constant to its key in
+the authors' pinned file, which must hold every constant with the same shape and dtype,
+no constant is written into the code (``always_keep_tensor_constants``), and both embed
+switches are refused. Engines that bind an ONNX file's initializers (``detector.PINS``:
+animetext-blocks, ``bunko.weights_format = onnx``) are built the same way against the
+pinned ONNX file; after compiling, every constant the package asks for must be in the map
+(``verify.package_constants``).
+
+``build.json`` records the exporter's commit (``exporter_commit``; ``exporter_dirty`` when
+tools/torch_export had uncommitted changes); detector packages carry it as
+``bunko.exporter_commit`` too, which ``publish_detector.sh`` reads.
+
 Weight groups: ``vision`` (the vision graph's weights) and ``decoder`` (prefill+step,
 plus the host loop's tables), each < 1.9 GB (GitHub's asset cap is 2 GiB).
 """
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -45,6 +60,21 @@ def sha256(path: Path) -> str:
         while b := f.read(1 << 24):
             h.update(b)
     return h.hexdigest()
+
+
+def exporter_commit() -> tuple[str, bool]:
+    """(commit, dirty) of tools/torch_export: ``TORCH_EXPORT_COMMIT`` / ``TORCH_EXPORT_DIRTY``
+    when set (the container has no git checkout), else git; ("unknown", True) without git."""
+    if os.environ.get("TORCH_EXPORT_COMMIT"):
+        return os.environ["TORCH_EXPORT_COMMIT"], os.environ.get("TORCH_EXPORT_DIRTY", "1") != "0"
+    here = Path(__file__).resolve().parents[1]
+    try:
+        git = ["git", "-C", str(here)]
+        commit = subprocess.run([*git, "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+        status = subprocess.run([*git, "status", "--porcelain", "--", "."], capture_output=True, text=True, check=True).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return "unknown", True
+    return commit, bool(status.strip())
 
 
 def _canonical(model, extra: dict | None = None) -> dict[int, str]:
@@ -169,10 +199,16 @@ def inductor_options(t: Target, role: str, meta: dict[str, str]) -> dict:
 def build(engine: str, precision: str, t: Target, out: Path, io: int = IO_VERSION, precast: bool = True) -> dict:
     import torch
 
+    from . import detector as D
     from . import graphs as G
+    from . import textbox as T
 
     if precision not in t.precisions:
         raise SystemExit(f"{t.name} does not build {precision} (has {t.precisions})")
+    if engine in T.PINS:
+        T.refuse_embedding(os.environ)  # before anything is built or written
+    if engine in D.PINS:
+        D.refuse_embedding(os.environ)
     want = f"2.13.0+{t.torch_variant}"
     if t.gpu and torch.__version__ != want:
         raise SystemExit(f"{t.name} needs torch {want}, this is {torch.__version__}")
@@ -185,17 +221,24 @@ def build(engine: str, precision: str, t: Target, out: Path, io: int = IO_VERSIO
     fuse = os.environ.get("TORCH_EXPORT_FUSE", "1") == "1"
     kw = {"precast": precast, "fuse": fuse}
     build_fn = G.BUILDERS[engine]
+    commit, dirty = exporter_commit()
     record: dict = {"engine": engine, "precision": precision, "target": t.name, "io": io, "tool": TOOL_VERSION,
-                    "torch": torch.__version__, "precast": precast if engine == "hayai-nova" else None, "fused": fuse and io == 2, "graphs": {}}
+                    "torch": torch.__version__, "precast": precast if engine == "hayai-nova" else None, "fused": fuse and io == 2,
+                    "exporter_commit": commit, "exporter_dirty": dirty, "graphs": {}}
 
     if t.gpu and os.environ.get("TORCH_EXPORT_REAL_DEVICE") == "1":
         # experiment: export + autotune on this machine's real GPU (must BE the target)
         gs = build_fn(precision, torch.device("cuda"), io, **kw)
         with torch.no_grad():
             eps = {g.role: torch.export.export(g.module, g.args, dynamic_shapes=g.dynamic_shapes, strict=False) for g in gs.graphs}
-        canon = _canonical(gs.model, gs.extra)
-        maps = {g.role: _weight_map(g, canon, eps[g.role]) for g in gs.graphs}
-        record["weights"] = write_weights(gs.model, maps, gs.host_weights, pdir, gs.extra)
+        if gs.authors_weights:
+            maps = _authors_maps(gs, eps, gs.authors_file)
+        elif gs.onnx_weights:
+            maps = _onnx_maps(gs, eps, gs.onnx_file)
+        else:
+            canon = _canonical(gs.model, gs.extra)
+            maps = {g.role: _weight_map(g, canon, eps[g.role]) for g in gs.graphs}
+            record["weights"] = write_weights(gs.model, maps, gs.host_weights, pdir, gs.extra)
         record["real_device"] = torch.cuda.get_device_name()
         meta_common = dict(gs.meta)
     elif t.gpu:
@@ -218,9 +261,14 @@ def build(engine: str, precision: str, t: Target, out: Path, io: int = IO_VERSIO
             fake_src = fake_src.to("cuda")
             gs = build_fn(precision, torch.device("cuda"), io, model=fake_src, **{**kw, "precast": False})
             eps = {g.role: torch.export.export(g.module, g.args, dynamic_shapes=g.dynamic_shapes, strict=False) for g in gs.graphs}
-        canon = _canonical(fake_src, gs.extra)
-        maps = {g.role: _weight_map(g, canon, eps[g.role]) for g in gs.graphs}
-        record["weights"] = write_weights(real.model, maps, real.host_weights, pdir, real.extra)
+        if gs.authors_weights:
+            maps = _authors_maps(gs, eps, real.authors_file)
+        elif gs.onnx_weights:
+            maps = _onnx_maps(gs, eps, real.onnx_file)
+        else:
+            canon = _canonical(fake_src, gs.extra)
+            maps = {g.role: _weight_map(g, canon, eps[g.role]) for g in gs.graphs}
+            record["weights"] = write_weights(real.model, maps, real.host_weights, pdir, real.extra)
         meta_common = {**real.meta}
         win_cross = t.os == "windows" and sys.platform != "win32" and _win_embed()
         if win_cross:
@@ -231,12 +279,16 @@ def build(engine: str, precision: str, t: Target, out: Path, io: int = IO_VERSIO
             for n, tt in list(real.model.named_parameters(remove_duplicate=False)) + list(real.model.named_buffers(remove_duplicate=False)):
                 named.setdefault(n, tt)
             real_by_role = {r: {fqn: named[key].detach().contiguous() for fqn, key in m.items()} for r, m in maps.items()}
+        # a detector's few non-weight constants (YOLO's strides) get their real values back:
+        # inductor reads them to fold them into the graph (the package then holds no such
+        # constant, which _check_bound confirms)
+        keep = _real_tiny_constants(eps, maps, real.model) if gs.onnx_weights else set()
         del real
-        _refake_constants(eps)
+        _refake_constants(eps, keep)
         from . import sdpa
 
         eps = {r: sdpa.pin(ep, t) for r, ep in eps.items()}
-        _refake_constants(eps)
+        _refake_constants(eps, keep)
         record["sdpa"] = "pinned to the target's rules (sdpa.py)"
         from . import fakegpu
 
@@ -245,7 +297,11 @@ def build(engine: str, precision: str, t: Target, out: Path, io: int = IO_VERSIO
         gs = build_fn(precision, torch.device("cpu"), io, **kw)
         with torch.no_grad():
             eps = {g.role: torch.export.export(g.module, g.args, dynamic_shapes=g.dynamic_shapes, strict=False) for g in gs.graphs}
-        if _cpu_embed():
+        if gs.authors_weights:
+            maps = _authors_maps(gs, eps, gs.authors_file)
+        elif gs.onnx_weights:
+            maps = _onnx_maps(gs, eps, gs.onnx_file)
+        elif _cpu_embed():
             maps = {g.role: {} for g in gs.graphs}
         else:
             # the same weights files as every GPU target of this engine x precision
@@ -254,6 +310,23 @@ def build(engine: str, precision: str, t: Target, out: Path, io: int = IO_VERSIO
             record["weights"] = write_weights(gs.model, maps, gs.host_weights, pdir, gs.extra)
         record["cpu_embed"] = _cpu_embed()
         meta_common = dict(gs.meta)
+
+    if gs.authors_weights:
+        pin = gs.authors_weights
+        meta_common.update(T.textbox_meta(pin, gs.max_batch, gs.weights_dtype))  # bunko.io = textbox-1 overrides str(io)
+        record["io"] = meta_common["io"]
+        record["fused"] = None  # the authors' graph as written: no hayai/paddle GEMM fusion
+        record["authors_weights"] = {"repo": pin.repo, "revision": pin.revision, "file": pin.file,
+                                     "sha256": pin.sha256, "size": pin.size, "cast": gs.weights_dtype}
+    elif gs.onnx_weights:
+        pin = gs.onnx_weights
+        meta_common.update(D.detector_meta(pin, gs.max_batch))  # bunko.io = detect-1 overrides str(io)
+        meta_common["exporter_commit"] = commit + ("-dirty" if dirty else "")
+        record["io"] = meta_common["io"]
+        record["fused"] = None
+        record["ultralytics"] = D.ULTRALYTICS_VERSION
+        record["onnx_weights"] = {"repo": pin.repo, "revision": pin.revision, "file": pin.file,
+                                  "sha256": pin.sha256, "size": pin.size}
 
     if t.os == "windows" and sys.platform == "win32":
         from . import winpatch
@@ -288,12 +361,22 @@ def build(engine: str, precision: str, t: Target, out: Path, io: int = IO_VERSIO
             # AOTInductorModelContainerUpdateUserManagedConstantBufferPairs instead
             meta["bunko.bind"] = "pairs"
         opts = inductor_options(t, g.role, meta)
+        if gs.authors_weights:
+            # inductor otherwise writes a 1-D constant of <= 8 values (charspot's heat, box,
+            # ruby, pout, start and end biases) into the code as numbers: a weight inside the
+            # package, and under fake tensors (GPU targets) no values to write at all. Kept,
+            # every constant is bound from the authors' file at load (bunko.weights).
+            opts["always_keep_tensor_constants"] = True
         t1 = time.time()
         # the archive's internal folder is named after the file: build as <role>.pt2 in a
         # scratch dir so packages unpack to <role>/... (not <role>.tmp/...)
         (tdir / ".partial").mkdir(exist_ok=True)
         tmp = tdir / ".partial" / path.name
-        aoti_compile_and_package(eps[g.role], package_path=str(tmp), inductor_configs=opts)
+        if gs.onnx_weights:
+            with _no_inlined_weights(set(maps[g.role])):
+                aoti_compile_and_package(eps[g.role], package_path=str(tmp), inductor_configs=opts)
+        else:
+            aoti_compile_and_package(eps[g.role], package_path=str(tmp), inductor_configs=opts)
         problems = []
         execstack_fixed = 0
         if t.os == "linux":
@@ -313,6 +396,9 @@ def build(engine: str, precision: str, t: Target, out: Path, io: int = IO_VERSIO
             z = sum(checks.zmm_count(tmp).values())
             if z:
                 problems.append(f"{z} AVX-512 (zmm) instructions in an x86-64-v3 package")
+        n_consts = len(maps[g.role])
+        if gs.onnx_weights:
+            n_consts = _check_bound(tmp, maps[g.role], gs.onnx_weights)
         if problems and os.environ.get("TORCH_EXPORT_SKIP_CHECKS") != "1":
             raise SystemExit(f"{t.name}/{g.role}: not portable: {'; '.join(problems)} "
                              "(build Linux packages in the container: python -m torch_export build ... without --host)")
@@ -320,7 +406,7 @@ def build(engine: str, precision: str, t: Target, out: Path, io: int = IO_VERSIO
         os.replace(tmp, path)
         (tdir / ".partial").rmdir()
         record["graphs"][g.role] = {"abi_needs": need, "check_problems": problems, "execstack_cleared": execstack_fixed,"file": path.name, "size": path.stat().st_size, "sha256": sha256(path),
-                                     "compile_s": round(time.time() - t1, 1), "constants": len(maps[g.role]),
+                                     "compile_s": round(time.time() - t1, 1), "constants": n_consts,
                                      "inductor": {k: v for k, v in opts.items() if k != "aot_inductor.metadata"}}
         log(f"  {t.name}/{path.name}: {path.stat().st_size / 1e6:.1f} MB in {time.time() - t1:.0f}s")
     record["total_s"] = round(time.time() - t0, 1)
@@ -328,9 +414,146 @@ def build(engine: str, precision: str, t: Target, out: Path, io: int = IO_VERSIO
     return record
 
 
-def _refake_constants(eps: dict) -> None:
+def _authors_maps(gs, eps: dict, path: Path | None) -> dict[str, dict[str, str]]:
+    """role -> {constant FQN: key of the authors' weights file}; refuses a constant the
+    pinned file does not hold with the same shape and dtype (so no weight stays inside),
+    or, for a package the host binds cast (``gs.weights_dtype``), with the same shape and
+    the dtype of that cast."""
+    import torch
+    from safetensors import safe_open
+
+    from .textbox import CASTS, authors_weight_map, check_pin, refuse_embedding
+
+    refuse_embedding(os.environ)
+    pin = gs.authors_weights
+    if path is None:
+        raise SystemExit(f"{gs.engine}: the builder did not say where the authors' {pin.file} is")
+    check_pin(path, pin)
+    with safe_open(str(path), framework="pt") as f:
+        stored = {k: (tuple(f.get_slice(k).get_shape()), f.get_slice(k).get_dtype()) for k in f.keys()}
+    maps = {}
+    for g in gs.graphs:
+        if g.role not in pin.prefix:
+            raise SystemExit(f"{gs.engine}/{g.role}: no FQN prefix for this role in the pin")
+        prefix, ep = pin.prefix[g.role], eps[g.role]
+        consts = {}
+        for spec in ep.graph_signature.input_specs:
+            if spec.target is None or spec.kind.name not in ("PARAMETER", "BUFFER", "CONSTANT_TENSOR"):
+                continue
+            consts[spec.target] = ep.state_dict.get(spec.target, ep.constants.get(spec.target))
+        wanted = {fqn[len(prefix):]: (tuple(t.shape), _ST_DTYPE[str(t.dtype).removeprefix("torch.")])
+                  for fqn, t in consts.items() if fqn.startswith(prefix) and isinstance(t, torch.Tensor)}
+        cast = CASTS[gs.weights_dtype] if gs.weights_dtype is not None else None
+        maps[g.role] = authors_weight_map(list(consts), prefix, stored, wanted, cast=cast)
+        how = f", cast to {cast} at load" if cast else ""
+        log(f"  {g.role}: {len(maps[g.role])} constants bound from the authors' {pin.file} ({pin.repo}@{pin.revision[:8]}){how}")
+    return maps
+
+
+def _onnx_maps(gs, eps: dict, path: Path | None) -> dict[str, dict[str, str]]:
+    """role -> {constant FQN: ONNX initializer name}; refuses a constant the pinned ONNX
+    file does not hold as a FLOAT raw initializer of the same shape. A lifted tensor
+    constant that is no initializer (YOLO's ``stride``, three numbers the graph folds) is
+    left out of the map; ``_check_bound`` refuses the package if it asks for one."""
+    from .detector import PREFIX, check_pin, onnx_initializers, onnx_weight_map, refuse_embedding
+
+    refuse_embedding(os.environ)
+    pin = gs.onnx_weights
+    if path is None:
+        raise SystemExit(f"{gs.engine}: the builder did not say where {pin.file} is")
+    check_pin(path, pin)
+    inits = onnx_initializers(path)
+    maps = {}
+    for g in gs.graphs:
+        ep = eps[g.role]
+        shapes, skipped = {}, []
+        for spec in ep.graph_signature.input_specs:
+            if spec.target is None or spec.kind.name not in ("PARAMETER", "BUFFER", "CONSTANT_TENSOR"):
+                continue
+            t = ep.state_dict.get(spec.target, ep.constants.get(spec.target))
+            key = spec.target[len(PREFIX):] if spec.target.startswith(PREFIX) else None
+            if spec.kind.name == "CONSTANT_TENSOR" and key not in inits and t is not None and t.numel() <= 16:
+                skipped.append(spec.target)
+                continue
+            shapes[spec.target] = tuple(t.shape)
+        maps[g.role] = onnx_weight_map(list(shapes), PREFIX, inits, shapes)
+        log(f"  {g.role}: {len(maps[g.role])} constants bound from {pin.file} ({pin.repo}@{pin.revision[:8]})"
+            + (f"; not weights: {skipped}" if skipped else ""))
+    return maps
+
+
+@contextlib.contextmanager
+def _no_inlined_weights(bound: set[str]):
+    """Inductor inlines a 1-d constant of at most 8 elements into the generated code
+    (``GraphLowering.can_inline_constant``): for a weight that would put its values inside
+    the package (YOLO's one-class ``cv3.*.2.bias``), and under the fake device it has no
+    values to read. While this is active, every constant named in ``bound`` stays a
+    package constant, bound at load like the others. Pinned to torch 2.13's
+    ``GraphLowering.get_attr``."""
+    import torch
+    from torch._inductor import graph as ig
+
+    orig = ig.GraphLowering.get_attr
+
+    def get_attr(self, target, args, kwargs):
+        if target in bound:
+            value = ig.getattr_recursive(self.module, target)
+            if isinstance(value, torch.Tensor):
+                return self.add_tensor_constant(value, target)
+        return orig(self, target, args, kwargs)
+
+    ig.GraphLowering.get_attr = get_attr
+    try:
+        yield
+    finally:
+        ig.GraphLowering.get_attr = orig
+
+
+def _check_bound(pt2: Path, wmap: dict[str, str], pin) -> int:
+    """The package's constants, all bound from the ONNX file by ``wmap``: refuses a
+    package that asks for a constant outside the map (it would hold it inside or fail to
+    load) or carries its weights inside. Returns how many constants it binds."""
+    from .verify import package_constants, weights_inside
+
+    fqns = package_constants(pt2)
+    unbound = sorted(set(fqns) - set(wmap))
+    if unbound:
+        raise SystemExit(f"{pt2}: constants without an ONNX initializer: {unbound[:5]} ({len(unbound)})")
+    if weights_inside(pt2, pin.size):
+        raise SystemExit(f"{pt2}: weights inside the package")
+    return len(fqns)
+
+
+def _real_tiny_constants(eps: dict, maps: dict[str, dict[str, str]], real_model, most: int = 16) -> set[str]:
+    """Put the real (CPU) value back into each lifted tensor constant that is no weight
+    (not in its role's map) and has at most ``most`` elements: under the fake mode it has
+    no data, and inductor reads such a constant to fold it. The FQN is
+    ``<prefix><attribute path on the model>``; returns the names set."""
+    import torch
+
+    from .detector import PREFIX
+
+    done = set()
+    for r, ep in eps.items():
+        for k, v in list(ep.constants.items()):
+            if k in maps[r] or not isinstance(v, torch.Tensor) or v.numel() > most:
+                continue
+            if not k.startswith(PREFIX):
+                raise SystemExit(f"{r}: constant {k} is not under {PREFIX!r}")
+            val = real_model
+            for part in k[len(PREFIX):].split("."):
+                val = val[int(part)] if part.isdigit() else getattr(val, part)
+            if not isinstance(val, torch.Tensor) or tuple(val.shape) != tuple(v.shape) or val.dtype != v.dtype:
+                raise SystemExit(f"{r}: constant {k}: no real tensor of shape {tuple(v.shape)} on the model")
+            ep.constants[k] = val.detach().clone()
+            done.add(k)
+    return done
+
+
+def _refake_constants(eps: dict, keep: set[str] = frozenset()) -> None:
     """Export puts the example inputs in its own FakeTensorMode; move the (fake) weights
-    into that mode too, or inductor sees two modes."""
+    into that mode too, or inductor sees two modes. Constants named in ``keep`` stay as
+    they are."""
     import torch
     from torch._subclasses.fake_tensor import FakeTensor
 
@@ -346,7 +569,7 @@ def _refake_constants(eps: dict) -> None:
             v = ep.state_dict[k]
             ep.state_dict[k] = torch.nn.Parameter(refake(v), requires_grad=False) if isinstance(v, torch.nn.Parameter) else refake(v)
         for k in list(ep.constants):
-            if isinstance(ep.constants[k], torch.Tensor):
+            if isinstance(ep.constants[k], torch.Tensor) and k not in keep:
                 ep.constants[k] = refake(ep.constants[k])
 
 

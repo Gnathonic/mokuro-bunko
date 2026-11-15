@@ -43,6 +43,7 @@ mod tests {
         let wants = vec![EngineWant {
             engine: "hayai-nova".into(),
             precision: "auto-accuracy".into(),
+            detector: None,
         }];
         assert!(write(dir.path(), &wants).unwrap());
         assert!(!write(dir.path(), &wants).unwrap());

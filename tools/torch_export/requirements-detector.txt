@@ -1,0 +1,19 @@
+# Build-time only: what the AnimeText detector builder (torch_export/detector.py) and its
+# gate (verify.py --pages) need on top of requirements-<variant>.txt. Never shipped.
+# Install into a directory of its own, without resolving dependencies (ultralytics would
+# pull in another torch):
+#   pip install --no-deps --target <dir> -r requirements-detector.txt
+# then PYTHONPATH=<dir> or TORCH_EXPORT_DETECTOR_PYLIB=<dir>.
+#
+# ultralytics 8.3.105 (the ONNX file's producer) maps the same 425 tensors, but its fuse()
+# leaves the fused conv weights as non-leaf tensors and AOTInductor (torch 2.13) refuses to
+# compile the graph; 8.4.212 is the version the spike measured (detector.ULTRALYTICS_VERSION).
+ultralytics==8.4.212
+onnx==1.23.2
+ml_dtypes==0.6.0
+protobuf==7.36.1
+# ultralytics imports cv2 at import time (the build container's venv has no OpenCV)
+opencv-python-headless==5.0.0.93
+# the gate's reference (verify.py --pages): ONNX Runtime on the CPU
+onnxruntime==1.30.0
+flatbuffers==25.12.19

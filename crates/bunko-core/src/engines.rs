@@ -64,6 +64,9 @@ pub struct EngineSpec {
     pub cpu_note: &'static str,
     /// Precision modes apply (`auto-accuracy`, `fp16`, ...).
     pub precision: bool,
+    /// The formats a row may force (`fp32`, `bf16`, `fp16`); empty when precision
+    /// modes do not apply. The auto modes resolve among these too.
+    pub precision_formats: &'static [&'static str],
     /// The recognizer reads whole text blocks: it may be paired with a block detector
     /// (it then finds the lines itself), as well as with a line detector.
     pub blocks: bool,
@@ -136,6 +139,7 @@ pub const ENGINES: &[EngineSpec] = &[
         cpu_only_reason: "",
         cpu_note: "",
         precision: true,
+        precision_formats: &["fp32", "bf16", "fp16"],
         blocks: false,
     },
     EngineSpec {
@@ -151,6 +155,7 @@ pub const ENGINES: &[EngineSpec] = &[
         cpu_only_reason: "",
         cpu_note: PADDLE_CPU_NOTE,
         precision: true,
+        precision_formats: &["fp32", "bf16", "fp16"],
         blocks: false,
     },
     EngineSpec {
@@ -166,10 +171,15 @@ pub const ENGINES: &[EngineSpec] = &[
         cpu_only_reason: "PP-OCRv6's CTC recognizer runs on the CPU",
         cpu_note: "",
         precision: false,
+        precision_formats: &[],
         blocks: false,
     },
-    // The text-box recognizers (muscgab): small networks without a decoder loop, on
-    // ONNX Runtime. Code Apache-2.0, weights CC BY-NC-SA 4.0.
+    // The text-box recognizers (muscgab): small networks without a decoder loop. On the
+    // CPU they run on ONNX Runtime; both also run on a GPU through the libtorch backend
+    // pack (the authors' weights bound to weightless graphs of ours), with the CPU as
+    // their fallback; there nar-small reads at fp32 or fp16 (the authors' fp32 weights
+    // cast at load), charspot-small at fp32, never bf16. Code Apache-2.0, weights
+    // CC BY-NC-SA 4.0.
     EngineSpec {
         id: "charspot-small",
         label: "manga-ocr-charspot-small (muscgab)",
@@ -180,9 +190,10 @@ pub const ENGINES: &[EngineSpec] = &[
         class: LicenseClass::NonCommercial,
         detector: None,
         patch_budget: false,
-        cpu_only_reason: "manga-ocr-charspot-small runs on the CPU",
+        cpu_only_reason: "",
         cpu_note: "",
         precision: false,
+        precision_formats: &[],
         blocks: true,
     },
     EngineSpec {
@@ -195,9 +206,10 @@ pub const ENGINES: &[EngineSpec] = &[
         class: LicenseClass::NonCommercial,
         detector: None,
         patch_budget: false,
-        cpu_only_reason: "manga-ocr-nar-small runs on the CPU",
+        cpu_only_reason: "",
         cpu_note: "",
-        precision: false,
+        precision: true,
+        precision_formats: &["fp32", "fp16"],
         blocks: true,
     },
 ];
@@ -244,6 +256,9 @@ pub const DETECTORS: &[DetectorSpec] = &[
     // A block detector: it boxes whole pieces of text, and the engine finds the lines
     // in each. Only for the engines that read blocks ([`EngineSpec::blocks`]). Not the
     // 0.5.x `animetext` (one line per block, whatever the engine): that id stays removed.
+    // On the CPU it runs on ONNX Runtime; on an NVIDIA or AMD GPU it also runs through
+    // the libtorch backend pack (a compiled graph of ours bound to the same ONNX file's
+    // weights, `detector-torch-v1`), with the CPU as its fallback.
     DetectorSpec {
         id: "animetext-blocks",
         label: "AnimeText YOLO12-x block detector (deepghs)",
@@ -252,7 +267,7 @@ pub const DETECTORS: &[DetectorSpec] = &[
         license: "GPL-3.0",
         class: LicenseClass::Gpl,
         line_level: false,
-        cpu_only_reason: "AnimeText runs on the CPU",
+        cpu_only_reason: "",
     },
 ];
 
@@ -387,6 +402,20 @@ pub const PRECISION_MODES: &[&str] = &[
 ];
 pub const DEFAULT_PRECISION_MODE: &str = MODE_ACCURACY;
 
+/// The modes a row of engine `id` may ask for, in [`PRECISION_MODES`] order: the auto
+/// modes and the formats it runs at (nar-small has no bf16). Empty for an engine whose
+/// precision is fixed, or an unknown one.
+pub fn engine_modes(id: &str) -> Vec<&'static str> {
+    let Some(spec) = engine(id).filter(|e| e.precision) else {
+        return Vec::new();
+    };
+    PRECISION_MODES
+        .iter()
+        .copied()
+        .filter(|m| !is_forced_precision(m) || spec.precision_formats.contains(m))
+        .collect()
+}
+
 pub fn is_forced_precision(mode: &str) -> bool {
     PRECISIONS.contains(&mode)
 }
@@ -458,5 +487,49 @@ mod tests {
             app_js.contains(&format!("const PADDLE_CPU_NOTE = '{PADDLE_CPU_NOTE}';")),
             "web/app/app.js carries another PADDLE_CPU_NOTE"
         );
+    }
+
+    /// A precision engine runs at fp32 at least (the always-supported fallback); an
+    /// engine with a fixed precision lists no format and offers no mode.
+    #[test]
+    fn precision_formats_follow_the_precision_flag() {
+        for e in ENGINES {
+            assert_eq!(e.precision, !e.precision_formats.is_empty(), "{}", e.id);
+            assert!(
+                !e.precision || e.precision_formats.contains(&PRECISION_FP32),
+                "{}",
+                e.id
+            );
+            assert!(
+                e.precision_formats.iter().all(|f| PRECISIONS.contains(f)),
+                "{}",
+                e.id
+            );
+        }
+        assert_eq!(engine_modes("hayai-nova"), PRECISION_MODES);
+        assert_eq!(
+            engine_modes("nar-small"),
+            [MODE_ACCURACY, MODE_BALANCED, MODE_SPEED, "fp32", "fp16"]
+        );
+        assert!(engine_modes("ppocr-manga").is_empty());
+        assert!(engine_modes("no-such-engine").is_empty());
+    }
+
+    /// nar-small may leave the CPU (the libtorch GPU route), with no caution when the
+    /// CPU is picked for it.
+    #[test]
+    fn nar_small_may_run_on_a_gpu() {
+        let nar = engine("nar-small").unwrap();
+        assert!(!nar.cpu_only());
+        assert_eq!(nar.cpu_note, "");
+    }
+
+    /// charspot-small may leave the CPU too (its libtorch GPU route), with no caution
+    /// when the CPU is picked for it (Q27).
+    #[test]
+    fn charspot_small_may_run_on_a_gpu() {
+        let c = engine("charspot-small").unwrap();
+        assert!(!c.cpu_only());
+        assert_eq!(c.cpu_note, "");
     }
 }
