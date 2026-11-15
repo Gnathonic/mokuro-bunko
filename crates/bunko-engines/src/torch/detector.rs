@@ -191,7 +191,8 @@ mod tests {
     struct Parity {
         /// The largest corner difference over the paired blocks.
         worst: f32,
-        /// Crop edges (`floor` x0/y0, `ceil` x1/y1) that differ over the paired blocks.
+        /// Crop edges (`page::block_crop`: each edge rounded to the nearest pixel, as the
+        /// page is cropped) that differ over the paired blocks.
         edges_moved: usize,
         /// The pairs are not in the CPU route's order.
         reordered: bool,
@@ -204,12 +205,22 @@ mod tests {
     }
 
     /// Pair each CPU block with the unused GPU block nearest it (the largest corner
-    /// difference), in the CPU route's order; `None` when the counts differ.
-    fn match_blocks(cpu: &[TextBlock], gpu: &[TextBlock]) -> Option<Parity> {
+    /// difference), in the CPU route's order, on a `(w, h)` page; `None` when the counts
+    /// differ.
+    fn match_blocks(
+        cpu: &[TextBlock],
+        gpu: &[TextBlock],
+        (w, h): (usize, usize),
+    ) -> Option<Parity> {
         if cpu.len() != gpu.len() {
             return None;
         }
-        let edges = |b: &[f32; 4]| [b[0].floor(), b[1].floor(), b[2].ceil(), b[3].ceil()];
+        // the crop the page stage cuts (a block with none counts as all four moved)
+        let edges = |b: &[f32; 4]| {
+            crate::page::block_crop(b, w, h)
+                .map(|c| c.map(Some))
+                .unwrap_or([None; 4])
+        };
         let off = |a: &[f32; 4], b: &[f32; 4]| {
             a.iter()
                 .zip(b)
@@ -296,11 +307,12 @@ mod tests {
 
     #[test]
     fn parity_matches_blocks_as_a_set() {
+        const PAGE: (usize, usize) = (640, 480);
         let a = block([10.2, 20.5, 30.7, 40.0]);
         let b = block([100.0, 5.0, 150.5, 60.25]);
         // the same blocks: nothing worse, nothing moved, the order kept
         assert_eq!(
-            match_blocks(&[a, b], &[a, b]),
+            match_blocks(&[a, b], &[a, b], PAGE),
             Some(Parity {
                 worst: 0.0,
                 edges_moved: 0,
@@ -309,7 +321,7 @@ mod tests {
         );
         // the same set in another order still pairs up
         assert_eq!(
-            match_blocks(&[a, b], &[b, a]),
+            match_blocks(&[a, b], &[b, a], PAGE),
             Some(Parity {
                 worst: 0.0,
                 edges_moved: 0,
@@ -318,21 +330,36 @@ mod tests {
         );
         // a corner 0.005 px away whose crop edge stays put, then one that crosses a pixel
         let near = block([10.205, 20.5, 30.7, 40.0]);
-        let p = match_blocks(&[a], &[near]).unwrap();
+        let p = match_blocks(&[a], &[near], PAGE).unwrap();
         assert!(
             (p.worst - 0.005).abs() < 1e-4 && p.edges_moved == 0,
             "{p:?}"
         );
-        let crossed = block([10.2, 20.5, 30.7, 40.004]);
-        let p = match_blocks(&[a], &[crossed]).unwrap();
+        // a hair either side of a whole pixel is the same edge (53.0 on a GPU route,
+        // 53.000015 on the CPU's), where `ceil` made them 53 and 54
+        let on = block([10.2, 20.5, 30.7, 53.0]);
+        let hair = block([10.2, 20.5, 30.7, 53.000_015]);
+        let p = match_blocks(&[hair], &[on], PAGE).unwrap();
+        assert_eq!(p.edges_moved, 0, "{p:?}");
+        assert!(p.passes());
+        // a half pixel crossed is a moved edge: 20.5 rounds to 21, 20.496 to 20
+        let crossed = block([10.2, 20.496, 30.7, 40.0]);
+        let p = match_blocks(&[a], &[crossed], PAGE).unwrap();
         assert_eq!(p.edges_moved, 1, "{p:?}");
         assert!(!p.passes());
+        // the page clamps both crops alike: 640.4 and 640.6 both end at the page's 640
+        let past = block([600.0, 400.0, 640.4, 470.0]);
+        let further = block([600.0, 400.0, 640.6, 470.0]);
+        assert_eq!(
+            match_blocks(&[past], &[further], PAGE).unwrap().edges_moved,
+            0
+        );
         // another count is another set
-        assert_eq!(match_blocks(&[a, b], &[a]), None);
-        assert!(match_blocks(&[], &[]).unwrap().passes());
+        assert_eq!(match_blocks(&[a, b], &[a], PAGE), None);
+        assert!(match_blocks(&[], &[], PAGE).unwrap().passes());
         // a block more than 0.01 px off fails the gate (it still pairs, to report how far)
         let far = block([10.2, 20.5, 30.75, 40.0]);
-        assert!(!match_blocks(&[a], &[far]).unwrap().passes());
+        assert!(!match_blocks(&[a], &[far], PAGE).unwrap().passes());
     }
 
     #[test]
@@ -379,8 +406,8 @@ mod tests {
     /// list file of them, one path a line relative to the list) detected by AnimeText on
     /// `gpu:0` through `bt_detect_blocks` and by [`bunko_ocr::animetext::AnimeText`] (ONNX
     /// Runtime, CPU) must give the same block set: the same count, every corner within
-    /// [`CORNER`] page px and no crop edge moved (`floor` x0/y0, `ceil` x1/y1, as the page
-    /// is cropped). A page neither route can decode (AVIF) is skipped and listed. The
+    /// [`CORNER`] page px and no crop edge moved (each edge rounded to the nearest pixel,
+    /// as the page is cropped: `page::block_crop`). A page neither route can decode (AVIF) is skipped and listed. The
     /// variables are this test's own (the server reads none of them): `MOKURO_TORCH_PACK`
     /// (a pack with `bt_detect_blocks`), `MOKURO_ANIMETEXT_TORCH_PACKAGE` (the dir holding
     /// `detector.pt2`) and `MOKURO_ANIMETEXT_ONNX` (the mirrored `animetext_yolo12x.onnx`).
@@ -458,7 +485,7 @@ mod tests {
             };
             assert_eq!(ran(&gi), ran(&ci), "{}", f.display());
             blocks += c.len();
-            match match_blocks(&c, &g) {
+            match match_blocks(&c, &g, (page.width(), page.height())) {
                 Some(p) if p.passes() => {
                     worst = worst.max(p.worst);
                     reordered += usize::from(p.reordered);

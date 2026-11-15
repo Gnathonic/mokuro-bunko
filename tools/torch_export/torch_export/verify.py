@@ -134,12 +134,42 @@ def same_chars(got: dict, want: dict, tol: float = 0.5) -> bool:
     return True
 
 
-def crop_edges(b) -> tuple[int, int, int, int]:
-    """The pixels a block's crop starts and ends at (as ``page.rs`` crops):
-    ``(floor(x0), floor(y0), ceil(x1), ceil(y1))``."""
+def _round_edge(v: float) -> int:
+    """``v`` rounded to the nearest integer, half away from zero (Rust ``f64::round``; not
+    Python's ``round``, which rounds half to even). Exact: ``v - floor(v)`` loses nothing."""
     import math
 
-    return math.floor(b[0]), math.floor(b[1]), math.ceil(b[2]), math.ceil(b[3])
+    if v < 0:
+        return -_round_edge(-v)
+    lo = math.floor(v)
+    return lo + 1 if v - lo >= 0.5 else lo
+
+
+def _crop_span(lo: float, hi: float, limit: int) -> tuple[int, int] | None:
+    """``page.rs`` ``crop_span``: ``lo..hi`` in whole pixels of an axis of ``limit``,
+    each end rounded to the nearest pixel and clamped to ``0..=limit``; a span with any
+    extent on the page keeps at least one pixel; None for one with none (or a NaN end)."""
+    import math
+
+    if math.isnan(lo) or math.isnan(hi) or min(hi, limit) <= max(lo, 0.0):
+        return None
+    a = min(max(_round_edge(lo), 0), limit)
+    b = min(max(_round_edge(hi), 0), limit)
+    if b > a:
+        return a, b
+    return (a, a + 1) if a < limit else (limit - 1, limit)
+
+
+def crop_edges(b, page: tuple[int, int]) -> tuple[int, int, int, int] | None:
+    """The pixels a block's crop starts and ends at on a ``(w, h)`` page, as ``page.rs``
+    ``block_crop`` crops: ``(x0, y0, x1, y1)``, each edge rounded to the nearest pixel
+    (half away from zero, never forced up or down), clamped to the page, at least one
+    pixel each way; None for a box with no extent on the page."""
+    x = _crop_span(float(b[0]), float(b[2]), int(page[0]))
+    y = _crop_span(float(b[1]), float(b[3]), int(page[1]))
+    if x is None or y is None:
+        return None
+    return x[0], y[0], x[1], y[1]
 
 
 def package_constants(pt2: Path) -> list[str]:
@@ -660,10 +690,10 @@ def blocks_from_output(out, scale: float, page: tuple[int, int]) -> list[tuple[l
     return [b for b in kept if not part(b)]
 
 
-def compare_blocks(ref, got) -> tuple[bool, float, int]:
-    """(same block set, largest corner difference, crop edges moved). Blocks pair up by
-    the largest overlap (each used once); a set differs when the counts differ or a pair
-    overlaps by IoU 0.9 or less."""
+def compare_blocks(ref, got, page: tuple[int, int]) -> tuple[bool, float, int]:
+    """(same block set, largest corner difference, crop edges moved) on a ``(w, h)``
+    page. Blocks pair up by the largest overlap (each used once); a set differs when the
+    counts differ or a pair overlaps by IoU 0.9 or less."""
     if len(ref) != len(got):
         return False, float("inf"), 0
     used, worst, moved = set(), 0.0, 0
@@ -675,7 +705,8 @@ def compare_blocks(ref, got) -> tuple[bool, float, int]:
         used.add(best[1])
         g = got[best[1]][0]
         worst = max(worst, max(abs(x - y) for x, y in zip(b, g)))
-        moved += sum(x != y for x, y in zip(crop_edges(b), crop_edges(g)))
+        cb, cg = crop_edges(b, page), crop_edges(g, page)
+        moved += 4 if (cb is None) != (cg is None) else sum(x != y for x, y in zip(cb or (), cg or ()))
     return True, worst, moved
 
 
@@ -802,7 +833,7 @@ def _verify_detector(out: Path, target: str, pages: Path, onnx_file: Path, devic
             if largest is None or x.shape[1] * x.shape[2] > largest.shape[1] * largest.shape[2]:
                 largest = x
             rb, gb = blocks_from_output(ref, scale, page), blocks_from_output(got, scale, page)
-            same, worst, moved = compare_blocks(rb, gb)
+            same, worst, moved = compare_blocks(rb, gb, page)
             res["blocks"] += len(rb)
             if same:
                 res["identical_sets"] += 1

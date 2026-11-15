@@ -23,7 +23,7 @@ use bunko_layout::records::{RawLine, RawPage};
 use bunko_layout::road::{EngineRoad, quad_extents};
 use bunko_layout::script::normalize_text;
 use bunko_layout::sidecar::{MOKURO_FORMAT_VERSION, Page, blocks_page, finish_page};
-use bunko_ocr::blocks::BlockDetector;
+use bunko_ocr::blocks::{BlockDetector, TextBlock};
 use bunko_ocr::image::{BgrImage, decode_bgr, decode_size};
 use bunko_ocr::lines::{DetectorInfo, RawPage as OcrRawPage};
 use bunko_ocr::ppocr::{LayoutHooks, Line, PpocrPageReader, ReadLines};
@@ -259,6 +259,66 @@ fn block_plans(
     plans
 }
 
+/// A crop edge in whole pixels: `v` rounded to the nearest pixel (half away from zero),
+/// clamped to `0..=limit`. Never forced up or down: an edge a hair either side of a
+/// whole pixel (53.0 on one route, 53.000015 on another) lands on that pixel either way.
+fn crop_edge(v: f64, limit: usize) -> usize {
+    v.round().clamp(0.0, limit as f64) as usize
+}
+
+/// The pixels `lo..hi` crops along one axis of `limit` pixels ([`crop_edge`] at both
+/// ends). A span with any extent on the page keeps at least one pixel, which rounding
+/// alone could take away (`10.6..10.9` rounds to `11..11`): the crop is then the pixel
+/// its rounded edge starts, or the page's last one. `None` for a span with no extent on
+/// the page, or a NaN edge.
+fn crop_span(lo: f64, hi: f64, limit: usize) -> Option<(usize, usize)> {
+    if lo.is_nan() || hi.is_nan() || hi.min(limit as f64) <= lo.max(0.0) {
+        return None;
+    }
+    let (a, b) = (crop_edge(lo, limit), crop_edge(hi, limit));
+    Some(if b > a {
+        (a, b)
+    } else if a < limit {
+        (a, a + 1)
+    } else {
+        (limit - 1, limit)
+    })
+}
+
+/// Where a block detector's box (`[x0, y0, x1, y1]`, page px) is cropped on a `w` x `h`
+/// page: `[x0, y0, x1, y1]` in whole pixels ([`crop_span`] on each axis), `None` for a
+/// box with no extent on the page. The detector gate compares crops by this rule.
+pub(crate) fn block_crop(bbox: &[f32; 4], w: usize, h: usize) -> Option<[usize; 4]> {
+    let (x0, x1) = crop_span(f64::from(bbox[0]), f64::from(bbox[2]), w)?;
+    let (y0, y1) = crop_span(f64::from(bbox[1]), f64::from(bbox[3]), h)?;
+    Some([x0, y0, x1, y1])
+}
+
+/// A block detector's page cut into its blocks' crops (RGB, by [`block_crop`]); a block
+/// with no extent on the page has none.
+fn cut_blocks(image: &BgrImage, blocks: &[TextBlock]) -> Blocked {
+    let (w, h, page) = (image.width(), image.height(), image.as_raw());
+    let (mut crops, mut places) = (Vec::new(), Vec::new());
+    for block in blocks {
+        let Some([x0, y0, x1, y1]) = block_crop(&block.bbox, w, h) else {
+            continue;
+        };
+        let mut data = Vec::with_capacity((x1 - x0) * (y1 - y0) * 3);
+        for y in y0..y1 {
+            for px in page[(y * w + x0) * 3..(y * w + x1) * 3].as_chunks::<3>().0 {
+                data.extend_from_slice(&[px[2], px[1], px[0]]);
+            }
+        }
+        crops.push(Rgb {
+            width: x1 - x0,
+            height: y1 - y0,
+            data,
+        });
+        places.push((x0 as f64, y0 as f64, f64::from(block.score)));
+    }
+    Blocked { crops, places }
+}
+
 /// The upright crop of one block: the box of its lines and of the layout's block box
 /// (which reaches over the block's ruby), a little margin around it, cut at the page.
 fn cut_block(
@@ -284,15 +344,15 @@ fn cut_block(
         .collect();
     thick.sort_by(f64::total_cmp);
     let pad = BLOCK_MARGIN_EM * thick.get(thick.len() / 2).copied().unwrap_or(0.0);
-    let edge = |v: f64, limit: usize| v.clamp(0.0, limit as f64) as usize;
-    let (cx0, cy0) = (
-        edge((x0 - pad).floor(), page.width),
-        edge((y0 - pad).floor(), page.height),
-    );
-    let (cx1, cy1) = (
-        edge((x1 + pad).ceil(), page.width).max(cx0),
-        edge((y1 + pad).ceil(), page.height).max(cy0),
-    );
+    // A box with no extent on the page (no lines) gives an empty crop, as before.
+    let span = |lo: f64, hi: f64, limit: usize| {
+        crop_span(lo, hi, limit).unwrap_or_else(|| {
+            let at = crop_edge(lo, limit);
+            (at, at)
+        })
+    };
+    let (cx0, cx1) = span(x0 - pad, x1 + pad, page.width);
+    let (cy0, cy1) = span(y0 - pad, y1 + pad, page.height);
     let (w, h) = (cx1 - cx0, cy1 - cy0);
     let mut data = Vec::with_capacity(w * h * 3);
     for y in cy0..cy1 {
@@ -404,32 +464,7 @@ impl Engines {
             Ok((found, _)) => found,
             Err(e) => return work.fail(e.to_string()),
         };
-        let (w, h, page) = (image.width(), image.height(), image.as_raw());
-        let (mut crops, mut places) = (Vec::new(), Vec::new());
-        for block in &blocks {
-            let edge = |v: f32, limit: usize| v.clamp(0.0, limit as f32) as usize;
-            let (x0, y0) = (
-                edge(block.bbox[0].floor(), w),
-                edge(block.bbox[1].floor(), h),
-            );
-            let (x1, y1) = (edge(block.bbox[2].ceil(), w), edge(block.bbox[3].ceil(), h));
-            if x1 <= x0 || y1 <= y0 {
-                continue;
-            }
-            let mut data = Vec::with_capacity((x1 - x0) * (y1 - y0) * 3);
-            for y in y0..y1 {
-                for px in page[(y * w + x0) * 3..(y * w + x1) * 3].as_chunks::<3>().0 {
-                    data.extend_from_slice(&[px[2], px[1], px[0]]);
-                }
-            }
-            crops.push(Rgb {
-                width: x1 - x0,
-                height: y1 - y0,
-                data,
-            });
-            places.push((x0 as f64, y0 as f64, f64::from(block.score)));
-        }
-        work.state = State::Blocked(Box::new(Blocked { crops, places }));
+        work.state = State::Blocked(Box::new(cut_blocks(image, &blocks)));
         work
     }
 
@@ -631,5 +666,96 @@ impl Engines {
             }
             _ => work.fail("post got a page that was not read by the engine"),
         }
+    }
+}
+
+#[cfg(test)]
+mod crop_tests {
+    use super::*;
+
+    #[test]
+    fn an_edge_rounds_to_the_nearest_pixel() {
+        // a hair either side of a whole pixel lands on it (one GPU route read 53.0
+        // where the CPU read 53.000015; `ceil` made those 53 and 54)
+        assert_eq!(crop_edge(f64::from(53.000_015f32), 100), 53);
+        assert_eq!(crop_edge(53.0, 100), 53);
+        assert_eq!(crop_edge(f64::from(52.999_985f32), 100), 53);
+        assert_eq!(crop_edge(52.6, 100), 53);
+        assert_eq!(crop_edge(52.4, 100), 52);
+        // half away from zero, neither up nor down by rule
+        assert_eq!(crop_edge(52.5, 100), 53);
+        assert_eq!(
+            block_crop(&[10.6, 52.4, 30.4, 52.6 + 10.0], 100, 100),
+            Some([11, 52, 30, 63])
+        );
+        assert_eq!(
+            block_crop(&[0.0, 53.000_015, 20.0, 60.0], 100, 100),
+            block_crop(&[0.0, 53.0, 20.0, 60.0], 100, 100)
+        );
+    }
+
+    #[test]
+    fn a_box_on_the_page_keeps_a_pixel_where_rounding_would_collapse_it() {
+        // 10.6..10.9 rounds to 11..11: one pixel stays
+        assert_eq!(crop_span(10.6, 10.9, 100), Some((11, 12)));
+        assert_eq!(crop_span(10.4, 10.45, 100), Some((10, 11)));
+        // collapsed at the page's far edge: the last pixel
+        assert_eq!(crop_span(99.6, 99.9, 100), Some((99, 100)));
+        assert_eq!(crop_span(99.7, 140.0, 100), Some((99, 100)));
+        // collapsed at the near edge
+        assert_eq!(crop_span(-3.0, 0.2, 100), Some((0, 1)));
+        assert_eq!(
+            block_crop(&[10.6, 20.0, 10.9, 20.3], 50, 50),
+            Some([11, 20, 12, 21])
+        );
+        // no extent on the page, or none at all: no crop
+        assert_eq!(crop_span(10.0, 10.0, 100), None);
+        assert_eq!(crop_span(12.0, 11.0, 100), None);
+        assert_eq!(crop_span(-5.0, -2.0, 100), None);
+        assert_eq!(crop_span(-0.3, 0.0, 100), None);
+        assert_eq!(crop_span(100.0, 120.0, 100), None);
+        assert_eq!(crop_span(0.0, 5.0, 0), None);
+        assert_eq!(crop_span(f64::NAN, 5.0, 100), None);
+        assert_eq!(crop_span(0.0, f64::NAN, 100), None);
+        assert_eq!(block_crop(&[0.0, 0.0, 10.0, f32::NAN], 50, 50), None);
+    }
+
+    #[test]
+    fn a_crop_is_clamped_to_the_page() {
+        assert_eq!(
+            block_crop(&[-4.6, -0.4, 640.7, 960.2], 640, 960),
+            Some([0, 0, 640, 960])
+        );
+        assert_eq!(crop_span(-1.5, 3.5, 3), Some((0, 3)));
+        assert_eq!(crop_span(2.6, 9.0, 3), Some((2, 3)));
+    }
+
+    #[test]
+    fn a_detected_block_is_cropped_by_the_rounding_rule() {
+        // every pixel says where it is: B = x, G = y
+        let (w, h) = (8usize, 6usize);
+        let mut raw = Vec::with_capacity(w * h * 3);
+        for y in 0..h {
+            for x in 0..w {
+                raw.extend_from_slice(&[x as u8, y as u8, 7]);
+            }
+        }
+        let page = BgrImage::from_raw(w, h, raw).unwrap();
+        let blocks = [
+            [1.4, 2.000_015, 4.6, 4.0],
+            [7.6, 0.0, 7.9, 1.2],
+            [3.0, 3.0, 3.0, 5.0],
+        ]
+        .map(|bbox| TextBlock { bbox, score: 0.5 });
+        let b = cut_blocks(&page, &blocks);
+        // the zero-width block has no crop; the sliver at the far edge keeps the last column
+        assert_eq!(b.places, [(1.0, 2.0, 0.5), (7.0, 0.0, 0.5)]);
+        let (first, second) = (&b.crops[0], &b.crops[1]);
+        assert_eq!((first.width, first.height), (4, 2));
+        // RGB out: R = 7, G = y, B = x; the first pixel is (1, 2), the last (4, 3)
+        assert_eq!(&first.data[..3], &[7, 2, 1]);
+        assert_eq!(&first.data[first.data.len() - 3..], &[7, 3, 4]);
+        assert_eq!((second.width, second.height), (1, 1));
+        assert_eq!(second.data, [7, 0, 7]);
     }
 }
