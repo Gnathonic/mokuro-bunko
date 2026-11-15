@@ -180,8 +180,9 @@ fn a_gpu_package_needs_the_weights_it_binds() {
 
 /// A text-box row on AnimeText over a pack that detects blocks on its GPU: the detector's
 /// package is a row of the check, and `models download` fetches it ahead of the first
-/// session (here it is on disk already; downloads are off). Without a package for the
-/// card the detector reads on the CPU, which doctor says.
+/// session (here it is on disk already; downloads are off). Before it is on disk the
+/// detector reads on the CPU when the release has no package for the card, which doctor
+/// says, and the package is missing when the release has one.
 #[cfg(all(target_os = "linux", feature = "nc-models", feature = "gpl-models"))]
 #[test]
 fn a_block_detectors_package_is_checked_and_fetched() {
@@ -195,10 +196,29 @@ fn a_block_detectors_package_is_checked_and_fetched() {
     }
     let models = env.storage().join("models");
     let line = packages_line(&env);
-    assert!(
-        line.contains("animetext-blocks detects on the CPU (gpu:0 has no AnimeText package"),
-        "{line}"
-    );
+    // The fake card is sm_80; once detector-torch-v1's rows are compiled in, the release
+    // has a package for it.
+    let rows: serde_json::Value = serde_json::from_str(include_str!(
+        "../../bunko-ocr/src/detector_torch_models.json"
+    ))
+    .unwrap();
+    let released = rows["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|f| f["target"] == "linux-cuda-sm_80");
+    if released {
+        assert!(
+            line.contains(" FAIL  Compiled packages")
+                && line.contains("NOT DOWNLOADED: animetext-blocks fp32 on gpu:0"),
+            "{line}"
+        );
+    } else {
+        assert!(
+            line.contains("animetext-blocks detects on the CPU (gpu:0 has no AnimeText package"),
+            "{line}"
+        );
+    }
     let package = models.join("torch/animetext-blocks/fp32/linux-cuda-sm_80");
     std::fs::create_dir_all(package.join("detector.pt2")).unwrap();
     let line = packages_line(&env);
@@ -215,11 +235,23 @@ fn a_block_detectors_package_is_checked_and_fetched() {
     let text = stdout(&out);
     // The ONNX file both routes read is one of the row's files (offline: it fails).
     assert!(text.contains("animetext/yolo12x"), "{text}");
-    assert!(
-        text.contains(&format!(
-            "animetext-blocks fp32 on gpu:0 (beside nar-small): {}",
-            package.display()
-        )),
-        "{text}"
-    );
+    if released {
+        // The fake package is not the release's file, so the release's is fetched
+        // (offline: it fails, naming where it comes from).
+        assert!(
+            text.contains("animetext-blocks note: its package for gpu:0 could not be fetched")
+                && text.contains(
+                    "releases/download/detector-torch-v1/animetext-blocks_fp32_linux-cuda-sm_80_detector.pt2"
+                ),
+            "{text}"
+        );
+    } else {
+        assert!(
+            text.contains(&format!(
+                "animetext-blocks fp32 on gpu:0 (beside nar-small): {}",
+                package.display()
+            )),
+            "{text}"
+        );
+    }
 }
