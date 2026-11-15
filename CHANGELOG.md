@@ -333,6 +333,13 @@
   `fp16`; a row with `precision: bf16` is refused (`nar-small has no bf16; use fp16 or
   an auto mode`), and a forced `fp16` row is never given to a machine without a card
   that runs it.
+- **Text-box crops round each edge to the nearest pixel** instead of widening it
+  outward, so a block detected on a GPU and on the CPU is cut the same way (a box
+  edge of 53.0 against 53.000015 no longer becomes a 1 px wider crop). It applies to
+  `nar-small` and `charspot-small` blocks; line-reading engines such as `hayai-nova`
+  are unchanged. On JMangaBench_Read the change is noise: nar-small on
+  `animetext-blocks` 96.73 → 96.71 (95% CI −0.13 to +0.09), on the default detector
+  95.84 → 95.79 (CI −0.11 to +0.01). Volumes already read are not re-read.
 - **`charspot-small` reads on an NVIDIA or AMD GPU** too, with the libtorch backend
   pack (fp32: the same characters, the same reading order and boxes within half a
   pixel of the CPU's); elsewhere it reads on the CPU as before. On a card two compiled
