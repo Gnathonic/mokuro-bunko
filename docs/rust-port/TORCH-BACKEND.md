@@ -407,11 +407,27 @@ differing at fp16.
 | `linux-rocm-gfx1100`, `gfx1101`, `gfx1102`, `gfx1200` | built, unverified | none; shipped because the verified neighbours passed |
 | `linux-cuda-sm_75`, `windows-cuda-sm_75` | built, unverified | none; exercised only through PTX JIT on newer cards |
 
-The AnimeText detector (`detector-torch-v1`) has no target list yet. Its gate keeps its
-tolerance (corners within 0.01 page px, no crop edge moved), and its crop edges now round
-to the nearest pixel instead of `floor`/`ceil` (TEXTBOX-GPU.md §20), so the packages are
-gated again under that rule; the stage step fills in the list. A target without a package
-detects on the CPU.
+#### Verified targets of the detector packages (`detector-torch-v1`)
+
+animetext-blocks fp32, one package for each of the 10 targets. "Verified" means the package
+passed the AnimeText gate on a card of that target: on each of 387 pages, the same block set
+as ONNX Runtime on the CPU, every corner within 0.01 page px (the worst was 0.0007 px), and
+no crop edge moved. Crop edges round to the nearest pixel (TEXTBOX-GPU.md §20). Under the
+earlier `floor`/`ceil` rule one edge on one page moved on the gfx1201 and sm_80 cards; under
+the nearest-pixel rule every page passes there. The gate in the table is the Rust one
+(`animetext_torch_parity`) unless the row says otherwise.
+
+| target | status | cards |
+|---|---|---|
+| `linux-rocm-gfx1201` | verified | RDNA4 (gfx1201) |
+| `linux-cuda-sm_80` | verified | Ampere-class and newer (an sm_89 card) |
+| `linux-rocm-gfx1030` | verified, under the earlier `floor`/`ceil` edge rule (not re-run) | RDNA2 (gfx1030), and a gfx1032 card through the `gfx1030` HSA override |
+| `windows-cuda-sm_80` | verified through the Python gate only (`verify.py`), under the earlier edge rule | an sm_86 card; no Windows build of the Rust runtime exists, so the Rust gate cannot run there |
+| `linux-rocm-gfx1100`, `gfx1101`, `gfx1102`, `gfx1200` | built, unverified | none; shipped because the verified neighbours passed |
+| `linux-cuda-sm_75` | built, unverified | none; its Rust gate passed through PTX JIT on an sm_89 card |
+| `windows-cuda-sm_75` | built, unverified | none; its Python gate passed through PTX JIT on an sm_86 card |
+
+A GPU outside these targets detects on the CPU.
 
 #### Runtime libraries the packages need (for the packs, stream C)
 

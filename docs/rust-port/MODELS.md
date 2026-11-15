@@ -259,9 +259,9 @@ and fp16 is recorded as `ocr_engine.precision = "fp16"`, which re-reads nothing.
 
 Which targets carry these packages, and which of them were verified on a card, is the
 table in [TORCH-BACKEND.md](TORCH-BACKEND.md#verified-targets-of-the-text-box-packages-textbox-torch-v1).
-The detector's target list is not settled (§2.5): it is filled in once the packages pass
-the gate again with crop edges rounded to the nearest pixel, and a target without a
-detector package detects on the CPU.
+The detector's packages (§2.5) cover the same 10 targets; which of them were verified on
+a card is the table in
+[TORCH-BACKEND.md](TORCH-BACKEND.md#verified-targets-of-the-detector-packages-detector-torch-v1).
 
 ### 2.5 The `detector-torch-v1` release: AnimeText on a GPU
 
@@ -290,7 +290,10 @@ with no card to test, on its verified neighbours from the same exporter commit):
 same block set as ONNX Runtime on the CPU on every one of at least 300 pages, every
 corner within 0.01 page px, and no crop edge moved (a block's crop edges round to the
 nearest pixel, half away from zero, on both routes). A target that fails is left out,
-and that GPU detects on the CPU.
+and that GPU detects on the CPU. All 10 targets ship: gfx1201, gfx1030 and Linux sm_80
+were verified on cards, Windows sm_80 through the Python gate only (no Windows build of
+the Rust runtime exists), and the others through their verified neighbours
+([TORCH-BACKEND.md](TORCH-BACKEND.md#verified-targets-of-the-detector-packages-detector-torch-v1)).
 
 The package is compiled Ultralytics code, so it is **AGPL-3.0**, and it goes only in its
 own pre-release `detector-torch-v1` (never in `textbox-torch-v1`), with a `NOTICE.md`
