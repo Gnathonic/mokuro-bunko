@@ -419,8 +419,11 @@ fn reader_change(c: &IndexChange) -> bool {
 
 /// A main or layer sidecar: `.mokuro`, `.mokuro.gz`, `.<layer>.mokuro`.
 fn is_sidecar(rel: &RelPath) -> bool {
-    let n = last_seg(rel).to_ascii_lowercase();
-    n.ends_with(".mokuro") || n.ends_with(".mokuro.gz")
+    use bunko_core::sidecar_names::{Suffix, suffix_of};
+    matches!(
+        suffix_of(last_seg(rel)),
+        Some(Suffix::Mokuro | Suffix::MokuroGz)
+    )
 }
 
 /// `series.json` in any spelling the filename fold joins (`ſeries.json`).

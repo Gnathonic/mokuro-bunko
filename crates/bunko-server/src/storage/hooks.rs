@@ -84,19 +84,18 @@ pub struct ServerCloudHooks {
     overlays: Option<PersonalOverlays>,
 }
 
-fn lower(p: &Path) -> String {
-    p.file_name()
-        .map(|n| n.to_string_lossy().to_lowercase())
-        .unwrap_or_default()
+/// The volume-file suffix of `p`'s name, read on the fold (sidecar names rule 2).
+fn suffix(p: &Path) -> Option<bunko_core::sidecar_names::Suffix> {
+    bunko_core::sidecar_names::suffix_of(&p.file_name()?.to_string_lossy())
 }
 
 fn is_cbz(p: &Path) -> bool {
-    lower(p).ends_with(".cbz")
+    suffix(p) == Some(bunko_core::sidecar_names::Suffix::Cbz)
 }
 
 fn is_sidecar(p: &Path) -> bool {
-    let n = lower(p);
-    n.ends_with(".mokuro") || n.ends_with(".mokuro.gz")
+    use bunko_core::sidecar_names::Suffix;
+    matches!(suffix(p), Some(Suffix::Mokuro | Suffix::MokuroGz))
 }
 
 /// Every `.cbz` below `dir`, through the store (index reads on a remote store).

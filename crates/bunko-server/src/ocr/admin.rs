@@ -699,7 +699,8 @@ impl OcrAdmin for OcrControl {
             })
             .collect::<Vec<_>>()
             .join("/");
-        let rel = if rel.to_lowercase().ends_with(".cbz") {
+        // `.cbz` as sidecar names rule 2 reads it, on the fold.
+        let rel = if bunko_core::sidecar_names::cbz_stem(&rel).is_some() {
             rel
         } else {
             format!("{rel}.cbz")

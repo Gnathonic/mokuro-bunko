@@ -797,7 +797,7 @@ impl Scheduler {
             }
             return;
         };
-        let is_archive = rel.to_lowercase().ends_with(".cbz");
+        let is_archive = bunko_core::sidecar_names::cbz_stem(&rel).is_some();
         let prefix = format!("{rel}/");
         let gone = |r: &str| {
             if is_archive {
