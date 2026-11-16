@@ -4,3 +4,6 @@
 # results JSON reports the skip with its capability. A Bunko change that needs a newer
 # reader than interop/reader.ref lists the capability here until reader.ref is bumped.
 # I3 is done only when this file lists nothing.
+# Sidecar names rule 2 and fold v2 (interop/contract/fold*.json, sidecar-names.json
+# rule 2): until reader.ref pins a reader that vendors them.
+sidecar-rule-2

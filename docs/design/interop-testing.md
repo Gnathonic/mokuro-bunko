@@ -155,6 +155,24 @@ Only stable fields are kept (dates, ETags, tokens and random ids are replaced wi
 placeholders of the same type and format), so the fixtures change only when the contract
 does.
 
+**The name fold and sidecar names rule 2.** Which names are one entry and which files are
+a volume's are decided the same way on both sides by three normative files, not by
+fixtures: `interop/contract/fold-table.json` (fold v2's tables on UCD 17.0.0: the case
+map, Default_Ignorable, the canonical decompositions, combining classes and composition
+exclusions, delta-encoded as `interop/contract/README.md` describes), `fold.json`
+(`fold: 2`, the table's `table_sha256`, vectors, same and different pairs, `series_key`
+vectors, and a digest: for every Unicode scalar value `c` in order, `F(c)`, `F("a" + c)`
+and `F(c + U+0301)`, each UTF-8 and LF-terminated, hashed with SHA-256) and
+`sidecar-names.json` (`rule: 2`: classify, layer_class, sweep, owner and `equivalent`
+vectors). One generator writes the first two and Bunko's `fold_table.rs`
+(`python3 -I crates/bunko-core/scripts/gen_fold.py`, `--check` in CI); Bunko's
+`bunko_core::names` tests and the reader's `fold.test.ts` reproduce every vector and the
+digest, and both run the rule-2 vectors (the reader from its vendored copy, which it
+checks byte for byte against `BUNKO_REPO` when set). `/login/api/me` and the cloud marker
+carry `sidecar_rule: 2`, informational: a reader logs a newer rule and never gates on it.
+Until `interop/reader.ref` pins a rule-2 reader, `interop/pending-reader-caps.txt` lists
+`sidecar-rule-2`.
+
 ## 6. cloudsim
 
 - **Endpoints**: exactly those Bunko's drivers and the reader's providers call (to be

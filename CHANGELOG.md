@@ -27,7 +27,7 @@
   `v.fast.mokuro`, `v.webp`, `v.edit.mokuro` for a hidden `v.cbz`); a read of one
   answers 404. Each such set is **frozen** until it is merged (by hand, or by a cloud
   store's case merge): every member, the one in use included, every file sidecar names
-  rule v1 gives or would give to an archive of the set (or to an archive whose own
+  rule 2 gives or would give to an archive of the set (or to an archive whose own
   files are such a set: `Vol.cbz` beside `VOL.mokuro` and `vol.mokuro`), and everything
   inside a member folder. A PUT, DELETE, MKCOL, COPY, MOVE (from or onto), PROPPATCH or
   LOCK of any of them answers 409 naming the set, new names included (`v.mokuro.gz`,
@@ -39,13 +39,10 @@
   upgrade, no cover or `.nocover`, no orphan, kept-layer or corrupt-sidecar sweep, no
   correction adoption, no `series.json`, and no upload, OCR or identity record is
   re-keyed or dropped. Reads keep serving the one in use. `doctor` and the startup log
-  name each set, with the files it holds, and the merge (MIGRATING-0.7). Sidecar names
-  rule v1, shared with Mokuro Reader, is unchanged: a sidecar belongs to the archive
-  whose stem it spells up to NFC and lowercase, and a layer id is matched exactly. A
-  file that is one name with a volume's OCR, cover or layer file only by the wider
-  fold (`STRASSE.mokuro` beside `Straße.cbz`) or only by the id's case
-  (`Vol.FAST.mokuro`) is not that volume's, and Bunko writes none beside it either (it
-  would be a second spelling): that volume owes no such OCR or cover. A folder spelled
+  name each set, with the files it holds, and the merge (MIGRATING-0.7). Which files
+  are a volume's is decided on this same fold (sidecar names rule 2, below), so a file
+  that is one name with a volume's OCR, cover or layer file is that file, and Bunko
+  writes to it in the spelling listed, never beside it. A folder spelled
   like a volume's OCR file or cover (`v.MOKURO/` beside `V.cbz`) takes that name the
   same way. Whether a volume has a cover or a `.nocover` marker, and the cover size in
   `series.json`, come only from a file its folder lists for it.
@@ -80,14 +77,13 @@
   reaches it (`STRASSE/` for an owned `Straße/`); it adds new volumes to a series nobody
   owns, as before. It can no longer add or replace a cover, an OCR file, a layer file
   or an archive named after a volume it did not upload, unless it owns the series. A
-  file is named after a volume by sidecar names rule v1 and by the wider filename fold
-  alike (`STRASSE.webp` and `Vol1.mokuro` with a zero width space in it are named
-  after `Straße.cbz` and `Vol1.cbz`), and an uploader must control every volume either
-  names. The series owner may add, replace and delete any file in the series, whoever
+  file is named after a volume by sidecar names rule 2, on the one fold
+  (`STRASSE.webp` and `Vol1.mokuro` with a zero width space in it are named after
+  `Straße.cbz` and `Vol1.cbz`), and an uploader must control that volume. The series owner may add, replace and delete any file in the series, whoever
   added its volume, and may delete the series folder, but for a case-variant group
   frozen there (409 for everyone) and the accounts' own corrections
-  (`<Volume>.edit.mokuro`), which stay each account's own: a request for one is never
-  sent to a file that is only one name with it by the wider fold. No uploader adds an archive named like a volume's correction or curated
+  (`<Volume>.edit.mokuro`, in any spelling of its id), which stay each account's own.
+  No uploader adds an archive named like a volume's correction or curated
   layer (`V.edit.cbz`, `V.curated.cbz` beside `V.cbz`), that volume's own uploader
   included. Editors and admins are not limited. This closes a way for an uploader to
   take over another account's volume with an archive named after it (`V.curated.cbz`
@@ -102,97 +98,43 @@
   space + `.json`, `CATALOG.json` with a variation selector are those files on every
   host, so a PUT of one is a metadata update (or refused as compiled) and never makes
   a raw file the compiler then reads as the series' facts.
-- **No name the filename fold ties to a volume's files without rule v1 doing so is
-  written.** Every host makes `STRASSE.mokuro` one name with `Straße.mokuro`, the OCR
-  file of a listed `Straße.cbz` (likewise `ı.webp` beside `i.cbz`, a non-final `σ`
-  beside a final `Σ`, a name with a default-ignorable character in it, a layer id in
-  another case: `V.EDIT.mokuro`), but sidecar names rule v1 does not give it to that
-  volume. A PUT, MKCOL, PROPPATCH or LOCK of such a name, or a COPY or MOVE onto it,
-  answers 409 (`ambiguous-name` in a PUT's verdict) for every account; so does a name
-  only the fold gives a `.cbz`, `.mokuro`, `.mokuro.gz`, `.webp` or `.nocover` ending
-  (`V.mo` + a Kelvin sign + `uro`). Reads, DELETE and a MOVE away still work on one
-  already there, and so does the repair: a MOVE that only respells it as the name the
-  volume's file has (`STRASSE.mokuro` to `Straße.mokuro`, `Vol1.webp` with a zero width
-  space to `Vol1.webp`, `V.Fast.mokuro` to `V.fast.mokuro`), by an account that may
-  MOVE, on every host (a case-variant group still freezes it). An archive is never
-  refused for such a name already listed beside it
-  (made before the volume, by hand, or by 0.7): a new or replaced `Straße.cbz` beside a
-  `STRASSE.mokuro`, or `V.cbz` beside a `V.EDIT.mokuro`, is written as before. The
-  stray then counts as that volume's for who may write or delete it (an account that
-  does not control the volume, its maker included, no longer may), Bunko writes no file for the volume in
-  its place, and on a local library `doctor` names it with the volume ("Ambiguous name").
-- **No name the filename fold makes one with a correction or the curated layer is
-  written, its volume listed or not.** `V.ed` + a zero width space + `it.mokuro`,
-  `V.edıt.mokuro` (a dotless i), `V.EDIT.mokuro`, `V.Edit-2.mokuro`, `V.Curated.mokuro`
-  are one name with `V.edit.mokuro` or `V.curated.mokuro` on every host, but sidecar
-  names rule v1 (layer ids exact) reads no such layer in them: such a file could only
-  ever stand in for an account's own correction or the shared layer. A PUT, MKCOL,
-  PROPPATCH or LOCK of one, or a COPY or MOVE onto one, answers 409 (`ambiguous-name`)
-  for every account, before the volume exists too (where before it was written, and
-  then, once the volume came, every account's request for its own `V.edit.mokuro` read
-  and wrote that file: readers got its maker's bytes and their saves were refused). A
-  dotted volume's own primary (`V.EDIT.mokuro` beside `V.EDIT.cbz`, rule 4) is not such
-  a name. Nor is an archive written whose OCR file could only be one, `V.cbz` listed or
-  not (`V.ed` + a zero width space + `it.cbz`, `V.edıt.cbz`, `V.cura` + a zero width
-  space + `ted.cbz`; nor that OCR file beside one made by hand); `V.EDIT.cbz` is
-  governed as before. One already there (by hand, or from an earlier release) never
-  stands in for the layer: a request for `V.edit.mokuro` is each account's own
-  correction, written to its own copy and never refused for what the library lists, a
-  request for `V.curated.mokuro` never reads it, and a curated publish beside it (or,
-  on a cloud library, the progress user's own correction, which is the cloud folder's
-  file) answers 409 naming it; on a local library `doctor` names it ("Ambiguous
-  name"). The other ids reserved
-  for OCR generations (`original`, `gcv`, `updated-ocr`, `tr-*`) are ordinary layer
-  files to WebDAV, as before.
-- **One volume name per filename fold, first come, first served.** An archive's
-  volume name is its stem with every trailing `.<id>` cut off whose id the filename
-  fold reads as `edit`, `edit-<n>`, `curated` or `curated-<n>` (`STRASSE.curated.cbz`
-  is a volume `STRASSE`'s, `X.ed` + a zero width space + `it.cbz` is `X`'s, `Vol 1.5.cbz`
-  and `V.fast.cbz` are their own). Two archives in a folder are one volume name, as on
-  a case-insensitive disk, when their volume names fold alike but are not spelled
-  alike byte for byte (`STRASSE.curated.cbz` and `Straße.cbz`, `Volſ.curated.cbz` and
-  `Vols.cbz`, `ıX.curated.cbz` and `iX.cbz`, `X` + a zero width space + `.edit.cbz` and
-  `X.cbz`, `v.curated.cbz` and `V.cbz`), or when the OCR file of one, `<s>.mokuro`, is
-  one name by the fold with a layer of the other, `<t>.<r>.mokuro`, that rule v1 gives
-  to the other archive and not to the first, the layer named as a client names it,
-  from `<t>` as spelled (`X` + a zero width space + `.cbz` and `X.5.cbz`: layer `5` of
-  the first is the primary of the second on every host; `Q.cura` + a zero width space
-  + `ted.curated.cbz` and `Q.curated.cbz`, `Q.edıt.curated.cbz` and `Q.edit.cbz`: the
-  primary of the first is the curated layer of the second; `ΟΔΟς.gcv.cbz`, with a final
-  sigma, and `ΟΔΟΣ.cbz`: rule v1 lowercases a sigma by its place in the stem, so
-  `ΟΔΟΣ.gcv.mokuro` is the second's layer `gcv`, one name with the first's primary;
-  `V.cura` + a zero width space + `ted.cbz` and `V.cbz`). A personal layer (`edit`,
-  `edit-<n>`) makes no pair: each account's correction is kept in its own copy, never
-  in the library (`V.ed` + a zero width space + `it.cbz` beside `V.cbz` is not one, and
-  Bunko creates no such archive anyway). Where rule v1 itself reads the layer name as
-  the first archive's primary (`V.5.cbz` and `ΟΔΟΣ.gcv.cbz` beside `V.cbz` and
-  `ΟΔΟΣ.cbz`), or reads one volume spelled alike (`V.curated.cbz` beside `V.cbz`,
-  governed by `V`'s uploader as before), and for two spellings of one whole name (a
-  case-variant group), there is no such pair. An upload of an archive that is not
-  listed yet, or a COPY or MOVE onto one (a MOVE inside the folder judged without its
-  own source), answers 409 `ambiguous-name` when it would be one volume name with a
-  listed archive, whichever was there first, for every account the rest of the rules
-  let through, the volume's own uploader and editors included (it got 403 before for
-  a `STRASSE.curated.cbz` beside its `Straße.cbz`). This is asked when the request
-  arrives and again from the folder as it is right before the archive lands (a PUT's
-  publish, once its body is read and checked; a COPY's or MOVE's rename), one archive
-  landing per folder at a time: an upload held open while another archive of that
-  volume name lands is refused when it finishes and nothing of it stays, and of two
-  such uploads finishing together only the first to land is published. Before, the
-  later archive was written, and then its own curated, edit and OCR writes were
-  refused, and the earlier archive's uploader could no longer delete or replace it.
-  The first archive stays its uploader's to replace, delete or move as before. A pair
-  already listed (made before this release, or outside Bunko) is read as before; a
-  PUT, MKCOL, PROPPATCH or LOCK of any other name either archive governs by rule v1 or
-  the wider fold (its OCR file, layers, cover, `.nocover`, a curated publish, a name
-  nested under it), or a COPY or MOVE onto one, answers 409 `ambiguous-name` naming the
-  pair, for every account, until one of the two archives is renamed or deleted. Each
-  archive of such a pair is governed by rule v1 alone, so whoever controls it by rule
-  v1 replaces, moves and deletes it (the wider fold no longer hands `X` + a zero width
-  space + `.curated.cbz` up to the `X.cbz` beside it, which locked both accounts out of
-  it). An account's own correction still goes to its own copy (on a cloud library the
-  progress user's, the cloud folder's file, is refused too). On a local library
-  `doctor` names each pair ("Ambiguous volume names").
+- **One name fold for every decision: fold v2 and sidecar names rule 2.** Which names
+  are one entry, and which files are a volume's (its OCR file, layers, cover,
+  `.nocover`), are decided by one fold, shared byte for byte with Mokuro Reader
+  (`interop/contract/fold-table.json` and `fold.json`, UCD 17.0.0): an ASCII name's
+  lowercase; any other name with the default-ignorable characters dropped, decomposed,
+  each character's case folding of its uppercase of its case folding, recomposed. Rule 2
+  (`interop/contract/sidecar-names.json`) is the reader's naming rule asked of the
+  folded names, so a file one name with a volume's file is that file: `STRASSE.mokuro`
+  beside `Straße.cbz` is its OCR file, `Vol1.webp` with a zero width space its cover, a
+  decomposed `Café.mokuro` beside a composed `Café.cbz` its OCR file, and layer ids are
+  read folded (`V.GCV.mokuro` is layer `gcv`; `V.EDIT.mokuro`, and `V.edit.mokuro` with
+  a zero width space or a dotless `ı` in the id, are each account's own correction
+  `edit`, kept as `V.edit.mokuro`). Every crafted spelling decides exactly as its plain
+  twin, for every account and in either upload order: `V.ed` + a zero width space +
+  `it.cbz`, `STRASSE.curated.cbz` beside `Straße.cbz`, `Q.cura` + a zero width space +
+  `ted.edit.cbz` beside `Q.curated.cbz` and `X` + a zero width space + `.curated.cbz`
+  beside `X.cbz` are governed as `V.edit.cbz`, `Straße.curated.cbz`,
+  `Q.curated.edit.cbz` and `X.curated.cbz` are (control passes up to the volume they
+  would hide a layer of), so no account takes, blocks or shadows another's volume with
+  one. The one name refused is a new name whose `.cbz`, `.mokuro`, `.mokuro.gz`, `.webp`
+  or `.nocover` ending only the fold shows (`V.cb` + a zero width space + `z`, `V.mo` + a
+  Kelvin sign + `uro`): a PUT, MKCOL, PROPPATCH or LOCK of it, or a COPY or MOVE onto it,
+  answers 409 (`unsupported-name` in a PUT's verdict) for every account, since readers
+  that do not fold would never see it as a volume file. One already listed is read and
+  written as its fold says and never refused; reads, DELETE and a MOVE away never are.
+  The 0.8 betas' `ambiguous-name` refusals (names the wider fold tied to a volume
+  without the reader's rule, layer names spelled otherwise, "one volume name per fold"
+  ties, and the archive publish lock behind them) are gone. Coming from 0.7 this changes
+  attribution only: no file is renamed, moved or deleted for it; the first start logs
+  the files concerned. Mokuro Reader 1.10.0 pairs only by lowercase: it sees fewer of
+  these files, and `doctor` says which ("Released readers read these differently",
+  "Volume files spelled unlike their archive", with the optional case-only renames).
+  Series are identified by the same fold, trimmed, each whitespace run one space
+  (`Straße/` and `STRASSE/` are one series; a 0.8 beta's owner records are rekeyed at
+  start, the earlier of two kept and the other reported by `doctor`), and a cloud
+  library's index is refolded once (fold rule 4). `/login/api/me` and the cloud marker
+  carry `sidecar_rule: 2` (informational).
 - **The OCR queue file and the cloud lease marker are recognised in every spelling the
   filename fold joins.** A write of `/mokuro-reader/.MOKURO-QUEUE.JSON`,
   `.mokuro-queue.jſon` or one with a zero width space in it answers 405 for every
@@ -582,8 +524,8 @@
   the audit log shows wrote it last; the Storage tab counts the ones with no such
   account ("N correction files have no owner"), which nobody sees. In a cloud library
   they are the readers' progress account's, and are counted while none is chosen.
-  Layer names are matched exactly as
-  written: `Vol.EDIT.mokuro` is an ordinary shared file. When a cloud folder's two
+  Layer names are read folded (sidecar names rule 2): `Vol.EDIT.mokuro` is the
+  account's correction `edit` too, kept as `Vol.edit.mokuro`. When a cloud folder's two
   spellings both have a different `curated` file, the younger one moves in as
   `curated-2`, as `edit` already did.
 - **`history` is a reserved series name, in any spelling.** `/mokuro-reader/history`
@@ -721,6 +663,12 @@
 - **Dependency updates**: zip 9, rcgen 0.14, windows 0.62, windows-sys 0.61.
 
 ### Fixed
+- **A cloud file named in decomposed Unicode is replaced in place.** A PUT over a file
+  the provider holds as, say, a decomposed `Café.cbz` (as macOS and some readers write
+  names) uploaded a second, composed `Café.cbz` beside it, since the provider's name
+  search matches bytes; a later DELETE of the name removed one and answered 204 while
+  the other stayed. The write now goes into the file the library lists, its spelling
+  kept.
 - **The OCR walk no longer downloads every sidecar again after a start or a settings
   change.** With generation upgrades on, every walk asks of each volume whether its main
   `.mokuro` is outdated and whether each generation layer is Bunko's own output at an
@@ -1001,8 +949,8 @@
   refused (409)** instead of deleting that entry first under `Overwrite: T`.
 - **Bunko writes no second spelling of a name.** Covers, `.nocover` markers, OCR
   results, the OCR upgrade and per-account corrections use the spelling the folder
-  already lists (`V.WEBP`, `V.MOKURO`), when rule v1 gives that file to the volume;
-  where it does not (a hidden archive's file, a layer id in another case), nothing is
+  already lists (`V.WEBP`, `V.MOKURO`, `V.FAST.mokuro`), when sidecar names rule 2 gives
+  that file to the volume; where it does not (a hidden archive's file), nothing is
   written. A cover Bunko made for an archive that moves goes along only to a name of
   the archive's own, and is removed otherwise. Reading-history device folders are
   reached in any case; the catalog's volume manifest and the admin OCR actions take a

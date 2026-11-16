@@ -4,7 +4,7 @@ The one normative description of what a `.mokuro` says about where its text came
 shared by Mokuro Bunko and Mokuro Reader. Bunko's code: `bunko_layout::seal`,
 `bunko_layout::sidecar`, `bunko-server/src/ocr/upgrade.rs`. Executable form: the
 vectors in `interop/contract/seal/*.json`, which both sides run. File names (which file
-is a volume's main sidecar, which is a layer) follow sidecar names rule v1
+is a volume's main sidecar, which is a layer) follow sidecar names rule 2
 (`interop/contract/sidecar-names.json`, `bunko_core::sidecar_names`).
 
 The rule this serves (decision D4, `0.8-remote-storage.md`): the main `<Vol>.mokuro` is
