@@ -23,7 +23,7 @@
 //!   lone-surrogate escape (which Python accepts) never gets a file deleted.
 //!
 //! Neither pass enters a frozen case-variant group (`bunko_core::fold_groups`: its
-//! members, the files rule v1 gives their archives, member folders) nor a series
+//! members, the files rule 2 gives their archives, member folders) nor a series
 //! spelled like a reader's per-user name; a cover or marker is written under the
 //! WebDAV write lock of its name.
 //!
@@ -919,7 +919,7 @@ fn publish_cover_with(
 }
 
 /// Every file below `dir`, leaving out what a case-variant group freezes (its members,
-/// the winner included, the files rule v1 gives their archives, everything inside a
+/// the winner included, the files rule 2 gives their archives, everything inside a
 /// member folder: [`bunko_core::fold_groups`]) and, at the library root (`top`), the
 /// per-user names (a cloud progress user's `history/`, a series spelled like one). No
 /// cover is made, no marker written and no sidecar deleted there.

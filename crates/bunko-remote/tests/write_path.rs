@@ -1405,10 +1405,10 @@ fn a_cloned_state_folder_goes_standby_while_the_original_runs() {
     assert_eq!(now[0].1.boot_id, original[0].1.boot_id);
 }
 
-/// Sidecar names rule v1 in `done[]`: a decimal volume's primary is its own (rule 4),
+/// Sidecar names rule 2 in `done[]`: a decimal volume's primary is its own (R4),
 /// a layer's suffix matches in any case, and an all-digit id is a layer.
 #[test]
-fn done_entries_name_volumes_by_rule_v1() {
+fn done_entries_name_volumes_by_rule_2() {
     let t = T::with(
         FakeBackend::drive_like(),
         &[("S/Vol 1.cbz", b"zip"), ("S/Vol 1.5.cbz", b"zip")],

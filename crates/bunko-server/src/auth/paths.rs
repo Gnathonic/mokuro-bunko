@@ -93,7 +93,8 @@ pub fn top_level_folder(path: &str) -> Option<String> {
 }
 
 /// The [`LayerClass`] of the layer id a library file's name carries
-/// (`S/V.edit.mokuro` → Personal), the id exact as written (rule v1). Listing-free:
+/// (`S/V.edit.mokuro`, `S/V.EDIT.mokuro` → Personal), the id read folded (rule 2).
+/// Listing-free:
 /// the name alone cannot tell a layer from a dotted volume's primary, which
 /// `AuthBackend::is_volume_primary` asks the folder about.
 pub fn layer_class_of_path(path: &str) -> Option<LayerClass> {

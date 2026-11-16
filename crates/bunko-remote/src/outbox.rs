@@ -1561,7 +1561,7 @@ impl<B: Backend> Core<B> {
         }
     }
 
-    /// `<vol>.cbz` is listed beside `rel` (only `.cbz` anchors sidecars, rule v1).
+    /// `<vol>.cbz` is listed beside `rel` (only `.cbz` anchors sidecars, rule 2).
     fn has_archive(&self, rel: &RelPath, vol: &str) -> bool {
         parent_of(rel)
             .join(format!("{vol}.cbz"))

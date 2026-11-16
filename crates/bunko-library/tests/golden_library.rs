@@ -78,7 +78,7 @@ fn compiled_files(root: &Path) -> BTreeMap<String, String> {
 
 /// Where 0.8 departs from 0.5.3 on purpose: `(what Python wrote, what Bunko writes)`.
 ///
-/// Sidecar names rule v1 tolerates a leading UTF-8 BOM, as Mokuro Reader does; Python's
+/// Sidecar names rule 2 tolerates a leading UTF-8 BOM, as Mokuro Reader does; Python's
 /// `json.loads` refused the fixture's BOM sidecar, so 0.5.3 compiled that volume as
 /// having no OCR. It now counts its page and characters, and its hash covers the stored
 /// bytes, BOM included.
@@ -523,7 +523,7 @@ fn archive_listings_and_pages_match_python() {
             .map(|s| s.as_str().unwrap().to_owned())
             .collect();
         // A departure on purpose: sidecar names rule 2 reads layer ids folded, so
-        // `v.1.Upper.mokuro`, an orphan to 0.5.3 (and rule v1), is layer `upper` of
+        // `v.1.Upper.mokuro`, an orphan to 0.5.3 (and rule 2), is layer `upper` of
         // `v.1.cbz`, as Mokuro Reader 1.10.0 reads it too.
         if rel == "Odd.Name. With.Dots/v.1.cbz" {
             let at = expected_siblings

@@ -35,6 +35,33 @@ pub(crate) fn personal_name(name: &str) -> Option<(&str, Cow<'_, str>, bool)> {
         .filter(|(_, id, _)| sidecar_names::layer_class(id) == LayerClass::Personal)
 }
 
+/// The spelling a correction `name` of a library folder listing `names` is kept under
+/// (sidecar names rule 2, R9): `<listed archive stem>.<folded id>.mokuro[.gz]`, so
+/// `V.EDIT.mokuro` and `V.ed\u{200B}it.mokuro` are written as `V.edit.mokuro` (the
+/// archive's own stem when one is listed, else the name's). A name the folder lists in
+/// some spelling (the cloud-root owner's physical correction) keeps that entry's: the
+/// overlay, too, is written onto any spelling it lists already ([`overlay_path`]).
+pub(crate) fn written_name<'a>(name: &'a str, names: &[String]) -> Cow<'a, str> {
+    let folded = crate::fold_name(name);
+    if names.iter().any(|n| crate::fold_name(n) == folded) {
+        return Cow::Borrowed(name);
+    }
+    let Some((raw_stem, id, gz)) = sidecar_names::split_layer(name) else {
+        return Cow::Borrowed(name);
+    };
+    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    let stem = sidecar_names::Folder::new(&refs)
+        .display_archive(name)
+        .and_then(sidecar_names::cbz_stem)
+        .unwrap_or(raw_stem);
+    let written = format!("{stem}.{id}.mokuro{}", if gz { ".gz" } else { "" });
+    if written == name {
+        Cow::Borrowed(name)
+    } else {
+        Cow::Owned(written)
+    }
+}
+
 /// The names of a library folder's FILES (through the store: an index read on a cloud
 /// library), staging files left out. A folder is never an archive nor a sidecar (rule
 /// 2): a directory named `V.edit.cbz` makes no `V.edit.mokuro` a primary. Blocking.
@@ -131,7 +158,7 @@ fn resolve_existing(library: &Path, base: &Path, rel: &str) -> Option<String> {
             continue;
         }
         // The library's folders here (an overlay folder mirrors one; overlay files are
-        // matched to archives by rule v1, [`PersonalOverlays::owned`]).
+        // matched to archives by rule 2, [`PersonalOverlays::owned`]).
         let listed_here: Vec<String> = library_dir
             .as_deref()
             .and_then(|d| fs::read_dir(d).ok())
@@ -153,7 +180,7 @@ fn resolve_existing(library: &Path, base: &Path, rel: &str) -> Option<String> {
                     .collect()
             })
             .unwrap_or_default();
-        // The correction file itself: an overlay spelled otherwise that rule v1 gives
+        // The correction file itself: an overlay spelled otherwise that rule 2 gives
         // to another archive of the library folder (a hidden case variant's own
         // correction, named by its exact stem) is that archive's, never this one's.
         let others_file = |n: &String| {
@@ -185,7 +212,7 @@ fn resolve_existing(library: &Path, base: &Path, rel: &str) -> Option<String> {
     Some(parts.join("/"))
 }
 
-/// Does rule v1, over the library folder `dir`'s files, give the overlay name `other` to
+/// Does rule 2, over the library folder `dir`'s files, give the overlay name `other` to
 /// an archive that `segment` (a correction name) is not the correction of? Then `other`
 /// is that archive's correction (`v.edit.mokuro` is the hidden `v.cbz`'s beside a
 /// reachable `V.cbz`), however alike the two names fold.
@@ -340,7 +367,7 @@ impl PersonalOverlays {
     }
 
     /// The overlays in `dir` that belong to the archive `cbz_name` of the library
-    /// folder `folder_rel`, as rule v1 sweeps them: an exact stem, or a folded one when
+    /// folder `folder_rel`, as rule 2 sweeps them: an exact stem, or a folded one when
     /// no other archive there has that spelling.
     fn owned(&self, dir: &Path, folder_rel: &str, cbz_name: &str) -> Vec<(String, String)> {
         let overlays: Vec<String> = names_in(dir)
@@ -436,7 +463,7 @@ impl PersonalOverlays {
     /// layer and are no listed archive's primary (rule 4). On a library on this disk,
     /// and in a cloud library with no progress user, nobody sees them. Nothing a
     /// case-variant group freezes is among them ([`bunko_core::fold_groups`]: a member,
-    /// the winner included, a file rule v1 gives an archive of the group, anything
+    /// the winner included, a file rule 2 gives an archive of the group, anything
     /// inside a member folder): adopting one would move it out of the group. Blocking
     /// (an index walk on a cloud library).
     pub fn physical_corrections(&self) -> Vec<String> {

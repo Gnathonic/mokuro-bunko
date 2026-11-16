@@ -1,10 +1,10 @@
 //! One rule for which names exist, on every host: decided from the folder listings,
 //! never by opening the requested spelling. A case-sensitive disk (or a remote store)
 //! can hold two spellings of a name; the one no request reaches is hidden, and so are
-//! the files rule v1 gives to a hidden archive (its sidecars, cover and corrections,
+//! the files rule 2 gives to a hidden archive (its sidecars, cover and corrections,
 //! named by its exact stem). Nothing hidden is ever shown or read through another
 //! spelling, and the whole group is frozen: every write to a member (the winner
-//! included), to a file rule v1 gives either, or to a folder holding them, answers 409
+//! included), to a file rule 2 gives either, or to a folder holding them, answers 409
 //! until the variants are merged by hand. No request makes a second spelling of a
 //! name.
 //!
@@ -220,7 +220,7 @@ async fn a_folder_holding_a_hidden_entry_is_never_deleted_whole() {
     );
 }
 
-/// An account's correction of a hidden archive (`edits/S/v.edit.mokuro`, rule v1's for
+/// An account's correction of a hidden archive (`edits/S/v.edit.mokuro`, rule 2's for
 /// `v.cbz`) is never the reachable `V.cbz`'s: not listed beside it, not read, written or
 /// deleted through `V.edit.mokuro`.
 #[tokio::test]

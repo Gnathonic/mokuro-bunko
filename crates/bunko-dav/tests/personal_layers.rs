@@ -99,7 +99,7 @@ async fn each_account_reads_and_writes_its_own_correction() {
 #[tokio::test]
 async fn a_correction_is_checked_before_it_is_stored() {
     let env = Env::new();
-    // No archive for it (rule v1: `.cbz` stems only).
+    // No archive for it (rule 2: `.cbz` stems only).
     std::fs::write(env.lib("series/vol2.zip"), b"x").unwrap();
     for path in [
         "/mokuro-reader/series/vol2.edit.mokuro",

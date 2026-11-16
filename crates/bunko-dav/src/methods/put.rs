@@ -23,6 +23,7 @@ use crate::response::{self, DavError, Resp};
 use crate::upload::{self, Rejection, Staging, Stored};
 use crate::{Inner, paths};
 use bunko_core::reader_tree::{self, HistoryShape};
+use bunko_core::sidecar_names::{Suffix, suffix_of};
 
 enum PutError {
     /// The writer's own verdict (truncated, corrupted-in-transit, archive-*, disk-full,
@@ -79,7 +80,7 @@ pub(crate) async fn put(inner: &Arc<Inner>, req: &Req, body: Body) -> Resp {
         }
         Err(PutError::Dav(e)) => e.into_response(),
     };
-    if req.path.to_lowercase().ends_with(".cbz") {
+    if suffix_of(&req.path) == Some(Suffix::Cbz) {
         response::set_header(&mut resp, "x-mokuro-put", "verified");
     }
     resp
@@ -107,7 +108,7 @@ fn set_retry_after(resp: &mut Resp, secs: Option<u64>) {
 
 /// See [`crate::put_refusal_verdict`].
 pub(crate) fn refusal_verdict(path: &str, mut resp: Resp) -> Resp {
-    let cbz = path.to_lowercase().ends_with(".cbz");
+    let cbz = suffix_of(path) == Some(Suffix::Cbz);
     if crate::put_gives_verdict(path) && !resp.status().is_success() {
         let (status, reason, mut detail, retry) =
             upload::failure_for_status(resp.status().as_u16());
@@ -345,22 +346,6 @@ async fn put_inner(inner: &Arc<Inner>, req: &Req, body: Body) -> Result<Resp, Pu
     if let Some(recheck) = req.ctx.ownership_recheck.clone() {
         staging.recheck_before_publish(Box::new(move || recheck()));
     }
-    // One volume name per fold, asked again from the folder as it is when this archive
-    // lands, for every account: an archive that landed while this body was read (dispatch
-    // judged the listing before it) and that the fold makes one volume name with this
-    // one keeps it. One archive publish per folder at a time, so of two such uploads only
-    // the first to land is published.
-    if super::lands_library_archive(inner, &dest) {
-        let dest2 = dest.clone();
-        staging.check_name_before_publish(
-            inner.archive_publishes.clone(),
-            super::archive_publish_key(&dest),
-            Box::new(move || {
-                super::archive_name_check(&dest2, None)
-                    .map(|detail| Rejection::new(409, "ambiguous-name", detail, false))
-            }),
-        );
-    }
     // The client's precondition travels with the publish (spec §10 PUT): a remote
     // store checks it against the provider's version, so a change made in the cloud
     // since the client's If-Match (or a file created since its If-None-Match: *) is a
@@ -374,8 +359,7 @@ async fn put_inner(inner: &Arc<Inner>, req: &Req, body: Body) -> Result<Resp, Pu
     }
     // A history file or a correction is the account's own bytes, never a library OCR
     // file to re-seal.
-    if history.is_none() && !personal && paths::file_name(&dest).to_lowercase().ends_with(".mokuro")
-    {
+    if history.is_none() && !personal && suffix_of(&paths::file_name(&dest)) == Some(Suffix::Mokuro) {
         let (hooks, dest) = (req.ctx.hooks.clone(), dest.clone());
         staging.before_publish(Box::new(move |staged| {
             hooks.ocr_sidecar_staged(&dest, staged)
@@ -556,8 +540,10 @@ async fn history_caps(
 
 /// A `.mokuro` / `.mokuro.gz` OCR file.
 fn is_ocr_sidecar(path: &Path) -> bool {
-    let name = paths::file_name(path).to_lowercase();
-    name.ends_with(".mokuro") || name.ends_with(".mokuro.gz")
+    matches!(
+        suffix_of(&paths::file_name(path)),
+        Some(Suffix::Mokuro | Suffix::MokuroGz)
+    )
 }
 
 /// 0.5.2 `_on_write_committed` + `UploadMiddleware._archive_arrived`. Blocking.

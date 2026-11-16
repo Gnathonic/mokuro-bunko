@@ -9,10 +9,10 @@ use crate::paths;
 
 /// Every sidecar of the archive `cbz`, as its folder lists them: every file
 /// [`sidecar_names::sweep_set`] gives that volume (`<stem>.mokuro[.gz]`, `<stem>.webp`,
-/// `<stem>.nocover` in any spelling rule v1 gives it, its layers). Only listed names:
+/// `<stem>.nocover` in any spelling rule 2 gives it, its layers). Only listed names:
 /// a constructed `<stem>.mokuro` is never deleted on the chance that it exists, since a
-/// host that folds names would open another file there (`STRASSE.mokuro` for
-/// `Straße.mokuro` on Linux casefold), one rule v1 does not give the volume. Folders
+/// host that folds names would open whatever spelling the folder holds, and a fold
+/// group's other spelling is not this archive's (rule 2, R6). Folders
 /// are no sidecars and archive nothing (rule 2). Nothing when the folder cannot be
 /// listed.
 ///

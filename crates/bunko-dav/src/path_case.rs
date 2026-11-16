@@ -26,7 +26,7 @@
 //! store's oldest spelling, the one its case merge keeps), else the byte-smallest. The
 //! others are shadowed. Such a case-variant group is frozen until it is merged by hand
 //! ([`bunko_core::fold_groups`], [`frozen`]): every write to a member, the winner
-//! included, to a file rule v1 gives (or would give) an archive of it, or to a folder
+//! included, to a file rule 2 gives (or would give) an archive of it, or to a folder
 //! holding one answers 409 (`crate::methods`); reads still reach the winner.
 //!
 //! The per-user names at the reader root (`history`, `goals.json`, ...) are reserved in
@@ -78,7 +78,7 @@ fn listing(parent: &Path, top: bool) -> Option<Vec<(String, bool)>> {
 
 /// The fold groups of `parent`'s listing `entries`
 /// ([`bunko_core::fold_groups::FoldGroups`]): which names no request reaches (every
-/// spelling of a name but the one [`on_disk_name`] picks, and every file rule v1 gives
+/// spelling of a name but the one [`on_disk_name`] picks, and every file rule 2 gives
 /// to a shadowed archive) and which the freeze holds (no write touches them until the
 /// case variants are merged by hand).
 fn groups_in(parent: &Path, entries: &[(String, bool)]) -> FoldGroups {
@@ -97,7 +97,7 @@ fn hidden_in(parent: &Path, entries: &[(String, bool)]) -> std::collections::Has
 
 /// Where the library path `rel` (below `library`, as PathCase resolved it) meets the
 /// freeze ([`bunko_core::fold_groups::frozen_along`]): a segment that is a member of a
-/// case-variant group, or a file rule v1 gives (or would give, once written) to an
+/// case-variant group, or a file rule 2 gives (or would give, once written) to an
 /// archive such a group freezes, in any folder on the way. Every write to it answers
 /// 409. From the listings alone, so every host answers alike.
 pub(crate) fn frozen(library: &Path, rel: &str) -> Option<Frozen> {
@@ -119,7 +119,7 @@ pub(crate) fn frozen(library: &Path, rel: &str) -> Option<Frozen> {
 /// listed names fold alike (only a case-sensitive disk or a remote store can hold them),
 /// the store's [`case_winner`] when it is listed (a remote store's oldest spelling, the
 /// one its case merge keeps), else the byte-smallest. The other spellings, and the files
-/// rule v1 gives to a shadowed archive ([`hidden_in`]), are never addressed. The listing
+/// rule 2 gives to a shadowed archive ([`hidden_in`]), are never addressed. The listing
 /// is always scanned: no probe, no exact fast path.
 ///
 /// At the library root (`top`) a name that folds to a per-user name (`History`,
@@ -285,26 +285,6 @@ pub(crate) fn listed_entry(library: &Path, relative: &str) -> Option<String> {
     Some(out.join("/"))
 }
 
-/// Is `requested` a personal or curated layer name (`V.edit.mokuro`, `V.curated.mokuro`,
-/// exact as rule v1 reads ids: [`sidecar_names::reserved_layer_of`]) that the listed
-/// entry `listed` of `parent`, one name with it by the fold, is not
-/// (`V.ed\u{200B}it.mokuro`, `V.EDIT.mokuro`, made by hand or before 0.8)? Then a
-/// request for the layer keeps its own spelling: it is an account's own correction or
-/// the shared layer, never that entry (whose bytes another account wrote). From the
-/// listing.
-///
-/// [`sidecar_names::reserved_layer_of`]: bunko_core::sidecar_names::reserved_layer_of
-fn layer_spelled_otherwise(parent: &Path, requested: &str, listed: &str) -> bool {
-    use bunko_core::sidecar_names::{LayerClass, layer_class, reserved_layer_of, split_layer};
-    if !split_layer(requested).is_some_and(|(_, id, _)| layer_class(&id) != LayerClass::Other) {
-        return false;
-    }
-    let files = crate::personal::names_in(parent);
-    let refs: Vec<&str> = files.iter().map(String::as_str).collect();
-    let class = reserved_layer_of(requested, &refs);
-    class.is_some() && reserved_layer_of(listed, &refs) != class
-}
-
 fn resolve(base: &Path, relative: &str, keep: Option<&str>, top_reserved: bool) -> String {
     let mut parts: Vec<String> = relative.split('/').map(str::to_string).collect();
     if parts.iter().any(|p| p == "..") {
@@ -324,9 +304,6 @@ fn resolve(base: &Path, relative: &str, keep: Option<&str>, top_reserved: bool) 
             break;
         };
         let is_last = position + 1 == named.len();
-        if is_last && on_disk != part && layer_spelled_otherwise(&parent, &part, &on_disk) {
-            break;
-        }
         if is_last
             && on_disk != part
             && keep.is_some_and(|k| {

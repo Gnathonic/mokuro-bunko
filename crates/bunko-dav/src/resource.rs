@@ -448,8 +448,9 @@ impl Roots {
             return None;
         }
         let folder_rel = self.library_rel(folder)?;
+        let name = personal::written_name(name, names);
         let rel = if folder_rel.is_empty() {
-            name.to_string()
+            name.into_owned()
         } else {
             format!("{folder_rel}/{name}")
         };
@@ -714,7 +715,7 @@ impl Roots {
     }
 
     /// `caller`'s overlays of the library folder `folder_rel` (virtual folder `vpath`,
-    /// physical `folder`) that rule v1, over the folder's whole listing, gives to an
+    /// physical `folder`) that rule 2, over the folder's whole listing, gives to an
     /// archive a request reaches: never a hidden case variant's (named by its exact
     /// stem), nor one beside no archive.
     fn overlays_in(
@@ -848,7 +849,7 @@ impl Roots {
         };
         let entries: Vec<_> = entries.flatten().collect();
         // Another spelling of a listed name (only a case-sensitive disk or a remote
-        // store holds one) is shadowed, and so are the files rule v1 gives to a
+        // store holds one) is shadowed, and so are the files rule 2 gives to a
         // shadowed archive: no request reaches them, so they are not listed.
         let names: Vec<(String, bool)> = entries
             .iter()
@@ -1049,11 +1050,23 @@ mod tests {
             rel("S/Nope.edit.mokuro").as_deref(),
             Some("S/Nope.edit.mokuro")
         );
-        // Rule 2 reads ids folded: `Vol.EDIT.mokuro` is the caller's correction too.
+        // Rule 2 reads ids folded: `Vol.EDIT.mokuro` is the caller's correction too,
+        // kept as `<archive stem>.<folded id>.mokuro` (R9), as is a padded id.
+        assert_eq!(
+            rel("S/Vol.EDIT.mokuro").as_deref(),
+            Some("S/Vol.edit.mokuro")
+        );
+        assert_eq!(
+            rel("S/VOL.ed\u{200B}it-2.mokuro.gz").as_deref(),
+            Some("S/Vol.edit-2.mokuro.gz")
+        );
+        // A spelling the folder lists (the cloud-root owner's physical file) is kept.
+        std::fs::write(base.join("library/S/Vol.Edit.mokuro"), b"{}").unwrap();
         assert_eq!(
             rel("S/Vol.EDIT.mokuro").as_deref(),
             Some("S/Vol.EDIT.mokuro")
         );
+        std::fs::remove_file(base.join("library/S/Vol.Edit.mokuro")).unwrap();
         assert_eq!(rel("S/Vol.edited.mokuro"), None);
         assert_eq!(rel("S/D.edit.mokuro"), None);
         assert_eq!(

@@ -86,7 +86,7 @@ pub(crate) async fn dispatch(inner: Arc<Inner>, req: Request<Body>, ctx: DavCont
     if let Some(resp) = frozen_refusal(&inner, &r).await {
         return resp;
     }
-    if let Some(resp) = disputed_refusal(&inner, &r).await {
+    if let Some(resp) = name_refusal(&inner, &r).await {
         return resp;
     }
     let result = match r.method.as_str() {
@@ -432,7 +432,7 @@ async fn per_user_spelled_otherwise(inner: &Arc<Inner>, r: &Req) -> Option<Resp>
 /// by a release before 0.5.3) holds a case-variant group, and until an admin merges it
 /// no write touches it. A PUT, DELETE, MKCOL, COPY, MOVE, PROPPATCH or LOCK whose
 /// target, COPY or MOVE source, or destination is a member of a group (the reachable
-/// winner included), a file rule v1 gives or would give to an archive of one (or below
+/// winner included), a file rule 2 gives or would give to an archive of one (or below
 /// a member folder), answers 409 naming the group; so does a DELETE, COPY or MOVE of a
 /// folder that holds one, or a COPY or MOVE onto such a folder. Reads still reach the
 /// winner. Decided once, here, from the folder listings: the same on every host, for
@@ -494,46 +494,21 @@ async fn frozen_refusal(inner: &Arc<Inner>, r: &Req) -> Option<Resp> {
     Some(response::status_page(StatusCode::CONFLICT, &refusal))
 }
 
-/// Where the filename fold and sidecar names rule v1 part ways about a name
-/// ([`bunko_core::sidecar_names::fold_disputed`]): a PUT, MKCOL, PROPPATCH or LOCK of
-/// it, or a COPY or MOVE onto it, answers 409, for every account. Every host makes
-/// `S/STRASSE.mokuro` one name with `S/Straße.mokuro`, the OCR file of a listed
-/// `S/Straße.cbz`, but rule v1 (Mokuro Reader's) does not give it to that volume: such
-/// a file would take the volume's name without being its file. The same for a name
-/// only the fold gives a volume file suffix (`V.mo\u{212A}uro`). An archive is never
-/// refused for such a name already listed beside it (`S/Straße.cbz` beside a
-/// `S/STRASSE.mokuro` made first): the name is then the archive's for authorization,
-/// and Bunko writes nothing for the volume in its place. Decided from the folder's
-/// listing, the name in the spelling the folder lists it in (the one a write reaches),
-/// so every host answers alike. Reads, DELETE and a MOVE away are left alone: they are
-/// how such a name is cleared up.
+/// The one name refusal of sidecar names rule 2, stateless hygiene: a PUT, MKCOL,
+/// PROPPATCH or LOCK of a NEW name, or a COPY or MOVE onto one, whose volume-file suffix
+/// only its fold shows ([`bunko_core::names::hides_suffix`]: `V.cb\u{200B}z`,
+/// `V.mo\u{212A}uro`, `V.cbz\u{200B}`) answers 409 for every account (a PUT's verdict
+/// `unsupported-name`). Such a name is one entry with `V.cbz` or `V.mokuro` on every
+/// host and in rule 2, but a reader that does not fold (Mokuro Reader 1.10.0 matches
+/// `.cbz` on the lowercase) would miss the volume file entirely, so Bunko creates none.
 ///
-/// A MOVE whose destination folds like its own source (in the same folder) respells
-/// that entry, and is judged as the source renamed: the destination name as spelled,
-/// over the listing without the source. Renaming a stray to the volume's own spelling
-/// (`S/STRASSE.mokuro` to `S/Straße.mokuro`, the repair doctor names) is done;
-/// respelling it as another stray is not. (The freeze ran before.)
-///
-/// Also refused: a name the fold makes one with a personal or curated layer name while
-/// it is no such layer ([`bunko_core::sidecar_names::shadows_reserved_layer`]:
-/// `X.ed\u{200B}it.mokuro`, `X.EDIT.mokuro`), its volume listed or not, and an archive
-/// whose OCR file could only be such a name (`X.ed\u{200B}it.cbz`,
-/// [`bunko_core::sidecar_names::shadowing_archive`]), `X.cbz` listed or not.
-///
-/// An account's own correction (an `edit`/`edit-<n>` layer name, written to its copy
-/// under `users/`) is never refused here, whatever the library lists: nothing in the
-/// library is written. A write of the shared layer, or of the cloud-root owner's
-/// correction (written in the library), beside a listed stray that is one name with it
-/// is never judged as the stray: it answers 409 naming the stray.
-///
-/// One volume name per fold ([`volume_name_refusal`]): no archive is created whose
-/// volume name the fold joins with a listed archive's spelled otherwise
-/// (`S/STRASSE.curated.cbz` beside `S/Straße.cbz`, either way round), and where two
-/// such archives are listed already, no file of either volume is written.
-// Sidecar names rule 2: the either-fold names are deprecated rule-2 shims until Track B3
-// removes this path.
-#[allow(deprecated)]
-async fn disputed_refusal(inner: &Arc<Inner>, r: &Req) -> Option<Resp> {
+/// Not a listing question: the name alone decides, except that a name already listed in
+/// some spelling one with it (in the library folder, or in the caller's own overlay
+/// folder for a correction) is never refused: the write lands on that entry
+/// ([`crate::path_case`] maps it onto the listed spelling), and no second spelling is
+/// made. A MOVE's own source in that folder does not count: it leaves. Reads, DELETE
+/// and a MOVE away are never refused: they are how such a name is cleared up.
+async fn name_refusal(inner: &Arc<Inner>, r: &Req) -> Option<Resp> {
     let target = match r.method.as_str() {
         "PUT" | "MKCOL" | "PROPPATCH" | "LOCK" => r.path.clone(),
         "COPY" | "MOVE" => write::destination_path(r).ok()?,
@@ -542,267 +517,97 @@ async fn disputed_refusal(inner: &Arc<Inner>, r: &Req) -> Option<Resp> {
     let paths::Target::Library(rel) = paths::classify(&target) else {
         return None;
     };
-    // A MOVE's source: a destination that folds like it respells that very entry.
+    let rel = rel.trim_end_matches('/').to_string();
+    let (dir, name) = rel.rsplit_once('/').unwrap_or(("", rel.as_str()));
+    if !bunko_core::names::hides_suffix(name) {
+        return None;
+    }
+    let (dir, name) = (dir.trim_matches('/').to_string(), name.to_string());
+    // A MOVE's source: it leaves the folder, so it is no listed spelling of the name.
     let source = match paths::classify(&r.path) {
         paths::Target::Library(src) if r.method == "MOVE" => Some(src),
         _ => None,
     };
-    let owns_cloud_root = r.caller().is_some_and(|c| c.owns_cloud_root);
+    let caller = r
+        .caller()
+        .filter(|c| !c.owns_cloud_root)
+        .map(|c| c.username.to_string());
     let roots = inner.roots.clone();
-    let library = roots.library.clone();
-    let refusal = blocking(move || -> Option<String> {
-        let rel = rel.trim_end_matches('/');
-        let (dir, name) = rel.rsplit_once('/').unwrap_or(("", rel));
-        if name.is_empty() || name == "." || name == ".." {
-            return None;
-        }
-        let resolved_dir =
-            |dir: &str| crate::path_case::resolve_existing(&library, dir.trim_matches('/'), true);
-        let parent = if dir.trim_matches('/').is_empty() {
-            library.clone()
-        } else {
-            roots.library_member(&library, &resolved_dir(dir))?
-        };
-        let mut files = crate::personal::names_in(&parent);
-        {
-            let refs: Vec<&str> = files.iter().map(String::as_str).collect();
-            if !owns_cloud_root
-                && bunko_core::sidecar_names::reserved_layer_of(name, &refs)
-                    == Some(bunko_core::sidecar_names::LayerClass::Personal)
-            {
-                // An account's own correction, written to its copy under `users/`
-                // ([`crate::resource::Roots::personal_path`]): nothing in the library is
-                // written, so nothing listed there can dispute it.
-                return None;
-            }
-        }
-        let folded = crate::fold_name(name);
-        // A MOVE's source in this very folder: it leaves the listing.
+    let quoted = format!("{name:?}");
+    let listed = blocking(move || -> bool {
+        let library = roots.library.clone();
+        let resolve = |dir: &str| crate::path_case::resolve_existing(&library, dir, true);
+        let resolved = resolve(&dir);
         let source_here = source.as_deref().and_then(|src| {
             let src = src.trim_end_matches('/');
             let (src_dir, src_name) = src.rsplit_once('/').unwrap_or(("", src));
-            (resolved_dir(src_dir) == resolved_dir(dir)).then(|| src_name.to_string())
+            (resolve(src_dir.trim_matches('/')) == resolved).then(|| src_name.to_string())
         });
-        let respelled = source_here
-            .clone()
-            .filter(|src_name| src_name != name && crate::fold_name(src_name) == folded);
-        let spelled = if let Some(src_name) = respelled {
-            // The source renamed (`S/STRASSE.mokuro` to `S/Stra\u{df}e.mokuro`, the
-            // repair doctor names): judged as the name it takes, without the source.
-            files.retain(|n| *n != src_name);
-            name.to_string()
-        } else {
-            let refs: Vec<&str> = files.iter().map(String::as_str).collect();
-            let layer = bunko_core::sidecar_names::reserved_layer_of(name, &refs);
-            let listed = files
+        let folded = crate::fold_name(&name);
+        let one_with = |entries: Vec<String>| {
+            entries
                 .iter()
-                .find(|n| *n == name)
-                .or_else(|| files.iter().find(|n| crate::fold_name(n) == folded))
-                .cloned();
-            match (listed, layer) {
-                // A personal or curated layer name, beside a listed entry that is one
-                // name with it but not that layer (`X.ed\u{200B}it.mokuro`, made by hand
-                // or before 0.8): never that entry.
-                (Some(other), Some(class))
-                    if bunko_core::sidecar_names::reserved_layer_of(&other, &refs)
-                        != Some(class) =>
-                {
-                    return Some(format!(
-                        "{other:?} is listed here, and is one name with {name:?} on \
-                         every host (Bunko joins names as the case-insensitive \
-                         filesystems do), but it is no such layer: Bunko writes no \
-                         second spelling of a name. Rename or delete {other:?} first \
-                         (doctor names it)."
-                    ));
-                }
-                (listed, _) => listed.unwrap_or_else(|| name.to_string()),
-            }
+                .filter(|n| Some(n.as_str()) != source_here.as_deref())
+                .any(|n| crate::fold_name(n) == folded)
         };
-        let refs: Vec<&str> = files.iter().map(String::as_str).collect();
-        if let Some(refusal) = volume_name_refusal(&spelled, &refs, source_here.as_deref()) {
-            return Some(refusal);
-        }
-        let disputed = bunko_core::sidecar_names::fold_disputed(&spelled, &refs);
-        if disputed.is_empty() {
-            let class = bunko_core::sidecar_names::shadows_reserved_layer(&spelled, &refs)?;
-            if bunko_core::sidecar_names::shadowing_archive(&spelled).is_some() {
-                return Some(format!(
-                    "{spelled:?} is, on every host (Bunko joins names as the case-insensitive \
-                     filesystems do), one name with an archive whose OCR file would be an \
-                     account's own correction or the curated layer of the volume of the \
-                     shorter stem, but the sidecar naming rule Mokuro Reader shares reads \
-                     no such layer in it: its OCR file could only ever stand in that \
-                     layer's place, so Bunko creates or writes no such archive. Choose \
-                     another name."
-                ));
-            }
-            let layer = match class {
-                bunko_core::sidecar_names::LayerClass::Personal => {
-                    "an account's own correction (edit, edit-<n>)"
-                }
-                bunko_core::sidecar_names::LayerClass::Curated => "the shared curated layer",
-                _ => "a reserved layer (curated-<n>)",
-            };
-            return Some(format!(
-                "{spelled:?} is, on every host (Bunko joins names as the case-insensitive \
-                 filesystems do), one name with {layer} of a volume of that stem, but the \
-                 sidecar naming rule Mokuro Reader shares reads no such layer in it: such \
-                 a name could only ever stand in that layer's place, so Bunko creates or \
-                 writes none. Choose another name."
-            ));
-        }
-        Some(if disputed == [spelled.clone()] {
-            format!(
-                "{spelled:?} is, on every host (Bunko joins names as the case-insensitive \
-                 filesystems do), a name ending in a volume file suffix (.cbz, .mokuro, \
-                 .mokuro.gz, .webp, .nocover) it does not spell itself: Bunko creates or \
-                 writes no such name. Choose another name."
-            )
+        let parent = if resolved.is_empty() {
+            Some(library.clone())
         } else {
-            let joined = disputed
-                .iter()
-                .map(|n| format!("{n:?}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!(
-                "{spelled:?} is tied to {joined} here on every host (Bunko joins names \
-                 as the case-insensitive filesystems do), but the sidecar naming rule \
-                 Mokuro Reader shares does not make them one volume's archive and file: \
-                 Bunko creates or writes no such ambiguous name. Spell it exactly like the \
-                 volume's stem, or choose another name."
-            )
+            roots.library_member(&library, &resolved)
+        };
+        if parent.is_some_and(|parent| one_with(entry_names(&parent))) {
+            return true;
+        }
+        // A correction is the caller's own overlay file (D27).
+        caller.is_some_and(|username| {
+            crate::personal::personal_name(&name).is_some()
+                && crate::personal::overlay_path(&library, &roots.users, &username, &resolved)
+                    .is_some_and(|overlay| one_with(entry_names(&overlay)))
         })
     })
     .await
-    .ok()
-    .flatten()?;
+    .unwrap_or(false);
+    if listed {
+        return None;
+    }
+    let detail = format!(
+        "{quoted} ends in a volume file suffix (.cbz, .mokuro, .mokuro.gz, .webp, \
+         .nocover) only once its invisible or compatibility characters are folded away: \
+         readers that do not fold names would never see it as a volume file, so Bunko \
+         creates no such name. Choose another name."
+    );
     if r.method == "PUT" && crate::put_gives_verdict(&r.path) {
         return Some(put::failure_response(&crate::upload::Rejection::new(
             409,
-            "ambiguous-name",
-            refusal,
+            "unsupported-name",
+            detail,
             false,
         )));
     }
-    Some(response::status_page(StatusCode::CONFLICT, &refusal))
+    Some(response::status_page(StatusCode::CONFLICT, &detail))
 }
 
-/// One volume name per filename fold
-/// ([`bunko_core::sidecar_names::volume_name_ties`]), for a write of `name` (spelled
-/// as the folder lists it, when it does) in a folder whose listed FILES are `files`
-/// (`source`: a MOVE's own source in this folder, which leaves it):
-///
-/// * an archive not listed yet (a PUT, a COPY or MOVE onto it) whose volume name the
-///   fold joins with a listed archive's spelled otherwise (`STRASSE.curated.cbz`
-///   beside `Straße.cbz`, `Straße.cbz` beside `STRASSE.curated.cbz`,
-///   `X\u{200B}.cbz` beside `X.5.cbz`) is refused, as a case-insensitive disk keeps
-///   one spelling of a name: the first one listed keeps it;
-/// * any other name a listed archive with such a tie governs, by either fold
-///   ([`bunko_core::sidecar_names::governing_archives_by_either_fold`]: its sidecars,
-///   layers, cover, a name nested under it) is refused naming the pair, while the
-///   pair is listed (made before this release, or outside Bunko).
-///
-/// An archive already listed is replaced, deleted and moved away as ever: that is how
-/// a pair is cleared up. Reads are never refused. Asked at dispatch, from the listing
-/// before the body is read, and again right before an archive lands
-/// ([`archive_name_check`]).
-// Sidecar names rule 2: the either-fold names are deprecated rule-2 shims until Track B3
-// removes this path.
-#[allow(deprecated)]
-fn volume_name_refusal(name: &str, files: &[&str], source: Option<&str>) -> Option<String> {
-    use bunko_core::sidecar_names::{
-        cbz_stem, governing_archives_by_either_fold, volume_name_ties,
+/// Every entry name of the folder `dir`, files and folders (staging files left out).
+/// Blocking.
+fn entry_names(dir: &Path) -> Vec<String> {
+    let Ok(entries) = bunko_store::fs::read_dir(dir) else {
+        return Vec::new();
     };
-    let quoted = |names: &[&str]| {
-        names
-            .iter()
-            .map(|n| format!("{n:?}"))
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-    if cbz_stem(name).is_some() {
-        if files.contains(&name) {
-            return None;
-        }
-        let others: Vec<&str> = files
-            .iter()
-            .copied()
-            .filter(|n| Some(*n) != source)
-            .collect();
-        let ties = volume_name_ties(name, &others);
-        if ties.is_empty() {
-            return None;
-        }
-        return Some(format!(
-            "{name:?} would be one volume name with {} here on every host (Bunko joins \
-             names as the case-insensitive filesystems do, and a nested archive such as \
-             <stem>.curated.cbz is the volume <stem>'s), spelled otherwise: Bunko keeps \
-             one spelling of a volume name, the one listed first. Spell it exactly like \
-             that volume, or choose another name.",
-            quoted(&ties)
-        ));
-    }
-    for archive in governing_archives_by_either_fold(name, files) {
-        let ties = volume_name_ties(archive, files);
-        if ties.is_empty() {
-            continue;
-        }
-        return Some(format!(
-            "{archive:?} and {} are one volume name on every host (Bunko joins names as \
-             the case-insensitive filesystems do), spelled otherwise (made before this \
-             release, or outside Bunko): no file of either volume, {name:?} included, is \
-             written until one of those archives is renamed or deleted (doctor names \
-             them). Reads still serve them.",
-            quoted(&ties)
-        ));
-    }
-    None
-}
-
-/// Does an archive landing at `dest` (physical) take a name in a library folder, so
-/// one volume name per fold ([`archive_name_check`]) is asked again right before it
-/// lands?
-pub(crate) fn lands_library_archive(inner: &Inner, dest: &Path) -> bool {
-    is_cbz(dest) && dest.parent().is_some() && inner.roots.library_rel(dest).is_some()
-}
-
-/// The [`Inner::archive_publishes`] key of the folder an archive lands in at `dest`:
-/// its physical path, folded, so every spelling of one folder is one key.
-pub(crate) fn archive_publish_key(dest: &Path) -> PathBuf {
-    let dir = dest.parent().unwrap_or(dest);
-    PathBuf::from(crate::fold_name(&dir.to_string_lossy()))
-}
-
-/// One volume name per filename fold ([`volume_name_refusal`]), asked again from a
-/// fresh listing of the folder right before an archive lands at `dest` (a PUT's
-/// publish, a COPY's or MOVE's rename; `source`: a MOVE's source, which leaves the
-/// folder when it is the same one), the caller holding the folder's
-/// [`Inner::archive_publishes`] lock through the publish. What dispatch checked was the
-/// listing before the body was read or the file copied: an archive that landed since
-/// (a racing upload, however long it was held open) is seen here, and of two archives
-/// the fold makes one volume name only the first to land is published, the other
-/// refused (`Some`: the 409 `ambiguous-name` detail), for every account. Blocking.
-pub(crate) fn archive_name_check(dest: &Path, source: Option<&Path>) -> Option<String> {
-    let (dir, name) = (dest.parent()?, dest.file_name()?.to_str()?);
-    let files = crate::personal::names_in(dir);
-    let refs: Vec<&str> = files.iter().map(String::as_str).collect();
-    let source = source
-        .filter(|src| src.parent() == Some(dir))
-        .and_then(|src| src.file_name())
-        .and_then(|n| n.to_str());
-    volume_name_refusal(name, &refs, source)
+    entries
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| !paths::is_staging_name(n))
+        .collect()
 }
 
 /// 0.5.2 `_forget_ocr_records`.
 pub(crate) fn forget_ocr_records(req: &Req, rel: Option<&str>, archive_too: bool) {
+    use bunko_core::sidecar_names::{Suffix, suffix_of};
     let Some(rel) = rel else { return };
-    let lower = rel.to_lowercase();
-    if lower.ends_with(".cbz") {
-        if archive_too {
-            req.ctx.hooks.forget_ocr_sidecars_of_volume(rel);
-        }
-    } else if lower.ends_with(".mokuro") || lower.ends_with(".mokuro.gz") {
-        req.ctx.hooks.forget_ocr_sidecar(rel);
+    match suffix_of(rel) {
+        Some(Suffix::Cbz) if archive_too => req.ctx.hooks.forget_ocr_sidecars_of_volume(rel),
+        Some(Suffix::Mokuro | Suffix::MokuroGz) => req.ctx.hooks.forget_ocr_sidecar(rel),
+        _ => {}
     }
 }
 
@@ -815,7 +620,7 @@ pub(crate) fn primary_leaving(inner: &Inner, req: &Req, phys: &Path) {
     if crate::sidecars::primary_sidecar_stem(&name).is_none() {
         return;
     }
-    // The primary of a listed archive (rule v1 over the folder's listing: `v.mokuro` is
+    // The primary of a listed archive (rule 2 over the folder's listing: `v.mokuro` is
     // `V.CBZ`'s), never a constructed archive name opened on the host.
     let Some(dir) = phys.parent() else { return };
     let Ok(entries) = bunko_store::fs::read_dir(dir) else {

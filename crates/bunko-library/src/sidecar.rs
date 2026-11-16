@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use crate::pyjson::{self, JsonObject, JsonValue};
 
 /// Archive extensions a volume can have (`VOLUME_ARCHIVE_EXTENSIONS`). Only `.cbz`
-/// anchors sidecars (rule v1, [`sidecar_names`]).
+/// anchors sidecars (rule 2, [`sidecar_names`]).
 pub const VOLUME_ARCHIVE_EXTENSIONS: &[&str] = &sidecar_names::ARCHIVE_EXTENSIONS;
 
 /// Suffixes of the files that belong to a volume besides layers.
@@ -71,7 +71,7 @@ fn listed_own_file(cbz_path: &Path, suffix: &str) -> Option<PathBuf> {
 }
 
 /// The archive's `<stem><suffix>` when `listed` lists it ([`listed_sibling_in`]: in
-/// any spelling, rule v1 giving it to this archive), `None` otherwise: whether such a
+/// any spelling, rule 2 giving it to this archive), `None` otherwise: whether such a
 /// file exists, decided from the listing alone.
 pub fn listed_file_in(cbz_path: &Path, suffix: &str, listed: &Listed) -> Option<PathBuf> {
     listed_sibling_in(cbz_path, suffix, listed).filter(|p| {
@@ -81,7 +81,7 @@ pub fn listed_file_in(cbz_path: &Path, suffix: &str, listed: &Listed) -> Option<
     })
 }
 
-/// One listing of a folder: the names of its files, sorted (what rule v1 and a
+/// One listing of a folder: the names of its files, sorted (what rule 2 and a
 /// [`sidecar_names::Folder`] read: a folder is never an archive nor a sidecar, rule 2),
 /// and the names of its folders (a folder spelled like a sidecar or a cover still takes
 /// that name: nothing is written beside it in another spelling).
@@ -134,12 +134,11 @@ impl Listed {
 ///
 /// `None` when nothing may be written for it: the folder's case-variant groups freeze
 /// the archive or the name ([`bunko_core::fold_groups`]: the archive is a member of a
-/// group, its own files hold one, or the name is a file rule v1 gives a frozen
-/// archive), a folder there takes the name in some spelling, or every listed spelling
-/// of the name belongs to another archive (rule v1: an exact stem is that archive's, a
-/// shadowed archive's included), so writing it would overwrite that volume's file.
-/// Such a volume is owed nothing until the case variants are merged by hand (doctor
-/// reports them). The freeze of a folder above this one is the walk's
+/// group, its own files hold one, or the name is a file rule 2 gives a frozen
+/// archive), a folder there takes the name in some spelling, or the listed spelling of
+/// the name is another archive's file (rule 2: a nested archive's primary, or in a fold
+/// group an exact stem's, a shadowed archive's included), so writing it would overwrite
+/// that volume's file. The freeze of a folder above this one is the walk's
 /// ([`crate::fsutil::frozen`]).
 pub fn sibling(cbz_path: &Path, suffix: &str) -> Option<PathBuf> {
     let directory = cbz_path.parent().unwrap_or_else(|| Path::new(""));
@@ -176,15 +175,17 @@ pub fn sibling_in(cbz_path: &Path, suffix: &str, listed: &Listed) -> Option<Path
 
 /// [`listed_sibling`] over `listed`.
 ///
-/// The listed names that are `<stem><suffix>` by the filename fold
+/// The listed names that are `<stem><suffix>` by the one filename fold
 /// ([`sidecar_names::fold`]) are that one name: a new file there would be a second
-/// spelling of it. A folder among them takes the name: `None`. Of the files, only those
-/// rule v1 gives to this archive ([`Folder::volume_files`] over the whole listing,
-/// shadowed archives included) are its own; of several, the one a request reaches (the
-/// store's case winner, else the byte-smallest). When every listed spelling is another
-/// archive's, or no archive's by rule v1 (`V.FAST.mokuro`, whose layer id rule v1
-/// matches exactly; `STRASSE.mokuro` beside `Straße.cbz`, whose stems rule v1 tells
-/// apart), nothing may be written for it: `None`.
+/// spelling of it, so the listed spelling is returned (sidecar names rule 2 reads every
+/// name by its fold, so a listed `STRASSE.mokuro` beside `Straße.cbz`, or
+/// `V.FAST.mokuro` for layer `fast`, is that volume's file). A folder among them takes
+/// the name: `None`. Of the files, only those rule 2 gives to this archive
+/// ([`Folder::volume_files`] over the whole listing, shadowed archives included) are
+/// its own; of several, the one a request reaches (the store's case winner, else the
+/// byte-smallest). The one listed spelling that is not is another archive's file (the
+/// primary of a nested `V.gcv.cbz`, or the other spelling's in a fold group, which is
+/// frozen until merged): nothing is written over it, `None`.
 ///
 /// [`Folder::volume_files`]: sidecar_names::Folder::volume_files
 pub fn listed_sibling_in(cbz_path: &Path, suffix: &str, listed: &Listed) -> Option<PathBuf> {
@@ -212,7 +213,7 @@ pub fn listed_sibling_in(cbz_path: &Path, suffix: &str, listed: &Listed) -> Opti
     if candidates.is_empty() {
         return Some(directory.join(wanted));
     }
-    // Rule v1 over the whole listing (the archive itself counted even when a caller
+    // Rule 2 over the whole listing (the archive itself counted even when a caller
     // asks for one that is not listed yet).
     let mut listing: Vec<&str> = names.iter().map(String::as_str).collect();
     if !listing.contains(&name) {
@@ -303,7 +304,7 @@ pub fn sidecar_siblings(cbz_path: &Path) -> Vec<PathBuf> {
     siblings
 }
 
-/// `_sidecar_for`: the archive's primary sidecar as the folder lists it, by rule v1
+/// `_sidecar_for`: the archive's primary sidecar as the folder lists it, by rule 2
 /// ([`sidecar_names::primary_of`]: an exact stem before a folded one, `.mokuro` before
 /// `.mokuro.gz`, so `V.MOKURO` for `V.cbz`). Always resolved from the listing, never by
 /// opening a constructed name: a case-insensitive disk would find `V.mokuro` and hand
@@ -324,7 +325,7 @@ pub fn primary_sidecar_in(cbz_path: &Path, folder: &sidecar_names::Folder) -> Op
 }
 
 /// The archive's layer `id`: `<stem>.<id>.mokuro[.gz]` in any spelling of the stem the
-/// folder lists (rule v1, [`sidecar_names::Folder::layer_of`]), the listed name.
+/// folder lists (rule 2, [`sidecar_names::Folder::layer_of`]), the listed name.
 pub fn layer_sidecar_in(
     cbz_path: &Path,
     id: &str,

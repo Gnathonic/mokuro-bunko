@@ -438,10 +438,10 @@ async fn a_suffix_only_the_fold_shows_is_never_created() {
         };
         for user in ["alice", "editor"] {
             let (status, body) = env.send(user, "PUT", &path, &[], body.clone()).await;
-            assert_eq!(status, 409, "{user} PUT {name:?}");
-            assert!(
-                outcome(status, &body).1.is_some(),
-                "{name:?}: a PUT verdict"
+            assert_eq!(
+                outcome(status, &body),
+                (409, Some("unsupported-name".to_string())),
+                "{user} PUT {name:?}"
             );
         }
         let (status, _) = env.send("editor", "MKCOL", &path, &[], vec![]).await;
@@ -464,4 +464,176 @@ async fn a_suffix_only_the_fold_shows_is_never_created() {
         .send("reader", "GET", "/mokuro-reader/S/W.mokuro", &[], vec![])
         .await;
     assert_eq!((status, body), (200, br#"{"pages":[]}"#.to_vec()));
+}
+
+/// `(the base volume another uploader puts, the crafted nested archive, its canonical
+/// twin)`: the archive names of the either-fold era's leaks, nested under a volume.
+const NESTED: [(&str, &str, &str); 7] = [
+    ("Q.edit.cbz", "Q.ed\u{200B}it.edit.cbz", "Q.edit.edit.cbz"),
+    (
+        "Q.curated.cbz",
+        "Q.cura\u{200B}ted.curated.cbz",
+        "Q.curated.curated.cbz",
+    ),
+    ("Caf\u{e9}.cbz", "Cafe\u{301}.gcv.cbz", "Caf\u{e9}.gcv.cbz"),
+    (
+        "Stra\u{df}e.cbz",
+        "STRASSE.curated.cbz",
+        "Stra\u{df}e.curated.cbz",
+    ),
+    ("X.cbz", "X\u{200B}.curated.cbz", "X.curated.cbz"),
+    ("V.edit.cbz", "V.ed\u{131}t.curated.cbz", "V.edit.curated.cbz"),
+    ("V.cbz", "V.ed\u{131}t.cbz", "V.edit.cbz"),
+];
+
+fn stem(archive: &str) -> &str {
+    bunko_core::sidecar_names::cbz_stem(archive).unwrap()
+}
+
+/// What `user` reads at `name` in `S/`: the status, and whose body it is.
+async fn read_as(env: &Env, user: &str, name: &str) -> String {
+    let (status, body) = env
+        .send(user, "GET", &format!("/mokuro-reader/S/{name}"), &[], vec![])
+        .await;
+    let by = serde_json::from_slice::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| v["by"].as_str().map(str::to_string));
+    format!("{status} {by:?}")
+}
+
+/// Two uploaders in a shared series: bob puts the volume `base`, alice the nested
+/// archive `nested`, in that order or the other (`nested_first`). Then each pushes the
+/// volume files and layers of the other's and its own, replaces and finally deletes.
+/// Each step's outcome, what each reads, and the listings, in order. Checks as it goes
+/// that bob, the base volume's uploader, keeps it: its upload, its layers and its
+/// replacement are never refused, alice can neither replace nor delete it nor write
+/// its files, and what bob wrote is what everyone reads (nothing captured).
+async fn uploaders(cloud: bool, base: &str, nested: &str, nested_first: bool) -> Vec<String> {
+    let env = Env::new(cloud).await;
+    let at = |name: &str| format!("/mokuro-reader/S/{name}");
+    let layer = |user: &str| format!(r#"{{"pages":[],"by":"{user}"}}"#).into_bytes();
+    let mut log = Vec::new();
+    let (b, n) = (stem(base), stem(nested));
+    let put_base = async |log: &mut Vec<String>| {
+        let (status, body) = env.send("bob", "PUT", &at(base), &[], cbz(1)).await;
+        assert_eq!(
+            status,
+            201,
+            "bob's volume {base:?} is never refused: {}",
+            String::from_utf8_lossy(&body)
+        );
+        log.push(format!("bob PUT base: {:?}", outcome(status, &body)));
+    };
+    let put_nested = async |log: &mut Vec<String>| {
+        let (status, body) = env.send("alice", "PUT", &at(nested), &[], cbz(2)).await;
+        log.push(format!("alice PUT nested: {:?}", outcome(status, &body)));
+    };
+    if nested_first {
+        put_nested(&mut log).await;
+        put_base(&mut log).await;
+    } else {
+        put_base(&mut log).await;
+        put_nested(&mut log).await;
+    }
+    // bob's volume files and layers: accepted, and read as bob's by everyone they are
+    // shared with.
+    for suffix in [".mokuro", ".curated.mokuro", ".edit.mokuro"] {
+        let name = format!("{b}{suffix}");
+        let (status, body) = env.send("bob", "PUT", &at(&name), &[], layer("bob")).await;
+        assert!(
+            (200..300).contains(&status),
+            "bob's {name:?} beside {nested:?} ({}): {status} {}",
+            if nested_first { "nested first" } else { "base first" },
+            String::from_utf8_lossy(&body)
+        );
+        log.push(format!("bob PUT {suffix}: {:?}", outcome(status, &body)));
+        let got = read_as(&env, "bob", &name).await;
+        assert_eq!(got, "200 Some(\"bob\")", "bob reads his {name:?}");
+        log.push(format!("bob GET {suffix}: {got}"));
+    }
+    // alice can take none of it.
+    for suffix in [".mokuro", ".curated.mokuro"] {
+        let name = format!("{b}{suffix}");
+        let (status, body) = env
+            .send("alice", "PUT", &at(&name), &[], layer("alice"))
+            .await;
+        assert_eq!(status, 403, "alice writes no {name:?} of bob's");
+        log.push(format!("alice PUT {suffix} of base: {:?}", outcome(status, &body)));
+        let got = read_as(&env, "reader", &name).await;
+        assert_eq!(got, "200 Some(\"bob\")", "{name:?} stays bob's");
+        log.push(format!("reader GET {suffix} of base: {got}"));
+    }
+    // alice's own correction of bob's volume is hers alone (or, where the nested
+    // archive's primary takes that name, nothing of hers).
+    let edit = format!("{b}.edit.mokuro");
+    let (status, body) = env
+        .send("alice", "PUT", &at(&edit), &[], layer("alice"))
+        .await;
+    log.push(format!("alice PUT .edit of base: {:?}", outcome(status, &body)));
+    assert_eq!(read_as(&env, "bob", &edit).await, "200 Some(\"bob\")");
+    log.push(format!("alice GET .edit of base: {}", read_as(&env, "alice", &edit).await));
+    for (what, target) in [("base", base.to_string()), ("primary", format!("{b}.mokuro"))] {
+        let (status, body) = env.send("alice", "PUT", &at(&target), &[], cbz(3)).await;
+        assert_eq!(status, 403, "alice replaces no {target:?}");
+        log.push(format!("alice replace {what}: {:?}", outcome(status, &body)));
+        let (status, body) = env.send("alice", "DELETE", &at(&target), &[], vec![]).await;
+        assert_eq!(status, 403, "alice deletes no {target:?}");
+        log.push(format!("alice DELETE {what}: {:?}", outcome(status, &body)));
+    }
+    // The nested archive's own files: as its canonical twin's.
+    for (user, suffix) in [("alice", ".mokuro"), ("alice", ".gcv.mokuro"), ("bob", ".mokuro")] {
+        let name = format!("{n}{suffix}");
+        let (status, body) = env.send(user, "PUT", &at(&name), &[], layer(user)).await;
+        log.push(format!("{user} PUT nested{suffix}: {:?}", outcome(status, &body)));
+        log.push(format!("reader GET nested{suffix}: {}", read_as(&env, "reader", &name).await));
+    }
+    let (status, body) = env.send("alice", "PUT", &at(nested), &[], cbz(4)).await;
+    log.push(format!("alice replace nested: {:?}", outcome(status, &body)));
+    for user in ["alice", "bob", "reader"] {
+        log.push(format!("{user} sees {:?}", env.listing(user, base).await));
+    }
+    // bob keeps control of his volume: replaced, then deleted with its files.
+    let (status, body) = env.send("bob", "PUT", &at(base), &[], cbz(5)).await;
+    assert_eq!(status, 204, "bob replaces his {base:?}: {}", String::from_utf8_lossy(&body));
+    log.push(format!("bob replace base: {:?}", outcome(status, &body)));
+    let (status, body) = env.send("bob", "DELETE", &at(base), &[], vec![]).await;
+    assert_eq!(status, 204, "bob deletes his {base:?}: {}", String::from_utf8_lossy(&body));
+    log.push(format!("bob DELETE base: {:?}", outcome(status, &body)));
+    let (status, body) = env.send("alice", "DELETE", &at(nested), &[], vec![]).await;
+    log.push(format!("alice DELETE nested: {:?}", outcome(status, &body)));
+    for user in ["alice", "bob", "reader"] {
+        log.push(format!("{user} sees {:?}", env.listing(user, base).await));
+    }
+    log
+}
+
+async fn uploaders_in_a_shared_series(cloud: bool) {
+    for (base, crafted, canonical) in NESTED {
+        assert_eq!(fold_name(crafted), fold_name(canonical), "{crafted:?}");
+        for nested_first in [true, false] {
+            let got = uploaders(cloud, base, crafted, nested_first).await;
+            let want = uploaders(cloud, base, canonical, nested_first).await;
+            for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+                assert_eq!(
+                    g, w,
+                    "step {i}: {crafted:?} beside {base:?} (nested first: {nested_first}) \
+                     decides otherwise than {canonical:?}\n{got:#?}\n{want:#?}"
+                );
+            }
+            assert_eq!(got.len(), want.len());
+        }
+    }
+}
+
+/// The leak shapes by two uploaders in one shared series, in both upload orders: every
+/// step decides as for the canonical twin, and the base volume's uploader keeps it, its
+/// layers included (never accepted and then refused its own layers, nothing captured).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn uploaders_in_a_shared_series_on_a_local_library() {
+    uploaders_in_a_shared_series(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn uploaders_in_a_shared_series_on_a_cloud_library() {
+    uploaders_in_a_shared_series(true).await;
 }

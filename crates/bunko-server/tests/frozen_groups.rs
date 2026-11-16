@@ -5,7 +5,7 @@
 //! folders, with sidecars, covers, numbered orphans, a corrupt sidecar, a kept upgrade
 //! layer, physical and per-account corrections and upload records for both members;
 //! beside them a series spelled like a reader's per-user name. Every WebDAV write
-//! method against every member, the files rule v1 gives their archives (and would give,
+//! method against every member, the files rule 2 gives their archives (and would give,
 //! once written), the folders holding them, and every background pass (the OCR walk and
 //! install, the upgrade, the orphan and kept-layer sweeps, the corrupt-sidecar sweep,
 //! covers and `.nocover` markers, correction adoption, the compile) then leave every
@@ -287,7 +287,7 @@ fn build(env: &Env) -> bool {
         env.write("S/v.webp", b"hidden cover");
         env.write("S/v.hayai.mokuro", sealed(HAYAI));
     }
-    // T: two spellings of one archive's primary sidecar (rule v1 gives both to
+    // T: two spellings of one archive's primary sidecar (rule 2 gives both to
     // `Vol.cbz`), and the layer an earlier beta's upgrade kept.
     env.write("T/Vol.cbz", cbz(3, "t"));
     env.write("T/VOL.mokuro", HAYAI);
@@ -564,7 +564,7 @@ async fn every_write(env: &Env) -> Vec<String> {
         "T/vol.mokuro",
         "Kingdom/a.cbz",
         "kingdom/a.cbz",
-        // Files rule v1 gives the frozen archives, listed or not yet.
+        // Files rule 2 gives the frozen archives, listed or not yet.
         "S/V.mokuro",
         "S/v.mokuro",
         "S/v.webp",

@@ -392,15 +392,12 @@ fn series_folders(
 /// The listed archives `username` controls in the series folders it does not own (D1),
 /// by series then stem: those auth lets it publish the curated layer of. A volume is
 /// controlled when every archive governing its `<stem>.curated.mokuro` (the nearest
-/// listed one, by either fold: `sidecar_names::governing_archives_by_either_fold`, as
-/// auth asks) is its recorded upload; in a series
+/// listed one, by rule 2: `sidecar_names::governing_archives`, as auth asks) is its
+/// recorded upload; in a series
 /// another account owns, only while that layer is listed (a new one there is refused).
 /// `owned` and `closed` are the series keys of its own and other accounts' records,
 /// `live` those listed at the root. Archives directly in a series folder only; a folder
 /// or record that cannot be read adds nothing. Blocking.
-// Sidecar names rule 2: the either-fold names are deprecated rule-2 shims until Track B3
-// removes this path.
-#[allow(deprecated)]
 fn curated_volumes(
     db: &bunko_db::Database,
     library: &std::path::Path,
@@ -409,7 +406,7 @@ fn curated_volumes(
     owned: &HashSet<String>,
     closed: &HashSet<String>,
 ) -> Vec<CuratedVolume> {
-    use bunko_core::sidecar_names::{cbz_stem, governing_archives_by_either_fold};
+    use bunko_core::sidecar_names::{cbz_stem, fold, governing_archives};
     use bunko_db::uploads::fold_series_title_key;
     use bunko_library::fsutil::ListedPath;
     use std::collections::BTreeSet;
@@ -456,10 +453,11 @@ fn curated_volumes(
                 continue;
             };
             let layer = format!("{stem}.curated.mokuro");
-            if closed.contains(&key) && !listed.contains(&layer.as_str()) {
+            let layer_fold = fold(&layer);
+            if closed.contains(&key) && !listed.iter().any(|n| fold(n) == layer_fold) {
                 continue;
             }
-            let governors = governing_archives_by_either_fold(&layer, &listed);
+            let governors = governing_archives(&layer, &listed);
             let mine = !governors.is_empty()
                 && governors.iter().all(|g| {
                     crate::backend::volume_owner_in(db, &walk, &format!("{folder}/{g}"))

@@ -298,7 +298,7 @@ fn listed_as_spelled(library: &std::path::Path, rel: &str) -> bool {
 }
 
 /// See [`AuthBackend::library_listing`]: the files of the library folder that holds
-/// the path, as rule v1 lists them (no folders); empty when that folder is not there
+/// the path, as rule 2 lists them (no folders); empty when that folder is not there
 /// (a PUT into it answers 409 later), `None` when it cannot be read.
 fn library_listing(layout: &StorageLayout, virtual_path: &str) -> Option<Vec<String>> {
     let Some(rel) = paths::library_rel(virtual_path) else {
@@ -339,7 +339,7 @@ fn library_listing(layout: &StorageLayout, virtual_path: &str) -> Option<Vec<Str
     Some(names)
 }
 
-/// See [`AuthBackend::is_volume_primary`]: rule v1 against the library folder's listing.
+/// See [`AuthBackend::is_volume_primary`]: rule 2 against the library folder's listing.
 fn is_volume_primary(layout: &StorageLayout, virtual_path: &str) -> bool {
     let Some(file) = virtual_to_physical(layout, virtual_path, None) else {
         return false;

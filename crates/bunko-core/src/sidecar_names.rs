@@ -734,74 +734,6 @@ pub fn reserved_layer_of(name: &str, names: &[&str]) -> Option<LayerClass> {
     }
 }
 
-// --- Deprecated: the either-fold machinery of rule v1, as thin rule-2 answers. ---------
-//
-// Rule v1 read stems by a second, narrower fold, so Bunko asked both and refused where
-// they disagreed. With one fold nothing disagrees: each of these answers as rule 2 does,
-// or empty, until its callers are gone.
-
-/// Deprecated: rule v1's stem fold. Rule 2 reads every name by [`fold`].
-#[deprecated(note = "rule 2 has one fold: use `fold`")]
-pub fn stem_fold(name: &str) -> String {
-    fold(name)
-}
-
-/// Deprecated: [`governing_archives`], sorted, each once. There is one fold to govern by.
-#[deprecated(note = "rule 2 has one fold: use `governing_archives`")]
-pub fn governing_archives_by_either_fold<'a>(name: &str, names: &[&'a str]) -> Vec<&'a str> {
-    let mut out = governing_archives(name, names);
-    out.sort_unstable();
-    out.dedup();
-    out
-}
-
-/// Deprecated: [`hides_reserved_layer`].
-#[deprecated(note = "rule 2 has one fold: use `hides_reserved_layer`")]
-pub fn hides_reserved_layer_by_either_fold(name: &str, names: &[&str]) -> bool {
-    hides_reserved_layer(name, names)
-}
-
-/// Deprecated: no two folds part ways. What is left is the stateless hygiene refusal:
-/// `[name]` when `name` hides a volume-file suffix ([`crate::names::hides_suffix`]:
-/// `V.mo\u{212A}uro`, `V.cb\u{200B}z`) and no listed name of `names` is one entry with it
-/// (a listed name is never refused); empty otherwise.
-#[deprecated(note = "rule 2 has one fold: only `names::hides_suffix` is refused")]
-pub fn fold_disputed(name: &str, names: &[&str]) -> Vec<String> {
-    let target = folded(name);
-    if crate::names::hides_suffix(name) && !names.iter().any(|n| folded(n) == target) {
-        vec![name.to_string()]
-    } else {
-        Vec::new()
-    }
-}
-
-/// Deprecated: always `None`. A name the fold makes a reserved layer IS that layer by
-/// rule 2 ([`reserved_layer_of`]).
-#[deprecated(note = "rule 2 reads ids folded: use `reserved_layer_of`")]
-pub fn shadows_reserved_layer(_name: &str, _names: &[&str]) -> Option<LayerClass> {
-    None
-}
-
-/// Deprecated: always `None`. An archive the fold makes `<s>.<reserved id>.cbz` hides
-/// that layer by rule 2 ([`hides_reserved_layer`]).
-#[deprecated(note = "rule 2 reads ids folded: use `hides_reserved_layer`")]
-pub fn shadowing_archive(_name: &str) -> Option<LayerClass> {
-    None
-}
-
-/// Deprecated: always empty. Two archives are one volume name exactly when they fold
-/// alike (a fold group, [`crate::fold_groups`]).
-#[deprecated(note = "rule 2 has one fold: volume names are ties only as fold groups")]
-pub fn volume_name_ties<'a>(_name: &str, _names: &[&'a str]) -> Vec<&'a str> {
-    Vec::new()
-}
-
-/// Deprecated: always empty ([`volume_name_ties`]).
-#[deprecated(note = "rule 2 has one fold: volume names are ties only as fold groups")]
-pub fn volume_name_tie_pairs<'a>(_names: &[&'a str]) -> Vec<(&'a str, &'a str)> {
-    Vec::new()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1407,48 +1339,5 @@ mod tests {
         assert_eq!(suffix_of("V.Mokuro.GZ"), Some(Suffix::MokuroGz));
         assert_eq!(suffix_of("V.NoCover"), Some(Suffix::NoCover));
         assert_eq!(suffix_of("V.zip"), None);
-    }
-
-    /// The deprecated either-fold names answer as rule 2 does, or empty.
-    #[test]
-    #[allow(deprecated)]
-    fn the_either_fold_names_are_rule_2_answers() {
-        assert_eq!(stem_fold("Stra\u{df}e"), fold("STRASSE"));
-        let listing = ["Stra\u{df}e.cbz", "Vol.cbz", "VOL.cbz"];
-        for name in ["STRASSE.mokuro", "vol.webp", "X.mokuro", "Vol.edit.cbz"] {
-            let mut want = governing_archives(name, &listing);
-            want.sort_unstable();
-            assert_eq!(governing_archives_by_either_fold(name, &listing), want);
-        }
-        assert!(hides_reserved_layer_by_either_fold(
-            "V.ed\u{200B}it.cbz",
-            &["V.cbz"]
-        ));
-        assert_eq!(
-            fold_disputed("V.mo\u{212A}uro", &[]),
-            ["V.mo\u{212A}uro".to_string()]
-        );
-        assert_eq!(
-            fold_disputed("V.cb\u{200B}z", &["V.mokuro"]),
-            ["V.cb\u{200B}z".to_string()]
-        );
-        // Listed in some spelling: never refused.
-        assert!(fold_disputed("V.cb\u{200B}z", &["v.cb\u{200B}z"]).is_empty());
-        for name in [
-            "STRASSE.mokuro",
-            "Vol\u{200B}1.webp",
-            "V.EDIT.mokuro",
-            "V.edit\u{200B}.mokuro",
-            "X.mokuro",
-        ] {
-            assert!(fold_disputed(name, &["Stra\u{df}e.cbz", "Vol1.cbz", "V.cbz"]).is_empty());
-        }
-        assert_eq!(
-            shadows_reserved_layer("X.ed\u{200B}it.mokuro", &["X.cbz"]),
-            None
-        );
-        assert_eq!(shadowing_archive("X.ed\u{200B}it.cbz"), None);
-        assert!(volume_name_ties("X\u{200B}.curated.cbz", &["X.cbz"]).is_empty());
-        assert!(volume_name_tie_pairs(&["X\u{200B}.cbz", "X.5.cbz"]).is_empty());
     }
 }

@@ -1062,6 +1062,27 @@ fn a_digit_only_layer_id_groups_as_a_layer() {
     assert!(t.at("kingdom").is_none());
 }
 
+/// Rule 2 reads layer ids folded: the loser's `Vol 1.GCV.mokuro` is the winner's layer
+/// `gcv`, so an identical copy merges as one layer (the loser's goes to the trash).
+#[test]
+fn a_miscased_layer_id_merges_as_the_same_layer() {
+    let t = T::new(
+        FakeBackend::drive_like(),
+        &[
+            ("Kingdom/Vol 1.cbz", b"same"),
+            ("Kingdom/Vol 1.gcv.mokuro", &mokuro("layer")),
+            ("kingdom/Vol 1.cbz", b"same"),
+            ("kingdom/Vol 1.GCV.mokuro", &mokuro("layer")),
+        ],
+    );
+    t.steady();
+    t.policy();
+    t.wait_merges(1);
+    assert_eq!(t.names("Kingdom"), ["Vol 1.cbz", "Vol 1.gcv.mokuro"]);
+    assert_eq!(t.bytes("Kingdom/Vol 1.gcv.mokuro").unwrap(), mokuro("layer"));
+    assert!(t.at("kingdom").is_none());
+}
+
 #[test]
 fn an_unstamped_layer_whose_id_the_winner_uses_moves_in_as_the_next_free_id() {
     let t = T::new(

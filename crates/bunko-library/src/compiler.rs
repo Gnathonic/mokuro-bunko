@@ -446,7 +446,7 @@ fn cached_object(
 }
 
 /// The row recorded a BOM sidecar as unreadable (no version, no hash), as every
-/// compile before sidecar names rule v1 did: compiled again once, so the sidecar's
+/// compile before sidecar names rule 2 did: compiled again once, so the sidecar's
 /// pages count without its stamp having to change.
 fn compiled_before_bom_tolerance(object: &JsonObject, stats: &VolumeStats) -> bool {
     let unread = matches!(object.get("mokuro_version"), Some(JsonValue::Str(v)) if v.is_empty())

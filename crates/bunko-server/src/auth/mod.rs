@@ -91,7 +91,7 @@ pub trait AuthBackend: Send + Sync {
         Ok(None)
     }
     /// The FILE names (no folders: rule 2) listed in the library folder that holds a
-    /// library path: what the owner rules read rule v1 from
+    /// library path: what the owner rules read rule 2 from
     /// (`bunko_core::sidecar_names::governing_archives`). Empty when that folder is not
     /// there; `None` when it cannot be read, which no rule reads as "nothing governs it"
     /// (OWN-8).
@@ -474,26 +474,20 @@ impl Listing {
         }
     }
 
-    /// The archives (library rels) that govern the path, listed or new, by rule v1 and
-    /// by the filename fold alike
-    /// ([`sidecar_names::governing_archives_by_either_fold`]): `S/STRASSE.mokuro` is
-    /// governed by a listed `S/Straße.cbz`, as every host makes them one name.
-    // Sidecar names rule 2: a deprecated rule-2 shim until Track B3 removes it.
-    #[allow(deprecated)]
+    /// The archives (library rels) that govern the path, listed or new, by sidecar names
+    /// rule 2 ([`sidecar_names::governing_archives`]): `S/STRASSE.mokuro` is governed by
+    /// a listed `S/Straße.cbz`, as one fold makes them one name everywhere.
     fn governors(&self) -> Vec<String> {
-        sidecar_names::governing_archives_by_either_fold(&self.name, &self.refs())
+        sidecar_names::governing_archives(&self.name, &self.refs())
             .into_iter()
             .map(|a| self.rel(a))
             .collect()
     }
 
     /// The path, a new archive, would turn a reserved layer of a listed volume into its
-    /// own primary (OWN-2), as rule v1 reads it (`V.edit.cbz`, `v.EDIT.cbz` beside
-    /// `V.cbz`). One the filename fold alone makes such an archive
-    /// (`STRASSE.curated.cbz` beside `Straße.cbz`, `V.ed\u{200B}it.cbz`) is created by
-    /// nobody: DAV answers it 409 `ambiguous-name` for every account
-    /// (`bunko_dav`'s one volume name per fold, and its shadowing archives), the
-    /// volume's own controller included.
+    /// own primary (OWN-2), as rule 2 reads it on the fold (`V.edit.cbz`, `v.EDIT.cbz`,
+    /// `V.ed\u{200B}it.cbz`, `STRASSE.curated.cbz` beside `Straße.cbz`): control
+    /// passes up to that volume, in either upload order.
     fn hides_reserved_layer(&self) -> bool {
         sidecar_names::hides_reserved_layer(&self.name, &self.refs())
     }
@@ -1840,7 +1834,7 @@ mod tests {
         );
     }
 
-    /// S2: a file named after a volume needs control of that volume; rule v1's own
+    /// S2: a file named after a volume needs control of that volume; rule 2's own
     /// reading of a `.mokuro` name decides (C7: `Vol 01.5.mokuro` is a layer of Vol 01
     /// when no `Vol 01.5.cbz` is listed).
     #[test]

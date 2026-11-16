@@ -94,7 +94,7 @@ fn scan_dir(
         return Vec::new();
     };
     // Folders and archives another listed spelling shadows are never reached: not
-    // walked, not volumes. Their sidecars stay in the listing rule v1 reads.
+    // walked, not volumes. Their sidecars stay in the listing rule 2 reads.
     let losers = fsutil::case_losers(dir, entries.iter().map(|(n, _)| n.as_str()));
     let mut subdirs = Vec::new();
     let mut filenames: HashSet<String> = HashSet::new();
@@ -138,7 +138,7 @@ fn scan_dir(
         .filter(|name| crate::sidecar::is_cbz_name(name) && !losers.contains(*name))
         .map(|name| (&name[..name.len() - 4], name.as_str()))
         .collect();
-    // What rule v1 reads: the names a request reaches, and every shadowed archive. A
+    // What rule 2 reads: the names a request reaches, and every shadowed archive. A
     // shadowed archive is no volume here, but the files its exact stem names stay its
     // own (as the OCR walk and the writers read them), never the volume's that shadows
     // it.
@@ -167,7 +167,7 @@ fn scan_dir(
                 _ => has_mokuro = true,
             }
         }
-        // The cover and the marker in any spelling of the stem (rule v1: `V.WEBP`), as
+        // The cover and the marker in any spelling of the stem (rule 2: `V.WEBP`), as
         // the thumbnail worker finds them: listed under their own names.
         let files = archive
             .map(|name| folder.volume_files(name))
@@ -494,7 +494,7 @@ impl Inner {
 mod tests {
     use super::*;
 
-    /// Sidecar names rule v1: a primary in another spelling of the stem (`V.MOKURO`,
+    /// Sidecar names rule 2: a primary in another spelling of the stem (`V.MOKURO`,
     /// `v.mokuro.gz`) means the volume is not pending OCR. (Two archives whose stems fold
     /// alike are bunko-core's synthetic-listing vectors.)
     #[test]

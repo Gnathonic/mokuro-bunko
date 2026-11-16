@@ -255,6 +255,23 @@ impl Services {
                 }
             };
         let db = Arc::new(Database::open_with(layout.database(), &db_options)?);
+        // The first 0.8 start of a 0.7 library (its series folders not adopted yet): the
+        // volume files released readers read otherwise than rule 2, and those spelled
+        // unlike their archive, are logged once (doctor lists them any time). A cloud
+        // library's are read from its index once it is in sync: doctor cannot see them.
+        if storage.is_none() && db.series_folder_adoption_pending().unwrap_or(false) {
+            let library = layout.library();
+            std::thread::spawn(move || {
+                for r in crate::storage::doctor::name_reading_rows(&library) {
+                    tracing::info!(
+                        "[STORAGE] {}: {}. {}",
+                        r.label,
+                        r.detail,
+                        r.hint.unwrap_or_default()
+                    );
+                }
+            });
+        }
         let dyndns = DynDnsService::new(config.dyndns.clone());
         let config = Arc::new(RwLock::new(config));
         let backend = Arc::new(DbAuthBackend::new(db.clone(), layout.clone()));
@@ -944,6 +961,19 @@ pub fn start_library_services(
                             r = wait => if r.unwrap_or(false) { break },
                         }
                     }
+                }
+                if db.series_folder_adoption_pending().unwrap_or(false) {
+                    let library = owners_root.clone();
+                    tokio::task::spawn_blocking(move || {
+                        for r in crate::storage::doctor::name_reading_rows(&library) {
+                            tracing::info!(
+                                "[STORAGE] {}: {}. {}",
+                                r.label,
+                                r.detail,
+                                r.hint.unwrap_or_default()
+                            );
+                        }
+                    });
                 }
                 crate::library::adopt_series_folder_owners_until_done(
                     db,

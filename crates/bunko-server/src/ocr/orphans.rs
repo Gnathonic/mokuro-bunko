@@ -8,15 +8,15 @@
 //! free; when it is taken the orphan is a stale second copy and goes. Anything else
 //! that looks numbered stays where it is, counted.
 //!
-//! Names follow sidecar names rule v1 ([`sidecar_names`]): only a `.cbz` anchors, and a
+//! Names follow sidecar names rule 2 ([`sidecar_names`]): only a `.cbz` anchors, and a
 //! numbered name that is itself any archive's stem (`Vol_1.cbz`) is a volume, never an
 //! orphan.
 //!
 //! Whether the canonical name is taken is read from the folder listing, never by
-//! opening the name, so every host does the same: taken when rule v1 already gives the
+//! opening the name, so every host does the same: taken when rule 2 already gives the
 //! volume that file (the orphan is a stale copy and goes); left in place, counted, when
-//! the folder lists the name only in another spelling rule v1 does not give the volume
-//! (`Vol.FAST.mokuro` for `Vol.fast.mokuro`: moving the orphan there would make a second
+//! the folder lists the name only in a spelling rule 2 does not give the volume (another
+//! archive's file in a fold group: moving the orphan there would make a second
 //! spelling, removing it would lose the OCR), and when a case-variant group freezes the
 //! orphan, its canonical name, its volume or a folder above them
 //! ([`bunko_core::fold_groups`]).
@@ -292,7 +292,7 @@ fn sweep_one(
     {
         return Ok(Swept::Left);
     }
-    // From the listing: rule v1 gives the volume that file already (a stale copy), or
+    // From the listing: rule 2 gives the volume that file already (a stale copy), or
     // the name is listed in another spelling that is not the volume's, or a folder
     // takes it (left: no second spelling, nothing lost). Never by opening `target`,
     // which a host that folds names would answer with that other file.
@@ -384,7 +384,7 @@ mod tests {
         assert_eq!(target("Other_1.mokuro", &["Vol.cbz"]), None);
         assert_eq!(target("Vol.mokuro", &["Vol.cbz"]), None);
         assert_eq!(target("Vol_1.webp", &["Vol.cbz"]), None);
-        // Only `.cbz` anchors (rule v1 #2); the collector numbered the archive's own stem.
+        // Only `.cbz` anchors (rule 2, R2); the collector numbered the archive's own stem.
         assert_eq!(target("Vol_1.mokuro", &["Vol.zip"]), None);
         assert_eq!(target("vol_1.mokuro", &["Vol.cbz"]), None);
         // A layer id the rule does not allow.

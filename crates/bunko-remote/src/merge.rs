@@ -715,7 +715,7 @@ struct Named {
 }
 
 /// The folded stems of the `.cbz` archives among `names`: only they anchor sidecars
-/// (rule v1). A `.zip` is still an [`Part::Archive`] for grouping moves.
+/// (rule 2). A `.zip` is still an [`Part::Archive`] for grouping moves.
 fn archive_stems<'a>(names: impl Iterator<Item = &'a str>) -> HashSet<String> {
     sidecar_names::volume_stems(names)
 }
@@ -726,7 +726,7 @@ fn split_name(name: &str, stems: &HashSet<String>) -> (String, String, Part) {
         return (s.to_string(), name[s.len()..].to_string(), Part::Archive);
     }
     if let Some((base, _)) = sidecar_names::split_mokuro(name) {
-        // The listing is at hand, so rule v1 decides: all-digit ids are layers.
+        // The listing is at hand, so rule 2 decides: all-digit ids are layers.
         if let SidecarClass::Layer { stem, id, .. } = sidecar_names::classify(name, stems) {
             return (
                 stem.to_string(),

@@ -612,7 +612,7 @@ impl Upgrade {
     }
 
     /// The volume's layer sidecars (plain `.mokuro`), sorted, as the directory lists them
-    /// and rule v1 sweeps them ([`sidecar_names::volume_files`]).
+    /// and rule 2 sweeps them ([`sidecar_names::volume_files`]).
     fn layer_files(cbz: &Path) -> Vec<PathBuf> {
         let Some(dir) = cbz.parent() else {
             return Vec::new();
@@ -1357,7 +1357,7 @@ impl Upgrade {
     }
 }
 
-/// The listed archive whose primary sidecar (rule v1, over the folder listing) is
+/// The listed archive whose primary sidecar (rule 2, over the folder listing) is
 /// `primary`: `V.CBZ` for `v.mokuro`. Never a constructed archive name opened on the
 /// host.
 fn archive_of_primary(primary: &Path) -> Option<PathBuf> {
@@ -1450,7 +1450,7 @@ mod tests {
         let junk = dir.path().join("c.mokuro");
         std::fs::write(&junk, b"nope").unwrap();
         assert_eq!(classify(&junk, None).family, UNKNOWN);
-        // A leading BOM (rule v1) hides neither the stamp nor the recipe.
+        // A leading BOM (rule 2) hides neither the stamp nor the recipe.
         let bom = dir.path().join("d.mokuro");
         let stamped = r#"{"ocr_engine":{"id":"hayai-nova","detector":"ppocr-manga","patch_budget":512},"pages":[]}"#;
         std::fs::write(&bom, format!("\u{feff}{stamped}")).unwrap();

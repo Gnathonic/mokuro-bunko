@@ -408,7 +408,7 @@ impl MetadataService {
         let listed = crate::sidecar::Listed { files, dirs };
         let files = &listed.files;
         // The first volume's cover as the thumbnail worker writes it: in the spelling
-        // the folder lists (`v.webp` for `V.cbz`, rule v1, never a shadowed archive's).
+        // the folder lists (`v.webp` for `V.cbz`, rule 2, never a shadowed archive's).
         let cover_path = volumes
             .iter()
             .find_map(|volume| {

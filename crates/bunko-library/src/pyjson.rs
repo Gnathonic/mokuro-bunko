@@ -298,7 +298,7 @@ const MAX_DEPTH: usize = 512;
 
 /// `text` without one leading UTF-8 BOM. [`parse`] stays as strict as `json.loads`;
 /// whatever reads a file another program wrote (a sidecar, a `series.json` PUT) strips
-/// it first, as the reader's UTF-8 decoder does (sidecar names rule v1).
+/// it first, as the reader's UTF-8 decoder does (sidecar names rule 2).
 pub fn strip_bom(text: &str) -> &str {
     text.strip_prefix('\u{feff}').unwrap_or(text)
 }
@@ -883,7 +883,7 @@ mod tests {
         );
         assert!(parse("[1,]").is_err());
         assert!(parse("\u{feff}{}").is_err());
-        // Callers that read exchanged files strip it first (rule v1); only the first.
+        // Callers that read exchanged files strip it first (rule 2); only the first.
         assert!(parse(strip_bom("\u{feff}{}")).is_ok());
         assert_eq!(strip_bom("\u{feff}\u{feff}{}"), "\u{feff}{}");
         assert_eq!(strip_bom("{}"), "{}");

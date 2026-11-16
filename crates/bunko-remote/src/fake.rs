@@ -765,9 +765,9 @@ fn join(parent: &str, name: &str) -> String {
     }
 }
 
-/// The case-insensitive name rule.
+/// The case-insensitive name rule: the one fold (which normalizes on its own).
 fn fold(name: &[u8]) -> String {
-    crate::names::fold(&crate::names::nfc(name))
+    crate::names::fold(&String::from_utf8_lossy(name))
 }
 
 impl State {

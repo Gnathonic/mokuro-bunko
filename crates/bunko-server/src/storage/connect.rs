@@ -70,7 +70,7 @@ pub const MAX_UNUSED_CODES: u32 = 5;
 pub const PAIRING_OFFER_MAX_VOLUMES: u64 = 10;
 
 /// Archive extensions the Check counts as volumes: every one, not only the `.cbz` that
-/// anchors sidecars (rule v1) — the Check counts what the folder holds.
+/// anchors sidecars (rule 2) — the Check counts what the folder holds.
 const VOLUME_EXTS: &[&str] = &bunko_core::sidecar_names::ARCHIVE_EXTENSIONS;
 
 /// The name a provider is shown by.

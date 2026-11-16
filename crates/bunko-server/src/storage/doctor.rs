@@ -2,9 +2,10 @@
 //! Google pairing (and a pairing change waiting for its Disconnect), whether the spool
 //! can hold what OCR spools at once, how the credentials file is protected, a local
 //! series named like the reader's reading history (0.8), names a local library holds in
-//! two spellings (case variants, which only a case-sensitive disk can hold), and files
-//! the filename fold ties to a volume that sidecar names rule v1 does not give it.
-//! Offline: no provider is asked.
+//! two spellings (case variants, which only a case-sensitive disk can hold), the volume
+//! files released Mokuro Reader (1.10 and earlier) reads otherwise than sidecar names
+//! rule 2, the volume files spelled unlike their archive, and the series owner records
+//! the rekey to the one fold merged. Offline: no provider is asked.
 
 use std::path::Path;
 
@@ -66,6 +67,8 @@ pub fn checks(config: &Config) -> Vec<Row> {
             None,
         ));
         out.extend(case_variant_rows(&config.storage.layout().library()));
+        out.extend(name_reading_rows(&config.storage.layout().library()));
+        out.extend(series_owner_merge_rows(&config.storage.layout().database()));
         out.extend(credentials_row(&config.storage.layout().cloud_dir()));
         return out;
     }
@@ -201,21 +204,8 @@ pub fn reserved_series_rows(library: &Path, cloud_folder: Option<&str>) -> Vec<R
 /// folder are never written, moved, deleted or re-keyed, by a client (409) or by Bunko
 /// (no OCR, cover, sweep or adoption). Also the hidden names a case-only rename leaves behind when
 /// it is interrupted between its two steps (`.bunko-case-<token>-<name>`), with the
-/// rename that finishes it. Also, one Warn row each, a file the filename fold ties to a
-/// listed volume's files that sidecar names rule v1 does not give it (`STRASSE.mokuro`
-/// beside `Straße.cbz`, `V.EDIT.mokuro` beside `V.cbz`: Bunko writes nothing for the
-/// volume in its place) or that only the fold gives a volume file suffix
-/// ([`bunko_core::sidecar_names::fold_disputed`]), and one the fold makes one name with
-/// a personal or curated layer name while it is no such layer (`X.ed\u{200B}it.mokuro`,
-/// its volume listed or not: [`bunko_core::sidecar_names::shadows_reserved_layer`]), or
-/// an archive whose OCR file could only be such a name (`X.ed\u{200B}it.cbz`). Also,
-/// one Warn row per pair, two archives the fold makes one volume name while they spell
-/// it otherwise (`Stra\u{df}e.cbz` beside `STRASSE.curated.cbz`,
-/// [`bunko_core::sidecar_names::volume_name_tie_pairs`]). Walks
-/// folders only (no file is read). A remote store merges its own case variants (spec §5.9): not for it.
-// Sidecar names rule 2: the either-fold names are deprecated rule-2 shims until Track B3
-// removes this path.
-#[allow(deprecated)]
+/// rename that finishes it. Walks folders only (no file is read). A remote store merges
+/// its own case variants (spec §5.9): not for it.
 pub fn case_variant_rows(library: &Path) -> Vec<Row> {
     let mut out = Vec::new();
     let mut todo = vec![String::new()];
@@ -335,91 +325,6 @@ pub fn case_variant_rows(library: &Path) -> Vec<Row> {
                 )),
             ));
         }
-        // Names the filename fold ties to a volume's files without rule v1 doing so
-        // (`STRASSE.mokuro` beside `Straße.cbz`, `V.EDIT.mokuro` beside `V.cbz`), and
-        // names only the fold gives a volume file suffix. A frozen group's are its row's.
-        let files: Vec<&str> = reachable
-            .iter()
-            .filter(|(_, is_dir)| !is_dir)
-            .map(|(n, _)| n.as_str())
-            .collect();
-        for name in &files {
-            if groups.is_frozen(name) {
-                continue;
-            }
-            let disputed = bunko_core::sidecar_names::fold_disputed(name, &files);
-            let path = dir.join(name);
-            if disputed.is_empty() {
-                if bunko_core::sidecar_names::shadows_reserved_layer(name, &files).is_some() {
-                    let what = if bunko_core::sidecar_names::shadowing_archive(name).is_some() {
-                        "an archive whose OCR file would be an account's correction or the curated layer of the volume of the shorter stem, but its OCR file is no such layer by the sidecar naming rule Mokuro Reader shares"
-                    } else {
-                        "an account's correction or the curated layer of a volume of that stem, but no such layer by the sidecar naming rule Mokuro Reader shares: requests for those layers never reach it"
-                    };
-                    out.push(row(
-                        Verdict::Warn,
-                        "Ambiguous name",
-                        format!(
-                            "{} is one name on every host (Bunko joins names as case-insensitive filesystems do) with {what}, and Bunko writes no such name",
-                            child(name)
-                        ),
-                        Some(format!("Delete {} or rename it apart.", path.display())),
-                    ));
-                }
-                continue;
-            }
-            out.push(if disputed == [name.to_string()] {
-                row(
-                    Verdict::Warn,
-                    "Ambiguous name",
-                    format!(
-                        "{} ends in a volume file suffix (.cbz, .mokuro, .mokuro.gz, .webp, .nocover) only as case-insensitive filesystems join names: it is no volume's file, and Bunko writes no such name",
-                        child(name)
-                    ),
-                    Some(format!("Rename or delete {}.", path.display())),
-                )
-            } else {
-                let volumes = disputed
-                    .iter()
-                    .map(|n| child(n))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                row(
-                    Verdict::Warn,
-                    "Ambiguous name",
-                    format!(
-                        "{} is one name with a file of {volumes} on every host (Bunko joins names as case-insensitive filesystems do), but not that volume's file by the sidecar naming rule Mokuro Reader shares: Bunko writes nothing for the volume in its place, and only the volume's controller or an editor may change or delete it",
-                        child(name)
-                    ),
-                    Some(format!(
-                        "If it is that volume's file, rename {} to the volume's exact stem with a lowercase layer id; otherwise delete it or rename it apart.",
-                        path.display()
-                    )),
-                )
-            });
-        }
-        // Two archives the fold makes one volume name, spelled otherwise
-        // (`Stra\u{df}e.cbz` beside `STRASSE.curated.cbz`): no request writes a file of
-        // either volume until one is renamed or deleted. A frozen group's are its row's.
-        for (a, b) in bunko_core::sidecar_names::volume_name_tie_pairs(&files) {
-            if groups.is_frozen(a) || groups.is_frozen(b) {
-                continue;
-            }
-            out.push(row(
-                Verdict::Warn,
-                "Ambiguous volume names",
-                format!(
-                    "{} and {} are one volume name on every host (Bunko joins names as case-insensitive filesystems do; a nested archive such as <stem>.curated.cbz is the volume <stem>'s), spelled otherwise: reads serve both, no request writes a file of either volume (409) until one of the archives is renamed or deleted, and Bunko writes none of its own files where the other volume's name is listed",
-                    child(a),
-                    child(b)
-                ),
-                Some(format!(
-                    "Rename {} or {} (with its sidecars, cover and layers) so that both spell the volume name alike or the names differ, or delete the one that should not be there (MIGRATING-0.7.md, \"One volume name per fold\").",
-                    dir.join(a).display(),
-                    dir.join(b).display()
-                )),
-            ));
-        }
         for (name, is_dir) in reachable {
             if *is_dir && !losers.contains(name) {
                 todo.push(child(name));
@@ -427,6 +332,249 @@ pub fn case_variant_rows(library: &Path) -> Vec<Row> {
         }
     }
     out
+}
+
+/// How the volume files of a local library read (sidecar names rule 2, one fold), for
+/// the admin: nothing here is refused or changed, every name keeps working.
+///
+/// * "Released readers read these differently": a listed file rule 2 gives a volume
+///   that Mokuro Reader 1.10 and earlier does not see at all (Info: `STRASSE.mokuro`
+///   beside `Straße.cbz`, an NFD `Café.mokuro` beside an NFC `Café.cbz`, a name whose
+///   volume-file suffix only its fold shows, `V.mo\u{212A}uro`), or shows as a layer of
+///   another archive (Warn: a crafted or hand-made nested archive, an NFD
+///   `Cafe\u{301}.fix.cbz` beside `Café.cbz`; renaming that archive clears it)
+///   ([`bunko_core::sidecar_names::legacy::r0_differences`]).
+/// * "Volume files spelled unlike their archive": a listed sidecar, cover, no-cover
+///   marker or layer that rule 2 gives an archive whose stem it spells otherwise
+///   (`vol 1.mokuro` beside `Vol 1.cbz`), with the case-only rename that spells it
+///   alike (Info).
+///
+/// A frozen fold group's files are its own row's. Walks folders only (no file is read).
+pub fn name_reading_rows(library: &Path) -> Vec<Row> {
+    use bunko_core::sidecar_names::legacy::{DiffKind, Reading, r0_differences};
+    use bunko_core::sidecar_names::{Folder, VolumeFile, split_layer, strip_suffix_folded};
+    let mut out = Vec::new();
+    let mut todo = vec![String::new()];
+    while let Some(rel) = todo.pop() {
+        let dir = if rel.is_empty() {
+            library.to_path_buf()
+        } else {
+            library.join(&rel)
+        };
+        let Ok(entries) = bunko_store::fs::read_dir(&dir) else {
+            continue;
+        };
+        let mut listed: Vec<(String, bool)> = entries
+            .flatten()
+            .filter_map(|e| {
+                let name = e.file_name().into_string().ok()?;
+                Some((name, e.file_type().is_ok_and(|t| t.is_dir())))
+            })
+            .filter(|(n, _)| {
+                !n.starts_with('.')
+                    && !(rel.is_empty() && bunko_core::reader_tree::is_per_user_root_name(n))
+            })
+            .collect();
+        listed.sort();
+        let child = |name: &str| {
+            if rel.is_empty() {
+                name.to_string()
+            } else {
+                format!("{rel}/{name}")
+            }
+        };
+        let groups = bunko_library::fsutil::fold_groups(
+            &dir,
+            listed.iter().map(|(n, is_dir)| (n.as_str(), *is_dir)),
+        );
+        let files: Vec<&str> = listed
+            .iter()
+            .filter(|(n, is_dir)| !is_dir && !groups.is_frozen(n))
+            .map(|(n, _)| n.as_str())
+            .collect();
+        let mut reported: std::collections::HashSet<&str> = Default::default();
+        let reads = |r: &Reading<'_>| match r {
+            Reading::Primary { archive } => format!("the OCR file of {}", child(archive)),
+            Reading::Layer { archive, id } => format!("layer {id} of {}", child(archive)),
+            Reading::Orphan => "no volume's file".to_string(),
+        };
+        for diff in r0_differences(&files) {
+            reported.insert(diff.name);
+            let path = dir.join(diff.name);
+            out.push(match diff.kind() {
+                DiffKind::Unseen => row(
+                    Verdict::Info,
+                    "Released readers read these differently",
+                    format!(
+                        "{} is {} (sidecar names rule 2, one fold), but Mokuro Reader 1.10 and earlier do not see it",
+                        child(diff.name),
+                        reads(&diff.rule2)
+                    ),
+                    respelled(&files, diff.name).map(|to| {
+                        format!(
+                            "Optional: rename {} to {} (a case-only rename) so released readers see it too.",
+                            path.display(),
+                            dir.join(to).display()
+                        )
+                    }),
+                ),
+                DiffKind::Misread => row(
+                    Verdict::Warn,
+                    "Released readers read these differently",
+                    format!(
+                        "{} is {} (sidecar names rule 2, one fold), but Mokuro Reader 1.10 and earlier show it as {}",
+                        child(diff.name),
+                        reads(&diff.rule2),
+                        reads(&diff.r0)
+                    ),
+                    match &diff.rule2 {
+                        Reading::Primary { archive } | Reading::Layer { archive, .. } => {
+                            Some(format!(
+                                "Rename {} (with its sidecars, cover and layers) so its name no longer reads as another volume's layer.",
+                                dir.join(archive).display()
+                            ))
+                        }
+                        Reading::Orphan => None,
+                    },
+                ),
+            });
+        }
+        // An archive, cover or no-cover marker whose suffix only the fold shows
+        // (`V.cb\u{200B}z`): released readers match those on the lowercase (an OCR
+        // file's reading is the diff above).
+        let unseen_suffix = |name: &str| {
+            use bunko_core::sidecar_names::{Suffix, suffix_of};
+            suffix_of(name).is_some_and(|suffix| {
+                !matches!(suffix, Suffix::Mokuro | Suffix::MokuroGz)
+                    && !name.to_lowercase().ends_with(suffix.as_str())
+            })
+        };
+        for name in &files {
+            if !reported.contains(name) && unseen_suffix(name) {
+                reported.insert(name);
+                out.push(row(
+                    Verdict::Info,
+                    "Released readers read these differently",
+                    format!(
+                        "{} ends in a volume file suffix only once folded: Bunko reads it by its fold, but Mokuro Reader 1.10 and earlier do not see it as a volume file",
+                        child(name)
+                    ),
+                    Some(format!(
+                        "Optional: rename {} so its suffix is spelled out.",
+                        dir.join(name).display()
+                    )),
+                ));
+            }
+        }
+        let folder = Folder::new(&files);
+        for archive in &files {
+            let Some(stem) = bunko_core::sidecar_names::cbz_stem(archive) else {
+                continue;
+            };
+            for (name, file) in folder.volume_files(archive) {
+                if reported.contains(name) {
+                    continue;
+                }
+                let (raw_stem, to) = match &file {
+                    VolumeFile::Layer { id, gz } => (
+                        split_layer(name).map(|(s, _, _)| s),
+                        format!("{stem}.{id}.mokuro{}", if *gz { ".gz" } else { "" }),
+                    ),
+                    VolumeFile::Primary { gz } => {
+                        let suffix = if *gz { ".mokuro.gz" } else { ".mokuro" };
+                        (strip_suffix_folded(name, suffix), format!("{stem}{suffix}"))
+                    }
+                    VolumeFile::Cover => {
+                        (strip_suffix_folded(name, ".webp"), format!("{stem}.webp"))
+                    }
+                    VolumeFile::NoCover => (
+                        strip_suffix_folded(name, ".nocover"),
+                        format!("{stem}.nocover"),
+                    ),
+                };
+                if raw_stem.is_none_or(|s| s == stem) || files.contains(&to.as_str()) {
+                    continue;
+                }
+                out.push(row(
+                    Verdict::Info,
+                    "Volume files spelled unlike their archive",
+                    format!(
+                        "{} is a file of {} (sidecar names rule 2, one fold), spelled otherwise",
+                        child(name),
+                        child(archive)
+                    ),
+                    Some(format!(
+                        "Optional: rename {} to {} (a case-only rename).",
+                        dir.join(name).display(),
+                        dir.join(&to).display()
+                    )),
+                ));
+            }
+        }
+        for (name, is_dir) in &listed {
+            if *is_dir && !groups.is_hidden(name) {
+                todo.push(child(name));
+            }
+        }
+    }
+    out
+}
+
+/// The spelling an unseen `.mokuro` (primary or layer) of `files` takes to be seen by
+/// released readers too: its archive's stem, the id folded; `None` when that name is
+/// listed already (two files would be one).
+fn respelled(files: &[&str], name: &str) -> Option<String> {
+    use bunko_core::sidecar_names::{Folder, VolumeFile, cbz_stem};
+    let folder = Folder::new(files);
+    let archive = folder.display_archive(name)?;
+    let stem = cbz_stem(archive)?;
+    let to = folder
+        .volume_files(archive)
+        .into_iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, file)| match file {
+            VolumeFile::Primary { gz } => format!("{stem}.mokuro{}", if gz { ".gz" } else { "" }),
+            VolumeFile::Layer { id, gz } => {
+                format!("{stem}.{id}.mokuro{}", if gz { ".gz" } else { "" })
+            }
+            VolumeFile::Cover => format!("{stem}.webp"),
+            VolumeFile::NoCover => format!("{stem}.nocover"),
+        })?;
+    (to != name && !files.contains(&to.as_str())).then_some(to)
+}
+
+/// "Series owner records merged by the rekey": the records the database's rekey to
+/// the one fold ([`bunko_db::series_owner_merges_at`], read-only) merged into an
+/// earlier one of the same series (`STRASSE/` and `Straße/`), one Warn row each.
+pub fn series_owner_merge_rows(database: &Path) -> Vec<Row> {
+    let merges = match bunko_db::series_owner_merges_at(database) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::debug!("series owner merges: {e}");
+            return Vec::new();
+        }
+    };
+    merge_rows(merges)
+}
+
+fn merge_rows(merges: Vec<bunko_db::SeriesOwnerMerge>) -> Vec<Row> {
+    merges
+        .into_iter()
+        .map(|m| {
+            row(
+                Verdict::Warn,
+                "Series owner records merged by the rekey",
+                format!(
+                    "{}/ (owned by {}) is one series with {}/ under the one filename fold: the earlier record is kept, {} owns both",
+                    m.folder_name, m.owner, m.kept_folder, m.kept_owner
+                ),
+                Some(format!(
+                    "Nothing to do if {} should keep it: the two spellings are one folder on every host, and the kept record decides who may add to it ({} keeps their own volumes either way).",
+                    m.kept_owner, m.owner
+                )),
+            )
+        })
+        .collect()
 }
 
 /// `storage.library.spool_gb` against 2 × lanes × the largest archive (the biggest one
@@ -753,13 +901,13 @@ mod tests {
         );
     }
 
-    /// Sidecar names rule 2 decides on the one fold: a name the old filename fold tied
-    /// to a volume's files without rule v1 (`STRASSE.mokuro` beside `Straße.cbz`,
-    /// `V.EDIT.mokuro`, `X.ed\u{200B}it.mokuro`) is now that volume's file or layer, and
-    /// a listed name with a suffix only the fold shows (`W.mo\u{212A}uro`) is read by its
-    /// fold. Nothing is ambiguous, so nothing is reported (the section goes in Track B3).
+    /// The dispute and tie sections are gone with rule v1 (rule 2 decides on the one
+    /// fold: nothing is ambiguous). What doctor reports instead decides nothing: the
+    /// files released readers (1.10 and earlier) read otherwise, unseen (Info, with the
+    /// respelling that makes them seen) or misread as another archive's layer (Warn,
+    /// naming the archive to rename), and the volume files spelled unlike their archive.
     #[test]
-    fn rule_2_leaves_no_ambiguous_names() {
+    fn released_readers_and_spellings_are_reported() {
         let dir = tempfile::tempdir().unwrap();
         let library = dir.path().join("library");
         bunko_store::fs::create_dir_all(library.join("S")).unwrap();
@@ -770,43 +918,112 @@ mod tests {
             "V.EDIT.mokuro",
             "Stra\u{df}e.cbz",
             "STRASSE.mokuro",
+            "W.cbz",
             "W.mo\u{212A}uro",
-            "X.ed\u{200B}it.mokuro",
+            "X.cb\u{200B}z",
+            "Caf\u{e9}.cbz",
+            "Cafe\u{301}.fix.cbz",
+            "Caf\u{e9}.fix.mokuro",
+            "Vol 1.cbz",
+            "vol 1.mokuro",
             "Y.cura\u{200B}ted.cbz",
             "Notes.txt",
         ] {
             bunko_store::fs::write(library.join("S").join(name), "x").unwrap();
         }
-        let rows: Vec<Row> = case_variant_rows(&library)
-            .into_iter()
-            .filter(|r| r.label == "Ambiguous name")
-            .collect();
-        assert!(rows.is_empty(), "{rows:?}");
+        let rows = case_variant_rows(&library);
+        assert!(
+            rows.iter()
+                .all(|r| !r.label.contains("Ambiguous") && r.label != "Case variants"),
+            "{rows:?}"
+        );
+        let rows = name_reading_rows(&library);
+        let find = |label: &str, name: &str| {
+            rows.iter()
+                .filter(|r| r.label == label && r.detail.starts_with(&format!("S/{name} ")))
+                .collect::<Vec<_>>()
+        };
+        let released = "Released readers read these differently";
+        let unseen = find(released, "STRASSE.mokuro");
+        assert_eq!(unseen.len(), 1, "{rows:?}");
+        assert_eq!(unseen[0].verdict, Verdict::Info);
+        assert!(
+            unseen[0].detail.contains("the OCR file of S/Stra\u{df}e.cbz"),
+            "{unseen:?}"
+        );
+        assert!(
+            unseen[0]
+                .hint
+                .as_deref()
+                .unwrap()
+                .contains("Stra\u{df}e.mokuro"),
+            "{unseen:?}"
+        );
+        let misread = find(released, "Caf\u{e9}.fix.mokuro");
+        assert_eq!(misread.len(), 1, "{rows:?}");
+        assert_eq!(misread[0].verdict, Verdict::Warn);
+        assert!(
+            misread[0].detail.contains("layer fix of S/Caf\u{e9}.cbz"),
+            "{misread:?}"
+        );
+        assert!(
+            misread[0]
+                .hint
+                .as_deref()
+                .unwrap()
+                .contains("Cafe\u{301}.fix.cbz"),
+            "{misread:?}"
+        );
+        let suffix = find(released, "X.cb\u{200B}z");
+        assert_eq!(suffix.len(), 1, "{rows:?}");
+        assert_eq!(suffix[0].verdict, Verdict::Info);
+        let spelled = find("Volume files spelled unlike their archive", "vol 1.mokuro");
+        assert_eq!(spelled.len(), 1, "{rows:?}");
+        assert!(
+            spelled[0].hint.as_deref().unwrap().contains("Vol 1.mokuro"),
+            "{spelled:?}"
+        );
+        // Released readers read these as Bunko does: no row.
+        for name in [
+            "V.mokuro",
+            "V.webp",
+            "V.EDIT.mokuro",
+            "W.mo\u{212A}uro",
+            "Notes.txt",
+        ] {
+            assert!(
+                rows.iter()
+                    .all(|r| !r.detail.starts_with(&format!("S/{name} "))),
+                "{name}: {rows:?}"
+            );
+        }
+        assert_eq!(rows.len(), 4, "{rows:?}");
     }
 
-    /// Two archives are one volume name only when they fold alike (a fold group, which
-    /// its own section reports): the either-fold "volume name tie" is gone with rule v1.
+    /// The series owner records the database's rekey merged are reported, read-only.
     #[test]
-    fn rule_2_leaves_no_volume_name_ties() {
+    fn series_owner_merges_are_reported() {
         let dir = tempfile::tempdir().unwrap();
-        let library = dir.path().join("library");
-        bunko_store::fs::create_dir_all(library.join("S")).unwrap();
-        for name in [
-            "Stra\u{df}e.cbz",
-            "STRASSE.curated.cbz",
-            "X.cbz",
-            "X\u{200B}.edit.cbz",
-            "V.cbz",
-            "V.curated.cbz",
-            "W.cbz",
-        ] {
-            bunko_store::fs::write(library.join("S").join(name), "x").unwrap();
-        }
-        let rows: Vec<Row> = case_variant_rows(&library)
-            .into_iter()
-            .filter(|r| r.label == "Ambiguous volume names")
-            .collect();
-        assert!(rows.is_empty(), "{rows:?}");
+        let path = dir.path().join("mokuro.db");
+        assert!(series_owner_merge_rows(&path).is_empty());
+        let db = bunko_db::Database::open(&path).unwrap();
+        db.record_series_folder_owner("Dr Stone", "alice").unwrap();
+        drop(db);
+        assert!(series_owner_merge_rows(&path).is_empty());
+        let rows = merge_rows(vec![bunko_db::SeriesOwnerMerge {
+            folder_name: "Stra\u{df}e".into(),
+            owner: "alice".into(),
+            kept_folder: "STRASSE".into(),
+            kept_owner: "bob".into(),
+        }]);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].verdict, Verdict::Warn);
+        assert!(
+            rows[0].detail.starts_with(
+                "Stra\u{df}e/ (owned by alice) is one series with STRASSE/ under the one filename fold"
+            ),
+            "{rows:?}"
+        );
     }
 
     /// A cloud folder can hold a `history/` series too (uploaded under 0.7, or by a

@@ -133,12 +133,13 @@ pub fn listed_sidecar_paths_in(
     })
 }
 
-/// `needs_sidecar`, the other way round: rule v1 finds the row's sidecar or its `.gz`
-/// in the archive's folder listing, in any spelling of the volume's stem (`V.MOKURO`,
-/// `v.fast.mokuro` on a case-sensitive disk), the layer id exact. Decided from the
-/// listing alone, never by opening a built name, so every host answers alike; the
-/// writer ([`listed_sidecar_paths`]) declines what rule v1 does not give the archive, so
-/// a row is never owed for a file that cannot be its own (`V.FAST.mokuro`).
+/// `needs_sidecar`, the other way round: rule 2 finds the row's sidecar or its `.gz`
+/// in the archive's folder listing, in any spelling of the volume's stem and layer id
+/// (`V.MOKURO`, `v.FAST.mokuro`: rule 2 reads them folded). Decided from the listing
+/// alone, never by opening a built name, so every host answers alike; the writer
+/// ([`listed_sidecar_paths`]) declines what rule 2 does not give the archive (another
+/// archive's file in a fold group), so a row is never owed for a file that cannot be
+/// its own.
 /// `folder`: the archive's folder when a walk has listed it; else it is listed here.
 pub fn row_done(cbz: &Path, row: &Generation, folder: Option<&Folder>) -> bool {
     let listed_in = |folder: &Folder| {
@@ -211,7 +212,7 @@ fn compute_in(
         return None;
     }
     // Nothing is owed that could not be written: a sidecar whose every listed spelling
-    // is another archive's (rule v1, a shadowed archive's included). Such a volume is
+    // is another archive's (rule 2, a shadowed archive's included). Such a volume is
     // left as it is until its case variants are merged by hand (doctor reports them).
     let own_names;
     let names: &sidecar::Listed = match listed {
@@ -282,7 +283,7 @@ fn compute_in(
 /// Every `library/**/*.cbz` (any case), sorted. The per-user names at the root (a cloud
 /// progress user's `history/`, a series spelled like one) are not walked, nor is
 /// anything a case-variant group freezes ([`bunko_core::fold_groups`]): the members of
-/// a group, the winner included, the files rule v1 gives their archives, and everything
+/// a group, the winner included, the files rule 2 gives their archives, and everything
 /// inside a member folder. Volumes there are owed nothing until the group is merged.
 pub fn list_archives(library: &Path) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
@@ -533,7 +534,7 @@ mod tests {
         assert!(still_owed(lib, "S/V1.CBZ", &rows()[0], false));
     }
 
-    /// Sidecar names rule v1: a sidecar in another spelling of the volume's stem
+    /// Sidecar names rule 2: a sidecar in another spelling of the volume's stem
     /// (`V.MOKURO`, `v2.fast.mokuro.gz`) is the volume's, so the
     /// walk does not OCR it again and write a second primary beside it.
     #[test]
@@ -652,7 +653,7 @@ mod tests {
         );
     }
 
-    /// A shadowed archive keeps the files its exact stem names (rule v1 over the whole
+    /// A shadowed archive keeps the files its exact stem names (rule 2 over the whole
     /// listing, as the walk reads it): the archive that shadows it is never given
     /// `v.mokuro` or `v.webp` to overwrite, and is owed nothing until the two are merged
     /// by hand. Where the host folds `V.cbz` and `v.cbz` into one entry, that one entry

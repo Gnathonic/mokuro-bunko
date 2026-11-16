@@ -1058,3 +1058,44 @@ fn an_index_from_before_the_ignorable_fold_is_refolded() {
         .collect();
     assert_eq!(v, ["Vol1", "Vol\u{200B}1"]);
 }
+
+/// Fold v2 (rule 4) replaced the UCD 15 tables and the runtime uppercase step: an index
+/// folded under rule 3 is refolded when it is opened, whatever its stored folds say.
+#[test]
+fn an_index_from_fold_rule_3_is_refolded() {
+    let d = tempfile::tempdir().unwrap();
+    let path = d.path().join("index.sqlite");
+    {
+        let idx = Index::open(&path).unwrap();
+        idx.set_roots(&[dir("root-1", "top", "mokuro-reader", 10)])
+            .unwrap();
+        let f = Fx {
+            _dir: tempfile::tempdir().unwrap(),
+            idx,
+        };
+        f.up(&dir("a", "root-1", "Caf\u{e9}", 100));
+        f.up(&dir("b", "root-1", "CAF\u{c9}", 200));
+    }
+    // As some older table left them: two folds, under rule 3.
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute(
+        "UPDATE entry SET fold = 'stale' WHERE name = 'CAF\u{c9}'",
+        [],
+    )
+    .unwrap();
+    conn.execute("UPDATE meta SET v = '3' WHERE k = 'fold_rule'", [])
+        .unwrap();
+    drop(conn);
+    let idx = Index::open(&path).unwrap();
+    let v: Vec<String> = idx
+        .variants(ROOT_EID, &fold("caf\u{e9}"))
+        .into_iter()
+        .map(|e| e.name)
+        .collect();
+    assert_eq!(v, ["Caf\u{e9}", "CAF\u{c9}"]);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let rule: String = conn
+        .query_row("SELECT v FROM meta WHERE k = 'fold_rule'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(rule, "4");
+}
