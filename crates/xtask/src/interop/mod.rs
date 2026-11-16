@@ -1,12 +1,13 @@
 //! `cargo xtask interop`: the cross-party test rig (docs/design/interop-testing.md).
 //! `catalog-perf` (I0): the catalog and series views on a large library, checked
 //! against `interop/budgets.toml`. `rig` (I3): every party as its own process, one
-//! suite per provider.
+//! suite per provider. `live-auth` (I5): the owner's sign-ins for the live runs.
 
 mod budgets;
 mod catalog;
 mod genlib;
 mod http;
+mod live;
 mod rig;
 mod server;
 
@@ -30,6 +31,12 @@ enum Suite {
     CatalogPerf(CatalogPerfArgs),
     /// Run interop suites against real processes: a testing server, cloudsim, rclone.
     Rig(rig::RigArgs),
+    /// Sign in to a live-run account (or take the saved MEGA session), check it and
+    /// store it as an Actions secret. Needs the `live` feature: `cargo xtask-live`.
+    LiveAuth(live::LiveAuthArgs),
+    /// One live run on a real account (scheduled by interop-live.yml): the cloud suite
+    /// in a sandbox folder, the account left as it was. Needs the `live` feature.
+    Live(live::LiveArgs),
 }
 
 #[derive(clap::Args)]
@@ -55,6 +62,8 @@ pub fn run(args: &InteropArgs) -> Result<()> {
     match &args.suite {
         Suite::CatalogPerf(a) => catalog_perf(a),
         Suite::Rig(a) => rig::run(a),
+        Suite::LiveAuth(a) => live::run(a),
+        Suite::Live(a) => live::run_live(a),
     }
 }
 

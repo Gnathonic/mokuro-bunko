@@ -1,2 +1,4 @@
 [alias]
 xtask = "run -p xtask --"
+# xtask with its `live` feature: `cargo xtask-live interop live-auth <target>`.
+xtask-live = "run -p xtask --features live --"

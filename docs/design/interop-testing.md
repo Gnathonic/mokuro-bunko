@@ -35,7 +35,9 @@ The connections to cover:
   test-only API base-URL override and token injection.
 - **D3. Scheduled live runs on all three clouds.** Drive and OneDrive on the test accounts;
   MEGA on a new free account made for testing (never the account holding the real
-  library). MEGA runs are sparing with bandwidth (§7.3).
+  library). MEGA runs are sparing with bandwidth (§7.3). Amended by the owner on
+  2026-11-15: MEGA runs on the owner's retired main account. Its old `mokuro-reader/`
+  library stays there, and no run opens, scans, downloads or changes it (§7.2).
 - **D4. Hard performance budgets from the start.** A budget breach fails CI (§8).
 
 ## 3. Non-goals
@@ -43,7 +45,8 @@ The connections to cover:
 - Testing generic WebDAV clients other than the reader (WebDAV is for Mokuro Reader only).
 - Load or soak testing of a busy multi-user server.
 - Browser coverage beyond Chromium in CI (Firefox/Safari stay manual for now).
-- Any test against the owner's real libraries or real accounts.
+- Any test against the owner's real libraries or real accounts (the retired MEGA account
+  of D3 is used for testing, but its old library is never touched).
 
 ## 4. Architecture
 
@@ -942,23 +945,71 @@ handover green, about 16 s); its pinned download has not run anywhere yet.
 
 ### 7.2 Live runs (layer 3: scheduled, real clouds)
 
-- **Accounts**: Drive (the existing test Google account, in the develop/beta project),
-  OneDrive (the existing throwaway Microsoft account), MEGA (a new free account created
-  by the owner for testing). Credentials are GitHub Actions secrets: refresh tokens for
-  Drive and OneDrive, a session string for MEGA.
-- **Sandbox**: each run works inside `bunko-interop/<run-id>/` under the provider's
-  `mokuro-reader/` folder, after a snapshot of the folder tree. The run deletes what it
-  created, then diffs against the snapshot; a non-empty diff fails the run. Pre-existing
-  JSON files are never edited.
+Plan: `plans/2026-11-15-i5-live-runs.md`.
+
+- **Accounts**: Drive (the existing test Google account, in the develop/beta project,
+  signed in through Bunko's beta Desktop client: `drive.file` grants are per project, so
+  the reader's calls use a token minted from the same grant), OneDrive (the existing
+  throwaway Microsoft account), MEGA (the owner's retired main account, D3 as amended;
+  its old `mokuro-reader/` library, about 1,800 volumes, is never opened, scanned,
+  downloaded or changed). Credentials are GitHub Actions secrets: refresh tokens for
+  Drive and OneDrive, Bunko's session string for MEGA.
+- **Sandbox**: each run works inside its own top-level folder `bunko-interop-<run-id>`,
+  never under `mokuro-reader/`: Bunko's library folder (`storage.library.folder`) is a
+  single folder name that it looks up by name (OneDrive only at the drive's top level),
+  not a path, and Bunko must never be pointed at an account's real `mokuro-reader`.
+  Bunko gets the sandbox name as its library folder; the reader gets it through a
+  test-only library-folder hook (on only in the `test` and `interop` modes, like its
+  other cloud hooks). Before the run, a snapshot of the account's top level and of the
+  direct children of `mokuro-reader/` (names, ids, sizes, dates, hashes: metadata, no
+  content). The run deletes its sandbox and whatever of it went to the trash, then
+  diffs against the snapshot; a non-empty diff fails the run. Pre-existing JSON files are
+  never edited. OneDrive's recycle bin cannot be listed for a personal account: the
+  run's own deletes stay there until it empties itself (30 days).
 - **Content**: the `shared` and `direct` checks above, plus `bridge` for Bunko, on a small
-  fixture library.
+  fixture library. Checks that need simulator faults or simulator-only seeding are
+  skipped on live runs.
 - **Schedule**: Drive and OneDrive nightly, MEGA weekly. Manual dispatch also works for a
-  pre-release check.
+  pre-release check. One run per provider at a time.
 - **Token upkeep**: OneDrive rotates refresh tokens on use, so the run writes the new one
-  back to the repository secret (needs a fine-grained token with secrets write, stored as a
-  secret). A Google project in "testing" consent status expires refresh tokens after 7
-  days; the live Drive run needs the develop project's consent screen in production
-  status, or a weekly re-auth. To settle in planning.
+  back to the repository secret as soon as it has it and again at the end (Bunko rotates
+  it too), with a fine-grained token that has the Secrets permission, itself stored as
+  a secret. A Google project in "testing" consent status expires refresh tokens after 7
+  days; the develop project's consent screen is in production status, so the Drive
+  token lasts until it is revoked or unused for six months. A dead token
+  (`invalid_grant`) fails the run with a message to run the Drive sign-in again.
+
+**Owner setup** (`cargo xtask-live interop live-auth`, run on the owner's machine; the
+alias builds xtask with its `live` feature). Each command signs in or reads the saved
+session, checks it with one harmless read (Drive `about`, Graph `/me/drive`, MEGA `ug`
+and `uq`, GitHub's secrets public key), shows which account it got, asks, and stores it
+with `gh secret set <name> --repo Gnathonic/mokuro-bunko`, the value on stdin. Nothing
+prints, logs or saves a token. `--dry-run` does everything but store.
+
+| Command | Secret |
+|---|---|
+| `live-auth github-token` (paste the fine-grained token: repository `mokuro-bunko`, Secrets read and write) | `BUNKO_LIVE_SECRETS_TOKEN` |
+| `live-auth gdrive --client-json <beta Desktop client JSON>` (or `BUNKO_GOOGLE_BETA_DESKTOP_SECRET` set) | `BUNKO_LIVE_GDRIVE_REFRESH_TOKEN` |
+| `live-auth onedrive` | `BUNKO_LIVE_ONEDRIVE_REFRESH_TOKEN` |
+| `live-auth mega` (the saved session; `--interactive` asks for email, password and 2FA code with no echo) | `BUNKO_LIVE_MEGA_SESSION` |
+
+**As built (I5, 2026-11-15):** `cargo xtask-live interop live --provider <gdrive|onedrive|mega>`
+(`crates/xtask/src/interop/live/runner.rs`) runs the `cloud` suite (§7.1) on the account's
+sandbox: cold start, adoption, OCR results through the outbox and the lease handover.
+The scenarios that need simulator knobs or a folder on this disk skip. Bunko gets the
+sandbox as `storage.library.folder`. Drive uses the beta Desktop client as the custom OAuth
+override, so the testing nightly, built without the Google secret, can refresh. At
+the end, whatever happened, the newest OneDrive token is stored, every credential file and config of
+the run is removed, the sandbox is deleted, and the snapshot is compared; the result is
+`target/interop/live/live-<provider>.json`. MEGA: a one-byte read before Bunko starts (and
+after a failure) tells a spent transfer quota; that run is `skipped`, and a second skip
+in a row fails. The browser suites (`bridge`, `direct`, `shared`) do not run on live
+accounts yet: they need the live view of plan Task 4 and the reader's library-folder hook
+(`__mokuroInteropConfig.libraryFolder`, committed on the reader branch
+`feat/interop-live-folder`) pinned in `reader.ref`. Measured on cloudsim (`--sim-base`,
+the testing release build): every provider passed with an empty diff. A forced leak
+(`--inject-leak`) failed the run naming the file, and MEGA with its quota out was
+skipped, then failed on the second skip in a row.
 
 ### 7.3 MEGA bandwidth
 
@@ -1077,6 +1128,15 @@ metric is within budget.
 - A PR that bumps `interop/reader.ref` runs the same rig, which is how a new reader is
   taken in.
 
+**As built (I5, live runs):** `.github/workflows/interop-live.yml`: Drive and OneDrive
+nightly (`41 5 * * *`), MEGA weekly (`23 6 * * 0`), and `workflow_dispatch` for one provider
+(`provider`, `ref`, and `cloudsim: true` for the same job on the simulator with no
+secret read). A schedule runs main's copy of the file, so the scheduled runs start once
+it is there. One concurrency group per provider, never cancelling. The testing server
+and cloudsim come from the branch's nightly. The previous run's `live-<provider>`
+artifact feeds the two-skips rule; the step summary lists the scenarios and the
+account diff. The artifact is the result file alone.
+
 **Reader repo** (`.github/workflows/interop.yml`, added in the reader PR):
 
 - On every PR: check out the Bunko repo at `main` for `interop/` and the contract
@@ -1184,7 +1244,9 @@ needs I3 (and takes in I0's scenario); I5 needs I3.
 - **Reader test hooks shipping by accident**: the overrides must vanish from production
   builds; a build check in the reader's CI asserts the production bundle contains none of
   the hook names.
-- **Google refresh-token lifetime** for the live Drive run (§7.2).
+- **Google refresh-token lifetime** for the live Drive run: settled (§7.2). The develop
+  project's consent screen is in production status; a dead token fails the run with a
+  message to sign in again.
 - **CI time and flakiness** of browser runs; the 15-minute target and the retry rule in
   §8.3 are the guard.
 - **`megajs` gateway override**: confirmed; megajs 1.3.9 takes a `gateway` option, and

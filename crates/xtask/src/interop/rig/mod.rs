@@ -16,6 +16,11 @@ mod rclone;
 mod reader;
 mod results;
 
+#[cfg(feature = "live")]
+pub use cloud::{LiveCloud, run_live};
+#[cfg(feature = "live")]
+pub use results::{Outcome, Report, Scenario};
+
 use crate::util;
 use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
@@ -321,7 +326,7 @@ fn release_bin(target: &Path, name: &str) -> PathBuf {
 
 /// A server built without `testing` has no `processor-fake` and ignores (refuses)
 /// cloudsim's addresses: say so before anything starts.
-fn check_testing_build(bin: &Path) -> Result<()> {
+pub fn check_testing_build(bin: &Path) -> Result<()> {
     let out = std::process::Command::new(bin)
         .args(["processor-fake", "--help"])
         .output()

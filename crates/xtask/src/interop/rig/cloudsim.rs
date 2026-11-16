@@ -261,6 +261,7 @@ impl Cloudsim {
             credential,
             webdav: None,
             path: None,
+            ..CloudLogin::default()
         })
     }
 }

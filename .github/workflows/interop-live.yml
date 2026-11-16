@@ -1,0 +1,194 @@
+name: Interop live
+
+# The live runs (docs/design/interop-testing.md §7.2, plans/2026-11-15-i5-live-runs.md):
+# Bunko's cloud suite on the real Drive, OneDrive and MEGA test accounts, each run in a
+# sandbox folder of its own that it deletes again, the account compared with a snapshot
+# taken before. The credentials are repository secrets the owner stores with
+# `cargo xtask-live interop live-auth <provider>`; a OneDrive run stores the token
+# OneDrive rotated with BUNKO_LIVE_SECRETS_TOKEN.
+#
+# A schedule runs the default branch's copy of this file, so the nightly and weekly
+# runs start once it is on main. Manual runs work from any branch that has it:
+# `gh workflow run interop-live.yml --ref <branch> -f provider=onedrive`. With
+# `cloudsim: true` the same run goes to the cloud simulator instead (every address its,
+# credentials minted by it, no secret read): a check of this workflow itself.
+
+on:
+  schedule:
+    # Drive and OneDrive nightly, after interop-nightly (03:17) rebuilt nightly-0.8.
+    - cron: "41 5 * * *"
+    # MEGA weekly, Sunday: its transfer quota is small (spec §7.3).
+    - cron: "23 6 * * 0"
+  # A change to the live run checks itself on the simulator (no secret is read).
+  pull_request:
+    paths:
+      - .github/workflows/interop-live.yml
+      - crates/xtask/src/interop/live/**
+  workflow_dispatch:
+    inputs:
+      provider:
+        description: The account to run on
+        type: choice
+        options: [gdrive, onedrive, mega]
+        required: true
+      ref:
+        description: The Bunko branch whose runner and testing build to use
+        default: 0.8/remote-storage
+      cloudsim:
+        description: Run on the cloud simulator instead of the real account
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  # gh run download of the previous run's result (two quota skips in a row fail).
+  actions: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      providers: ${{ steps.p.outputs.providers }}
+    steps:
+      - id: p
+        env:
+          EVENT: ${{ github.event_name }}
+          SCHEDULE: ${{ github.event.schedule }}
+          INPUT: ${{ inputs.provider }}
+        run: |
+          case "$EVENT" in
+            workflow_dispatch) providers="[\"$INPUT\"]" ;;
+            pull_request) providers='["gdrive", "onedrive", "mega"]' ;;
+            schedule)
+              if [ "$SCHEDULE" = "23 6 * * 0" ]; then providers='["mega"]'
+              else providers='["gdrive", "onedrive"]'; fi ;;
+            *) echo "::error::no live run for $EVENT"; exit 1 ;;
+          esac
+          echo "providers=$providers" >> "$GITHUB_OUTPUT"
+
+  live:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        provider: ${{ fromJSON(needs.plan.outputs.providers) }}
+    # One run per account at a time, never cancelled: a cancelled run would skip its
+    # cleanup, and a cancelled OneDrive run would lose the token it rotated.
+    concurrency:
+      group: interop-live-${{ matrix.provider }}${{ (inputs.cloudsim || github.event_name == 'pull_request') && '-cloudsim' || '' }}
+      cancel-in-progress: false
+    env:
+      PROVIDER: ${{ matrix.provider }}
+      REF: ${{ inputs.ref || github.head_ref || '0.8/remote-storage' }}
+      ON_CLOUDSIM: ${{ (inputs.cloudsim || github.event_name == 'pull_request') && '1' || '' }}
+      ARTIFACT: live-${{ matrix.provider }}${{ (inputs.cloudsim || github.event_name == 'pull_request') && '-cloudsim' || '' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.REF }}
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: "1.99.1" # not stable: see the note in ci.yml
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: the testing server and cloudsim (interop-nightly's build of this branch)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          case "$REF" in
+            main) tag=nightly ;;
+            0.8/remote-storage) tag=nightly-0.8 ;;
+            *) tag= ;;
+          esac
+          mkdir -p bin
+          if [ -n "$tag" ] && gh release download "$tag" --dir bin \
+               --pattern mokuro-bunko-testing-x86_64-linux --pattern bunko-cloudsim-x86_64-linux; then
+            mv bin/mokuro-bunko-testing-x86_64-linux bin/mokuro-bunko
+            mv bin/bunko-cloudsim-x86_64-linux bin/bunko-cloudsim
+          else
+            cargo build --release --locked -p mokuro-bunko --no-default-features --features testing
+            cargo build --release --locked -p bunko-cloudsim
+            cp target/release/mokuro-bunko target/release/bunko-cloudsim bin/
+          fi
+          chmod +x bin/*
+      - name: the runner (xtask with its live feature)
+        run: cargo build --locked -p xtask --features live
+      - name: the previous run's result
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p previous
+          for id in $(gh run list --workflow interop-live.yml --status completed --limit 20 \
+                        --json databaseId --jq '.[].databaseId'); do
+            if gh run download "$id" --name "$ARTIFACT" --dir previous 2>/dev/null; then
+              echo "previous result from run $id"
+              break
+            fi
+          done
+      - name: cloudsim and its credentials (cloudsim runs only)
+        if: env.ON_CLOUDSIM == '1'
+        run: |
+          bin/bunko-cloudsim --port 0 > cloudsim.out 2> cloudsim.log &
+          for _ in $(seq 50); do grep -q listening cloudsim.out && break; sleep 0.2; done
+          base=$(grep -oE 'http://[0-9.:]+' cloudsim.out | head -1)
+          ctl() { curl -sf -X POST "$base/_sim/$1" -H 'content-type: application/json' -d "$2"; }
+          field() { python3 -c "import json,sys;print(json.load(sys.stdin)['$1'])"; }
+          case "$PROVIDER" in
+            gdrive) v=$(ctl token '{"provider":"google","account":"live"}' | field refresh_token)
+                    name=BUNKO_LIVE_GDRIVE_REFRESH_TOKEN
+                    echo "BUNKO_GOOGLE_BETA_DESKTOP_SECRET=cloudsim-client-secret" >> "$GITHUB_ENV" ;;
+            onedrive) v=$(ctl token '{"provider":"microsoft","account":"live"}' | field refresh_token)
+                    name=BUNKO_LIVE_ONEDRIVE_REFRESH_TOKEN ;;
+            mega) v=$(ctl mega/account '{"account":"live","email":"live@cloudsim.test","password":"pw-1"}' | field session)
+                    name=BUNKO_LIVE_MEGA_SESSION ;;
+          esac
+          echo "::add-mask::$v"
+          {
+            echo "$name=$v"
+            echo "SIM_BASE=$base"
+          } >> "$GITHUB_ENV"
+      - name: the live run
+        env:
+          # Each run sees its own provider's secret only.
+          BUNKO_LIVE_GDRIVE_REFRESH_TOKEN: ${{ matrix.provider == 'gdrive' && !(inputs.cloudsim || github.event_name == 'pull_request') && secrets.BUNKO_LIVE_GDRIVE_REFRESH_TOKEN || env.BUNKO_LIVE_GDRIVE_REFRESH_TOKEN }}
+          BUNKO_GOOGLE_BETA_DESKTOP_SECRET: ${{ matrix.provider == 'gdrive' && !(inputs.cloudsim || github.event_name == 'pull_request') && secrets.BUNKO_GOOGLE_BETA_DESKTOP_SECRET || env.BUNKO_GOOGLE_BETA_DESKTOP_SECRET }}
+          BUNKO_LIVE_ONEDRIVE_REFRESH_TOKEN: ${{ matrix.provider == 'onedrive' && !(inputs.cloudsim || github.event_name == 'pull_request') && secrets.BUNKO_LIVE_ONEDRIVE_REFRESH_TOKEN || env.BUNKO_LIVE_ONEDRIVE_REFRESH_TOKEN }}
+          BUNKO_LIVE_MEGA_SESSION: ${{ matrix.provider == 'mega' && !(inputs.cloudsim || github.event_name == 'pull_request') && secrets.BUNKO_LIVE_MEGA_SESSION || env.BUNKO_LIVE_MEGA_SESSION }}
+          # Stores the token OneDrive rotated (a cloudsim run stores nothing).
+          GH_TOKEN: ${{ matrix.provider == 'onedrive' && !(inputs.cloudsim || github.event_name == 'pull_request') && secrets.BUNKO_LIVE_SECRETS_TOKEN || '' }}
+        run: |
+          set -- --provider "$PROVIDER" --bin bin/mokuro-bunko --repo "$GITHUB_REPOSITORY"
+          [ -f "previous/live-$PROVIDER.json" ] && set -- "$@" --previous "previous/live-$PROVIDER.json"
+          if [ "$ON_CLOUDSIM" = 1 ]; then set -- "$@" --sim-base "$SIM_BASE" --no-store; fi
+          target/debug/xtask interop live "$@"
+      - name: summary
+        if: always()
+        run: |
+          f="target/interop/live/live-$PROVIDER.json"
+          if [ ! -f "$f" ]; then echo "live $PROVIDER: no result (the run stopped before its sandbox)" >> "$GITHUB_STEP_SUMMARY"; exit 0; fi
+          python3 - "$f" >> "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json, sys
+          d = json.load(open(sys.argv[1]))
+          where = " (cloudsim)" if d["on_cloudsim"] else ""
+          print(f"### live {d['provider']}{where}: {d['outcome']}")
+          if d["reason"]:
+              print(f"\n{d['reason']}\n")
+          print("| scenario | outcome | ms |\n|---|---|---|")
+          for s in d["scenarios"] or []:
+              print(f"| {s['name']} | {s['outcome']} | {s['ms']} |")
+          print(f"\naccount diff: {len(d['diff'])} change(s); runner downloaded {d['runner_bytes_downloaded']} bytes; "
+                f"token stored: {d['token_stored']}; {d['duration_ms'] // 1000} s")
+          PY
+      # The result only: the work folder is deleted, and the runner removes every
+      # credential file and config before that.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: ${{ env.ARTIFACT }}
+          path: target/interop/live/live-${{ matrix.provider }}.json
+          if-no-files-found: ignore

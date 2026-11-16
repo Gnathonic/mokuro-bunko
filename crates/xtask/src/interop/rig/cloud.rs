@@ -82,18 +82,38 @@ fn wait_for<T>(
     }
 }
 
+/// A live account's sandbox (I5, `cargo xtask interop live`): the run's own folder in
+/// a real account, or in cloudsim reached as a real account is. Paths are below the
+/// sandbox folder. Implemented in `interop::live`.
+pub trait LiveCloud {
+    /// The sha256 of the file at `rel`, or `None` when there is none.
+    fn sha(&self, rel: &str) -> Result<Option<String>>;
+    /// Upload `files` (`(rel, bytes)`), as the reader would.
+    fn seed(&self, files: &[(String, Vec<u8>)]) -> Result<()>;
+    /// Bunko's sign-in to the sandbox, with the newest credential the run knows of
+    /// (a OneDrive token the servers under `servers` have rotated).
+    fn login(&self, servers: &Path) -> Result<CloudLogin>;
+    /// The server's extra environment (the bases, when they are overridden).
+    fn server_env(&self) -> Vec<(String, String)>;
+    /// Whether a download still works (MEGA's transfer quota): one byte of `rel`.
+    fn transfer_ok(&self, _rel: &str) -> Result<bool> {
+        Ok(true)
+    }
+}
+
 /// The cloud the server keeps its library in.
-enum CloudSide {
+enum CloudSide<'a> {
     Sim(Cloudsim),
     Rclone(Rclone),
     Folder(Folder),
+    Live(&'a dyn LiveCloud),
 }
 
 struct Rig<'a> {
     p: Provider,
     paths: &'a Paths,
     work: PathBuf,
-    cloud: CloudSide,
+    cloud: CloudSide<'a>,
     /// The server holding the lease.
     a: Option<Server>,
     vol1: Vec<u8>,
@@ -103,14 +123,14 @@ impl Rig<'_> {
     fn sim(&self) -> Option<&Cloudsim> {
         match &self.cloud {
             CloudSide::Sim(s) => Some(s),
-            CloudSide::Rclone(_) | CloudSide::Folder(_) => None,
+            CloudSide::Rclone(_) | CloudSide::Folder(_) | CloudSide::Live(_) => None,
         }
     }
 
     fn folder(&self) -> Option<&Folder> {
         match &self.cloud {
             CloudSide::Folder(f) => Some(f),
-            CloudSide::Sim(_) | CloudSide::Rclone(_) => None,
+            CloudSide::Sim(_) | CloudSide::Rclone(_) | CloudSide::Live(_) => None,
         }
     }
 
@@ -118,6 +138,7 @@ impl Rig<'_> {
     fn no_knobs(&self, what: &str) -> String {
         match &self.cloud {
             CloudSide::Folder(_) => format!("a folder has no {what}"),
+            CloudSide::Live(_) => format!("a live account has no {what}"),
             _ => format!("{} has no {what}", self.p.name()),
         }
     }
@@ -131,13 +152,15 @@ impl Rig<'_> {
                 Ok(std::fs::read(path).ok().map(|b| sha256_hex(&b)))
             }
             CloudSide::Folder(f) => Ok(f.bytes(rel).map(|b| sha256_hex(&b))),
+            CloudSide::Live(l) => l.sha(rel),
         }
     }
 
     fn cloud_bytes(&self, rel: &str) -> Result<Option<Vec<u8>>> {
         match &self.cloud {
-            // cloudsim lists hashes, not bytes: read it back through the server.
-            CloudSide::Sim(_) => {
+            // cloudsim lists hashes, not bytes: read it back through the server (a live
+            // account too: a download there costs quota).
+            CloudSide::Sim(_) | CloudSide::Live(_) => {
                 let a = self.server()?;
                 let r = http::request(
                     a.addr,
@@ -158,6 +181,7 @@ impl Rig<'_> {
             CloudSide::Sim(s) => s.login(self.p, ACCOUNT),
             CloudSide::Rclone(r) => Ok(rclone_login(r)),
             CloudSide::Folder(f) => Ok(f.login()),
+            CloudSide::Live(l) => l.login(&self.work),
         }
     }
 
@@ -165,6 +189,9 @@ impl Rig<'_> {
         let mut env = vec![("MOKURO_TEST_CLOUD_TUNE".to_string(), tune(self.p))];
         if let Some(s) = self.sim() {
             env.extend(s.server_env());
+        }
+        if let CloudSide::Live(l) = &self.cloud {
+            env.extend(l.server_env());
         }
         Server::start_with(
             &self.paths.bin,
@@ -281,6 +308,7 @@ pub fn rclone_login(r: &Rclone) -> CloudLogin {
         credential: json!({"webdav_password": r.password}),
         webdav: Some((url, r.user.clone())),
         path: None,
+        ..CloudLogin::default()
     }
 }
 
@@ -302,12 +330,37 @@ const SCENARIOS: [(&str, Step); 9] = [
 ];
 
 pub fn run(paths: &Paths, p: Provider, work: &Path, grep: Option<&str>, report: &mut Report) {
+    run_on(paths, p, work, None, grep, report)
+}
+
+/// The suite on a live account's sandbox: the scenarios that need simulator knobs or a
+/// folder on this disk skip themselves.
+#[cfg_attr(not(feature = "live"), allow(dead_code))]
+pub fn run_live(
+    paths: &Paths,
+    p: Provider,
+    work: &Path,
+    live: &dyn LiveCloud,
+    grep: Option<&str>,
+    report: &mut Report,
+) {
+    run_on(paths, p, work, Some(live), grep, report)
+}
+
+fn run_on(
+    paths: &Paths,
+    p: Provider,
+    work: &Path,
+    live: Option<&dyn LiveCloud>,
+    grep: Option<&str>,
+    report: &mut Report,
+) {
     let selected: Vec<(&str, Step)> = SCENARIOS
         .into_iter()
         .filter(|(n, _)| grep.is_none_or(|g| n.contains(g)))
         .collect();
     let start = Instant::now();
-    let mut rig = match setup(paths, p, work) {
+    let mut rig = match setup(paths, p, work, live) {
         Ok(r) => r,
         Err(e) => {
             let detail = format!("setup: {e:#}");
@@ -358,7 +411,13 @@ pub fn run(paths: &Paths, p: Provider, work: &Path, grep: Option<&str>, report: 
 }
 
 /// The library in the cloud, then server A started on it and holding the lease.
-fn setup<'a>(paths: &'a Paths, p: Provider, work: &Path) -> Result<Rig<'a>> {
+fn setup<'a>(
+    paths: &'a Paths,
+    p: Provider,
+    work: &Path,
+    live: Option<&'a dyn LiveCloud>,
+) -> Result<Rig<'a>> {
+    // Paths below the library folder.
     let mut files: Vec<(String, Vec<u8>)> = Vec::new();
     let mut vol1 = Vec::new();
     for (i, v) in VOLUMES.iter().enumerate() {
@@ -366,24 +425,37 @@ fn setup<'a>(paths: &'a Paths, p: Provider, work: &Path) -> Result<Rig<'a>> {
         if i == 0 {
             vol1 = bytes.clone();
             files.push((
-                cloud_path(&format!("{SERIES}/{v}.mokuro")),
+                format!("{SERIES}/{v}.mokuro"),
                 genlib::mokuro_doc(SERIES, v, i),
             ));
         }
-        files.push((cloud_path(&format!("{SERIES}/{v}.cbz")), bytes));
+        files.push((format!("{SERIES}/{v}.cbz"), bytes));
     }
     // A reader-written series.json: the first adoption applies its facts.
     files.push((
-        cloud_path(&format!("{SERIES}/series.json")),
+        format!("{SERIES}/series.json"),
         serde_json::to_vec(&json!({
             "version": 2, "series_title": SERIES, "external_ids": {}, "titles": {},
             "synonyms": [], "tag": ADOPTED_TAG, "updated_at": "2026-01-02T03:04:05.000Z",
             "volumes": [],
         }))?,
     ));
-    let cloud = if p == Provider::Folder {
+    let in_cloud = || -> Vec<(String, Vec<u8>)> {
+        files
+            .iter()
+            .map(|(rel, b)| (cloud_path(rel), b.clone()))
+            .collect()
+    };
+    let cloud = if let Some(l) = live {
+        l.seed(&files)?;
+        // Out of transfer quota (MEGA): no server is started; the run reports skipped.
+        if !l.transfer_ok(&format!("{SERIES}/{}.cbz", VOLUMES[0]))? {
+            bail!("the transfer quota is out");
+        }
+        CloudSide::Live(l)
+    } else if p == Provider::Folder {
         let f = Folder::create(work)?;
-        f.seed(&files)?;
+        f.seed(&in_cloud())?;
         // The reader-rename scenario's own series: a volume with its OCR.
         f.seed(&[
             (
@@ -407,11 +479,11 @@ fn setup<'a>(paths: &'a Paths, p: Provider, work: &Path) -> Result<Rig<'a>> {
             Some(PREFLIGHT_ORIGIN),
         )?;
         r.preflight(PREFLIGHT_ORIGIN)?;
-        r.seed(&files)?;
+        r.seed(&in_cloud())?;
         CloudSide::Rclone(r)
     } else {
         let sim = Cloudsim::start(&paths.cloudsim_bin, &work.join("cloudsim"))?;
-        sim.seed(p, ACCOUNT, &files)?;
+        sim.seed(p, ACCOUNT, &in_cloud())?;
         if p != Provider::Mega {
             // Only Bunko talks to this account: hold it to what Bunko's driver must send.
             sim.knobs(p, ACCOUNT, json!({"strict_bunko": true}))?;
@@ -587,17 +659,13 @@ fn quota_pause(rig: &mut Rig) -> Result<Option<String>> {
 fn ocr_results(rig: &mut Rig) -> Result<Option<String>> {
     if let Some(sim) = rig.sim() {
         sim.clear_log()?;
-    }
-    match rig.p {
-        Provider::Google | Provider::Microsoft => {
-            rig.upload_fault(503, "backendError", 2, false)?
+        match rig.p {
+            Provider::Google | Provider::Microsoft => {
+                rig.upload_fault(503, "backendError", 2, false)?
+            }
+            Provider::Mega => sim.knobs(rig.p, ACCOUNT, json!({"eagain": 2}))?,
+            _ => {}
         }
-        Provider::Mega => {
-            rig.sim()
-                .context("cloudsim")?
-                .knobs(rig.p, ACCOUNT, json!({"eagain": 2}))?
-        }
-        _ => {}
     }
     let a = rig.server()?;
     let mut fake = FakeProcessor::start(

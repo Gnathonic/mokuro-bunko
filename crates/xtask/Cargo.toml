@@ -11,6 +11,12 @@ publish = false
 # Run with `cargo run -p xtask -- <command>` (or `cargo xtask <command>` once the
 # workspace has the alias in .cargo/config.toml: `[alias] xtask = "run -p xtask --"`).
 
+[features]
+# `interop live-auth`: the owner's sign-in commands for the live runs, on Bunko's own
+# OAuth code and MEGA client. Off by default, so the release jobs that run xtask don't
+# build them; `cargo xtask-live` (.cargo/config.toml) turns it on.
+live = ["dep:bunko-remote", "dep:bunko-mega", "dep:tokio", "dep:reqwest", "dep:rpassword"]
+
 [dependencies]
 bunko-update.workspace = true
 anyhow.workspace = true
@@ -31,6 +37,14 @@ zstd = { version = "0.14", features = ["zstdmt"] }
 goblin = "0.10"
 # interop: interop/budgets.toml.
 toml = "0.8"
+# live: sign-in (loopback + PKCE, refresh), the credentials file, the MEGA session.
+bunko-remote = { path = "../bunko-remote", default-features = false, features = ["oauth", "gdrive", "onedrive", "mega"], optional = true }
+bunko-mega = { path = "../bunko-mega", optional = true }
+tokio = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
+rpassword = { version = "7", optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true
+# live: the refresh, check and MEGA paths of live-auth against the cloud simulator.
+bunko-cloudsim = { path = "../bunko-cloudsim" }
