@@ -19,7 +19,7 @@ mod results;
 #[cfg(feature = "live")]
 pub use cloud::{LiveCloud, run_live};
 #[cfg(feature = "live")]
-pub use results::{Outcome, Report};
+pub use results::{Outcome, Report, Scenario};
 
 use crate::util;
 use anyhow::{Context, Result, bail};

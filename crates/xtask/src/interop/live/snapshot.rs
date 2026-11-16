@@ -205,6 +205,110 @@ pub fn mask_lines(values: &[&str], in_actions: bool) -> String {
         .collect()
 }
 
+/// Every secret a run has seen, and what it is replaced with wherever the run writes
+/// text: the result file, the uploaded artifact, stdout and stderr. GitHub masks
+/// secrets in its logs only, never in files.
+#[derive(Debug, Default)]
+pub struct Redactor {
+    /// Longest first, so a secret that contains another is replaced whole.
+    values: std::sync::Mutex<Vec<String>>,
+}
+
+/// Values shorter than this are no credential and would match everywhere.
+const MIN_SECRET: usize = 6;
+
+/// `s` percent-encoded as a URL query value would carry it (RFC 3986 unreserved kept).
+fn percent_encoded(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+impl Redactor {
+    /// Remember `value` and the forms it travels in (percent-encoded, as in a URL);
+    /// answers the forms that were new, for the caller to mask in Actions.
+    pub fn add(&self, value: &str) -> Vec<String> {
+        let value = value.trim();
+        if value.len() < MIN_SECRET {
+            return Vec::new();
+        }
+        let mut forms = vec![value.to_string()];
+        let enc = percent_encoded(value);
+        if enc != value {
+            forms.push(enc);
+        }
+        let mut v = self.values.lock().expect("redactor lock");
+        let new: Vec<String> = forms.into_iter().filter(|f| !v.contains(f)).collect();
+        v.extend(new.iter().cloned());
+        v.sort_by_key(|s| std::cmp::Reverse(s.len()));
+        new
+    }
+
+    /// A MEGA session blob and its parts: the session id travels on its own (`sid=`
+    /// in every API URL), in the URL-safe and the standard base64 alphabets.
+    pub fn add_mega_session(&self, blob: &str) -> Vec<String> {
+        use base64::Engine as _;
+        use base64::engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD};
+        let mut new = self.add(blob);
+        let raw = URL_SAFE_NO_PAD
+            .decode(blob.trim().trim_end_matches('='))
+            .or_else(|_| STANDARD_NO_PAD.decode(blob.trim().trim_end_matches('=')));
+        if let Ok(raw) = raw
+            && raw.len() > 17
+        {
+            for part in [&raw[1..17], &raw[17..]] {
+                new.extend(self.add(&URL_SAFE_NO_PAD.encode(part)));
+                new.extend(self.add(&STANDARD_NO_PAD.encode(part)));
+            }
+        }
+        new
+    }
+
+    /// `text` with every known secret replaced by `<redacted>`.
+    pub fn redact(&self, text: &str) -> String {
+        let v = self.values.lock().expect("redactor lock");
+        let mut s = text.to_string();
+        for secret in v.iter() {
+            if s.contains(secret.as_str()) {
+                s = s.replace(secret.as_str(), "<redacted>");
+            }
+        }
+        s
+    }
+
+    /// Every string in `v`, redacted.
+    pub fn redact_json(&self, v: &serde_json::Value) -> serde_json::Value {
+        use serde_json::Value;
+        match v {
+            Value::String(s) => Value::String(self.redact(s)),
+            Value::Array(a) => Value::Array(a.iter().map(|x| self.redact_json(x)).collect()),
+            Value::Object(o) => Value::Object(
+                o.iter()
+                    .map(|(k, x)| (self.redact(k), self.redact_json(x)))
+                    .collect(),
+            ),
+            other => other.clone(),
+        }
+    }
+}
+
+/// What a result file may say of an error or a scenario's detail: its first line, at
+/// most `max` characters, so no log tail (a server's, a response body's) is carried.
+pub fn excerpt(text: &str, max: usize) -> String {
+    let line = text.lines().next().unwrap_or("").trim_end();
+    let mut out: String = line.chars().take(max).collect();
+    if line.chars().count() > max || text.lines().nth(1).is_some() {
+        out.push('…');
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,6 +402,46 @@ mod tests {
         assert!(why.unwrap().contains("two runs in a row"));
         assert_eq!(with_previous(Passed, Some(Skipped)).0, Passed);
         assert_eq!(with_previous(Failed, Some(Skipped)).0, Failed);
+    }
+
+    #[test]
+    fn the_redactor_replaces_every_form_of_every_secret() {
+        use base64::Engine as _;
+        let r = Redactor::default();
+        assert!(r.add("tiny").is_empty(), "too short to be a credential");
+        let new = r.add("1//0g a+b/c");
+        assert_eq!(new, ["1//0g a+b/c", "1%2F%2F0g%20a%2Bb%2Fc"]);
+        assert!(r.add("1//0g a+b/c").is_empty(), "known already");
+        assert_eq!(
+            r.redact("x=1%2F%2F0g%20a%2Bb%2Fc&y=1//0g a+b/c"),
+            "x=<redacted>&y=<redacted>"
+        );
+        // A MEGA blob: kind 1, wrapped master key, session id.
+        let mut raw = vec![1u8];
+        raw.extend([9u8; 16]);
+        raw.extend(b"SESSION-ID-BYTES-0123456789abcdef");
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let blob = b64.encode(&raw);
+        r.add_mega_session(&blob);
+        let sid = b64.encode(&raw[17..]);
+        assert_eq!(
+            r.redact(&format!("cs?id=1&sid={sid}")),
+            "cs?id=1&sid=<redacted>"
+        );
+        assert_eq!(r.redact(&blob), "<redacted>");
+        let json = serde_json::json!({"a": [format!("t {sid}")], "b": 1});
+        assert_eq!(
+            r.redact_json(&json),
+            serde_json::json!({"a": ["t <redacted>"], "b": 1})
+        );
+    }
+
+    #[test]
+    fn excerpts_keep_one_bounded_line() {
+        assert_eq!(excerpt("short", 10), "short");
+        assert_eq!(excerpt("first\nlog tail", 10), "first…");
+        assert_eq!(excerpt("0123456789abc", 10), "0123456789…");
+        assert_eq!(excerpt("", 10), "");
     }
 
     #[test]

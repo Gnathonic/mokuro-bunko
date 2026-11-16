@@ -18,8 +18,8 @@
 
 use super::auth::{GOOGLE_SECRET_ENV, google_secret, mega_verify, refresh_and_verify};
 use super::snapshot::{
-    Change, Entry, READER_FOLDER, RunOutcome, SANDBOX_PREFIX, STALE_AFTER_MS, Snapshot,
-    check_sandbox_name, mask_lines, run_id, sandbox_name, sandbox_segments, with_previous,
+    Change, Entry, READER_FOLDER, Redactor, RunOutcome, SANDBOX_PREFIX, STALE_AFTER_MS, Snapshot,
+    check_sandbox_name, excerpt, mask_lines, run_id, sandbox_name, sandbox_segments, with_previous,
 };
 use super::{LiveArgs, LiveProvider, Secret, SecretWriter};
 use crate::interop::rig::{self, LiveCloud, Outcome, Paths, Report};
@@ -40,7 +40,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
 /// Where every provider lives: the real services, or one cloudsim.
@@ -105,16 +105,96 @@ fn in_actions() -> bool {
     std::env::var("GITHUB_ACTIONS").is_ok_and(|v| v == "true")
 }
 
-/// Mask `values` in the rest of an Actions log (printed before anything could show
-/// one); nothing outside Actions.
-fn mask(values: &[&Secret]) {
-    let v: Vec<&str> = values.iter().map(|s| s.expose()).collect();
+/// Every secret this run has seen (the redactor of everything it writes).
+static REDACTOR: OnceLock<Redactor> = OnceLock::new();
+
+fn redactor() -> &'static Redactor {
+    REDACTOR.get_or_init(Redactor::default)
+}
+
+/// Print `::add-mask::` for `forms` in Actions (nothing elsewhere).
+fn print_masks(forms: &[String]) {
+    let v: Vec<&str> = forms.iter().map(String::as_str).collect();
     let lines = mask_lines(&v, in_actions());
     if !lines.is_empty() {
         let mut out = std::io::stdout().lock();
         let _ = out.write_all(lines.as_bytes());
         let _ = out.flush();
     }
+}
+
+/// Remember `values` for redaction and mask them in the rest of an Actions log, before
+/// anything could show one.
+fn mask(values: &[&Secret]) {
+    let mut new = Vec::new();
+    for v in values {
+        new.extend(redactor().add(v.expose()));
+    }
+    print_masks(&new);
+}
+
+/// A MEGA session and its parts (the session id travels on its own).
+fn mask_mega(blob: &Secret) {
+    print_masks(&redactor().add_mega_session(blob.expose()));
+}
+
+/// One line on stderr, redacted.
+fn say(text: impl AsRef<str>) {
+    eprintln!("{}", redactor().redact(text.as_ref()));
+}
+
+/// The bound on a reason in the result file and on stderr.
+const REASON_MAX: usize = 600;
+/// The bound on a scenario's detail in the result file.
+const DETAIL_MAX: usize = 400;
+
+/// The result file's document: every string redacted, the reason and each scenario's
+/// detail cut to one bounded line (no log tail, no response body).
+fn summary_doc(red: &Redactor, summary: &Summary) -> Result<Value> {
+    let mut v = serde_json::to_value(summary)?;
+    if let Some(r) = summary.reason.as_deref() {
+        v["reason"] = excerpt(&red.redact(r), REASON_MAX).into();
+    }
+    if let Some(list) = v["scenarios"].as_array_mut() {
+        for s in list {
+            if let Some(d) = s["detail"].as_str() {
+                s["detail"] = excerpt(&red.redact(d), DETAIL_MAX).into();
+            }
+            if let Some(notes) = s.get_mut("notes").and_then(Value::as_array_mut) {
+                for n in notes {
+                    if let Some(t) = n.as_str() {
+                        *n = excerpt(&red.redact(t), DETAIL_MAX).into();
+                    }
+                }
+            }
+        }
+    }
+    Ok(red.redact_json(&v))
+}
+
+/// The scenario lines on stderr: one bounded, redacted line each.
+fn scenario_lines(red: &Redactor, scenarios: &[rig::Scenario]) -> Vec<String> {
+    scenarios
+        .iter()
+        .map(|s| {
+            red.redact(&format!(
+                "  {:<16} {:<8} {:>6} ms{}",
+                s.name,
+                format!("{:?}", s.outcome).to_lowercase(),
+                s.ms,
+                s.detail
+                    .as_deref()
+                    .map(|d| format!("  {}", excerpt(&red.redact(d), DETAIL_MAX)))
+                    .unwrap_or_default()
+            ))
+        })
+        .collect()
+}
+
+/// An error as the run reports it: redacted, bounded.
+fn redacted_error(red: &Redactor, e: &anyhow::Error) -> anyhow::Error {
+    let text = red.redact(&format!("{e:#}"));
+    anyhow!("{}", text.chars().take(2000).collect::<String>())
 }
 
 fn env_secret(name: &str, p: LiveProvider) -> Result<Secret> {
@@ -636,6 +716,11 @@ pub struct Creds {
 impl Creds {
     fn from_env(p: LiveProvider) -> Result<Creds> {
         let secret = env_secret(p.target().secret_name(), p)?;
+        if p == LiveProvider::Mega {
+            mask_mega(&secret);
+        } else {
+            mask(&[&secret]);
+        }
         let google_secret = if p == LiveProvider::Gdrive {
             Some(google_secret(
                 None,
@@ -645,6 +730,9 @@ impl Creds {
         } else {
             None
         };
+        if let Some(g) = &google_secret {
+            mask(&[g]);
+        }
         Ok(Creds {
             secret,
             google_secret,
@@ -764,7 +852,7 @@ async fn connect(
         }
         LiveProvider::Mega => {
             let blob = creds.secret.clone();
-            mask(&[&blob]);
+            mask_mega(&blob);
             let mut cfg = MegaConfig::new(state_dir);
             cfg.client.api_origin = bases.mega_origin.clone();
             mega_verify(cfg.client.clone(), &blob, &mut sink).await?;
@@ -790,6 +878,16 @@ async fn connect(
 }
 
 pub fn run(a: &LiveArgs) -> Result<()> {
+    // The GitHub token the write-back uses is a secret of the run too.
+    for k in ["GH_TOKEN", "GITHUB_TOKEN"] {
+        if let Ok(v) = std::env::var(k) {
+            mask(&[&Secret::new(v)]);
+        }
+    }
+    run_inner(a).map_err(|e| redacted_error(redactor(), &e))
+}
+
+fn run_inner(a: &LiveArgs) -> Result<()> {
     let p = a.provider;
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -834,7 +932,7 @@ pub fn run(a: &LiveArgs) -> Result<()> {
     std::fs::create_dir_all(&state_dir)?;
     let started = now_ms();
     let t0 = Instant::now();
-    eprintln!(
+    say(format!(
         "== live {} in {name}{}",
         p.name(),
         if bases.sim.is_some() {
@@ -842,7 +940,7 @@ pub fn run(a: &LiveArgs) -> Result<()> {
         } else {
             ""
         }
-    );
+    ));
 
     // 1. The credential.
     let creds = Creds::from_env(p)?;
@@ -855,7 +953,10 @@ pub fn run(a: &LiveArgs) -> Result<()> {
         if stored.as_ref() == Some(t) {
             return Ok(());
         }
-        writer.store(p.target().secret_name(), t, &mut std::io::stderr())?;
+        let mut said = Vec::new();
+        let r = writer.store(p.target().secret_name(), t, &mut said);
+        say(String::from_utf8_lossy(&said).trim_end());
+        r?;
         *stored = Some(t.clone());
         *flag = !writer.dry_run;
         Ok(())
@@ -882,7 +983,7 @@ pub fn run(a: &LiveArgs) -> Result<()> {
     let body = (|| -> Result<Snapshot> {
         stale = sandbox.block(sandbox.sweep_stale(now_ms()))?;
         for s in &stale {
-            eprintln!("removed a crashed run's sandbox {s}");
+            say(format!("removed a crashed run's sandbox {s}"));
         }
         let before = sandbox.block(sandbox.snapshot())?;
         let paths = Paths {
@@ -904,17 +1005,8 @@ pub fn run(a: &LiveArgs) -> Result<()> {
         );
         report.finish();
         scenarios = serde_json::to_value(&report.scenarios)?;
-        for s in &report.scenarios {
-            eprintln!(
-                "  {:<16} {:<8} {:>6} ms{}",
-                s.name,
-                format!("{:?}", s.outcome).to_lowercase(),
-                s.ms,
-                s.detail
-                    .as_deref()
-                    .map(|d| format!("  {}", d.lines().next().unwrap_or("")))
-                    .unwrap_or_default()
-            );
+        for line in scenario_lines(redactor(), &report.scenarios) {
+            eprintln!("{line}");
         }
         if report.outcome == Outcome::Failed {
             // A MEGA run that failed with the transfer quota out was skipped (§7.3).
@@ -934,7 +1026,10 @@ pub fn run(a: &LiveArgs) -> Result<()> {
         update_newest(cell, &servers, p);
         let t = cell.lock().expect("lock").token.clone();
         if let Err(e) = store(&t, &mut stored_token, &mut token_stored) {
-            eprintln!("storing the newest {} token failed: {e:#}", p.name());
+            say(format!(
+                "storing the newest {} token failed: {e:#}",
+                p.name()
+            ));
             outcome = RunOutcome::Failed;
             reason.get_or_insert_with(|| "the rotated token was not stored".into());
         }
@@ -943,7 +1038,7 @@ pub fn run(a: &LiveArgs) -> Result<()> {
     if a.inject_leak
         && let Err(e) = sandbox.block(sandbox.inject_leak())
     {
-        eprintln!("{e:#}");
+        say(format!("{e:#}"));
     }
     let cleanup = sandbox.block(sandbox.delete_sandbox());
     let mut diff = Vec::new();
@@ -1003,8 +1098,10 @@ pub fn run(a: &LiveArgs) -> Result<()> {
     };
     std::fs::create_dir_all(&out_dir)?;
     let file = out_dir.join(format!("live-{}.json", p.name()));
-    std::fs::write(&file, serde_json::to_vec_pretty(&summary)?)?;
-    eprintln!(
+    let doc = summary_doc(redactor(), &summary)?;
+    std::fs::write(&file, serde_json::to_vec_pretty(&doc)?)?;
+    let reason = reason.map(|r| excerpt(&redactor().redact(&r), REASON_MAX));
+    say(format!(
         "live {}: {:?}{} (runner downloaded {} bytes) -> {}",
         p.name(),
         final_outcome,
@@ -1014,7 +1111,7 @@ pub fn run(a: &LiveArgs) -> Result<()> {
             .unwrap_or_default(),
         summary.runner_bytes_downloaded,
         file.display()
-    );
+    ));
     if !a.keep {
         let _ = std::fs::remove_dir_all(&work);
     }
@@ -1023,9 +1120,12 @@ pub fn run(a: &LiveArgs) -> Result<()> {
         RunOutcome::Skipped => {
             if in_actions() {
                 println!(
-                    "::warning::live {}: {}",
-                    p.name(),
-                    reason.unwrap_or_default()
+                    "{}",
+                    redactor().redact(&format!(
+                        "::warning::live {}: {}",
+                        p.name(),
+                        reason.unwrap_or_default()
+                    ))
                 );
             }
             Ok(())
@@ -1252,6 +1352,103 @@ mod tests {
             "{dbg}"
         );
         let _ = r.sim.take_violations();
+    }
+
+    /// Every kind of secret a run collects, planted in an error chain, a scenario's
+    /// detail (with a log tail after it) and a diff path: none reaches the result file,
+    /// the scenario lines, the final error or the masks' complement.
+    #[test]
+    fn no_secret_reaches_the_result_file_or_the_output() {
+        use base64::Engine as _;
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let mut raw = vec![1u8];
+        raw.extend([5u8; 16]);
+        raw.extend(b"planted-mega-session-id-bytes-xyz");
+        let blob = b64.encode(&raw);
+        let sid = b64.encode(&raw[17..]);
+        let secrets = [
+            "1//planted-refresh-token",
+            "M.C5-planted-rotated-token",
+            "ya29.planted-access-token",
+            "planted-client-secret-GOCSPX",
+            "github_pat_planted_token_0123",
+        ];
+        let red = Redactor::default();
+        for s in secrets {
+            red.add(s);
+        }
+        red.add_mega_session(&blob);
+        let all: Vec<String> = secrets
+            .iter()
+            .map(|s| s.to_string())
+            .chain([
+                blob.clone(),
+                sid.clone(),
+                "1%2F%2Fplanted-refresh-token".into(),
+            ])
+            .collect();
+
+        let chain = anyhow!("HTTP 400: {{\"refresh_token\": \"{}\"}}", secrets[0])
+            .context(format!("GET /cs?id=1&sid={sid} with {}", secrets[2]))
+            .context(format!("token endpoint said {}", secrets[1]));
+        let reason = format!("{chain:#}");
+        let detail = format!(
+            "setup: a refresh with {} failed\nserve.log: client_secret={} pat={} session={blob} {}",
+            secrets[3], secrets[3], secrets[4], "1%2F%2Fplanted-refresh-token"
+        );
+        let scen = rig::Scenario {
+            name: "cold-start".into(),
+            outcome: Outcome::Failed,
+            ms: 1,
+            detail: Some(detail.clone()),
+            capability: None,
+            notes: vec![format!("note {}", secrets[1])],
+        };
+        let summary = Summary {
+            provider: "onedrive",
+            run_id: "r".into(),
+            sandbox: "bunko-interop-r".into(),
+            outcome: RunOutcome::Failed,
+            reason: Some(reason.clone()),
+            on_cloudsim: true,
+            stale_sandboxes_removed: vec![],
+            diff: vec![Change::Added {
+                path: format!("leak-{}.txt", secrets[4]),
+            }],
+            runner_bytes_downloaded: 0,
+            token_stored: false,
+            scenarios: serde_json::to_value(vec![scen.clone()]).unwrap(),
+            started_at_ms: 0,
+            duration_ms: 0,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("live-onedrive.json");
+        let doc = summary_doc(&red, &summary).unwrap();
+        std::fs::write(&file, serde_json::to_vec_pretty(&doc).unwrap()).unwrap();
+        let written = std::fs::read_to_string(&file).unwrap();
+        let lines = scenario_lines(&red, &[scen]).join("\n");
+        let err = format!("{:#}", redacted_error(&red, &chain));
+        for (what, text) in [
+            ("result file", &written),
+            ("stderr lines", &lines),
+            ("error", &err),
+        ] {
+            for s in &all {
+                assert!(!text.contains(s.as_str()), "{what} carries {s}: {text}");
+            }
+            assert!(text.contains("<redacted>"), "{what}: {text}");
+        }
+        // Bounded, one line: the log tail after the detail's first line is gone.
+        assert!(!written.contains("serve.log"), "{written}");
+        assert!(
+            doc["scenarios"][0]["detail"]
+                .as_str()
+                .unwrap()
+                .chars()
+                .count()
+                <= DETAIL_MAX + 1
+        );
+        assert!(doc["reason"].as_str().unwrap().chars().count() <= REASON_MAX + 1);
     }
 
     #[test]
