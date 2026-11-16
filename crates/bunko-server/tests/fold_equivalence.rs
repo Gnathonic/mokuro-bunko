@@ -232,8 +232,9 @@ impl Env {
     }
 
     /// The names `user` sees in `S/` (the library's, and its own corrections beside
-    /// them), each folded. Covers the server makes on its own time are left out, but
-    /// for `keep` (the name a script is about).
+    /// them), each folded. What the server writes on its own time is left out: covers
+    /// and the staging file of one being written (`<cover>.webp.tmp`), but for `keep`
+    /// (the name a script is about), and the compiled `series.json` and queue file.
     async fn listing(&self, user: &str, keep: &str) -> BTreeSet<String> {
         let (status, body) = self
             .send(
@@ -255,7 +256,16 @@ impl Env {
                 let name = percent_encoding::percent_decode_str(name).decode_utf8_lossy();
                 fold_name(name.trim_end_matches('/'))
             })
-            .filter(|name| !name.ends_with(".webp") || *name == fold_name(keep))
+            .filter(|name| {
+                !(name.ends_with(".webp") || name.ends_with(".webp.tmp"))
+                    || *name == fold_name(keep)
+            })
+            // What the compiler writes on its own time (a cloud library's own copies).
+            .filter(|name| {
+                !["series.json", ".mokuro-series-queue.json"]
+                    .iter()
+                    .any(|fixed| bunko_core::names::is_fixed_name(name, fixed))
+            })
             .collect()
     }
 }
