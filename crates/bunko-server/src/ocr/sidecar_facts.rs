@@ -376,10 +376,9 @@ fn content_versions(path: &Path) -> bool {
 /// The bytes of the sidecar at `path` at the version `meta` names: on a cloud store
 /// read pinned to it (a version since replaced is an error), else as the file is now.
 fn read_at(path: &Path, meta: &Meta) -> std::io::Result<Vec<u8>> {
-    let gz = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .is_some_and(|n| n.to_ascii_lowercase().ends_with(".gz"));
+    let gz = path.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+        bunko_core::sidecar_names::suffix_of(n) == Some(bunko_core::sidecar_names::Suffix::MokuroGz)
+    });
     let remote = bunko_store::store_for(path).filter(|s| s.caps().remote);
     match (remote, meta.version()) {
         (Some(store), Some(version)) if !gz => {

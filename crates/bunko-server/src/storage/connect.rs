@@ -452,12 +452,15 @@ pub fn folder_report(
 }
 
 /// The folder's top level holds a folder named like the reader's own (`mokuro-reader`
-/// in any case): the person likely picked its parent.
+/// in any spelling the one fold joins): the person likely picked its parent.
 async fn nested_reader_folder<B: Backend>(b: &B, folder: &str) -> bool {
-    let want = folder.to_lowercase();
+    let want = bunko_core::names::fold_name(folder);
     let mut found = false;
     let mut sink = |n: RNode| {
-        if n.is_dir && !n.trashed && String::from_utf8_lossy(&n.name_raw).to_lowercase() == want {
+        if n.is_dir
+            && !n.trashed
+            && bunko_core::names::fold_name(&String::from_utf8_lossy(&n.name_raw)) == want
+        {
             found = true;
         }
     };

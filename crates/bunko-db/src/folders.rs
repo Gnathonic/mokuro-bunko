@@ -102,7 +102,9 @@ pub(crate) fn rekey_series_folder_owners(conn: &Connection) -> Result<Vec<Series
             "SELECT rowid, series_key, folder_name, owner_username, recorded_at \
              FROM series_folder_owners ORDER BY recorded_at, rowid",
         )?
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
+        .query_map([], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })?
         .collect::<rusqlite::Result<_>>()?;
     let mut by_key: std::collections::BTreeMap<String, Vec<&Row>> = Default::default();
     for row in &rows {
@@ -439,7 +441,13 @@ mod tests {
         let rows = db.list_series_folder_owners().unwrap();
         let got: Vec<(&str, &str, &str)> = rows
             .iter()
-            .map(|r| (r.series_key.as_str(), r.folder_name.as_str(), r.owner.as_str()))
+            .map(|r| {
+                (
+                    r.series_key.as_str(),
+                    r.folder_name.as_str(),
+                    r.owner.as_str(),
+                )
+            })
             .collect();
         assert_eq!(
             got,

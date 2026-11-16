@@ -575,7 +575,7 @@ fn a_changed_cloud_sidecar_is_judged_on_what_is_there_now() {
         assert!(reads.is_empty(), "{name}: {reads:?}");
         assert_eq!(now, fresh(&t.root), "{name}");
 
-        // A case rename of a main sidecar (rule v1 still gives it to its volume).
+        // A case rename of a main sidecar (rule 2 still gives it to its volume).
         t.fake.reader_rename(
             &format!("{FOLDER}/A/Vol 2.mokuro"),
             &format!("{FOLDER}/A/vol 2.mokuro"),

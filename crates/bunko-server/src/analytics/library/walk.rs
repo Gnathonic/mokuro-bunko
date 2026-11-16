@@ -109,7 +109,7 @@ pub fn key_hash(key: &str) -> u64 {
 
 /// The lowercase extension `by_ext` counts a file under (`""`: none).
 pub fn ext_of(name: &str) -> String {
-    if sidecar_names::strip_suffix_ci(name, ".mokuro.gz").is_some() {
+    if sidecar_names::strip_suffix_folded(name, ".mokuro.gz").is_some() {
         return "mokuro.gz".into();
     }
     match name.rfind('.') {
@@ -131,7 +131,7 @@ pub fn ext_of(name: &str) -> String {
 fn archive_index(name: &str) -> Option<usize> {
     ARCHIVE_EXTS
         .iter()
-        .position(|e| sidecar_names::strip_suffix_ci(name, &format!(".{e}")).is_some())
+        .position(|e| sidecar_names::strip_suffix_folded(name, &format!(".{e}")).is_some())
 }
 
 /// Modification time as epoch nanoseconds.
@@ -247,11 +247,11 @@ impl Walk {
                     SidecarClass::Primary { .. } => PRIMARY,
                     SidecarClass::Layer { .. } => LAYER,
                     SidecarClass::Orphan => {
-                        if let Some(stem) = sidecar_names::strip_suffix_ci(name, ".webp")
+                        if let Some(stem) = sidecar_names::strip_suffix_folded(name, ".webp")
                             && stems.contains(&sidecar_names::fold(stem))
                         {
                             COVER
-                        } else if sidecar_names::strip_suffix_ci(name, ".nocover").is_some() {
+                        } else if sidecar_names::strip_suffix_folded(name, ".nocover").is_some() {
                             NOCOVER
                         } else if !root && names::is_fixed_name(name, "series.json") {
                             SERIES_JSON

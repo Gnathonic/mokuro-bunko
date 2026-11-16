@@ -763,7 +763,7 @@ fn rename_moves_by_id_including_case_only_renames() {
         );
         assert!(!fs::exists(t.abs("S/a.mokuro")) && !fs::exists(t.abs("S/b.mokuro")));
         assert_eq!(fs::read(t.abs("S/B.mokuro")).unwrap(), b"a");
-        // Between names only the wider filename fold joins, the same: one entry moved.
+        // Between names only the full fold joins (not a lowercase), the same: one entry moved.
         fs::rename(t.abs("S/B.mokuro"), t.abs("S/STRASSE.mokuro")).unwrap();
         fs::rename(t.abs("S/STRASSE.mokuro"), t.abs("S/Stra\u{df}e.mokuro")).unwrap();
         fs::rename(

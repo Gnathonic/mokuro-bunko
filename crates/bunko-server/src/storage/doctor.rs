@@ -306,7 +306,7 @@ pub fn reserved_series_rows(library: &Path, cloud_folder: Option<&str>) -> Vec<R
 /// case-variant group, [`bunko_core::fold_groups`]). Bunko reaches one spelling of a
 /// name, the byte-smallest; the others are hidden from DAV and the catalog. The whole
 /// group is frozen until it is merged by hand: the members, the winner included, the
-/// files rule v1 gives their archives (named in the row) and everything inside a member
+/// files rule 2 gives their archives (named in the row) and everything inside a member
 /// folder are never written, moved, deleted or re-keyed, by a client (409) or by Bunko
 /// (no OCR, cover, sweep or adoption). Also the hidden names a case-only rename leaves behind when
 /// it is interrupted between its two steps (`.bunko-case-<token>-<name>`), with the
@@ -1105,7 +1105,9 @@ mod tests {
         assert_eq!(unseen.len(), 1, "{rows:?}");
         assert_eq!(unseen[0].verdict, Verdict::Info);
         assert!(
-            unseen[0].detail.contains("the OCR file of S/Stra\u{df}e.cbz"),
+            unseen[0]
+                .detail
+                .contains("the OCR file of S/Stra\u{df}e.cbz"),
             "{unseen:?}"
         );
         assert!(

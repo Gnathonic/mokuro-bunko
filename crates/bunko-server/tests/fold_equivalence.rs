@@ -482,7 +482,11 @@ const NESTED: [(&str, &str, &str); 7] = [
         "Stra\u{df}e.curated.cbz",
     ),
     ("X.cbz", "X\u{200B}.curated.cbz", "X.curated.cbz"),
-    ("V.edit.cbz", "V.ed\u{131}t.curated.cbz", "V.edit.curated.cbz"),
+    (
+        "V.edit.cbz",
+        "V.ed\u{131}t.curated.cbz",
+        "V.edit.curated.cbz",
+    ),
     ("V.cbz", "V.ed\u{131}t.cbz", "V.edit.cbz"),
 ];
 
@@ -493,7 +497,13 @@ fn stem(archive: &str) -> &str {
 /// What `user` reads at `name` in `S/`: the status, and whose body it is.
 async fn read_as(env: &Env, user: &str, name: &str) -> String {
     let (status, body) = env
-        .send(user, "GET", &format!("/mokuro-reader/S/{name}"), &[], vec![])
+        .send(
+            user,
+            "GET",
+            &format!("/mokuro-reader/S/{name}"),
+            &[],
+            vec![],
+        )
         .await;
     let by = serde_json::from_slice::<serde_json::Value>(&body)
         .ok()
@@ -543,7 +553,11 @@ async fn uploaders(cloud: bool, base: &str, nested: &str, nested_first: bool) ->
         assert!(
             (200..300).contains(&status),
             "bob's {name:?} beside {nested:?} ({}): {status} {}",
-            if nested_first { "nested first" } else { "base first" },
+            if nested_first {
+                "nested first"
+            } else {
+                "base first"
+            },
             String::from_utf8_lossy(&body)
         );
         log.push(format!("bob PUT {suffix}: {:?}", outcome(status, &body)));
@@ -558,7 +572,10 @@ async fn uploaders(cloud: bool, base: &str, nested: &str, nested_first: bool) ->
             .send("alice", "PUT", &at(&name), &[], layer("alice"))
             .await;
         assert_eq!(status, 403, "alice writes no {name:?} of bob's");
-        log.push(format!("alice PUT {suffix} of base: {:?}", outcome(status, &body)));
+        log.push(format!(
+            "alice PUT {suffix} of base: {:?}",
+            outcome(status, &body)
+        ));
         let got = read_as(&env, "reader", &name).await;
         assert_eq!(got, "200 Some(\"bob\")", "{name:?} stays bob's");
         log.push(format!("reader GET {suffix} of base: {got}"));
@@ -569,35 +586,70 @@ async fn uploaders(cloud: bool, base: &str, nested: &str, nested_first: bool) ->
     let (status, body) = env
         .send("alice", "PUT", &at(&edit), &[], layer("alice"))
         .await;
-    log.push(format!("alice PUT .edit of base: {:?}", outcome(status, &body)));
+    log.push(format!(
+        "alice PUT .edit of base: {:?}",
+        outcome(status, &body)
+    ));
     assert_eq!(read_as(&env, "bob", &edit).await, "200 Some(\"bob\")");
-    log.push(format!("alice GET .edit of base: {}", read_as(&env, "alice", &edit).await));
-    for (what, target) in [("base", base.to_string()), ("primary", format!("{b}.mokuro"))] {
+    log.push(format!(
+        "alice GET .edit of base: {}",
+        read_as(&env, "alice", &edit).await
+    ));
+    for (what, target) in [
+        ("base", base.to_string()),
+        ("primary", format!("{b}.mokuro")),
+    ] {
         let (status, body) = env.send("alice", "PUT", &at(&target), &[], cbz(3)).await;
         assert_eq!(status, 403, "alice replaces no {target:?}");
-        log.push(format!("alice replace {what}: {:?}", outcome(status, &body)));
+        log.push(format!(
+            "alice replace {what}: {:?}",
+            outcome(status, &body)
+        ));
         let (status, body) = env.send("alice", "DELETE", &at(&target), &[], vec![]).await;
         assert_eq!(status, 403, "alice deletes no {target:?}");
         log.push(format!("alice DELETE {what}: {:?}", outcome(status, &body)));
     }
     // The nested archive's own files: as its canonical twin's.
-    for (user, suffix) in [("alice", ".mokuro"), ("alice", ".gcv.mokuro"), ("bob", ".mokuro")] {
+    for (user, suffix) in [
+        ("alice", ".mokuro"),
+        ("alice", ".gcv.mokuro"),
+        ("bob", ".mokuro"),
+    ] {
         let name = format!("{n}{suffix}");
         let (status, body) = env.send(user, "PUT", &at(&name), &[], layer(user)).await;
-        log.push(format!("{user} PUT nested{suffix}: {:?}", outcome(status, &body)));
-        log.push(format!("reader GET nested{suffix}: {}", read_as(&env, "reader", &name).await));
+        log.push(format!(
+            "{user} PUT nested{suffix}: {:?}",
+            outcome(status, &body)
+        ));
+        log.push(format!(
+            "reader GET nested{suffix}: {}",
+            read_as(&env, "reader", &name).await
+        ));
     }
     let (status, body) = env.send("alice", "PUT", &at(nested), &[], cbz(4)).await;
-    log.push(format!("alice replace nested: {:?}", outcome(status, &body)));
+    log.push(format!(
+        "alice replace nested: {:?}",
+        outcome(status, &body)
+    ));
     for user in ["alice", "bob", "reader"] {
         log.push(format!("{user} sees {:?}", env.listing(user, base).await));
     }
     // bob keeps control of his volume: replaced, then deleted with its files.
     let (status, body) = env.send("bob", "PUT", &at(base), &[], cbz(5)).await;
-    assert_eq!(status, 204, "bob replaces his {base:?}: {}", String::from_utf8_lossy(&body));
+    assert_eq!(
+        status,
+        204,
+        "bob replaces his {base:?}: {}",
+        String::from_utf8_lossy(&body)
+    );
     log.push(format!("bob replace base: {:?}", outcome(status, &body)));
     let (status, body) = env.send("bob", "DELETE", &at(base), &[], vec![]).await;
-    assert_eq!(status, 204, "bob deletes his {base:?}: {}", String::from_utf8_lossy(&body));
+    assert_eq!(
+        status,
+        204,
+        "bob deletes his {base:?}: {}",
+        String::from_utf8_lossy(&body)
+    );
     log.push(format!("bob DELETE base: {:?}", outcome(status, &body)));
     let (status, body) = env.send("alice", "DELETE", &at(nested), &[], vec![]).await;
     log.push(format!("alice DELETE nested: {:?}", outcome(status, &body)));

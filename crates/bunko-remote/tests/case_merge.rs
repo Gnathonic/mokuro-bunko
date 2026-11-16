@@ -1086,7 +1086,10 @@ fn a_miscased_layer_id_merges_as_the_same_layer() {
     t.policy();
     t.wait_merges(1);
     assert_eq!(t.names("Kingdom"), ["Vol 1.cbz", "Vol 1.gcv.mokuro"]);
-    assert_eq!(t.bytes("Kingdom/Vol 1.gcv.mokuro").unwrap(), mokuro("layer"));
+    assert_eq!(
+        t.bytes("Kingdom/Vol 1.gcv.mokuro").unwrap(),
+        mokuro("layer")
+    );
     assert!(t.at("kingdom").is_none());
 }
 

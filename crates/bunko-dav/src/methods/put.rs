@@ -359,7 +359,8 @@ async fn put_inner(inner: &Arc<Inner>, req: &Req, body: Body) -> Result<Resp, Pu
     }
     // A history file or a correction is the account's own bytes, never a library OCR
     // file to re-seal.
-    if history.is_none() && !personal && suffix_of(&paths::file_name(&dest)) == Some(Suffix::Mokuro) {
+    if history.is_none() && !personal && suffix_of(&paths::file_name(&dest)) == Some(Suffix::Mokuro)
+    {
         let (hooks, dest) = (req.ctx.hooks.clone(), dest.clone());
         staging.before_publish(Box::new(move |staged| {
             hooks.ocr_sidecar_staged(&dest, staged)

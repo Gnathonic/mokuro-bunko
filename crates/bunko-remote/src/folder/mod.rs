@@ -303,11 +303,19 @@ fn unreachable_err(why: &str) -> BErr {
 }
 
 /// A name the folder driver never lists (and never creates): Bunko's internal names,
-/// Chromium's swap files, and at the top the names a filesystem keeps for itself.
+/// Chromium's swap files, and at the top the names a filesystem keeps for itself, each
+/// in every spelling the one fold joins (as [`crate::names::is_reserved_name`] reads
+/// them), so no spelling of one is listed while another is hidden.
 pub(crate) fn hidden_name(name: &str, at_root: bool) -> bool {
-    crate::names::is_reserved_name(name)
-        || name.to_ascii_lowercase().ends_with(".crswap")
-        || (at_root && ROOT_SYSTEM.iter().any(|s| s.eq_ignore_ascii_case(name)))
+    if crate::names::is_reserved_name(name) {
+        return true;
+    }
+    let folded = bunko_core::names::folded(name);
+    folded.ends_with(".crswap")
+        || (at_root
+            && ROOT_SYSTEM
+                .iter()
+                .any(|s| bunko_core::names::folded(s) == folded))
 }
 
 /// `candidate` is a Chromium swap file of `name`: `<name>.crswap`, or

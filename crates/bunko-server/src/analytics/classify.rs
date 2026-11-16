@@ -98,14 +98,13 @@ pub fn method_name(method: &str) -> &'static str {
         .unwrap_or("OTHER")
 }
 
-/// A series' identity in the analytics: one key for every spelling of its folder
-/// that the catalog takes for one series (`bunko_db::fold_series_title_key`: case,
-/// whitespace runs, NFC) or that any host takes for one folder (the filename fold,
-/// [`bunko_core::names::fold_name`]: `Straße/` and `STRASSE/`, `ſ`, ignorables), so a
-/// case-only rename never splits a series' numbers. An ASCII title keys exactly as
-/// `fold_series_title_key` does.
+/// A series' identity in the analytics: the series key (`bunko_db::fold_series_title_key`,
+/// the one filename fold, trimmed, whitespace runs one space), one key for every
+/// spelling of its folder that any host takes for one folder (`Straße/` and
+/// `STRASSE/`, `ſ`, ignorables) or the catalog takes for one series (`Dr  Stone/`), so
+/// a case-only rename never splits a series' numbers.
 pub fn series_key(title: &str) -> String {
-    bunko_db::fold_series_title_key(&bunko_core::names::fold_name(title))
+    bunko_db::fold_series_title_key(title)
 }
 
 /// A library archive's identity (`Series/Vol 1.cbz`): its folder by [`series_key`],
@@ -201,8 +200,14 @@ fn starts(path: &str, prefix: &str) -> bool {
             .is_some_and(|rest| rest.starts_with('/'))
 }
 
-/// `name` ends with `suffix`, ASCII case folded (no allocation: this runs per request).
-fn ends_with_ci(name: &str, suffix: &str) -> bool {
+/// `name`'s fold ends with `suffix` (an ASCII suffix), as sidecar names rule 2 reads
+/// suffixes: `V.CBZ`, and `V.cb\u{200B}z` or `V.mo\u{212A}uro`, which every host makes
+/// one name with `V.cbz` and `V.mokuro`. An ASCII name is matched in place (no
+/// allocation: this runs per request).
+fn ends_with_folded(name: &str, suffix: &str) -> bool {
+    if !name.is_ascii() {
+        return bunko_core::sidecar_names::strip_suffix_folded(name, suffix).is_some();
+    }
     name.len() >= suffix.len()
         && name.as_bytes()[name.len() - suffix.len()..].eq_ignore_ascii_case(suffix.as_bytes())
 }
@@ -212,17 +217,24 @@ fn ext(name: &str) -> &str {
     name.rsplit_once('.').map(|(_, e)| e).unwrap_or("")
 }
 
+/// The last extension is one of `any`, read on the fold as [`ends_with_folded`] does.
 fn ext_is(name: &str, any: &[&str]) -> bool {
-    let e = ext(name);
+    let folded;
+    let e = if name.is_ascii() {
+        ext(name)
+    } else {
+        folded = bunko_core::names::fold_name(name);
+        ext(&folded)
+    };
     any.iter().any(|x| e.eq_ignore_ascii_case(x))
 }
 
 fn is_archive(name: &str) -> bool {
-    ARCHIVE_EXTENSIONS.iter().any(|e| ends_with_ci(name, e))
+    ARCHIVE_EXTENSIONS.iter().any(|e| ends_with_folded(name, e))
 }
 
 fn is_sidecar(name: &str) -> bool {
-    ends_with_ci(name, ".mokuro") || ends_with_ci(name, ".mokuro.gz")
+    ends_with_folded(name, ".mokuro") || ends_with_folded(name, ".mokuro.gz")
 }
 
 fn is_cover(name: &str) -> bool {
@@ -498,8 +510,8 @@ mod tests {
     }
 
     /// One series and one volume for every spelling a host takes for one folder or
-    /// file (a case-only rename, the filename fold's wider joins), and for every
-    /// spelling the catalog takes for one series; ASCII keys as the catalog's.
+    /// file (a case-only rename, the one fold's joins), and for every spelling the
+    /// catalog takes for one series: the catalog's series key itself.
     #[test]
     fn one_identity_per_spelling() {
         for (a, b) in [
@@ -514,7 +526,13 @@ mod tests {
         ] {
             assert_eq!(series_key(a), series_key(b), "{a:?} {b:?}");
         }
-        for t in ["Kingdom", "Dr  Stone ", "The KINGDOM/Arc 2"] {
+        for t in [
+            "Kingdom",
+            "Dr  Stone ",
+            "The KINGDOM/Arc 2",
+            "Stra\u{df}e",
+            "Cafe\u{301}",
+        ] {
             assert_eq!(series_key(t), bunko_db::fold_series_title_key(t), "{t:?}");
         }
         assert_ne!(series_key("Kingdom"), series_key("Kingdoms"));
@@ -585,6 +603,9 @@ mod tests {
             ("/mokuro-reader/S/Vol 01.5.mokuro", "sidecar", "primary"),
             ("/mokuro-reader/S/v.webp", "cover", ""),
             ("/mokuro-reader/S/v.nocover", "cover", ""),
+            // Suffixes read on the fold (sidecar names rule 2), as every host joins them.
+            ("/mokuro-reader/S/v.mo\u{212A}uro", "sidecar", "primary"),
+            ("/mokuro-reader/S/v.web\u{200B}p", "cover", ""),
             ("/mokuro-reader/S/series.json", "metadata", "series_json"),
             // Every spelling the filename fold joins, as the server treats them.
             (

@@ -190,7 +190,7 @@ fn a_case_only_rename_takes_effect() {
     );
 }
 
-/// A rename between two names only the wider filename fold joins (`STRASSE` and
+/// A rename between two names only the full fold joins, not a lowercase (`STRASSE` and
 /// `Stra\u{df}e`, a default-ignorable code point dropped, a dotless `\u{131}`) takes
 /// effect too, whether the host makes them one file (casefold) or two: the listing holds
 /// exactly the new name afterwards.

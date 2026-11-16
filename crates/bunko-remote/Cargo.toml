@@ -42,7 +42,7 @@ oauth = [
 ]
 
 [dependencies]
-# Sidecar names rule v1 (`merge.rs`, the queue file's `done[]`) and the configuration
+# Sidecar names rule 2 and the one fold (`merge.rs`, `names.rs`) and the configuration
 # OAuth reads.
 bunko-core.workspace = true
 bunko-store.workspace = true

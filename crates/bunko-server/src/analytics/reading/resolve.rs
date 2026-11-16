@@ -34,15 +34,15 @@ pub struct Resolver {
     map: Mutex<Option<Arc<UuidMap>>>,
 }
 
-/// `Series/Vol 1.cbz` → `Vol 1`.
+/// `Series/Vol 1.cbz` → `Vol 1`: the extension read on the fold, as sidecar names rule 2
+/// reads suffixes (`V.CBZ`, `V.cb\u{200B}z`), the name cut at the same dot.
 pub fn volume_stem(volume_key: &str) -> &str {
     let name = volume_key.rsplit_once('/').map_or(volume_key, |(_, n)| n);
     for ext in ARCHIVE_EXTENSIONS {
-        if name.len() > ext.len()
-            && name.is_char_boundary(name.len() - ext.len())
-            && name[name.len() - ext.len()..].eq_ignore_ascii_case(ext)
+        if let Some(stem) = bunko_core::sidecar_names::strip_suffix_folded(name, ext)
+            && !stem.is_empty()
         {
-            return &name[..name.len() - ext.len()];
+            return stem;
         }
     }
     name
