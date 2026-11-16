@@ -97,7 +97,7 @@ fn default_active() -> MarkerState {
 /// {"version":1,"kind":"mokuro-bunko","instance_id":"6f1c…","boot_id":"a93e…","instance_name":"nas",
 ///  "bunko_version":"0.8.0","epoch":3,"claimed_at":"…","heartbeat_at":"…","ttl_s":900,"state":"active",
 ///  "compiles":["series.json","catalog.json"],"ocr":true,"queue":".mokuro-queue.json","dedup":true,
-///  "curated":true,"took_over_from":null,
+///  "curated":true,"took_over_from":null,"sidecar_rule":2,
 ///  "per_user_files":["volume-data.json","profiles.json","goals.json","positions.json","history/"]}
 /// ```
 ///
@@ -153,6 +153,12 @@ pub struct Marker {
     /// The `instance_id` this marker took the lease over from.
     #[serde(default)]
     pub took_over_from: Option<String>,
+    /// The sidecar names rule the holder reads names by
+    /// ([`bunko_core::sidecar_names::SIDECAR_RULE`]: 2, one fold). Informational: a
+    /// cloud-direct reader logs when it is newer than its own rule and never gates on
+    /// it. Absent (before 0.8): 0.
+    #[serde(default)]
+    pub sidecar_rule: u32,
     /// The names under `/mokuro-reader` the holder keeps per account, as
     /// `/login/api/me` lists them (`history/` is a directory tree). A cloud-direct
     /// reader turns per-account features on from it; absent (before 0.8): none.
@@ -886,6 +892,7 @@ impl<B: Backend> Lease<B> {
             dedup: self.cfg.dedup,
             curated: self.cfg.curated,
             took_over_from,
+            sidecar_rule: bunko_core::sidecar_names::SIDECAR_RULE,
             per_user_files: self.cfg.per_user_files.clone(),
         }
     }

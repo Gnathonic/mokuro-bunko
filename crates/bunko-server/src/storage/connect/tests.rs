@@ -1257,6 +1257,7 @@ async fn the_check_reports_another_bunkos_lease() {
         dedup: false,
         curated: false,
         took_over_from: None,
+        sidecar_rule: 2,
         per_user_files: vec![],
     };
     fake.reader_put(

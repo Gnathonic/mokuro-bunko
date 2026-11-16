@@ -146,6 +146,7 @@ fn foreign(id: &str, epoch: u64, now_ms: i64) -> Marker {
         dedup: false,
         curated: false,
         took_over_from: None,
+        sidecar_rule: 2,
         per_user_files: vec![],
     }
 }
@@ -612,6 +613,8 @@ async fn the_marker_advertises_the_per_user_files() {
     assert_eq!(a.claim().await.unwrap(), LeaseState::Holder);
     let (node, m) = env.markers().await.remove(0);
     assert_eq!(m.per_user_files, ["volume-data.json"]);
+    // The sidecar names rule it reads names by (informational).
+    assert_eq!(m.sidecar_rule, bunko_core::sidecar_names::SIDECAR_RULE);
     let raw: serde_json::Value =
         serde_json::from_slice(&env.fake.content(&node.pid).unwrap()).unwrap();
     let keys: Vec<&String> = raw.as_object().unwrap().keys().collect();

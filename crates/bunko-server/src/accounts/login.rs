@@ -492,6 +492,7 @@ fn identity_body(db: &bunko_db::Database, library: &std::path::Path, user: &User
         "permissions": permissions(user.role, folders),
         "per_user_files": bunko_core::reader_tree::advertised(),
         "per_user_layers": bunko_core::sidecar_names::per_user_layers(),
+        "sidecar_rule": bunko_core::sidecar_names::SIDECAR_RULE,
         "version": bunko_core::VERSION,
     })
 }
@@ -534,6 +535,10 @@ async fn me(State(d): State<AccountsDeps>, client: Client, headers: HeaderMap) -
                 // The layer ids each account keeps its own copy of (D27): a reader
                 // pushes its corrections only when `edit` is listed.
                 "per_user_layers": bunko_core::sidecar_names::per_user_layers(),
+                // The sidecar names rule this server reads names by (2: one fold,
+                // `interop/contract/sidecar-names.json`). Informational: a reader logs
+                // when it is newer than its own and never gates on it.
+                "sidecar_rule": bunko_core::sidecar_names::SIDECAR_RULE,
                 // Reported only by builds that keep history per account (0.8.0 on): a
                 // reader turns history sync on from the numeric core.
                 "version": bunko_core::VERSION,

@@ -71,11 +71,13 @@ async fn me_valid_creds_returns_identity_and_permissions() {
     // The layer ids each account keeps its own copy of (D27): the reader pushes its
     // corrections only when `edit` is listed.
     assert_eq!(b["per_user_layers"], json!(["edit"]));
+    // The sidecar names rule this server reads names by (informational: 2, one fold).
+    assert_eq!(b["sidecar_rule"], 2);
     // The running version, last: reading history is per account from 0.8.0 on.
     assert_eq!(b["version"], bunko_core::VERSION);
     assert!(
         text.ends_with(&format!(
-            r#""per_user_files":["volume-data.json","profiles.json","goals.json","positions.json","history/"],"per_user_layers":["edit"],"version":"{}"}}"#,
+            r#""per_user_files":["volume-data.json","profiles.json","goals.json","positions.json","history/"],"per_user_layers":["edit"],"sidecar_rule":2,"version":"{}"}}"#,
             bunko_core::VERSION
         )),
         "{text}"
@@ -206,13 +208,14 @@ async fn me_failures_and_anonymous() {
         "permissions": {"canWriteProgress": false, "canAddFiles": false, "canModifyDelete": false, "metadata": {"scope": "none"}, "curated": {"scope": "none"}, "addFiles": {"scope": "none"}},
         "per_user_files": ["volume-data.json", "profiles.json", "goals.json", "positions.json", "history/"],
         "per_user_layers": ["edit"],
+        "sidecar_rule": 2,
         "version": bunko_core::VERSION,
     });
     let r = me(&env, None).await;
     assert_eq!((r.status, r.json()), (200, anon.clone()));
     assert!(
         r.text().ends_with(&format!(
-            r#""history/"],"per_user_layers":["edit"],"version":"{}"}}"#,
+            r#""history/"],"per_user_layers":["edit"],"sidecar_rule":2,"version":"{}"}}"#,
             bunko_core::VERSION
         )),
         "{}",

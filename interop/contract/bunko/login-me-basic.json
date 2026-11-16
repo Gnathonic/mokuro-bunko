@@ -33,6 +33,7 @@
     "per_user_layers": [
       "edit"
     ],
+    "sidecar_rule": 2,
     "version": "0.0.0"
   },
   "headers": {

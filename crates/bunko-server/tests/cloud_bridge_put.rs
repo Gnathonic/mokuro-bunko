@@ -797,6 +797,7 @@ async fn a_put_while_another_bunko_holds_the_lease_is_a_503() {
         dedup: false,
         curated: false,
         took_over_from: None,
+        sidecar_rule: 2,
         per_user_files: vec![],
     };
     fake.reader_put(
