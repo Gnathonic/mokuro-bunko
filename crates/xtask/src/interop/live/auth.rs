@@ -96,7 +96,7 @@ fn oauth_client(a: &LiveAuthArgs) -> Result<OAuthClient> {
 /// The beta Desktop client's secret: from `--client-json`, else the run-time
 /// variable, else the one built in. The refresh token belongs to this client, and the
 /// live runs refresh with this same client.
-fn google_secret(
+pub(super) fn google_secret(
     client_json: Option<&Path>,
     env: Option<String>,
     built_in: Option<&str>,

@@ -28,8 +28,10 @@ pub struct Server {
     child: Option<Child>,
 }
 
-/// Where a rig server keeps its library.
+/// Where a rig server keeps its library. A few per run: the size of a login is no
+/// concern.
 #[derive(Debug, Clone, Default)]
+#[allow(clippy::large_enum_variant)]
 pub enum Backend {
     /// `<dir>/library` on this disk.
     #[default]
@@ -40,8 +42,9 @@ pub enum Backend {
 
 /// A cloud sign-in as a connected server keeps it: the `storage.library` backend and
 /// one entry of `<base>/cloud/credentials.json`. A library folder keeps one too: a stub
-/// with no secret, as the connect flow writes it.
-#[derive(Debug, Clone)]
+/// with no secret, as the connect flow writes it. `Debug` leaves out the credential
+/// and the extra configuration, which hold secrets on a live account.
+#[derive(Clone, Default)]
 pub struct CloudLogin {
     /// `storage.library.backend`: `gdrive`, `onedrive`, `mega`, `webdav` or `folder`.
     pub backend: &'static str,
@@ -54,6 +57,34 @@ pub struct CloudLogin {
     pub webdav: Option<(String, String)>,
     /// A folder: the library folder (`storage.library.path`).
     pub path: Option<PathBuf>,
+    /// The library folder in the account (`storage.library.folder`); default
+    /// [`CLOUD_FOLDER`]. A live run's sandbox has a name of its own.
+    pub folder: Option<String>,
+    /// The Google pairing part of the store id; default `release` for Drive.
+    pub pairing: Option<String>,
+    /// More `storage.library` keys, as YAML lines indented four spaces (a live Drive
+    /// run's `oauth.google` client).
+    pub library_yaml: Option<String>,
+}
+
+impl std::fmt::Debug for CloudLogin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CloudLogin")
+            .field("backend", &self.backend)
+            .field("account_id", &self.account_id)
+            .field("webdav", &self.webdav.as_ref().map(|(url, _)| url))
+            .field("path", &self.path)
+            .field("folder", &self.folder)
+            .field("pairing", &self.pairing)
+            .finish_non_exhaustive()
+    }
+}
+
+impl CloudLogin {
+    /// `storage.library.folder`.
+    pub fn folder(&self) -> &str {
+        self.folder.as_deref().unwrap_or(CLOUD_FOLDER)
+    }
 }
 
 /// A folder library's sign-in: the stub the connect flow writes (`provider: folder`,
@@ -66,6 +97,7 @@ pub fn folder_login(path: &Path) -> CloudLogin {
         credential: serde_json::json!({"account_label": account_id}),
         webdav: None,
         path: Some(path.to_path_buf()),
+        ..CloudLogin::default()
     }
 }
 
@@ -151,10 +183,17 @@ fn config_yaml(dir: &Path, port: u16, o: &ServerOptions) -> String {
     if let Backend::Cloud(login) = &o.backend {
         // Short quiet and poll periods: the rig waits on what the feed sees.
         y.push_str(&format!(
-            "  library:\n    backend: {}\n    folder: {CLOUD_FOLDER}\n    quiet_s: 1\n\
+            "  library:\n    backend: {}\n    folder: {}\n    quiet_s: 1\n\
              \x20   poll:\n      active_s: 2\n      idle_s: 2\n",
-            login.backend
+            login.backend,
+            login.folder(),
         ));
+        if let Some(extra) = &login.library_yaml {
+            y.push_str(extra);
+            if !extra.ends_with('\n') {
+                y.push('\n');
+            }
+        }
         if let Some((url, user)) = &login.webdav {
             y.push_str(&format!(
                 "    webdav:\n      url: {}\n      username: {}\n",
@@ -195,12 +234,12 @@ fn write_credentials(dir: &Path, login: &CloudLogin) -> Result<()> {
         std::fs::set_permissions(&cloud, std::fs::Permissions::from_mode(0o700))?;
     }
     // Only Drive has a pairing part; the rig's servers use the release pairing.
-    let pairing = if login.backend == "gdrive" {
-        "release"
-    } else {
-        ""
+    let pairing = match (&login.pairing, login.backend) {
+        (Some(p), _) => p.as_str(),
+        (None, "gdrive") => "release",
+        (None, _) => "",
     };
-    let id = store_id(login.backend, pairing, &login.account_id, CLOUD_FOLDER);
+    let id = store_id(login.backend, pairing, &login.account_id, login.folder());
     let mut cred = login.credential.clone();
     cred["provider"] = login.backend.into();
     cred["account_id"] = login.account_id.clone().into();
@@ -235,6 +274,15 @@ impl Server {
         std::fs::write(dir.join("config.yaml"), config_yaml(dir, port, &o))?;
         if let Backend::Cloud(login) = &o.backend {
             write_credentials(dir, login)?;
+            // A live Drive login puts its client's secret in the config.
+            #[cfg(unix)]
+            if login.library_yaml.is_some() {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::set_permissions(
+                    dir.join("config.yaml"),
+                    std::fs::Permissions::from_mode(0o600),
+                )?;
+            }
         }
         let mut server = Server {
             bin: bin.to_path_buf(),

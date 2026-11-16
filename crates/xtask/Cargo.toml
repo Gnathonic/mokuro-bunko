@@ -38,7 +38,7 @@ goblin = "0.10"
 # interop: interop/budgets.toml.
 toml = "0.8"
 # live: sign-in (loopback + PKCE, refresh), the credentials file, the MEGA session.
-bunko-remote = { path = "../bunko-remote", default-features = false, features = ["oauth"], optional = true }
+bunko-remote = { path = "../bunko-remote", default-features = false, features = ["oauth", "gdrive", "onedrive", "mega"], optional = true }
 bunko-mega = { path = "../bunko-mega", optional = true }
 tokio = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }

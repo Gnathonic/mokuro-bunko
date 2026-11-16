@@ -17,6 +17,9 @@
 
 #[cfg(feature = "live")]
 mod auth;
+#[cfg(feature = "live")]
+mod runner;
+pub mod snapshot;
 
 use anyhow::{Context, Result, bail};
 use std::fmt;
@@ -336,6 +339,110 @@ pub fn finish(
     a.writer().store(name, &got.secret, out)
 }
 
+/// The providers a live run runs on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum LiveProvider {
+    Gdrive,
+    Onedrive,
+    Mega,
+}
+
+impl LiveProvider {
+    pub fn name(self) -> &'static str {
+        self.target().name()
+    }
+
+    /// The sign-in command and secret of this provider.
+    pub fn target(self) -> Target {
+        match self {
+            LiveProvider::Gdrive => Target::Gdrive,
+            LiveProvider::Onedrive => Target::Onedrive,
+            LiveProvider::Mega => Target::Mega,
+        }
+    }
+
+    /// `storage.library.backend`.
+    pub fn backend(self) -> &'static str {
+        match self {
+            LiveProvider::Gdrive => "gdrive",
+            LiveProvider::Onedrive => "onedrive",
+            LiveProvider::Mega => "mega",
+        }
+    }
+
+    pub fn rig_provider(self) -> super::rig::Provider {
+        match self {
+            LiveProvider::Gdrive => super::rig::Provider::Google,
+            LiveProvider::Onedrive => super::rig::Provider::Microsoft,
+            LiveProvider::Mega => super::rig::Provider::Mega,
+        }
+    }
+}
+
+/// `cargo xtask-live interop live`: one scheduled live run (docs/design/plans/
+/// 2026-11-15-i5-live-runs.md). Reads `BUNKO_LIVE_<PROVIDER>_*` (and, for Drive,
+/// `BUNKO_GOOGLE_BETA_DESKTOP_SECRET`) from the environment.
+#[derive(clap::Args, Debug)]
+pub struct LiveArgs {
+    #[arg(long, value_enum)]
+    pub provider: LiveProvider,
+    /// A testing-feature server (default: target/release/mokuro-bunko).
+    #[arg(long)]
+    pub bin: Option<PathBuf>,
+    /// The run id in the sandbox's name (default: the UTC time and the workflow run's
+    /// id, or `local`).
+    #[arg(long)]
+    pub run_id: Option<String>,
+    /// Only the cloud suite's scenarios whose name contains this.
+    #[arg(long)]
+    pub grep: Option<String>,
+    /// Keep the work folder (credentials and configs are removed whatever happens).
+    #[arg(long)]
+    pub keep: bool,
+    /// Where `live-<provider>.json` goes (default: target/interop/live).
+    #[arg(long)]
+    pub out: Option<PathBuf>,
+    /// The repository a rotated OneDrive token is stored in.
+    #[arg(long, default_value = REPO)]
+    pub repo: String,
+    /// Do not store a rotated token (a local run; the stored one keeps working until
+    /// it expires).
+    #[arg(long)]
+    pub no_store: bool,
+    /// The previous run's `live-<provider>.json`: a second transfer-quota skip in a
+    /// row fails.
+    #[arg(long)]
+    pub previous: Option<PathBuf>,
+    /// The GitHub CLI to run.
+    #[arg(long, hide = true, default_value = "gh")]
+    pub gh: PathBuf,
+    /// cloudsim's address: every provider address and token endpoint under it, the
+    /// server's too (this command's end-to-end test).
+    #[arg(long, hide = true)]
+    pub sim_base: Option<String>,
+    /// With --sim-base only: write one file outside the sandbox before the diff, which
+    /// must then fail the run.
+    #[arg(long, hide = true, requires = "sim_base")]
+    pub inject_leak: bool,
+}
+
+pub fn run_live(a: &LiveArgs) -> Result<()> {
+    if !a.repo.contains('/') {
+        bail!("--repo {}: give it as owner/name", a.repo);
+    }
+    #[cfg(feature = "live")]
+    {
+        runner::run(a)
+    }
+    #[cfg(not(feature = "live"))]
+    {
+        bail!(
+            "live needs xtask's `live` feature: run `cargo xtask-live interop live --provider {}`",
+            a.provider.name()
+        )
+    }
+}
+
 pub fn run(a: &LiveAuthArgs) -> Result<()> {
     a.validate()?;
     #[cfg(feature = "live")]
@@ -496,11 +603,22 @@ mod tests {
             std::fs::write(
                 &p,
                 format!(
-                    "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{d}/args'\ncat > '{d}/stdin'\n{say}\nexit {code}\n"
+                    "#!/bin/sh\n[ \"$1\" = --probe ] && exit 0\nprintf '%s\\n' \"$@\" > '{d}/args'\ncat > '{d}/stdin'\n{say}\nexit {code}\n"
                 ),
             )
             .unwrap();
             std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            // A test thread forking while the script was open for writing makes its
+            // first exec fail with ETXTBSY until that child execs: wait it out.
+            for _ in 0..100 {
+                match Command::new(&p).arg("--probe").status() {
+                    Ok(_) => break,
+                    Err(e) if e.raw_os_error() == Some(26) => {
+                        std::thread::sleep(std::time::Duration::from_millis(10))
+                    }
+                    Err(e) => panic!("{e}"),
+                }
+            }
             p
         }
 
