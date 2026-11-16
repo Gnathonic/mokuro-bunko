@@ -2,7 +2,15 @@
 // in interop/.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { asSeeded, mergeProblems, replacedBelow, writesOutside } from './dup-roots.mjs';
+import {
+    asSeeded,
+    copiesBelow,
+    filesBelow,
+    mergeProblems,
+    perUserBelow,
+    replacedBelow,
+    writesOutside,
+} from './dup-roots.mjs';
 
 const folder = (id, parent_id, name, extra = {}) => ({
     id,
@@ -136,4 +144,54 @@ test("a version replaced in the canonical root is no write outside it; a write t
         writesOutside(outside, 'B', MERGED, replacedBelow(outside, 'B')).map((r) => r.id),
         ['lone', 'in-a', 'newer', 'live-out'],
     );
+});
+
+test('every live copy at a path counts, where filesBelow keeps one', () => {
+    // Regression (S1 on MEGA, reader PR #368): root A held two live volume-data.json
+    // copies (one Bunko's doubled write of the cloud-root owner's file left beside the
+    // direct reader's); filesBelow, keyed by path, counted one, and the merge correctly
+    // moved both into B.
+    const rows = [
+        folder('A', '', 'mokuro-reader'),
+        folder('S', 'A', 'Series'),
+        file('vd-reader', 'A', 'volume-data.json', '2026-11-13T09:14:10.000Z'),
+        file('vd-bunko', 'A', 'volume-data.json', '2026-11-13T09:14:15.000Z'),
+        file('vd-old', 'A', 'volume-data.json', '2026-11-13T09:00:00.000Z', {
+            trashed: true,
+            explicitly_trashed: true,
+        }),
+        file('vd-series', 'S', 'volume-data.json', '2026-11-13T09:00:00.000Z'),
+        file('pos', 'A', 'positions.json', '2026-11-13T09:14:10.000Z'),
+    ];
+    assert.equal([...filesBelow(rows, 'A')].filter(([p]) => p === 'volume-data.json').length, 1);
+    assert.deepEqual(
+        copiesBelow(rows, 'A', 'volume-data.json').map((r) => r.id),
+        ['vd-reader', 'vd-bunko'],
+    );
+    assert.deepEqual(
+        copiesBelow(rows, 'A', 'Series/volume-data.json').map((r) => r.id),
+        ['vd-series'],
+    );
+    assert.deepEqual(copiesBelow(rows, 'B', 'volume-data.json'), []);
+});
+
+test("a root's per-user files, every copy, are what S1 waits on to hold still", () => {
+    const rows = [
+        folder('A', '', 'mokuro-reader'),
+        folder('H', 'A', 'history'),
+        folder('D', 'H', 'dev'),
+        folder('S', 'A', 'Series'),
+        file('vd-2', 'A', 'volume-data.json', '2026-11-13T09:14:15.000Z', { sha256: 'aa' }),
+        file('vd-1', 'A', 'volume-data.json', '2026-11-13T09:14:10.000Z', { sha256: 'aa' }),
+        file('month', 'D', '2026-11.json', '2026-11-13T09:14:10.000Z', { sha256: 'mm' }),
+        // Not per-user: a series' files and Bunko's marker (its heartbeat moves on its own).
+        file('sj', 'S', 'series.json', '2026-11-13T09:14:10.000Z', { sha256: 'ss' }),
+        file('marker', 'A', '.mokuro-bunko.json', '2026-11-13T09:14:10.000Z', { sha256: 'kk' }),
+        file('gone', 'A', 'positions.json', '2026-11-13T09:00:00.000Z', { sha256: 'pp', trashed: true }),
+    ];
+    assert.deepEqual(perUserBelow(rows, 'A'), [
+        'history/dev/2026-11.json month mm',
+        'volume-data.json vd-1 aa',
+        'volume-data.json vd-2 aa',
+    ]);
 });

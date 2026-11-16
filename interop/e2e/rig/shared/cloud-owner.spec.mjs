@@ -13,7 +13,15 @@ import { createHash } from 'node:crypto';
 import { test, expect } from '../fixtures.mjs';
 import { basic, bunko, davPath } from '../bunko.mjs';
 import { cloudFiles } from '../cloud-direct.mjs';
-import { cloudDeleter, unseenNote } from '../cloud-restore.mjs';
+import {
+    cloudDeleter,
+    copiesByPath,
+    copyLines,
+    copyProblems,
+    perUserPath,
+    unseenNote,
+    untilQuiet,
+} from '../cloud-restore.mjs';
 import { monthFile, positionsOf, seedSentinel } from '../history-accounts.mjs';
 import { bunkoSeenAlive, cloudBytes, cloudJson, connect, recordReaderWrites, volumeNamed } from './shared.mjs';
 
@@ -23,28 +31,53 @@ const PASSWORD = 'rig-owner-3';
 
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
 
-/** The reader-root files that are an account's own (bunko-core reader_tree.rs). */
-const PER_USER_FILES = ['volume-data.json', 'profiles.json', 'goals.json', 'positions.json'];
-const ownTree = (rel) => PER_USER_FILES.includes(rel) || rel.startsWith('history/');
-
-/** The cloud's own tree as it stands: `{path → bytes}` (of several at a path, the last written). */
-async function ownTreeNow(rig) {
-    const paths = [...new Set((await cloudFiles(rig)).map((f) => f.path).filter(ownTree))];
-    return Object.fromEntries(await Promise.all(paths.map(async (p) => [p, await cloudBytes(rig, p)])));
+/**
+ * The cloud's own tree (the per-user root files and the history) as it stands, every
+ * copy at a path: `{path → [{path, id, sha256, modified}]}`, oldest first.
+ */
+async function ownCopies(rig) {
+    return copiesByPath(await cloudFiles(rig), perUserPath);
 }
 
 /**
- * What differs from the cloud as the spec found it (`found`, ownTreeNow's), and every
- * file left under the spec's own series: `[]` once the cloud is as it was.
+ * The cloud's own tree as the spec found it: `{bytes, want}`, `bytes` the last written
+ * copy at each path (what a restore puts back), `want` its sha256 (one copy of each).
+ * Copies an earlier spec left beside it are noted: the restore leaves one.
+ */
+async function ownTreeFound(rig) {
+    const copies = await ownCopies(rig);
+    const extra = Object.entries(copies).filter(([, c]) => c.length > 1);
+    if (extra.length) {
+        test.info().annotations.push({
+            type: 'found-copies',
+            description: JSON.stringify(Object.fromEntries(extra)),
+        });
+    }
+    const read = async (p) => [p, await cloudBytes(rig, p)];
+    const bytes = Object.fromEntries(await Promise.all(Object.keys(copies).map(read)));
+    const want = Object.fromEntries(Object.entries(bytes).map(([p, b]) => [p, sha256(b)]));
+    return { bytes, want };
+}
+
+/** How long the cloud's own tree must hold still: past Bunko's re-put delay (3-8 s). */
+const QUIET_MS = 15_000;
+/** The longest a restore waits for it to (Bunko's listing lags 2 s; an op retries). */
+const QUIET_WAIT_MS = 120_000;
+
+/** The cloud's own tree once nothing writes it any more (cloud-restore.mjs `untilQuiet`). */
+async function ownCopiesQuiet(rig) {
+    const { value } = await untilQuiet(() => ownCopies(rig), { quietMs: QUIET_MS, timeoutMs: QUIET_WAIT_MS });
+    return value;
+}
+
+/**
+ * What differs from the cloud as the spec found it (`found`, ownTreeFound's): every copy
+ * at a per-user path counts (a second copy is one Bunko's double write or a foreign copy
+ * left beside its own), and every file left under the spec's own series: `[]` once the
+ * cloud is as it was.
  */
 async function leftBehind(rig, found, series) {
-    const now = await ownTreeNow(rig);
-    const out = [];
-    for (const [p, bytes] of Object.entries(found)) {
-        if (!(p in now)) out.push(`gone ${p}`);
-        else if (sha256(now[p]) !== sha256(bytes)) out.push(`changed ${p}`);
-    }
-    for (const p of Object.keys(now)) if (!(p in found)) out.push(`added ${p}`);
+    const out = copyLines(found.want, await ownCopiesQuiet(rig));
     for (const f of await cloudFiles(rig)) if (f.path.startsWith(`${series}/`)) out.push(`left ${f.path}`);
     return out;
 }
@@ -62,24 +95,29 @@ async function settled(call) {
 const UNSEEN_WAIT_MS = 60_000;
 /** Unlisted this long is no lag (the rig's Bunko polls every 2 s), so it is noted. */
 const UNSEEN_NOTE_MS = 10_000;
+/** Rounds of removing left-over copies before the restore gives up (each waits QUIET_MS). */
+const COPY_ROUNDS = 4;
 
 /**
- * Put the cloud back as the spec found it (`found`, ownTreeNow's): the other account's
+ * Put the cloud back as the spec found it (`found`, ownTreeFound's): the other account's
  * overlay and the spec's series removed (the admin), the owner's tree written back
- * through Bunko as the owner (the cloud's own files are its). Answers what failed.
+ * through Bunko as the owner (the cloud's own files are its), and then, once Bunko's own
+ * writes have landed, one copy of each file and no more. Answers what failed.
  */
 async function restoreCloud(rig, { found, own, owner, other, admin }) {
     const server = bunko(rig);
     const del = (path, auth) => settled(async () => (await server.request('DELETE', path, { auth })).status);
     // The cloud's file at `segments` (with `folder`, the folder and all below it).
-    const deleter = cloudDeleter({
-        del: ({ segments, folder, auth }) => del(davPath(...segments) + (folder ? '/' : ''), auth),
-        holds: async ({ segments, folder }) => {
-            const rel = segments.join('/');
-            return (await cloudFiles(rig)).some((f) => (folder ? f.path.startsWith(`${rel}/`) : f.path === rel));
-        },
-        waitMs: UNSEEN_WAIT_MS,
-    });
+    const deleterFor = () =>
+        cloudDeleter({
+            del: ({ segments, folder, auth }) => del(davPath(...segments) + (folder ? '/' : ''), auth),
+            holds: async ({ segments, folder }) => {
+                const rel = segments.join('/');
+                return (await cloudFiles(rig)).some((f) => (folder ? f.path.startsWith(`${rel}/`) : f.path === rel));
+            },
+            waitMs: UNSEEN_WAIT_MS,
+        });
+    let deleter = deleterFor();
     const delCloud = async (segments, auth, { folder = false } = {}) => {
         const got = await deleter({ segments, folder, auth });
         const note = unseenNote(segments.join('/') + (folder ? '/' : ''), got, UNSEEN_NOTE_MS);
@@ -95,32 +133,8 @@ async function restoreCloud(rig, { found, own, owner, other, admin }) {
             problems.push(`${what}: ${e.message}`);
         }
     };
-    await step("the other account's overlay", () => del(davPath(own, 'Vol 1.edit.mokuro'), other), [204, 404]);
-    await step(`the series ${own}`, () => delCloud([own], admin, { folder: true }), [204, 404]);
-    let now = {};
-    try {
-        now = await ownTreeNow(rig);
-    } catch (e) {
-        problems.push(`the cloud's own tree: ${e.message}`);
-    }
-    const devices = (paths) => new Set(paths.filter((p) => p.startsWith('history/')).map((p) => p.split('/')[1]));
-    const hadDevices = devices(Object.keys(found));
-    // A device's folder the spec's readers made goes whole; a file added beside the
-    // ones that were there goes alone.
-    for (const device of devices(Object.keys(now))) {
-        if (hadDevices.has(device)) continue;
-        await step(`history/${device}/`, () => delCloud(['history', device], owner, { folder: true }), [204, 404]);
-    }
-    for (const p of Object.keys(now)) {
-        const segments = p.split('/');
-        if (p in found || (segments[0] === 'history' && !hadDevices.has(segments[1]))) continue;
-        await step(p, () => delCloud(segments, owner), [204, 404]);
-    }
-    if (hadDevices.size === 0 && devices(Object.keys(now)).size > 0) {
-        await step('history/', () => delCloud(['history'], owner, { folder: true }), [204, 404]);
-    }
-    for (const [p, bytes] of Object.entries(found)) {
-        if (p in now && sha256(now[p]) === sha256(bytes)) continue;
+    // The owner's file at `p` put back as found (its history folders made on the way).
+    const putBack = async (p) => {
         const segments = p.split('/');
         if (segments[0] === 'history') {
             for (let i = 1; i < segments.length; i++) {
@@ -130,7 +144,71 @@ async function restoreCloud(rig, { found, own, owner, other, admin }) {
                 ]);
             }
         }
-        await step(p, () => settled(() => server.put(davPath(...segments), bytes, owner)), [200, 201, 204]);
+        await step(p, () => settled(() => server.put(davPath(...segments), found.bytes[p], owner)), [200, 201, 204]);
+    };
+    await step("the other account's overlay", () => del(davPath(own, 'Vol 1.edit.mokuro'), other), [204, 404]);
+    await step(`the series ${own}`, () => delCloud([own], admin, { folder: true }), [204, 404]);
+    let now = {};
+    try {
+        now = await ownCopies(rig);
+    } catch (e) {
+        problems.push(`the cloud's own tree: ${e.message}`);
+    }
+    const devices = (paths) => new Set(paths.filter((p) => p.startsWith('history/')).map((p) => p.split('/')[1]));
+    const hadDevices = devices(Object.keys(found.want));
+    // A device's folder the spec's readers made goes whole; a file added beside the
+    // ones that were there goes alone.
+    for (const device of devices(Object.keys(now))) {
+        if (hadDevices.has(device)) continue;
+        await step(`history/${device}/`, () => delCloud(['history', device], owner, { folder: true }), [204, 404]);
+    }
+    for (const p of Object.keys(now)) {
+        const segments = p.split('/');
+        if (p in found.want || (segments[0] === 'history' && !hadDevices.has(segments[1]))) continue;
+        await step(p, () => delCloud(segments, owner), [204, 404]);
+    }
+    if (hadDevices.size === 0 && devices(Object.keys(now)).size > 0) {
+        await step('history/', () => delCloud(['history'], owner, { folder: true }), [204, 404]);
+    }
+    for (const [p, sha] of Object.entries(found.want)) {
+        const copies = now[p] ?? [];
+        if (copies.length === 1 && copies[0].sha256 === sha) continue;
+        await putBack(p);
+    }
+
+    // Left-over copies (cloud-restore.mjs: a Bunko product issue, not this spec's). Bunko
+    // writes the owner's file twice on MEGA, the second node 3-8 s after the first, and
+    // its Replace supersedes only the copy it indexes, leaving the direct reader's beside
+    // it; a DELETE through Bunko likewise takes the copy it indexes. So: wait until the
+    // tree holds still, then take away a copy at a time (a doubled write of the right
+    // bytes: all but one; a foreign copy: every one, and the found bytes go back up
+    // once), and look again.
+    for (let round = 1; round <= COPY_ROUNDS; round++) {
+        try {
+            now = await ownCopiesQuiet(rig);
+        } catch (e) {
+            problems.push(`the cloud's own tree held still: ${e.message}`);
+            break;
+        }
+        const wrong = copyProblems(found.want, now);
+        if (wrong.length === 0) break;
+        const copiesNow = Object.fromEntries(wrong.map((w) => [w.path, now[w.path]]));
+        const description = JSON.stringify({ round, wrong, copiesNow });
+        test.info().annotations.push({ type: 'restore-copies', description });
+        if (round === COPY_ROUNDS) {
+            problems.push(`left after ${COPY_ROUNDS} rounds: ${wrong.map((w) => `${w.why} ${w.path}`).join(', ')}`);
+            break;
+        }
+        // Each round has its own wait for Bunko to list the copy it has not indexed yet.
+        deleter = deleterFor();
+        for (const w of wrong) {
+            const copies = now[w.path] ?? [];
+            const removals = w.extra === 'copies' ? copies.length - 1 : w.extra === 'all' ? copies.length : 0;
+            for (let i = 0; i < removals; i++) {
+                await step(`copy ${i + 1} of ${w.path}`, () => delCloud(w.path.split('/'), owner), [204, 404]);
+            }
+            if (w.path in found.want && w.extra !== 'copies') await putBack(w.path);
+        }
     }
     return problems;
 }
@@ -164,7 +242,7 @@ test("the cloud-root owner's history, positions and correction are the cloud's",
     const ad = basic(admin.username, admin.password);
     const series = rig.library.series;
     const own = `S3 Owner ${tag}`;
-    const found = await ownTreeNow(rig);
+    const found = await ownTreeFound(rig);
     const before = await server.storage();
     // Read per request: the next one is the owner's.
     await server.setReaders(before.serve_readers, owner.username);
@@ -185,7 +263,7 @@ test("the cloud-root owner's history, positions and correction are the cloud's",
                     expect(await reader.sync()).toEqual({ ok: true, errors: [] });
                     await reader.idle();
                     // This reader's: an earlier spec's reader may have left its own.
-                    month = (await cloudFiles(rig)).find((f) => monthFile(f.path) && !(f.path in found)) ?? null;
+                    month = (await cloudFiles(rig)).find((f) => monthFile(f.path) && !(f.path in found.want)) ?? null;
                     const positions = await cloudJson(rig, 'positions.json');
                     return { month: month !== null, page: positions?.positions?.[id]?.[1] ?? null };
                 },
@@ -246,7 +324,10 @@ test("the cloud-root owner's history, positions and correction are the cloud's",
                     await owned.idle();
                     ownerMonth =
                         (await cloudFiles(rig)).find(
-                            (f) => monthFile(f.path) && !(f.path in found) && monthFile(f.path).device !== directDevice,
+                            (f) =>
+                                monthFile(f.path) &&
+                                !(f.path in found.want) &&
+                                monthFile(f.path).device !== directDevice,
                         ) ?? null;
                     const positions = (await cloudJson(rig, 'positions.json'))?.positions;
                     return {
@@ -318,7 +399,8 @@ test("the cloud-root owner's history, positions and correction are the cloud's",
             await owned?.logout().catch(() => {});
             const problems = await restoreCloud(rig, { found, own, owner: o, other: x, admin: ad });
             expect.soft(problems, 'putting the cloud back').toEqual([]);
-            // Bunko's writes reach the cloud on its own time.
+            // Bunko's writes reach the cloud on its own time: each look waits until the
+            // cloud's own tree holds still, and counts every copy.
             let left = null;
             for (const until = Date.now() + 60_000; Date.now() < until; ) {
                 left = await leftBehind(rig, found, own);
