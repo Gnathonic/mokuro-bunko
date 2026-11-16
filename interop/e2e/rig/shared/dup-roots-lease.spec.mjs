@@ -20,12 +20,14 @@ import { processorHold } from '../rename-ocr.mjs';
 import {
     CONTROL_FILES,
     asSeeded,
+    copiesBelow,
     filesBelow,
     mergeProblems,
     mokuroDoc,
     nestedChanges,
     nestedState,
     nodeBytes,
+    perUserBelow,
     replacedBelow,
     retag,
     seedFiles,
@@ -43,6 +45,7 @@ import {
     writesOutside,
 } from '../dup-roots.mjs';
 import { LIBRARY_FOLDER } from '../cloud-direct.mjs';
+import { untilQuiet } from '../cloud-restore.mjs';
 import { bunkoSeenAlive, connect, tabAwayAndBack } from './shared.mjs';
 
 test.use({ needs: ['dedup'] });
@@ -50,6 +53,8 @@ test.describe.configure({ mode: 'serial' });
 
 const OK = { ok: true, errors: [] };
 const RACES = 3;
+/** How long a root's per-user files must hold still before S1 counts them: past Bunko's re-put delay (3-8 s). */
+const QUIET_MS = 15_000;
 
 /**
  * Bunko's Storage panel, sampled every 500 ms until `stop()`: each distinct
@@ -111,16 +116,46 @@ async function libraryRoot(rig) {
     return tops[0].id;
 }
 
-/** The live Bunko markers below `root` whose heartbeat is at or after `since` (ms). */
+/**
+ * The live Bunko markers below `root` whose heartbeat is at or after `since` (ms). Every
+ * copy: a merge keeps each control file's copies, and the one that beats need not be
+ * the one a path-keyed look picks.
+ */
 async function markersBeating(rig, root, since) {
-    const rows = await tree(rig);
     const out = [];
-    for (const [p, r] of filesBelow(rows, root)) {
-        if (p !== CONTROL_FILES[0]) continue;
+    for (const r of copiesBelow(await tree(rig), root, CONTROL_FILES[0])) {
         const m = JSON.parse((await nodeBytes(rig, r.id)).toString('utf8'));
         if (Date.parse(m.heartbeat_at) >= since) out.push(m);
     }
     return out;
+}
+
+/**
+ * The tree once the per-user files below `root` have held still for QUIET_MS (every
+ * copy, by id and bytes), so a count of them made from it is the one the merge moves.
+ *
+ * S1 failed on MEGA (reader PR #368, 2026-11-13) with two live copies of A's
+ * `volume-data.json`: its path-keyed look counted one, and the merge (correctly) moved
+ * both into B. The copies come from a Bunko product issue, not a spec rule
+ * (cloud-restore.mjs): Bunko writes each of the cloud-root owner's per-user root ops
+ * twice, the second node 3-8 s after the first, and its Replace leaves a copy another
+ * client wrote beside its own. The spec before this one (cloud-owner) puts the owner's
+ * files back through Bunko last thing, so a second copy may still be on its way when
+ * this one starts: it waits until A's per-user files hold still, then counts every
+ * copy. The double write wants its own fix in Bunko; this only stops the spec from
+ * miscounting or racing it.
+ */
+async function treeQuietBelow(rig, root) {
+    const { value, waitedMs } = await untilQuiet(() => tree(rig), {
+        quietMs: QUIET_MS,
+        timeoutMs: 120_000,
+        key: (rows) => perUserBelow(rows, root),
+    });
+    test.info().annotations.push({
+        type: 'root-a-quiet',
+        description: `${waitedMs} ms: ${JSON.stringify(perUserBelow(value, root))}`,
+    });
+    return value;
 }
 
 /** The volume `series`/`title` as the reader lists it, or null. */
@@ -150,8 +185,11 @@ test('S1: Bunko merges duplicate roots under its lease into the older top-level 
         expect((await reader.controlState()).held, 'the reader steps aside for a Bunko that merges').toBe(true);
 
         const rootA = await libraryRoot(rig);
-        const before = await tree(rig);
-        const aVolumeData = [...filesBelow(before, rootA)].filter(([p]) => p === 'volume-data.json');
+        // Every copy of A's `volume-data.json`, counted once nothing writes A's per-user
+        // files any more: a folder holds any number of files of one name here, and the
+        // merge keeps each copy (a path-keyed `filesBelow` would count one).
+        const before = await treeQuietBelow(rig, rootA);
+        const aVolumeData = copiesBelow(before, rootA, 'volume-data.json');
         const seed = await seedX5(rig, rootA);
         const nestedBefore = nestedState(await tree(rig), seed);
         const merged = [rootA, seed.a.get('S1 Dup')];
@@ -177,10 +215,10 @@ test('S1: Bunko merges duplicate roots under its lease into the older top-level 
         ]) {
             expect(inB.has(p), `${p} in B`).toBe(true);
         }
-        // Both volume-data.json copies kept: B's own and A's, moved in beside it.
+        // Every volume-data.json copy kept: B's own and each of A's, moved in beside it.
         const copies = rows.filter((r) => r.name === 'volume-data.json' && !r.trashed && r.parent_id === seed.rootB);
         expect(copies.map((r) => r.id).sort()).toEqual(
-            [seed.b.get('volume-data.json'), ...aVolumeData.map(([, r]) => r.id)].sort(),
+            [seed.b.get('volume-data.json'), ...aVolumeData.map((r) => r.id)].sort(),
         );
         // The nested root is left as it was: Bunko only compiles its series' index
         // and covers beside it, as for any series.

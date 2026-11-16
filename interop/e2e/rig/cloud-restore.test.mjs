@@ -2,7 +2,15 @@
 // in interop/.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { cloudDeleter, unseenNote } from './cloud-restore.mjs';
+import {
+    cloudDeleter,
+    copiesByPath,
+    copyLines,
+    copyProblems,
+    perUserPath,
+    unseenNote,
+    untilQuiet,
+} from './cloud-restore.mjs';
 
 /**
  * A Bunko that answers `answers` in turn (the last one from then on), a cloud that holds
@@ -81,4 +89,109 @@ test('a file Bunko did not see is noted when it gave up, or when it took longer 
         unseenNote('history/dev/', { status: 404, unseenMs: 0, gaveUpMs: 62_000 }, after),
         "history/dev/: Bunko still answered 404 while the cloud held it, 62 s into the restore's wait",
     );
+});
+
+const copy = (id, sha256, modified = '2026-11-13T09:13:00.000Z') => ({ id, sha256, modified });
+
+test('copies at one path all count, oldest first', () => {
+    const files = [
+        { path: 'volume-data.json', id: 'N2', sha256: 'b', modified: '2026-11-13T09:13:05.000Z' },
+        { path: 'Rig Series/Vol 1.cbz', id: 'N3', sha256: 'c', modified: '2026-11-13T09:00:00.000Z' },
+        { path: 'volume-data.json', id: 'N1', sha256: 'a', modified: '2026-11-13T09:13:00.000Z' },
+        { path: 'history/dev/2026-11.json', id: 'N4', sha256: 'd', modified: '2026-11-13T09:00:00.000Z' },
+    ];
+    assert.deepEqual(copiesByPath(files, perUserPath), {
+        'volume-data.json': [files[2], files[0]],
+        'history/dev/2026-11.json': [files[3]],
+    });
+});
+
+test('one copy of the wanted bytes is no problem; a doubled write is extra copies', () => {
+    const want = { 'volume-data.json': 'a' };
+    assert.deepEqual(copyProblems(want, { 'volume-data.json': [copy('N1', 'a')] }), []);
+    // The regression (reader PR #368): Bunko's write of the owner's file reached MEGA
+    // twice, the same bytes as two nodes. Removing any one leaves the right bytes.
+    assert.deepEqual(copyProblems(want, { 'volume-data.json': [copy('N1', 'a'), copy('N2', 'a')] }), [
+        { path: 'volume-data.json', why: '2 copies', extra: 'copies' },
+    ]);
+    assert.deepEqual(copyLines(want, { 'volume-data.json': [copy('N1', 'a'), copy('N2', 'a')] }), [
+        '2 copies volume-data.json',
+    ]);
+});
+
+test('a foreign copy beside the wanted bytes, other bytes, a missing or an added file are problems', () => {
+    const want = { 'volume-data.json': 'a', 'positions.json': 'p' };
+    assert.deepEqual(
+        copyProblems(want, {
+            // The direct reader's own copy, which Bunko's Replace left beside its own.
+            'volume-data.json': [copy('N1', 'reader'), copy('N2', 'a')],
+            'goals.json': [copy('N3', 'g')],
+        }),
+        [
+            { path: 'volume-data.json', why: '2 copies, other bytes', extra: 'all' },
+            { path: 'positions.json', why: 'gone', extra: null },
+            { path: 'goals.json', why: 'added', extra: 'all' },
+        ],
+    );
+    assert.deepEqual(copyLines(want, { 'volume-data.json': [copy('N1', 'b')], 'positions.json': [copy('N4', 'p')] }), [
+        'changed volume-data.json',
+    ]);
+    assert.deepEqual(copyLines({}, { 'goals.json': [copy('N3', 'g'), copy('N5', 'g')] }), [
+        'added, 2 copies goals.json',
+    ]);
+});
+
+/** A clock that moves only when the wait pauses, and a read that answers `answers` in turn. */
+function quietFake(answers) {
+    let t = 0;
+    let reads = 0;
+    return {
+        read: async () => answers[Math.min(reads++, answers.length - 1)],
+        pause: async (ms) => {
+            t += ms;
+        },
+        clock: () => t,
+        reads: () => reads,
+    };
+}
+
+test('the wait ends once the tree has held still for the quiet period', async () => {
+    // The second node of a doubled write lands 3 s in; quiet for 5 s after that.
+    const f = quietFake([['N1'], ['N1'], ['N1'], ['N1', 'N2']]);
+    const got = await untilQuiet(f.read, { quietMs: 5000, timeoutMs: 60_000, pause: f.pause, clock: f.clock });
+    assert.deepEqual(got, { value: ['N1', 'N2'], waitedMs: 8000 });
+});
+
+test('a tree that never holds still is an error, not a pass', async () => {
+    let n = 0;
+    let t = 0;
+    await assert.rejects(
+        untilQuiet(async () => [`N${n++}`], {
+            quietMs: 5000,
+            timeoutMs: 20_000,
+            pause: async (ms) => {
+                t += ms;
+            },
+            clock: () => t,
+        }),
+        /still changed 20000 ms on/,
+    );
+});
+
+test('only what `key` picks must hold still, and the answer is the latest look', async () => {
+    // Bunko's marker beats on its own; the per-user files are what the wait is for.
+    const f = quietFake([
+        { marker: 1, own: ['N1'] },
+        { marker: 2, own: ['N1'] },
+        { marker: 3, own: ['N1'] },
+        { marker: 4, own: ['N1'] },
+    ]);
+    const got = await untilQuiet(f.read, {
+        quietMs: 3000,
+        timeoutMs: 60_000,
+        key: (v) => v.own,
+        pause: f.pause,
+        clock: f.clock,
+    });
+    assert.deepEqual(got, { value: { marker: 4, own: ['N1'] }, waitedMs: 3000 });
 });

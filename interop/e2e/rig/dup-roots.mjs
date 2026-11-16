@@ -11,6 +11,7 @@
 // files, which keep every copy.
 import { createHash } from 'node:crypto';
 import { LIBRARY_FOLDER } from './cloud-direct.mjs';
+import { perUserPath } from './cloud-restore.mjs';
 import { cloudBytes } from './shared/shared.mjs';
 
 export const CONTROL_FILES = ['.mokuro-bunko.json', '.mokuro-queue.json'];
@@ -72,7 +73,11 @@ export function pathBelow(rows, id, root) {
     return null;
 }
 
-/** The live files below the folder `root`, by path below it: `{path → row}`. */
+/**
+ * The live files below the folder `root`, by path below it: `{path → row}`. ONE row per
+ * path: where a folder holds several files of one name (Drive, MEGA), the others are
+ * not in it. A check that counts copies reads `copiesBelow`.
+ */
 export function filesBelow(rows, root) {
     const out = new Map();
     for (const r of rows) {
@@ -81,6 +86,30 @@ export function filesBelow(rows, root) {
         if (p !== null) out.set(p, r);
     }
     return out;
+}
+
+/**
+ * Every live file at `rel` below the folder `root`, one row per node, in `rows` order:
+ * every copy of a file that has several (the merged-across `volume-data.json`, Bunko's
+ * control files, or a per-user file Bunko wrote twice: cloud-restore.mjs).
+ */
+export function copiesBelow(rows, root, rel) {
+    return rows.filter((r) => !r.folder && !r.trashed && pathBelow(rows, r.id, root) === rel);
+}
+
+/**
+ * The live per-user files below the reader root `root` (cloud-restore.mjs `perUserPath`),
+ * every copy, as sorted `path id sha256` lines: what a look at a root waits on to hold
+ * still before it counts them (`untilQuiet`).
+ */
+export function perUserBelow(rows, root) {
+    const out = [];
+    for (const r of rows) {
+        if (r.folder || r.trashed) continue;
+        const p = pathBelow(rows, r.id, root);
+        if (p !== null && perUserPath(p)) out.push(`${p} ${r.id} ${r.sha256}`);
+    }
+    return out.sort();
 }
 
 /** A node's own bytes as the cloud stores them. */
