@@ -1361,7 +1361,7 @@ impl<B: Backend> Core<B> {
         if !uncertain && let Some(step) = self.status_fast_put(op, &dest, &parent).await? {
             return Ok(step);
         }
-        let existing = match self.backend.find_named(&parent, &name).await {
+        let mut existing = match self.backend.find_named(&parent, &name).await {
             Ok((nodes, _)) => nodes,
             Err(BErr::NotFound) => {
                 return Ok(self
@@ -1376,6 +1376,27 @@ impl<B: Backend> Core<B> {
                 .await);
         }
         let indexed = self.index.lock().lookup(&dest).and_then(|e| e.winner_pid);
+        // The index's file at this very name, which the provider spells otherwise in
+        // its bytes (a decomposed `Cafe\u{301}.cbz` is the index's NFC `Café.cbz`, and
+        // a name search matches bytes): it IS this name, so it is replaced, never
+        // written beside as a second file of that name.
+        if let Some(pid) = indexed
+            .as_ref()
+            .filter(|p| !existing.iter().any(|n| &n.pid == *p))
+        {
+            match self.backend.stat(pid).await {
+                Ok(Some(n))
+                    if !n.is_dir
+                        && !n.trashed
+                        && n.parent.as_deref() == Some(parent.as_str())
+                        && nfc(&n.name_raw) == nfc(name.as_bytes()) =>
+                {
+                    existing.push(n);
+                }
+                Ok(_) | Err(BErr::NotFound) => {}
+                Err(e) => return Ok(self.on_error(op, e, None).await),
+            }
+        }
         let current = existing
             .iter()
             .find(|n| Some(&n.pid) == indexed.as_ref())

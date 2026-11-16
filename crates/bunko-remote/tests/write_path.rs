@@ -2029,3 +2029,34 @@ fn staged_bytes_that_cannot_be_read_are_kept() {
     );
     assert_eq!(t.fake.calls(FakeOp::Upload), 0);
 }
+
+/// A file the provider holds in a decomposed spelling (`Cafe\u{301}.mokuro`, which the
+/// index holds as its NFC `Café.mokuro`) is that name: a replace of it is written into
+/// that file, its spelling kept, never beside it as a second file of the same name
+/// (which a later DELETE of the name would leave behind).
+#[test]
+fn a_replace_of_a_decomposed_name_writes_into_that_file() {
+    let t = T::new(
+        FakeBackend::drive_like(),
+        &[
+            ("S/Caf\u{e9}.cbz", b"zip"),
+            ("S/Cafe\u{301}.mokuro", b"old"),
+        ],
+    );
+    t.wait_steady();
+    let w = deferred(Origin::Compiler, Mode::Replace { base: None });
+    t.publish("S/Caf\u{e9}.mokuro", b"new", w.clone());
+    t.idle();
+    let nfd = t.remote_named("S", "Cafe\u{301}.mokuro");
+    assert_eq!(nfd.len(), 1);
+    assert_eq!(t.fake.content(&nfd[0].pid).unwrap(), b"new");
+    assert!(t.remote_named("S", "Caf\u{e9}.mokuro").is_empty());
+    // Again, now that the index holds the file Bunko wrote.
+    t.sync_feed();
+    t.publish("S/Caf\u{e9}.mokuro", b"newer", w);
+    t.idle();
+    let nfd = t.remote_named("S", "Cafe\u{301}.mokuro");
+    assert_eq!(nfd.len(), 1);
+    assert_eq!(t.fake.content(&nfd[0].pid).unwrap(), b"newer");
+    assert!(t.remote_named("S", "Caf\u{e9}.mokuro").is_empty());
+}

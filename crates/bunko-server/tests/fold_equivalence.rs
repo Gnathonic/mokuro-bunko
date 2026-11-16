@@ -37,7 +37,7 @@ const ROOT: &str = "mokuro-reader";
 
 /// `(the archives the volume's uploader puts first, the crafted name, its canonical
 /// twin)`: every leak shape of the either-fold era.
-const CASES: [(&[&str], &str, &str); 14] = [
+const CASES: [(&[&str], &str, &str); 16] = [
     // A reserved-layer hider: refused beside its volume, handed up when listed first.
     (
         &["Q.edit.cbz"],
@@ -53,6 +53,11 @@ const CASES: [(&[&str], &str, &str); 14] = [
         &["V.edit.cbz"],
         "V.ed\u{131}t.curated.cbz",
         "V.edit.curated.cbz",
+    ),
+    (
+        &["Q.curated.cbz"],
+        "Q.cura\u{200B}ted.edit.cbz",
+        "Q.curated.edit.cbz",
     ),
     (&["X.cbz"], "X\u{200B}.curated.cbz", "X.curated.cbz"),
     (&["X.cbz"], "X.ed\u{200B}it.cbz", "X.edit.cbz"),
@@ -79,6 +84,7 @@ const CASES: [(&[&str], &str, &str); 14] = [
     // Miscased and padded layer ids: the layer itself.
     (&["V.cbz"], "V.EDIT.mokuro", "V.edit.mokuro"),
     (&["V.cbz"], "V.ed\u{200B}it.mokuro", "V.edit.mokuro"),
+    (&["V.cbz"], "V.ed\u{131}t.mokuro", "V.edit.mokuro"),
     (&["X.cbz"], "X.cura\u{200B}ted.mokuro", "X.curated.mokuro"),
 ];
 
@@ -363,12 +369,6 @@ async fn script(cloud: bool, archives: &[&str], target: &str) -> Vec<String> {
 
 async fn crafted_names_behave_as_their_fold(cloud: bool) {
     for (archives, crafted, canonical) in CASES {
-        // Known, and older than rule 2 (0117af7 does the same): on a cloud library a
-        // decomposed (NFD) name overwritten by PUT and then by COPY is not deleted by a
-        // DELETE that answers 204. Not a fold question; left out here until fixed.
-        if cloud && crafted.contains('\u{301}') {
-            continue;
-        }
         assert_eq!(fold_name(crafted), fold_name(canonical), "{crafted:?}");
         let got = script(cloud, archives, crafted).await;
         let want = script(cloud, archives, canonical).await;
@@ -468,12 +468,17 @@ async fn a_suffix_only_the_fold_shows_is_never_created() {
 
 /// `(the base volume another uploader puts, the crafted nested archive, its canonical
 /// twin)`: the archive names of the either-fold era's leaks, nested under a volume.
-const NESTED: [(&str, &str, &str); 7] = [
+const NESTED: [(&str, &str, &str); 8] = [
     ("Q.edit.cbz", "Q.ed\u{200B}it.edit.cbz", "Q.edit.edit.cbz"),
     (
         "Q.curated.cbz",
         "Q.cura\u{200B}ted.curated.cbz",
         "Q.curated.curated.cbz",
+    ),
+    (
+        "Q.curated.cbz",
+        "Q.cura\u{200B}ted.edit.cbz",
+        "Q.curated.edit.cbz",
     ),
     ("Caf\u{e9}.cbz", "Cafe\u{301}.gcv.cbz", "Caf\u{e9}.gcv.cbz"),
     (
