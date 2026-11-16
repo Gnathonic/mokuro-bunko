@@ -993,6 +993,24 @@ prints, logs or saves a token. `--dry-run` does everything but store.
 | `live-auth onedrive` | `BUNKO_LIVE_ONEDRIVE_REFRESH_TOKEN` |
 | `live-auth mega` (the saved session; `--interactive` asks for email, password and 2FA code with no echo) | `BUNKO_LIVE_MEGA_SESSION` |
 
+**As built (I5, 2026-11-15):** `cargo xtask-live interop live --provider <gdrive|onedrive|mega>`
+(`crates/xtask/src/interop/live/runner.rs`) runs the `cloud` suite (§7.1) on the account's
+sandbox: cold start, adoption, OCR results through the outbox and the lease handover.
+The scenarios that need simulator knobs or a folder on this disk skip. Bunko gets the
+sandbox as `storage.library.folder`. Drive uses the beta Desktop client as the custom OAuth
+override, so the testing nightly, built without the Google secret, can refresh. At
+the end, whatever happened, the newest OneDrive token is stored, every credential file and config of
+the run is removed, the sandbox is deleted, and the snapshot is compared; the result is
+`target/interop/live/live-<provider>.json`. MEGA: a one-byte read before Bunko starts (and
+after a failure) tells a spent transfer quota; that run is `skipped`, and a second skip
+in a row fails. The browser suites (`bridge`, `direct`, `shared`) do not run on live
+accounts yet: they need the live view of plan Task 4 and the reader's library-folder hook
+(`__mokuroInteropConfig.libraryFolder`, committed on the reader branch
+`feat/interop-live-folder`) pinned in `reader.ref`. Measured on cloudsim (`--sim-base`,
+the testing release build): every provider passed with an empty diff. A forced leak
+(`--inject-leak`) failed the run naming the file, and MEGA with its quota out was
+skipped, then failed on the second skip in a row.
+
 ### 7.3 MEGA bandwidth
 
 Free MEGA accounts get a small transfer allowance that refills over several hours. The
@@ -1109,6 +1127,15 @@ metric is within budget.
 - Nightly and weekly: the live runs (§7.2).
 - A PR that bumps `interop/reader.ref` runs the same rig, which is how a new reader is
   taken in.
+
+**As built (I5, live runs):** `.github/workflows/interop-live.yml`: Drive and OneDrive
+nightly (`41 5 * * *`), MEGA weekly (`23 6 * * 0`), and `workflow_dispatch` for one provider
+(`provider`, `ref`, and `cloudsim: true` for the same job on the simulator with no
+secret read). A schedule runs main's copy of the file, so the scheduled runs start once
+it is there. One concurrency group per provider, never cancelling. The testing server
+and cloudsim come from the branch's nightly. The previous run's `live-<provider>`
+artifact feeds the two-skips rule; the step summary lists the scenarios and the
+account diff. The artifact is the result file alone.
 
 **Reader repo** (`.github/workflows/interop.yml`, added in the reader PR):
 
