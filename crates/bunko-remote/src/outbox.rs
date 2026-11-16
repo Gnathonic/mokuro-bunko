@@ -1379,11 +1379,17 @@ impl<B: Backend> Core<B> {
         // The index's file at this very name, which the provider spells otherwise in
         // its bytes (a decomposed `Cafe\u{301}.cbz` is the index's NFC `Café.cbz`, and
         // a name search matches bytes): it IS this name, so it is replaced, never
-        // written beside as a second file of that name.
-        if let Some(pid) = indexed
+        // written beside as a second file of that name. Asked of the provider only for
+        // such a file: one the index spells as searched is gone when the search says so.
+        let spelled_otherwise = indexed
             .as_ref()
             .filter(|p| !existing.iter().any(|n| &n.pid == *p))
-        {
+            .filter(|p| {
+                self.index.lock().node(p).is_some_and(|n| {
+                    n.name_raw != name.as_bytes() && nfc(&n.name_raw) == nfc(name.as_bytes())
+                })
+            });
+        if let Some(pid) = spelled_otherwise {
             match self.backend.stat(pid).await {
                 Ok(Some(n))
                     if !n.is_dir
