@@ -46,6 +46,8 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       # The full build (default features, links ONNX Runtime) and the lite build.
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # xtask's `live` feature (the live runs' sign-in commands), off in the workspace build.
+      - run: cargo clippy -p xtask --all-targets --locked --features live -- -D warnings
       - run: cargo clippy -p mokuro-bunko --all-targets --locked --no-default-features -- -D warnings
       # The full build without the restricted-licence models (`gpl-models`, `nc-models`),
       # as `xtask dist --permissive-models` builds it.
@@ -77,6 +79,8 @@ jobs:
           toolchain: "1.99.1" # not stable: see the note in ci.yml
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo test --workspace --locked
+      - name: xtask's live feature (the live runs' sign-in commands, on cloudsim)
+        run: cargo test -p xtask --locked --features live
       - name: lite build compiles and tests on every OS
         run: cargo test -p mokuro-bunko --locked --no-default-features
 

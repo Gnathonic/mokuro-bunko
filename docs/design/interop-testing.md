@@ -979,6 +979,20 @@ Plan: `plans/2026-11-15-i5-live-runs.md`.
   token lasts until it is revoked or unused for six months. A dead token
   (`invalid_grant`) fails the run with a message to run the Drive sign-in again.
 
+**Owner setup** (`cargo xtask-live interop live-auth`, run on the owner's machine; the
+alias builds xtask with its `live` feature). Each command signs in or reads the saved
+session, checks it with one harmless read (Drive `about`, Graph `/me/drive`, MEGA `ug`
+and `uq`, GitHub's secrets public key), shows which account it got, asks, and stores it
+with `gh secret set <name> --repo Gnathonic/mokuro-bunko`, the value on stdin. Nothing
+prints, logs or saves a token. `--dry-run` does everything but store.
+
+| Command | Secret |
+|---|---|
+| `live-auth github-token` (paste the fine-grained token: repository `mokuro-bunko`, Secrets read and write) | `BUNKO_LIVE_SECRETS_TOKEN` |
+| `live-auth gdrive --client-json <beta Desktop client JSON>` (or `BUNKO_GOOGLE_BETA_DESKTOP_SECRET` set) | `BUNKO_LIVE_GDRIVE_REFRESH_TOKEN` |
+| `live-auth onedrive` | `BUNKO_LIVE_ONEDRIVE_REFRESH_TOKEN` |
+| `live-auth mega` (the saved session; `--interactive` asks for email, password and 2FA code with no echo) | `BUNKO_LIVE_MEGA_SESSION` |
+
 ### 7.3 MEGA bandwidth
 
 Free MEGA accounts get a small transfer allowance that refills over several hours. The
