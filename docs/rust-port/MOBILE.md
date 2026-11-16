@@ -20,7 +20,7 @@ on a NAS. Volumes wait in the queue until a processor connects.
 | Path | What |
 |---|---|
 | `crates/bunko-android/` | the server as `libbunko_android.so` (cdylib; rlib for host tests): JNI entry points, lifecycle, config, logging |
-| `packaging/android/` | the Kotlin app (Gradle 9.6.1 wrapper, AGP 9.4.1, no AndroidX), `build.sh`, `android_licenses.py` |
+| `packaging/android/` | the Kotlin app (Gradle 9.8.2 wrapper, AGP 9.5.1, no AndroidX), `build.sh`, `android_licenses.py` |
 | `.github/workflows/release-build.yml` job `android` | builds and checks the APK; the `release` job attaches it |
 
 ## 2. Native library (`crates/bunko-android`)

@@ -494,31 +494,27 @@ fn an_upload_landing_while_the_swap_waits_is_kept() {
     );
 }
 
-/// A stale `.nocover` is removed after a cover is made only when, under its write lock,
-/// the folder still lists it as the volume's marker: a client's `v.NOCOVER` written in
-/// its place meanwhile stays (a casefold disk opened it for the old name and removed
-/// it).
+/// A `.nocover` that appeared while the cover was made is removed after it only when,
+/// under its write lock, the folder still lists it as the volume's marker: a client's
+/// `v.NOCOVER` written in its place meanwhile stays (a casefold disk opened it for the
+/// old name and removed it).
 #[test]
 fn a_marker_respelled_while_the_cover_is_made_stays() {
     let dir = tempfile::tempdir().unwrap();
     let library = dir.path().join("library");
     let s = library.join("S");
     std::fs::create_dir_all(&s).unwrap();
-    std::fs::write(s.join("V.nocover"), b"").unwrap();
-    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
-    std::fs::File::options()
-        .write(true)
-        .open(s.join("V.nocover"))
-        .unwrap()
-        .set_modified(old)
-        .unwrap();
     std::fs::write(s.join("V.cbz"), cbz(3, "v")).unwrap();
     let marker_dir = s.clone();
+    let marked = AtomicBool::new(false);
     let respelled = AtomicBool::new(false);
     let locks: PathLocks = Arc::new(Landing(move |path: &Path| {
-        let marker = path
-            .file_name()
-            .is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case("v.nocover"));
+        let name = path.file_name().map(|n| n.to_string_lossy().to_lowercase());
+        // While the cover is written, a marker lands for the volume.
+        if name.as_deref() == Some("v.webp") && !marked.swap(true, Ordering::SeqCst) {
+            std::fs::write(marker_dir.join("V.nocover"), b"").unwrap();
+        }
+        let marker = name.as_deref() == Some("v.nocover");
         if marker && !respelled.swap(true, Ordering::SeqCst) {
             std::fs::remove_file(marker_dir.join("V.nocover")).unwrap();
             std::fs::write(marker_dir.join("v.NOCOVER"), b"the client's marker").unwrap();

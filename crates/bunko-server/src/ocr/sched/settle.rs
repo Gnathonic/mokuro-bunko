@@ -9,7 +9,7 @@ use bunko_sched::breaker::{
 use bunko_sched::failures::{NewFailure, failure_log_line, record_failure};
 use serde_json::{Map, Value};
 
-use super::{Msg, Scheduler};
+use super::{JUDGE_PATIENCE_SECONDS, Msg, Scheduler};
 use crate::ocr::collect::{CollectRequest, Outcome};
 use crate::ocr::owed::OwedVolume;
 use crate::ocr::types::{Job, LOCAL, Stamp, rel_of, stamp_of};
@@ -433,14 +433,27 @@ impl Scheduler {
 
     // --- returned claims and the download breaker -------------------------------------------
 
-    /// `_download_delivered`: the processor has the verified archive.
+    /// `_download_delivered`: the processor has the verified archive. `sent`: the
+    /// archive's stamp when the op was sent.
     pub fn download_delivered(
         &mut self,
         pid: &str,
         job: &Job,
         detail: &std::collections::BTreeMap<String, Value>,
+        sent: Option<Stamp>,
     ) {
-        let stamp = stamp_of(&job.path(&self.library()));
+        // A copy kept from the volume's earlier job was not downloaded: it is the
+        // archive as it was when the op was sent (its ETag matched the op's), so the
+        // claim is of that version. When the archive was replaced since (outside WebDAV:
+        // no arrival cancelled the claim), the result is discarded when it comes back
+        // and the job goes back to the queue. No cancel is sent: a processor takes a
+        // cancel naming a claim for one of its whole session, and the session's other
+        // volumes would be blamed for its end.
+        let reused = detail.get("reused").and_then(Value::as_bool) == Some(true);
+        let stamp = match sent {
+            Some(sent) if reused => Some(sent),
+            _ => stamp_of(&job.path(&self.library())),
+        };
         if let Some(c) = self.claims.get_mut(job) {
             c.stamp = stamp;
         }
@@ -451,14 +464,22 @@ impl Scheduler {
             .entry(pid.to_string())
             .or_insert_with(|| DownloadBreaker::new(label.clone()))
             .note_delivered();
+        // A copy the processor kept from the volume's earlier job says nothing about
+        // the transfer.
         if let Some(m) = self.machines.get_mut(pid) {
-            m.transfer.note_ready(detail);
+            if !reused {
+                m.transfer.note_ready(detail);
+            }
             m.transfer.held_until = None;
             m.transfer.held_error.clear();
         }
         if reopened {
             self.log(format!("{label} fetched an archive again; no longer held"));
             self.bump();
+        }
+        if reused {
+            self.log(format!("{label} reused its copy of {}", job.rel));
+            return;
         }
         let requests = detail
             .get("requests")
@@ -662,21 +683,22 @@ impl Scheduler {
     /// `archive_arrived(cbz)`: a `.cbz` is now in place (PUT / MOVE / COPY).
     pub fn archive_arrived(&mut self, path: &Path) {
         let library = self.library();
-        let Some(rel) = rel_of(&library, path) else {
+        // An archive in the per-user tree (the history rule allows the name) is no volume.
+        let Some(rel) = crate::ocr::types::arrival_rel(&library, path) else {
             return;
         };
-        // An archive in the per-user tree (the history rule allows the name) is no volume.
-        if !bunko_library::sidecar::is_cbz_name(&rel)
-            || bunko_core::reader_tree::is_per_user_rel(&rel)
-        {
-            return;
-        }
         self.cancel_stale_jobs(|r| r == rel);
         let probe = self.upgrade_probe();
         if self.remote_library() {
             // Spec §8: judging the arrival reads sidecar bytes and the zip directory,
             // which on a remote store may mean the network. A helper does it; the actor
             // goes on, and takes the answer only if the archive is still that version.
+            // Until it is in, the volume is unknown, not "nothing owed".
+            let now = self.mono();
+            self.judging
+                .retain(|_, (n, since)| *n > 0 && now - *since < JUDGE_PATIENCE_SECONDS);
+            let entry = self.judging.entry(rel.clone()).or_insert((0, now));
+            *entry = (entry.0 + 1, now);
             let (rows, facts, path) = (
                 self.settings.rows.clone(),
                 self.deps.facts.clone(),
@@ -714,16 +736,34 @@ impl Scheduler {
             v.pages = crate::ocr::owed::pages_of(path, self.deps.facts.as_ref());
             v
         });
-        self.take_arrival(rel, entry);
+        self.take_arrival(rel.clone(), entry);
+        self.settled_arrivals.push(rel);
     }
 
     /// A remote arrival's judgement (see [`archive_arrived`](Self::archive_arrived)):
     /// dropped when the archive changed again meanwhile (its own arrival follows).
     pub fn arrival_judged(&mut self, rel: String, stamp: Option<Stamp>, entry: Option<OwedVolume>) {
+        if let Some((n, _)) = self.judging.get_mut(&rel) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                self.judging.remove(&rel);
+            }
+        }
+        self.settled_arrivals.push(rel.clone());
         if stamp != stamp_of(&self.library().join(&rel)) {
             return;
         }
         self.take_arrival(rel, entry);
+    }
+
+    /// A remote arrival of `rel` is still being judged ([`Self::archive_arrived`]): the
+    /// scheduler does not know yet what it owes. Given up after
+    /// [`JUDGE_PATIENCE_SECONDS`] (a judgement that never came back).
+    pub fn arrival_judging(&self, rel: &str) -> bool {
+        let now = self.mono();
+        self.judging
+            .get(rel)
+            .is_some_and(|(n, since)| *n > 0 && now - *since < JUDGE_PATIENCE_SECONDS)
     }
 
     fn take_arrival(&mut self, rel: String, entry: Option<OwedVolume>) {

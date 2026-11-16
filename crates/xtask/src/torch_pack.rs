@@ -776,7 +776,7 @@ fn unpack_libtorch(
                 if f.is_dir() {
                     continue;
                 }
-                let Some(rel) = f.name().strip_prefix(prefix).map(str::to_string) else {
+                let Some(rel) = f.name()?.strip_prefix(prefix).map(str::to_string) else {
                     continue;
                 };
                 let want = if let Some(l) = rel.strip_prefix("lib/") {
@@ -939,7 +939,7 @@ fn torch_licenses(wheel: &Path, dir: &Path) -> Result<Vec<(String, PathBuf)>> {
     let mut out = Vec::new();
     for i in 0..zip.len() {
         let mut f = zip.by_index(i)?;
-        let name = f.name().to_string();
+        let name = f.name()?.into_owned();
         let Some((_, rest)) = name.split_once(".dist-info/licenses/") else {
             continue;
         };
@@ -1175,7 +1175,7 @@ fn package_libraries(path: &Path, scratch: &Path) -> Result<Vec<PathBuf>> {
     std::fs::create_dir_all(scratch)?;
     for i in 0..zip.len() {
         let mut f = zip.by_index(i)?;
-        let name = f.name().to_string();
+        let name = f.name()?.into_owned();
         if f.is_dir() || !is_lib(&name) {
             continue;
         }

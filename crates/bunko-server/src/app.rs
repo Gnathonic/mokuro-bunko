@@ -102,6 +102,8 @@ pub struct Services {
     pub ocr: crate::ocr::OcrControl,
     /// Cover thumbnails for library volumes (started by `serve_router`).
     pub thumbs: Arc<crate::thumbs::Thumbnails>,
+    /// Usage analytics (`analytics.sqlite`; the accounting layer and the admin API).
+    pub analytics: crate::analytics::Analytics,
     pub stop: CancellationToken,
     /// Set by the admin "Update and restart" action: the binary re-execs after shutdown.
     pub restart_requested: Arc<std::sync::atomic::AtomicBool>,
@@ -315,7 +317,36 @@ impl Services {
             })
         };
         let _ = late_ocr.set(ocr.clone());
+        {
+            // The queue file v2 over HTTP: a finished job leaves its series' file once
+            // the series' metadata has no recompile pending (§5.4); a connected store's
+            // instance id is the one its files carry.
+            let lib = Arc::downgrade(&library);
+            ocr.series_queue_state()
+                .set_settled(Arc::new(move |folder: &str| {
+                    lib.upgrade()
+                        .is_none_or(|l| !l.series_regeneration_pending(folder))
+                }));
+            if let Some(id) = storage.as_ref().and_then(|s| s.instance_id()) {
+                ocr.series_queue_state().set_instance_id(&id);
+            }
+            // The store's copy: the lease holder writes each series' file (§6), from
+            // the same queue.
+            if let Some(s) = &storage {
+                s.set_series_queue_source(Arc::new(
+                    crate::ocr::series_queue::StoreQueueSource::new(
+                        ocr.clone(),
+                        Arc::downgrade(&library),
+                    ),
+                ));
+            }
+        }
         dav_hooks.add_listener(Arc::new(ocr.clone()));
+        let analytics = crate::analytics::Analytics::open(crate::analytics::AnalyticsDeps {
+            core: core.clone(),
+            db: db.clone(),
+            library: Some(library.clone()),
+        })?;
         let listing_watch = storage
             .as_ref()
             .and_then(|_| watch_listings(&dav, &layout.library()));
@@ -353,6 +384,7 @@ impl Services {
             library,
             ocr,
             thumbs,
+            analytics,
             stop: CancellationToken::new(),
             restart_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             writes: WritesInFlight::default(),
@@ -366,13 +398,19 @@ impl Services {
 /// ancestors' and its descendants'), as a DAV write does for its own changes; a
 /// `Rescan` drops them all (spec §10). The progress user's per-user tree is in no
 /// shared listing (each caller's own is appended per request), so its changes drop
-/// nothing, as its DAV writes do not.
+/// nothing, as its DAV writes do not; nor do a series' OCR queue file's (queue file
+/// v2), which no listing shows and the lease holder rewrites as jobs start and end.
 fn watch_listings(dav: &bunko_dav::Dav, library: &Path) -> Option<bunko_store::WatchGuard> {
     let store = bunko_store::store_for(library)?;
     let (dav, root) = (dav.clone(), library.to_path_buf());
     let sink: bunko_store::WatchSink = Arc::new(move |ev: bunko_store::WatchEvent| {
         match ev.path().and_then(|p| crate::ocr::types::rel_of(&root, p)) {
             Some(rel) if bunko_core::reader_tree::is_per_user_rel(&rel) => {}
+            Some(rel)
+                if rel.split('/').count() >= 2
+                    && rel.rsplit('/').next().is_some_and(|n| {
+                        bunko_core::names::is_fixed_name(n, bunko_core::names::SERIES_QUEUE_FILE)
+                    }) => {}
             Some(rel) => dav.invalidate_listing(&[format!("/{}/{rel}", auth::paths::READER_ROOT)]),
             None => dav.propfind_cache().invalidate(),
         }
@@ -672,16 +710,19 @@ static PROCESSOR_REFUSALS: std::sync::OnceLock<RefusalHook> = std::sync::OnceLoc
 /// Assemble the router: module routers (each with its own state) in 0.5.2 precedence,
 /// then the authenticated WebDAV fallback, wrapped by CORS and security headers.
 pub fn build_router(core: Core, modules: Vec<Router>, dav: DavFallback) -> Router {
-    build_router_with(core, modules, dav, None, |r| r)
+    build_router_with(core, modules, dav, None, None, |r| r)
 }
 
 /// [`build_router`] with `inner` applied inside CORS and the security headers (for
-/// gates that must see every request, like the `/` home/setup redirect).
+/// gates that must see every request, like the `/` home/setup redirect), and the
+/// request accounting (`analytics`) as the second-outermost layer, just inside the
+/// request log: it sees every request, including those answered early.
 pub fn build_router_with(
     core: Core,
     modules: Vec<Router>,
     dav: DavFallback,
     library: Option<crate::library::LibraryDeps>,
+    analytics: Option<crate::analytics::Analytics>,
     inner: impl FnOnce(Router) -> Router,
 ) -> Router {
     let mut app: Router = Router::new()
@@ -710,7 +751,7 @@ pub fn build_router_with(
             }
         })
         .fallback_service(dav_router);
-    inner(app.layer(axum::middleware::from_fn_with_state(
+    let app = inner(app.layer(axum::middleware::from_fn_with_state(
         core.clone(),
         auth_gate,
     )))
@@ -725,8 +766,15 @@ pub fn build_router_with(
         cors::cors,
     ))
     .layer(axum::middleware::from_fn(headers::path_guard))
-    .layer(axum::middleware::from_fn(headers::security_headers))
-    .layer(axum::middleware::from_fn(
+    .layer(axum::middleware::from_fn(headers::security_headers));
+    let app = match analytics {
+        Some(a) => app.layer(axum::middleware::from_fn_with_state(
+            a,
+            crate::analytics::layer,
+        )),
+        None => app,
+    };
+    app.layer(axum::middleware::from_fn(
         |req: Request, next: axum::middleware::Next| async move {
             if headers::request_log_enabled() {
                 headers::request_log(req, next).await
@@ -795,10 +843,15 @@ pub async fn serve_router_with(
             });
         }
         services.updates.start(stop.clone());
+        services.analytics.start(stop.clone());
         start_library_services(services, stop.clone())
     };
-    crate::serve::serve(listener, app, tls, stop, Duration::from_secs(5)).await?;
-    // Ordered shutdown (0.5.2 shutdown_app order, plus the new services).
+    let gauges = Some(services.analytics.gauges().clone());
+    crate::serve::serve_with(listener, app, tls, stop, Duration::from_secs(5), gauges).await?;
+    // Ordered shutdown (0.5.2 shutdown_app order, plus the new services). Analytics
+    // first: every response has recorded by now, and its last window is written
+    // before the library and the databases go.
+    services.analytics.stop().await;
     let _ = thumbs.await;
     services.ocr.stop().await;
     services.library.stop().await;
@@ -977,7 +1030,6 @@ pub fn start_library_services(
         }
         let covers = thumbs.spawn_remote(library_dir, stop.child_token());
         ocr.start(stop.child_token());
-        publish_cloud_queue(ocr, storage.clone(), stop.child_token());
         // A metadata pass before first adoption would compile series whose series.json
         // is not read yet (each waits for its submission and is compiled again when it
         // is answered): adoption compiles every series it ingests, the startup pass
@@ -1035,43 +1087,6 @@ impl CorrectionSweeper {
     }
 }
 
-/// How often the cloud copy of the queue file is offered to the store (which writes it
-/// only on change, at most once per provider floor).
-pub const CLOUD_QUEUE_EVERY: Duration = Duration::from_secs(2);
-
-/// Keep the cloud library's `.mokuro-queue.json` current (§9.1): the scheduler's queue
-/// document, as the reader's WebDAV copy is built, until `stop`.
-fn publish_cloud_queue(
-    ocr: crate::ocr::OcrControl,
-    storage: Arc<crate::storage::StoreHandle>,
-    stop: CancellationToken,
-) {
-    if !storage.connected() {
-        return;
-    }
-    tokio::spawn(async move {
-        loop {
-            if let Some(((held, volumes, pending), now)) =
-                ocr.ask(|s| (s.queue_document(), s.now())).await
-            {
-                let doc = serde_json::Value::Object(crate::ocr::queue_file::build_document(
-                    held, volumes, pending, now,
-                ));
-                let st = storage.clone();
-                match tokio::task::spawn_blocking(move || st.publish_queue_doc(doc)).await {
-                    Ok(Err(e)) => tracing::debug!("[STORAGE] queue file not published: {e}"),
-                    Err(e) => tracing::warn!("[STORAGE] queue file task: {e}"),
-                    Ok(Ok(_)) => {}
-                }
-            }
-            tokio::select! {
-                _ = stop.cancelled() => return,
-                _ = tokio::time::sleep(CLOUD_QUEUE_EVERY) => {}
-            }
-        }
-    });
-}
-
 /// Build every module router and the WebDAV fallback for these services. Modules are
 /// added here as they land; the order is 0.5.2's precedence (spec http-webdav §2.1).
 pub fn assemble(services: &Services, opts: &ServeOptions) -> Router {
@@ -1097,6 +1112,7 @@ pub fn assemble(services: &Services, opts: &ServeOptions) -> Router {
         services.db.clone(),
         services.library.clone(),
     );
+    library.popular = Some(services.analytics.popularity().clone());
     let glue = Arc::new(crate::glue::OcrGlue(ocr.clone()));
     library.ocr_status = Some(glue.clone());
     library.outlook = Some(glue);
@@ -1145,6 +1161,7 @@ pub fn assemble(services: &Services, opts: &ServeOptions) -> Router {
         machine: opts.machine.clone(),
         storage: services.storage.clone(),
         storage_control: Some(services.storage_control.clone()),
+        analytics: Some(services.analytics.clone()),
     };
     let mut modules: Vec<Router> = vec![
         crate::accounts::router(accounts.clone()),
@@ -1174,6 +1191,7 @@ pub fn assemble(services: &Services, opts: &ServeOptions) -> Router {
         modules,
         dav,
         Some(library),
+        Some(services.analytics.clone()),
         move |r| {
             r.layer(axum::middleware::from_fn_with_state(
                 queue_file,

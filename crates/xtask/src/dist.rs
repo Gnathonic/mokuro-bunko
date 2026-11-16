@@ -52,6 +52,11 @@ pub struct DistArgs {
     /// pass this: images have no desktop.
     #[arg(long)]
     pub no_tray: bool,
+    /// Build without the models whose weights are not under a permissive licence (the
+    /// `gpl-models` and `nc-models` features): the build neither offers, downloads nor
+    /// runs them. For distribution where those licences are a problem.
+    #[arg(long)]
+    pub permissive_models: bool,
 }
 
 /// Returns the archive written.
@@ -61,6 +66,7 @@ pub fn run(args: &DistArgs) -> Result<PathBuf> {
     let target = args.target.clone().unwrap_or_else(|| host.clone());
     let mut build = Build::new(&target, args.flavor, args.ep)?;
     build.no_tray = args.no_tray;
+    build.permissive_models = args.permissive_models;
     let version = util::workspace_version(&root)?;
     let out_dir = if args.out.is_absolute() {
         args.out.clone()

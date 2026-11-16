@@ -15,6 +15,10 @@
 //!   configured provider, pairing and folder is used; its `account_id` is part of the id.
 //! * **mega**: the session on file (`mega_session`, from `library connect mega`);
 //!   the password is never stored, so a lapsed session means a new sign-in.
+//! * **folder**: `storage.library.path`, a folder on this computer opened exactly like
+//!   a cloud folder (the folder plays the role Drive's `mokuro-reader` folder plays).
+//!   The account id is the path ([`bunko_remote::folder::account_id`]); its
+//!   credentials entry holds no secret and is written when missing ([`folder`]).
 //!
 //! A cloud library that cannot be opened (not signed in, no password, the pairing
 //! changed) is not a startup failure: an [`UnconnectedStore`] is mounted instead, the
@@ -29,6 +33,7 @@ pub mod connect;
 mod control;
 pub mod disconnect;
 pub mod doctor;
+pub mod folder;
 pub mod hooks;
 mod unconnected;
 
@@ -102,7 +107,11 @@ pub fn pairing_of(lib: &LibraryConfig) -> String {
 fn poll_intervals(lib: &LibraryConfig) -> (Duration, Duration) {
     let (active, idle) = match lib.backend {
         LibraryBackend::GDrive => (30, 300),
-        _ => (60, 300),
+        LibraryBackend::Local
+        | LibraryBackend::OneDrive
+        | LibraryBackend::Mega
+        | LibraryBackend::WebDav
+        | LibraryBackend::Folder => (60, 300),
     };
     (
         Duration::from_secs(u64::from(lib.poll.active_s.unwrap_or(active).max(1))),
@@ -114,14 +123,17 @@ fn poll_intervals(lib: &LibraryConfig) -> (Duration, Duration) {
 pub trait CloudStore: Send + Sync {
     fn health(&self) -> Health;
     fn engine_state(&self) -> EngineState;
+    /// The change feed's poll cadence now (§5.3).
+    fn poll_cadence(&self) -> bunko_remote::PollCadence;
     fn cache_stats(&self) -> CacheStats;
     /// Block (a content-kind call: never from inside an async task) until the change
     /// feed is steady; false on timeout.
     fn wait_steady(&self, timeout: Duration) -> bool;
     fn set_hooks(&self, hooks: Arc<dyn CloudHooks>);
-    /// Publish the cloud queue file from the server's queue document (§9.1; the store
-    /// dedups and throttles). `true` when a write was queued or scheduled.
-    fn publish_queue_doc(&self, doc: Value) -> io::Result<bool>;
+    /// The OCR queue the store's series-file sink writes from (queue file v2 §6).
+    fn set_series_queue_source(&self, src: Arc<dyn bunko_remote::SeriesQueueSource>);
+    /// The series-file sink's status (`{"state": "off"}` with `status_files` off).
+    fn series_queue_status(&self) -> Value;
     /// Every op in the outbox.
     fn outbox(&self) -> Vec<bunko_remote::outbox::OpSummary>;
     /// Unresolved conflict rows `(kind, path, detail)`.
@@ -165,6 +177,9 @@ impl<B: Backend> CloudStore for RemoteStore<B> {
     fn engine_state(&self) -> EngineState {
         RemoteStore::engine_state(self)
     }
+    fn poll_cadence(&self) -> bunko_remote::PollCadence {
+        RemoteStore::poll_cadence(self)
+    }
     fn cache_stats(&self) -> CacheStats {
         RemoteStore::cache_stats(self)
     }
@@ -174,8 +189,14 @@ impl<B: Backend> CloudStore for RemoteStore<B> {
     fn set_hooks(&self, hooks: Arc<dyn CloudHooks>) {
         RemoteStore::set_hooks(self, hooks)
     }
-    fn publish_queue_doc(&self, doc: Value) -> io::Result<bool> {
-        RemoteStore::publish_queue_doc(self, doc)
+    fn set_series_queue_source(&self, src: Arc<dyn bunko_remote::SeriesQueueSource>) {
+        RemoteStore::set_series_queue_source(self, src)
+    }
+    fn series_queue_status(&self) -> Value {
+        match self.series_queue() {
+            Some(sink) => sink.status_json(),
+            None => json!({"state": "off"}),
+        }
     }
     fn outbox(&self) -> Vec<bunko_remote::outbox::OpSummary> {
         RemoteStore::outbox(self)
@@ -254,6 +275,8 @@ pub struct StoreHandle {
     pub account: Option<String>,
     /// The Google pairing (D25); `None` for other providers.
     pub pairing: Option<String>,
+    /// A folder library's folder (`storage.library.path`, as the store id names it).
+    pub path: Option<PathBuf>,
     store: Option<Arc<dyn CloudStore>>,
     /// Why there is no store.
     problem: Option<String>,
@@ -268,6 +291,8 @@ pub struct StoreHandle {
     quota: parking_lot::Mutex<Option<(std::time::Instant, Value)>>,
     #[cfg(feature = "testing")]
     fake: Option<Arc<RemoteStore<bunko_remote::fake::FakeBackend>>>,
+    #[cfg(feature = "testing")]
+    folder_store: Option<Arc<RemoteStore<bunko_remote::folder::FolderBackend>>>,
     // Last: the store (and its runtime) goes first.
     _connect_rt: Option<ConnectRuntime>,
 }
@@ -288,6 +313,7 @@ impl StoreHandle {
             root,
             account: None,
             pairing: (lib.backend == LibraryBackend::GDrive).then(|| pairing_of(lib)),
+            path: folder_path(lib),
             store: None,
             problem: Some(problem),
             pairing_change: None,
@@ -296,6 +322,8 @@ impl StoreHandle {
             quota: parking_lot::Mutex::new(None),
             #[cfg(feature = "testing")]
             fake: None,
+            #[cfg(feature = "testing")]
+            folder_store: None,
             _connect_rt: None,
         }
     }
@@ -303,6 +331,11 @@ impl StoreHandle {
     /// A store runs (it may still be syncing, offline or need a new sign-in).
     pub fn connected(&self) -> bool {
         self.store.is_some()
+    }
+
+    /// The connected store's instance id (the lease marker's), if a store runs.
+    pub fn instance_id(&self) -> Option<String> {
+        self.store.as_ref().map(|s| s.instance_id())
     }
 
     /// First adoption is done (true without a store: there is nothing to adopt).
@@ -335,11 +368,11 @@ impl StoreHandle {
         }
     }
 
-    /// Publish the cloud copy of the queue file (§9.1); nothing without a store.
-    pub fn publish_queue_doc(&self, doc: Value) -> io::Result<bool> {
-        match &self.store {
-            Some(s) => s.publish_queue_doc(doc),
-            None => Ok(false),
+    /// The OCR queue the store's series-file sink writes from (queue file v2 §6);
+    /// nothing without a store.
+    pub fn set_series_queue_source(&self, src: Arc<dyn bunko_remote::SeriesQueueSource>) {
+        if let Some(s) = &self.store {
+            s.set_series_queue_source(src);
         }
     }
 
@@ -376,9 +409,17 @@ impl StoreHandle {
         self.fake.as_ref()
     }
 
+    /// A folder library's store (feature `testing`): its outbox, failpoints and feed.
+    #[cfg(feature = "testing")]
+    pub fn folder_store(&self) -> Option<&Arc<RemoteStore<bunko_remote::folder::FolderBackend>>> {
+        self.folder_store.as_ref()
+    }
+
     /// The admin status's `library.storage` block (§11): what the store is, its
-    /// health and sync, caches, the outbox, conflicts, the lease, the provider quota and
-    /// the `problems[]` of kinds `storage-*`. Never a secret.
+    /// health and sync, caches, the outbox, conflicts, the lease, the provider quota,
+    /// the series queue files' sink (`series_queue`: why it writes nothing yet, the
+    /// files it wrote, its backlog) and the `problems[]` of kinds `storage-*`. Never a
+    /// secret.
     pub fn status_json(&self) -> Value {
         let (engine, progress) = match self.engine_state() {
             None => ("unconnected".to_string(), Value::Null),
@@ -402,7 +443,9 @@ impl StoreHandle {
                 "spool_bytes": c.spool_bytes,
             })
         });
+        let poll = self.store.as_ref().map(|s| poll_json(&s.poll_cadence()));
         let outbox = self.store.as_ref().map(|s| outbox_json(&s.outbox()));
+        let series_queue = self.store.as_ref().map(|s| s.series_queue_status());
         let conflicts: Vec<Value> = self
             .store
             .as_ref()
@@ -442,6 +485,26 @@ impl StoreHandle {
                 &s.instance_id(),
             )
         });
+        // Why the held uploads wait, when it is the library as a whole that holds them.
+        let outbox = match (outbox, &self.store, &submissions) {
+            (Some(mut ob), Some(s), Some(sub)) => {
+                let held = ob["held"].as_u64().unwrap_or(0) > 0;
+                let why = held_because(
+                    self.adopted(),
+                    (
+                        sub["waiting"].as_u64().unwrap_or(0),
+                        sub["total"].as_u64().unwrap_or(0),
+                    ),
+                    s.lease_event(),
+                    s.lease_claiming_left(),
+                );
+                if let (true, Some(why)) = (held, why) {
+                    ob["held_because"] = json!(why);
+                }
+                Some(ob)
+            }
+            (ob, _, _) => ob,
+        };
         let problems = storage_problems(self, &health, conflicts.len());
         json!({
             "backend": self.backend.as_str(),
@@ -451,6 +514,7 @@ impl StoreHandle {
             "account": self.account,
             "pairing": self.pairing,
             "pairing_label": self.pairing.as_deref().map(connect::pairing_label),
+            "path": self.path,
             "pairing_change": self.pairing_change.as_ref().map(|(configured, connected)| json!({
                 "configured": configured, "connected": connected,
             })),
@@ -459,6 +523,7 @@ impl StoreHandle {
             "health": health_json(&health),
             "engine": engine,
             "sync": progress,
+            "poll": poll,
             "synced_at": synced_at.map(unix_s),
             "cache": cache,
             "outbox": outbox,
@@ -467,6 +532,7 @@ impl StoreHandle {
             "submissions": submissions,
             "lease": lease,
             "quota": self.quota_json(),
+            "series_queue": series_queue,
             "problems": problems,
         })
     }
@@ -536,6 +602,49 @@ fn outbox_json(ops: &[bunko_remote::outbox::OpSummary]) -> Value {
         "held_ops": ops.iter().filter(|o| o.state == "HELD").take(20).map(op).collect::<Vec<_>>(),
         "failed_ops": ops.iter().filter(|o| o.state == "FAILED").take(20).map(op).collect::<Vec<_>>(),
     })
+}
+
+/// Why nothing reaches the cloud library yet, while that is so for every upload (§5.3:
+/// the series.json files are read, then this Bunko claims the library, then it writes).
+/// `None` once this Bunko holds the library: an upload still held then waits for the
+/// earlier ones of its series.
+fn held_because(
+    adopted: bool,
+    (waiting, total): (u64, u64),
+    lease: Option<bunko_remote::status::LeaseEvent>,
+    claiming_left: Option<Duration>,
+) -> Option<String> {
+    use bunko_remote::status::LeaseEvent;
+    if !adopted {
+        return Some(format!(
+            "Nothing is written to the library before its series.json files are read \
+             ({waiting} of {total} still to read) and this Bunko has claimed it."
+        ));
+    }
+    match lease {
+        None => Some(
+            "Nothing is written to the library before this Bunko has claimed it: the claim \
+             starts once the library's first sync is done."
+                .into(),
+        ),
+        Some(LeaseEvent::Claiming) => Some(match claiming_left {
+            Some(left) => format!(
+                "This Bunko is claiming the library (about {} left): nothing is written to \
+                 it until then.",
+                bunko_remote::status::about(left)
+            ),
+            None => {
+                "This Bunko is claiming the library: nothing is written to it until then.".into()
+            }
+        }),
+        Some(LeaseEvent::Standby { .. } | LeaseEvent::Lost { .. }) => {
+            Some("Another Bunko manages this library: nothing is written to it from here.".into())
+        }
+        Some(LeaseEvent::Released) => {
+            Some("This Bunko released the library: nothing is written to it.".into())
+        }
+        Some(LeaseEvent::Acquired | LeaseEvent::HeartbeatFailed { .. }) => None,
+    }
 }
 
 /// The lease as the Storage panel shows it (holder, epoch, last seen).
@@ -641,6 +750,17 @@ pub fn health_json(h: &Health) -> Value {
     }
 }
 
+/// How often the change feed asks the provider for changes, and why (§5.3):
+/// `{push, every_s, active, because: ["bridge" | "ocr" | "reader"]}`.
+fn poll_json(c: &bunko_remote::PollCadence) -> Value {
+    json!({
+        "push": c.push,
+        "every_s": c.every.as_secs(),
+        "active": c.active,
+        "because": c.because.iter().map(|a| a.as_str()).collect::<Vec<_>>(),
+    })
+}
+
 fn engine_json(e: &EngineState) -> (String, Value) {
     match e {
         EngineState::Init => ("init".into(), Value::Null),
@@ -682,6 +802,11 @@ enum Plan {
         account: Option<String>,
         session: bunko_remote::mega::SessionBlob,
     },
+    Folder {
+        id: String,
+        path: PathBuf,
+        account: String,
+    },
     #[cfg(feature = "testing")]
     Fake {
         id: String,
@@ -689,6 +814,17 @@ enum Plan {
         tune: Option<testing::Tune>,
     },
     Unconnected(String),
+}
+
+/// A folder library's folder as the store id names it (`None` for other backends, or
+/// no path set).
+fn folder_path(lib: &LibraryConfig) -> Option<PathBuf> {
+    if lib.backend != LibraryBackend::Folder {
+        return None;
+    }
+    lib.path
+        .as_deref()
+        .map(|p| PathBuf::from(bunko_remote::folder::account_id(p)))
 }
 
 enum OAuthBackend {
@@ -729,6 +865,8 @@ pub fn open_library_store(
         rc.bunko_version = bunko_core::VERSION.to_string();
         rc.per_user_files = bunko_core::reader_tree::advertised();
         rc.dedup = lib.dedup;
+        // Each series' OCR queue file and the marker's queue block (queue file v2 §6.10).
+        rc.status_files = lib.status_files;
         test_cloud::StoreTune::current().apply(&mut rc);
         #[cfg(feature = "testing")]
         test_cloud::apply_tune(&layout.base, &mut rc);
@@ -751,6 +889,7 @@ pub fn open_library_store(
         root,
         account,
         pairing: pairing.clone(),
+        path: folder_path(lib),
         store: None,
         problem: None,
         pairing_change: None,
@@ -759,6 +898,8 @@ pub fn open_library_store(
         quota: parking_lot::Mutex::new(None),
         #[cfg(feature = "testing")]
         fake: None,
+        #[cfg(feature = "testing")]
+        folder_store: None,
         _connect_rt: None,
     };
     let opened: (Arc<dyn LibraryStore>, StoreHandle) = match plan {
@@ -857,6 +998,37 @@ pub fn open_library_store(
                 }
             }
         }
+        Plan::Folder { id, path, account } => {
+            let (root, rc) = open_remote(&id);
+            folder::ensure_stub(&cloud, &id, &account);
+            let cfg = bunko_remote::folder::FolderConfig {
+                path,
+                root_name: lib.folder.clone(),
+                state_dir: rc.dir.clone(),
+                watch: true,
+            };
+            match connect_on_own_runtime(bunko_remote::folder::FolderBackend::connect(cfg)) {
+                Ok((backend, rt)) => {
+                    let store = RemoteStore::open(rc, backend)?;
+                    let mut h = handle_of(id, root, Some(account));
+                    h.store = Some(store.clone());
+                    #[cfg(feature = "testing")]
+                    {
+                        h.folder_store = Some(store.clone());
+                    }
+                    h._connect_rt = Some(rt);
+                    (store, h)
+                }
+                Err(e) => {
+                    let problem = format!("could not open the library folder: {e}");
+                    let store = Arc::new(UnconnectedStore::new(unconnected_root.clone(), &problem));
+                    (
+                        store,
+                        StoreHandle::unconnected(lib, unconnected_root, problem),
+                    )
+                }
+            }
+        }
         #[cfg(feature = "testing")]
         Plan::Fake { id, fake, tune } => {
             let (root, mut rc) = open_remote(&id);
@@ -874,12 +1046,19 @@ pub fn open_library_store(
     handle.cloud_dir = cloud.clone();
     handle.pairing_change = pairing_change(lib, &cloud);
     if let Some(id) = &handle.store_id {
-        tracing::info!(
-            "[STORAGE] Library: {} folder {:?} (store {id}) mounted at {}",
-            handle.backend.as_str(),
-            handle.folder,
-            handle.root.display()
-        );
+        match &handle.path {
+            Some(path) => tracing::info!(
+                "[STORAGE] Library: the folder {} (store {id}) mounted at {}",
+                path.display(),
+                handle.root.display()
+            ),
+            None => tracing::info!(
+                "[STORAGE] Library: {} folder {:?} (store {id}) mounted at {}",
+                handle.backend.as_str(),
+                handle.folder,
+                handle.root.display()
+            ),
+        }
     }
     let guard = bunko_store::mount(store.clone());
     Ok(Some((store, guard, Arc::new(handle))))
@@ -905,6 +1084,7 @@ pub fn describe_offline(config: &Config) -> Value {
         Ok(Plan::WebDav { id, account, .. }) => (Some(id), Some(account), None),
         Ok(Plan::OAuth { id, account, .. }) => (Some(id), account, None),
         Ok(Plan::Mega { id, account, .. }) => (Some(id), account, None),
+        Ok(Plan::Folder { id, account, .. }) => (Some(id), Some(account), None),
         #[cfg(feature = "testing")]
         Ok(Plan::Fake { id, .. }) => (Some(id), None, None),
         Ok(Plan::Unconnected(why)) => (None, None, Some(why)),
@@ -917,6 +1097,7 @@ pub fn describe_offline(config: &Config) -> Value {
         "store_id": id,
         "account": account,
         "pairing": pairing,
+        "path": folder_path(lib),
         "problem": problem,
         "store_dir": dir,
         "indexed": dir.as_ref().is_some_and(|d| d.join("index.sqlite").is_file()),
@@ -973,6 +1154,24 @@ fn plan_inner(lib: &LibraryConfig, layout: &StorageLayout) -> io::Result<Plan> {
             })
         }
         LibraryBackend::GDrive | LibraryBackend::OneDrive => signed_in_plan(lib, &cloud),
+        LibraryBackend::Folder => {
+            let Some(path) = lib.path.as_deref().filter(|p| !p.as_os_str().is_empty()) else {
+                return Ok(Plan::Unconnected("storage.library.path must be set".into()));
+            };
+            // config.yaml and the environment are the operator's own.
+            let path = match folder::check_path(
+                path,
+                &layout.base,
+                &lib.folder_roots,
+                folder::Asker::Operator,
+            ) {
+                Ok(p) => p,
+                Err(why) => return Ok(Plan::Unconnected(why)),
+            };
+            let account = bunko_remote::folder::account_id(&path);
+            let id = store_id(folder::PROVIDER, "", &account, &lib.folder);
+            Ok(Plan::Folder { id, path, account })
+        }
     }
 }
 
@@ -1043,7 +1242,10 @@ fn signed_in_plan(lib: &LibraryConfig, cloud: &Path) -> io::Result<Plan> {
     let name = match lib.backend {
         LibraryBackend::GDrive => "Google Drive",
         LibraryBackend::Mega => "MEGA",
-        _ => "OneDrive",
+        LibraryBackend::OneDrive => "OneDrive",
+        LibraryBackend::Local | LibraryBackend::WebDav | LibraryBackend::Folder => {
+            connect::provider_name(lib.backend)
+        }
     };
     Ok(Plan::Unconnected(
         if other_pairing && lib.backend == LibraryBackend::GDrive {
@@ -1187,6 +1389,32 @@ mod tests {
 
     /// Regression: the Storage panel's Lease showed Epoch and Last seen as "-" while
     /// this Bunko held the lease: they came only from another holder's marker.
+    #[test]
+    fn held_uploads_say_what_they_wait_for() {
+        use bunko_remote::status::LeaseEvent;
+        let why = |adopted, lease, left| super::held_because(adopted, (78, 133), lease, left);
+        assert!(
+            why(false, None, None)
+                .unwrap()
+                .contains("78 of 133 still to read")
+        );
+        assert!(
+            why(true, None, None)
+                .unwrap()
+                .contains("first sync is done")
+        );
+        assert!(
+            why(
+                true,
+                Some(LeaseEvent::Claiming),
+                Some(Duration::from_secs(360))
+            )
+            .unwrap()
+            .contains("claiming the library (about 6 min left)")
+        );
+        assert_eq!(why(true, Some(LeaseEvent::Acquired), None), None);
+    }
+
     #[test]
     fn a_held_lease_shows_our_epoch_and_last_confirmation() {
         use bunko_remote::status::{LeaseEvent, LeaseRecord, LeaseRecordState};
@@ -1361,6 +1589,67 @@ mod tests {
                 .is_some_and(|p| p.contains("another pairing")),
             "{:?}",
             beta.problem()
+        );
+    }
+
+    /// A folder library: the store id names the path; the credentials stub is written
+    /// when missing (an env-only setup); the status names the path. Without a path, or
+    /// with one inside Bunko's own folder, an unconnected library says why.
+    #[test]
+    fn a_folder_library_opens_by_its_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let manga = outside.path().join("manga");
+        bunko_store::fs::create_dir_all(&manga).unwrap();
+        let mut c = cloud_config(dir.path(), LibraryBackend::Folder);
+        let (_s, _g, h) = open_library_store(&c, &c.storage.layout())
+            .unwrap()
+            .unwrap();
+        assert!(!h.connected());
+        assert_eq!(h.problem(), Some("storage.library.path must be set"));
+        drop((_s, _g, h));
+        c.storage.library.path = Some(dir.path().join("cloud"));
+        let (_s, _g, h) = open_library_store(&c, &c.storage.layout())
+            .unwrap()
+            .unwrap();
+        assert!(!h.connected());
+        assert!(
+            h.problem()
+                .is_some_and(|p| p.contains("Bunko's own folder")),
+            "{:?}",
+            h.problem()
+        );
+        drop((_s, _g, h));
+
+        c.storage.library.path = Some(manga.join("."));
+        let account = manga.to_string_lossy().into_owned();
+        let id = store_id("folder", "", &account, "mokuro-reader");
+        let offline = describe_offline(&c);
+        assert_eq!(offline["store_id"], id.as_str());
+        assert_eq!(offline["account"], account.as_str());
+        assert_eq!(offline["path"], account.as_str());
+        let layout = c.storage.layout();
+        let (store, _guard, handle) = open_library_store(&c, &layout).unwrap().unwrap();
+        assert!(handle.connected(), "{:?}", handle.problem());
+        assert_eq!(handle.store_id.as_deref(), Some(id.as_str()));
+        assert_eq!(handle.account.as_deref(), Some(account.as_str()));
+        assert_eq!(handle.path.as_deref(), Some(manga.as_path()));
+        assert_eq!(
+            store.root(),
+            layout.cloud_dir().join(&id).join("library").as_path()
+        );
+        let st = handle.status_json();
+        assert_eq!(st["backend"], "folder");
+        assert_eq!(st["provider"], "the library folder");
+        assert_eq!(st["folder"], "mokuro-reader");
+        assert_eq!(st["path"], account.as_str());
+        let creds = bunko_remote::auth::CredentialStore::open(&layout.cloud_dir()).unwrap();
+        let cred = creds.get(&id).unwrap().expect("the stub is written");
+        assert_eq!(cred.provider, "folder");
+        assert_eq!(cred.account_id.as_deref(), Some(account.as_str()));
+        assert_eq!(
+            poll_intervals(&c.storage.library).0,
+            Duration::from_secs(60)
         );
     }
 

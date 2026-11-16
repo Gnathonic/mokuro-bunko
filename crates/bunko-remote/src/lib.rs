@@ -1,6 +1,7 @@
 //! Remote library storage (0.8 design §5, §6).
 //!
-//! [`backend::Backend`] is the provider seam (WebDAV, Google Drive, OneDrive, MEGA).
+//! [`backend::Backend`] is the provider seam (WebDAV, Google Drive, OneDrive, MEGA, a
+//! local folder).
 //! The `testing` feature adds `fake::FakeBackend`, an in-memory provider with fault
 //! injection that the store's tests run on. [`index::Index`] is the disposable
 //! `index.sqlite` that maps provider nodes to library paths; [`names`] holds the NFC,
@@ -15,10 +16,12 @@
 //! adoption ingests the library's facts there. [`merge`] merges case variants into
 //! the oldest spelling, and same-named duplicate folders as Mokuro Reader does (§5.9).
 //! [`status`]
-//! holds the marker lease (`.mokuro-bunko.json`) and the cloud queue document. Default
+//! holds the marker lease (`.mokuro-bunko.json`); [`series_queue`] writes each series'
+//! OCR queue file and fills the marker's queue block (queue file v2). Default
 //! features add the providers' drivers (`webdav::WebDavBackend`,
-//! `gdrive::GDriveBackend`, `onedrive::OneDriveBackend`, `mega::MegaBackend`) and
-//! [`auth`], which signs in to the OAuth providers and keeps their credentials.
+//! `gdrive::GDriveBackend`, `onedrive::OneDriveBackend`, `mega::MegaBackend`,
+//! `folder::FolderBackend`) and [`auth`], which signs in to the OAuth providers and
+//! keeps their credentials.
 
 #[cfg(feature = "oauth")]
 pub mod auth;
@@ -28,6 +31,8 @@ pub mod cache;
 pub mod fake;
 pub mod feed;
 pub mod file;
+#[cfg(feature = "folder")]
+pub mod folder;
 #[cfg(feature = "gdrive")]
 pub mod gdrive;
 pub mod governor;
@@ -39,6 +44,7 @@ pub mod names;
 #[cfg(feature = "onedrive")]
 pub mod onedrive;
 pub mod outbox;
+pub mod series_queue;
 pub mod state;
 pub mod status;
 pub mod store;
@@ -55,9 +61,11 @@ pub use backend::{
 };
 pub use cache::CacheStats;
 pub use feed::{
-    CloudHooks, EngineState, Feed, FeedConfig, FeedHandle, FeedState, NoFeedState, SubmissionResult,
+    ACTIVE_FOR, CloudHooks, EngineState, Feed, FeedConfig, FeedHandle, FeedState, NoFeedState,
+    PollCadence, SubmissionResult,
 };
 pub use governor::{ApiClass, ApiStats, ClassStats, Governed, Governor, Limits};
 pub use merge::{CaseMergePolicy, MergeChoice, MergeRecord, ResolveChoice};
+pub use series_queue::{SeriesQueueSource, SeriesQueueTiming, SnapshotFuture};
 pub use state::Conflict;
 pub use store::{RemoteStore, RemoteStoreConfig, berr_to_io, on_store_runtime};

@@ -40,6 +40,8 @@ pub mod precision;
 pub mod runtime;
 pub mod session;
 pub mod stages;
+#[cfg(feature = "nc-models")]
+pub mod textbox;
 #[cfg(feature = "torch")]
 pub mod torch;
 #[cfg(feature = "torch")]
@@ -223,9 +225,16 @@ pub struct EnginePipeline {
     store: ModelStore,
     #[cfg(feature = "onnx-vlm")]
     recognizers: RecognizerCache,
-    /// The PP-OCR pair, shared by every session that needs no more detect workers
-    /// than it has sessions.
-    ppocr: Mutex<Option<(usize, Weak<PpocrPageReader>)>>,
+    /// The PP-OCR pair of a line detector (its id first), shared by every session on
+    /// that detector that needs no more detect workers than it has sessions.
+    ppocr: Mutex<Option<(String, usize, Weak<PpocrPageReader>)>>,
+    /// The loaded block detector (its id first), shared by the sessions on it.
+    #[cfg(feature = "gpl-models")]
+    block_detector: Mutex<Option<(String, Weak<bunko_ocr::animetext::AnimeText>)>>,
+    /// The loaded text-box recognizers by engine and session threads, shared by their
+    /// sessions.
+    #[cfg(feature = "nc-models")]
+    textbox: Mutex<Vec<(&'static str, usize, Weak<textbox::TextboxRecognizer>)>>,
     /// One load at a time: model loads are memory-heavy.
     loading: Mutex<()>,
 }
@@ -240,6 +249,10 @@ impl EnginePipeline {
             #[cfg(feature = "onnx-vlm")]
             recognizers: RecognizerCache::new(Arc::new(OrtSessionFactory)),
             ppocr: Mutex::new(None),
+            #[cfg(feature = "gpl-models")]
+            block_detector: Mutex::new(None),
+            #[cfg(feature = "nc-models")]
+            textbox: Mutex::new(Vec::new()),
             loading: Mutex::new(()),
         }
     }
@@ -692,8 +705,61 @@ impl EnginePipeline {
         false
     }
 
+    /// The text-box recognizer of `engine` (ONNX Runtime on the CPU), loaded once and
+    /// shared by the sessions that read with it. Its threads are sized for an engine
+    /// stage of `workers` ([`plan::textbox_session_threads`]): a session of that many
+    /// threads is shared, one of another count is loaded beside it, so a benchmark that
+    /// tries 1, 2 and 3 workers measures each at the threads a session of that width
+    /// will run with (from 3 workers on they all share one 1-thread session).
+    #[cfg(feature = "nc-models")]
+    fn textbox_recognizer(
+        &self,
+        engine: &str,
+        workers: u32,
+    ) -> Result<Arc<dyn Recognizer>, String> {
+        let single = plan::cpu_engine_threads(
+            plan::physical_cpu_count(),
+            plan::performance_core_count(),
+            self.config.jobs,
+        );
+        let threads = plan::textbox_session_threads(single, workers);
+        let mut loaded = self.textbox.lock();
+        loaded.retain(|(_, _, r)| r.strong_count() > 0);
+        if let Some(r) = loaded
+            .iter()
+            .find(|(e, t, _)| *e == engine && *t == threads)
+            .and_then(|(_, _, r)| r.upgrade())
+        {
+            return Ok(r);
+        }
+        let files = models::ensure_all(&self.store, &models::textbox_ids(engine))?;
+        info!("{engine}: one shared session of {threads} thread(s) for {workers} worker(s)");
+        let opts = RuntimeOptions {
+            intra_threads: threads,
+            targets: vec![ExecutionTarget::Cpu],
+            copies: 1,
+            spinning: false,
+        };
+        // The sidecar names the pinned source only when these are the pinned files.
+        let source = files
+            .iter()
+            .all(|f| f.verified)
+            .then(|| models::textbox_source(engine))
+            .flatten();
+        let rec =
+            textbox::TextboxRecognizer::load(engine, &files[0].path, &files[1].path, &opts, source)
+                .map_err(|e| format!("could not load {engine}: {e}"))?;
+        let rec = Arc::new(rec);
+        loaded.push((rec.info().engine, threads, Arc::downgrade(&rec)));
+        Ok(rec)
+    }
+
     /// Whether a recognizer backend can run `engine` here (for `describe`).
     fn recognizer_ready(&self, engine: &str, devices: &[Device]) -> bool {
+        // The text-box recognizers need their files and nothing else.
+        if models::textbox_engine(engine) {
+            return models::obtainable(&self.store, &models::textbox_ids(engine));
+        }
         #[cfg(feature = "torch")]
         if self.torch().is_ok() {
             if !models::obtainable(
@@ -1071,9 +1137,57 @@ impl EnginePipeline {
         &self.config
     }
 
-    fn reader(&self, copies: usize, spinning: bool) -> Result<Arc<PpocrPageReader>, String> {
+    /// The block detector `detector` (`models::block_detector`), loaded once, and the
+    /// pinned `(repo, revision)` of its file when it is the pinned one.
+    #[cfg(feature = "gpl-models")]
+    #[allow(clippy::type_complexity)]
+    fn block_detector(
+        &self,
+        detector: &str,
+        copies: usize,
+    ) -> Result<
+        (
+            Arc<dyn bunko_ocr::blocks::BlockDetector>,
+            Option<(String, String)>,
+        ),
+        String,
+    > {
+        let file = models::ensure_all(&self.store, &models::detector_ids(detector))?.remove(0);
+        let (repo, revision) = bunko_ocr::models::ANIMETEXT_SOURCE;
+        let source = file
+            .verified
+            .then(|| (repo.to_string(), revision.to_string()));
+        let mut slot = self.block_detector.lock();
+        if let Some((of, weak)) = slot.as_ref()
+            && of == detector
+            && let Some(d) = weak.upgrade()
+        {
+            return Ok((d, source));
+        }
+        let opts = RuntimeOptions {
+            intra_threads: plan::SESSION_THREADS + 2 * (copies.max(1) - 1),
+            targets: vec![ExecutionTarget::Cpu],
+            copies,
+            spinning: false,
+        };
+        let loaded = Arc::new(
+            bunko_ocr::animetext::AnimeText::load(&file.path, &opts)
+                .map_err(|e| format!("could not load AnimeText: {e}"))?,
+        );
+        *slot = Some((detector.to_string(), Arc::downgrade(&loaded)));
+        Ok((loaded, source))
+    }
+
+    /// The page reader on `detector`'s lines (`models::DETECTORS`).
+    fn reader(
+        &self,
+        detector: &str,
+        copies: usize,
+        spinning: bool,
+    ) -> Result<Arc<PpocrPageReader>, String> {
         let mut slot = self.ppocr.lock();
-        if let Some((have, weak)) = slot.as_ref()
+        if let Some((of, have, weak)) = slot.as_ref()
+            && of == detector
             && *have >= copies
             && let Some(r) = weak.upgrade()
         {
@@ -1093,8 +1207,28 @@ impl EnginePipeline {
         let engine = PpOcr::load(&files.detector, &files.recognizer, &files.dictionary, &opts)
             .map_err(|e| format!("could not load the PP-OCR models: {e}"))?
             .with_prep_threads(2);
-        let reader = Arc::new(PpocrPageReader::new(engine, files.pinned));
-        *slot = Some((copies, Arc::downgrade(&reader)));
+        let reader = match detector {
+            #[cfg(feature = "gpl-models")]
+            models::CTD => {
+                let file =
+                    models::ensure_all(&self.store, &models::detector_ids(detector))?.remove(0);
+                let ctd = bunko_ocr::ppocr::ctd::Ctd::load(&file.path, &opts)
+                    .map_err(|e| format!("could not load comic-text-detector: {e}"))?;
+                let reader =
+                    PpocrPageReader::new(engine.with_line_detector(Arc::new(ctd)), files.pinned);
+                if file.verified {
+                    reader.with_detector_source(
+                        bunko_ocr::models::CTD_REPO,
+                        bunko_ocr::models::CTD_REVISION,
+                    )
+                } else {
+                    reader
+                }
+            }
+            _ => PpocrPageReader::new(engine, files.pinned),
+        };
+        let reader = Arc::new(reader);
+        *slot = Some((detector.to_string(), copies, Arc::downgrade(&reader)));
         Ok(reader)
     }
 
@@ -1251,7 +1385,12 @@ impl EnginePipeline {
             },
             spec.patch_budget,
         );
-        let r = vb.recognizer(engine, &dev, candidates, opts, golden, info, Some(fetch))?;
+        let r = vb
+            .recognizer(engine, &dev, candidates, opts, golden, info, Some(fetch))
+            .map_err(|e| match torch::pack_budget_error(&e, spec.patch_budget) {
+                Some(update) => format!("{e} ({update})"),
+                None => e,
+            })?;
         Ok(r)
     }
 
@@ -1308,7 +1447,10 @@ impl EnginePipeline {
                 spec.patch_budget,
                 threads,
             )
-            .map_err(|e| format!("could not load {engine}: {e}"))?;
+            .map_err(|e| {
+                torch::pack_budget_error(&e, spec.patch_budget)
+                    .unwrap_or_else(|| format!("could not load {engine}: {e}"))
+            })?;
         Ok(r)
     }
 
@@ -1390,12 +1532,31 @@ impl EnginePipeline {
                 models::ENGINES.join(", ")
             )
         })?;
-        if let Some(d) = spec
+        let detector = spec
             .detector
             .as_deref()
-            .filter(|d| !d.is_empty() && *d != models::PPOCR)
-        {
-            return Err(format!("unknown detector {d} (only ppocr-manga is left)"));
+            .filter(|d| !d.is_empty())
+            .unwrap_or(models::PPOCR);
+        if !models::DETECTORS.contains(&detector) {
+            return Err(models::detector_left_out(detector).unwrap_or_else(|| {
+                format!(
+                    "unknown detector {detector} (this processor runs {})",
+                    models::DETECTORS.join(", ")
+                )
+            }));
+        }
+        // ppocr-manga alone is its own detector and recognizer.
+        if road == Road::Line && detector != models::PPOCR {
+            return Err(format!(
+                "{engine} reads with its own detector, not with {detector}"
+            ));
+        }
+        // A block detector finds no lines: only an engine that reads blocks goes with it.
+        let by_blocks = models::block_detector(detector);
+        if by_blocks && !models::textbox_engine(engine) {
+            return Err(format!(
+                "the {detector} detector finds text blocks, and {engine} reads lines"
+            ));
         }
         let _one_load = self.loading.lock();
         let devices = self.devices();
@@ -1403,7 +1564,10 @@ impl EnginePipeline {
         // Where the recognizer runs, and in which format.
         let mut placement = Placement::cpu();
         let mut resolved = None;
-        if road == Road::Reconciled {
+        // The text-box recognizers run on the CPU in one format: nothing to place or
+        // to resolve, and no backend pack involved.
+        let textbox = models::textbox_engine(engine);
+        if road == Road::Reconciled && !textbox {
             // No recognizer backend: nothing here knows the GPUs (unless `ocr.backend:
             // cpu` rules them out anyway), so that is the error to fix first.
             if self.config.backend != Backend::Cpu
@@ -1435,10 +1599,31 @@ impl EnginePipeline {
             )?;
         }
 
+        let host_of = |placement: &Placement| plan::Host {
+            budget: plan::host_worker_budget(plan::logical_cpu_count(), self.config.jobs),
+            physical_cores: plan::core_count(),
+            jobs: self.config.jobs,
+            fast_gpu: placement.is_gpu() && self.bf16_native(placement),
+        };
         let mut recognizer = None;
+        #[cfg(feature = "nc-models")]
+        if textbox {
+            // The session's threads follow the engine stage's planned width.
+            let host = host_of(&placement);
+            let workers = plan::plan(engine, road, &placement.device, &spec.pools, &host)
+                .iter()
+                .find(|s| s.key == plan::STAGE_ENGINE)
+                .map_or(1, |s| s.workers);
+            recognizer = Some(self.textbox_recognizer(engine, workers)?);
+        }
         if let Some(r) = &resolved {
             match self.recognizer(spec, &placement, r.precision, r.backend.as_deref()) {
                 Ok(rec) => recognizer = Some(rec),
+                // A pack that cannot read this patch budget: updating it is the fix, and
+                // the CPU reads with the same pack (no slow run that ends in the same
+                // refusal).
+                #[cfg(feature = "torch")]
+                Err(e) if e.contains(torch::PACK_UPDATE) => return Err(e),
                 Err(e) if placement.is_gpu() => {
                     let gpu = placement.device.clone();
                     warn!("{engine} could not start on {gpu} ({e}); falling back to the CPU");
@@ -1470,47 +1655,76 @@ impl EnginePipeline {
             info!("{engine} precision: {} ({})", r.precision, r.why);
         }
 
-        let host = plan::Host {
-            budget: plan::host_worker_budget(plan::logical_cpu_count(), self.config.jobs),
-            physical_cores: plan::physical_cpu_count(),
-            fast_gpu: placement.is_gpu() && self.bf16_native(&placement),
-        };
+        let host = host_of(&placement);
         let stages = plan::plan(engine, road, &placement.device, &spec.pools, &host);
         let detect_workers = stages
             .iter()
             .find(|s| s.key == STAGE_DETECT)
             .map_or(1, |s| s.workers) as usize;
-        let reader = self.reader(detect_workers, placement.is_gpu() || road == Road::Line)?;
+        #[allow(unused_mut)]
+        let mut blocks: Option<Arc<dyn bunko_ocr::blocks::BlockDetector>> = None;
+        #[allow(unused_mut)]
+        let mut block_source: Option<(String, String)> = None;
+        #[cfg(feature = "gpl-models")]
+        if by_blocks {
+            let (loaded, source) = self.block_detector(detector, detect_workers)?;
+            (blocks, block_source) = (Some(loaded), source);
+        }
+        let reader = if by_blocks {
+            None
+        } else {
+            Some(self.reader(
+                detector,
+                detect_workers,
+                placement.is_gpu() || road == Road::Line,
+            )?)
+        };
 
-        // Provenance: PP-OCR's pin when its files are the pinned ones, then the
-        // recognizer's source repos and the export set (spec Q9).
-        let mut weights: Vec<(String, String)> = reader.repos();
+        // Provenance: PP-OCR's pin when its files are the pinned ones (or the block
+        // detector's), then the recognizer's source repos and the export set (spec Q9).
+        let mut weights: Vec<(String, String)> =
+            reader.as_ref().map(|r| r.repos()).unwrap_or_default();
+        weights.extend(block_source);
         if let Some(rec) = &recognizer {
             for (repo, rev) in &rec.info().repos {
                 weights.push((repo.to_string(), rev.to_string()));
             }
             // The export set the recognizer's files come from: the torch package release
-            // for the libtorch recognizers, models-v1 for the ONNX ones.
-            let vulkan = placement.provider == "vulkan"
-                || resolved.as_ref().is_some_and(|r| r.backend.is_some());
-            let release = if vulkan {
-                bunko_ocr::models::vulkan_release_name()
-            } else if self.torch_loaded() {
-                bunko_ocr::models::torch_release_name()
-            } else {
-                bunko_ocr::models_release::RELEASE.to_string()
-            };
-            weights.push((models::EXPORT_REPO.to_string(), release));
+            // for the libtorch recognizers, models-v1 for the ONNX ones. The text-box
+            // recognizers run their authors' own files: no export set.
+            if !textbox {
+                let vulkan = placement.provider == "vulkan"
+                    || resolved.as_ref().is_some_and(|r| r.backend.is_some());
+                let release = if vulkan {
+                    bunko_ocr::models::vulkan_release_name()
+                } else if self.torch_loaded() {
+                    bunko_ocr::models::torch_release_name()
+                } else {
+                    bunko_ocr::models_release::RELEASE.to_string()
+                };
+                weights.push((models::EXPORT_REPO.to_string(), release));
+            }
         }
         let (stage_workers, queue_capacity) = plan::tables(&stages);
         let pipeline = plan::graph_line(&stages);
-        let precision = resolved.as_ref().map(|r| r.precision.to_string());
+        // A recognizer with one format (the text-box ones) says so itself.
+        let fixed = recognizer
+            .as_ref()
+            .filter(|_| resolved.is_none())
+            .map(|r| r.info().precision.to_string());
+        let precision = resolved
+            .as_ref()
+            .map(|r| r.precision.to_string())
+            .or_else(|| fixed.clone());
         // What ran, backend included (`fp32@ncnn`): the benchmark tells its candidates
         // apart by it. The sidecar keeps the plain precision.
-        let ran = resolved.as_ref().map(|r| match &r.backend {
-            Some(b) => format!("{}@{b}", r.precision),
-            None => r.precision.to_string(),
-        });
+        let ran = resolved
+            .as_ref()
+            .map(|r| match &r.backend {
+                Some(b) => format!("{}@{b}", r.precision),
+                None => r.precision.to_string(),
+            })
+            .or(fixed);
         let ready = ReadyInfo {
             weights: weights.iter().cloned().collect(),
             stage_workers,
@@ -1521,13 +1735,18 @@ impl EnginePipeline {
         };
         let info = SessionInfo {
             engine: engine.to_string(),
+            detector: detector.to_string(),
             patch_budget: spec.patch_budget,
             generator: self.config.generator.clone(),
             weights,
             precision,
             ready,
         };
-        let engines = Arc::new(Engines { reader, recognizer });
+        let engines = Arc::new(Engines {
+            reader,
+            blocks,
+            recognizer,
+        });
         let source = detect_workers as u32 + SOURCE_EXTRA;
         let ceilings = plan::width_ceilings(&stages, &host);
         let runner = EngineRunner::start(info, engines, road, &stages, source, ceilings)?;
@@ -1545,10 +1764,16 @@ impl PagePipeline for EnginePipeline {
         let devices = self.catalog_devices();
         let engines =
             models::available_engines(&self.store, |e| self.recognizer_ready(e, &devices));
+        // A detector is offered like an engine: when its files are here or may be
+        // downloaded (the first session on it fetches them).
         let detectors = if engines.is_empty() {
             Vec::new()
         } else {
-            vec![models::PPOCR.to_string()]
+            models::DETECTORS
+                .iter()
+                .filter(|d| models::obtainable(&self.store, &models::detector_ids(d)))
+                .map(|d| d.to_string())
+                .collect()
         };
         #[cfg(feature = "torch")]
         let (torch, cpu) = match self.torch() {

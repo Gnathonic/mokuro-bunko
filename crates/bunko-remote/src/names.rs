@@ -23,6 +23,13 @@ pub use bunko_core::relpath::{is_safe_segment, is_windows_device_name};
 /// the same rule as bunko-dav's `fold_name`).
 pub use bunko_core::names::fold_name as fold;
 
+/// A path-id provider's pid (a `/`-separated path, WebDAV) as a server that folds
+/// spelling would compare it: every segment under [`fold`]. Two pids that fold alike
+/// may be one resource there (the old and the new spelling of a case-only rename).
+pub fn fold_path_pid(pid: &str) -> String {
+    pid.split('/').map(fold).collect::<Vec<_>>().join("/")
+}
+
 /// `H(pid‖cver)`: the first 8 bytes (big-endian) of `sha256(pid ‖ 0x00 ‖ cver)`.
 pub fn version_salt(pid: &str, cver: &str) -> u64 {
     let mut h = Sha256::new();
@@ -65,6 +72,25 @@ pub const KEEP_BOTH_FOLDED: [&str; 3] = ["volume-data.json", "goals.json", "posi
 /// (Bunko writes only this spelling; [`bunko_core::names::CONTROL_FILES`]).
 pub use bunko_core::names::CONTROL_FILES;
 
+/// A series' OCR queue file (queue file v2): the lease holder's status writer
+/// regenerates it, so a duplicate-folder merge keeps the newer copy and trashes the
+/// other (it is not kept twice).
+pub use bunko_core::names::SERIES_QUEUE_FILE;
+
+/// The leftover root queue file of a 0.8 pre-release (queue file v2 §3): never written
+/// any more; the lease holder deletes it.
+pub const ROOT_QUEUE_FILE: &str = ".mokuro-queue.json";
+
+/// `rel` names a series' queue file: two segments or more, the last folding to
+/// [`SERIES_QUEUE_FILE`].
+pub fn is_series_queue_path(rel: &crate::index::RelPath) -> bool {
+    let segs = rel.segments();
+    segs.len() >= 2
+        && segs
+            .last()
+            .is_some_and(|n| bunko_core::names::is_fixed_name(n, SERIES_QUEUE_FILE))
+}
+
 /// A merge moves every copy of `name` in, never trashing one (same-name collision
 /// rule). History `.events` files and `profiles.json` are not kept twice: the newer
 /// write wins, as the reader's own import does.
@@ -72,15 +98,26 @@ pub fn dedup_keeps_both(name: &str) -> bool {
     KEEP_BOTH_FOLDED.contains(&fold(name).as_str()) || CONTROL_FILES.contains(&name)
 }
 
+/// The local folder driver's in-folder trash (D16).
+pub const FOLDER_TRASH_DIR: &str = ".mokuro-bunko-trash";
+
+/// The suffix every file the local folder driver trashes gets, so no reader lists it.
+pub const TRASHED_SUFFIX: &str = ".bunko-trashed";
+
 /// A name Bunko reserves on the provider for its own transient files: the WebDAV
-/// driver's staged uploads (`.<name>.bunko-<op>.tmp`) and its probe leftovers
-/// (`.bunko-probe-*`). Compared folded, because a case-insensitive provider resolves
-/// any spelling to the same node. The store never lists one, and its shim never
-/// creates, moves or removes one.
+/// driver's staged uploads (`.<name>.bunko-<op>.tmp`), the folder driver's
+/// (`.bunko-<op>.tmp`) and its case-rename stops (`.bunko-case-*`), probe leftovers
+/// (`.bunko-probe-*`), and the folder driver's trash (`.mokuro-bunko-trash`, and
+/// `*.bunko-trashed` files). Compared folded, because a case-insensitive provider
+/// resolves any spelling to the same node. The store never lists one, and its shim
+/// never creates, moves or removes one.
 pub fn is_reserved_name(seg: &str) -> bool {
     let s = fold(seg);
     s.starts_with(".bunko-probe-")
+        || s.starts_with(".bunko-case-")
         || (s.starts_with('.') && s.ends_with(".tmp") && s.contains(".bunko-"))
+        || s == FOLDER_TRASH_DIR
+        || s.ends_with(TRASHED_SUFFIX)
 }
 
 #[cfg(test)]
@@ -122,6 +159,34 @@ mod tests {
         // The account top unknown: age, then pid.
         sort_roots_canonical(&mut v, None);
         assert_eq!(pids(&v), ["nested-old", "top-a", "top-b", "top-new"]);
+    }
+
+    #[test]
+    fn reserved_names_cover_every_driver_internal_name() {
+        for n in [
+            ".bunko-probe-x1",
+            ".Vol 1.cbz.bunko-17.tmp",
+            ".bunko-0123456789abcdef.tmp",
+            ".bunko-case-77.tmp",
+            ".BUNKO-CASE-77",
+            ".mokuro-bunko-trash",
+            ".Mokuro-Bunko-Trash",
+            "Vol 1.cbz.bunko-trashed",
+            "catalog.json.BUNKO-TRASHED",
+        ] {
+            assert!(is_reserved_name(n), "{n}");
+        }
+        for n in [
+            "Vol 1.cbz",
+            ".mokuro-bunko.json",
+            ".mokuro-queue.json",
+            "bunko-case.txt",
+            ".mokuro-bunko-trash.txt",
+            "x.bunko-trashed.cbz",
+            "a.tmp",
+        ] {
+            assert!(!is_reserved_name(n), "{n}");
+        }
     }
 
     #[test]

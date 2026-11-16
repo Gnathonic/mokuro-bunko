@@ -24,6 +24,9 @@ pub struct Probe {
     pub strong_etags: bool,
     /// A wrong `If-Match` on PUT gives 412 and the right one succeeds.
     pub if_match: bool,
+    /// How the `ETag` of a PUT's answer reads in a listing (the Status fast path
+    /// takes the new version from it instead of a PROPFIND).
+    pub put_etag: PutEtag,
     /// `If-None-Match: *` on PUT gives 412 for an existing name and succeeds for a new one.
     pub if_none_match: bool,
     /// `Some(false)` when `.bunko-probe-aa` found `.bunko-probe-Aa`.
@@ -32,6 +35,59 @@ pub struct Probe {
     pub nested_propagation: bool,
     /// The hash `oc:checksums` reported for the probe file.
     pub hash_kind: Option<HashKind>,
+}
+
+/// How the `ETag` a PUT answers with relates to the `getetag` a listing then reports
+/// for the file, as the probe saw it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PutEtag {
+    /// No `ETag`, a weak one, or another value than the listing's: a stat follows.
+    #[default]
+    Unusable,
+    /// The same text.
+    Same,
+    /// The listing's text is the `ETag` without its quotes (a `getetag` some servers
+    /// send unquoted).
+    Unquoted,
+}
+
+impl PutEtag {
+    /// The version a listing would report, from a PUT answer's `ETag` header.
+    pub fn listing_form(self, header: Option<&str>) -> Option<String> {
+        let h = header?.trim();
+        if h.is_empty() || h.starts_with("W/") {
+            return None;
+        }
+        match self {
+            PutEtag::Unusable => None,
+            PutEtag::Same => Some(h.to_string()),
+            PutEtag::Unquoted => h
+                .strip_prefix('"')
+                .and_then(|t| t.strip_suffix('"'))
+                .filter(|t| !t.is_empty())
+                .map(str::to_string),
+        }
+    }
+
+    /// Compare the `ETag` a PUT answered with to the `getetag` listed after it.
+    fn judge(header: Option<&str>, listed: Option<&str>) -> PutEtag {
+        let (Some(h), Some(l)) = (header.map(str::trim), listed) else {
+            return PutEtag::Unusable;
+        };
+        if h.starts_with("W/") || l.starts_with("W/") {
+            PutEtag::Unusable
+        } else if h == l {
+            PutEtag::Same
+        } else if h.len() == l.len() + 2
+            && h.starts_with('"')
+            && h.ends_with('"')
+            && &h[1..h.len() - 1] == l
+        {
+            PutEtag::Unquoted
+        } else {
+            PutEtag::Unusable
+        }
+    }
 }
 
 const DIR: &str = ".bunko-probe-d";
@@ -77,6 +133,16 @@ async fn put(
     body: &'static [u8],
     headers: &[(&str, String)],
 ) -> Result<u16, BErr> {
+    Ok(put_tagged(b, pid, body, headers).await?.0)
+}
+
+/// [`put`], with the `ETag` the answer carries.
+async fn put_tagged(
+    b: &WebDavBackend,
+    pid: &str,
+    body: &'static [u8],
+    headers: &[(&str, String)],
+) -> Result<(u16, Option<String>), BErr> {
     let mut h: Vec<(&str, String)> = vec![("content-length", body.len().to_string())];
     h.extend(headers.iter().cloned());
     let resp = b
@@ -86,7 +152,12 @@ async fn put(
         // Bunko answers .cbz PUTs with it; harmless to notice on any PUT.
         tracing::debug!("webdav probe: X-Mokuro-Put on PUT");
     }
-    Ok(resp.status().as_u16())
+    let tag = resp
+        .headers()
+        .get("etag")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    Ok((resp.status().as_u16(), tag))
 }
 
 /// The ETag the server reports for `pid` (no fallback).
@@ -159,7 +230,7 @@ async fn write_probes(b: &WebDavBackend, p: &mut Probe) -> Result<(), BErr> {
         && p.strong_etags
         && let Some(cur) = etag(b, &file).await?
     {
-        let right = put(
+        let (right, put_tag) = put_tagged(
             b,
             &file,
             b"bunko-probe-3",
@@ -167,6 +238,10 @@ async fn write_probes(b: &WebDavBackend, p: &mut Probe) -> Result<(), BErr> {
         )
         .await?;
         p.if_match = (200..300).contains(&right);
+        if p.if_match {
+            let listed = etag(b, &file).await?;
+            p.put_etag = PutEtag::judge(put_tag.as_deref(), listed.as_deref());
+        }
     }
 
     // If-None-Match: * must refuse an existing name and accept a new one.
@@ -215,4 +290,36 @@ async fn write_probes(b: &WebDavBackend, p: &mut Probe) -> Result<(), BErr> {
             && e1 != e2;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PutEtag;
+
+    #[test]
+    fn a_put_etag_is_used_only_in_the_form_the_listing_has() {
+        let j = PutEtag::judge;
+        assert_eq!(j(Some("\"a-1\""), Some("\"a-1\"")), PutEtag::Same);
+        assert_eq!(j(Some("\"a-1\""), Some("a-1")), PutEtag::Unquoted);
+        assert_eq!(j(Some(" \"a-1\" "), Some("a-1")), PutEtag::Unquoted);
+        assert_eq!(j(Some("\"a-2\""), Some("a-1")), PutEtag::Unusable);
+        assert_eq!(j(Some("W/\"a-1\""), Some("W/\"a-1\"")), PutEtag::Unusable);
+        assert_eq!(j(None, Some("a-1")), PutEtag::Unusable);
+        assert_eq!(j(Some("\"a-1\""), None), PutEtag::Unusable);
+
+        assert_eq!(
+            PutEtag::Same.listing_form(Some("\"b-2\"")).as_deref(),
+            Some("\"b-2\"")
+        );
+        assert_eq!(
+            PutEtag::Unquoted.listing_form(Some("\"b-2\"")).as_deref(),
+            Some("b-2")
+        );
+        // Whatever the probe saw, a weak, empty or missing tag is no version.
+        assert_eq!(PutEtag::Same.listing_form(Some("W/\"b-2\"")), None);
+        assert_eq!(PutEtag::Unquoted.listing_form(Some("b-2")), None);
+        assert_eq!(PutEtag::Unquoted.listing_form(Some("\"\"")), None);
+        assert_eq!(PutEtag::Same.listing_form(None), None);
+        assert_eq!(PutEtag::Unusable.listing_form(Some("\"b-2\"")), None);
+    }
 }

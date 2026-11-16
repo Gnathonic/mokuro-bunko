@@ -2,7 +2,7 @@
 // in interop/.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { asSeeded, mergeProblems, writesOutside } from './dup-roots.mjs';
+import { asSeeded, mergeProblems, replacedBelow, writesOutside } from './dup-roots.mjs';
 
 const folder = (id, parent_id, name, extra = {}) => ({
     id,
@@ -104,5 +104,36 @@ test("a seeded node is no write while the seed's, and one again once rewritten i
     assert.deepEqual(
         writesOutside(rewritten, 'B', RACE, allowed).map((r) => r.id),
         ['d-vd'],
+    );
+});
+
+test("a version replaced in the canonical root is no write outside it; a write that landed outside still is", () => {
+    // Regression (S9 end on MEGA): the reader wrote S/series.json into B in the second
+    // Bunko started; Bunko replaced it, and MEGA sent the old node to the rubbish bin
+    // on its own (`parent_id` the bin, `explicitly_trashed`), with the reader's stamp.
+    const rows = [
+        ...merged(),
+        folder('S', 'B', 'Series'),
+        file('new', 'S', 'series.json', '2026-10-30T12:00:15.000Z'),
+        file('old', 'BIN', 'series.json', '2026-10-30T12:00:00.000Z', { trashed: true, explicitly_trashed: true }),
+    ];
+    assert.deepEqual(
+        writesOutside(rows, 'B', MERGED).map((r) => r.id),
+        ['old'],
+    );
+    assert.deepEqual(writesOutside(rows, 'B', MERGED, replacedBelow(rows, 'B')), []);
+    // Not one: trashed on its own with no live file of its name in B, a file trashed
+    // with the merged-away root it was written into, a file trashed on its own that is
+    // newer than B's, and a live write outside B.
+    const outside = [
+        ...rows,
+        file('lone', 'BIN', 'positions.json', '2026-10-30T12:00:03.000Z', { trashed: true, explicitly_trashed: true }),
+        file('in-a', 'A', 'series.json', '2026-10-30T12:00:04.000Z', { trashed: true }),
+        file('newer', 'BIN', 'series.json', '2026-10-30T12:00:20.000Z', { trashed: true, explicitly_trashed: true }),
+        file('live-out', 'X', 'series.json', '2026-10-30T12:00:05.000Z'),
+    ];
+    assert.deepEqual(
+        writesOutside(outside, 'B', MERGED, replacedBelow(outside, 'B')).map((r) => r.id),
+        ['lone', 'in-a', 'newer', 'live-out'],
     );
 });

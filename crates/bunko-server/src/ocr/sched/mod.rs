@@ -13,6 +13,7 @@
 
 mod availability;
 mod bench;
+mod by_volume;
 mod claim;
 mod registry;
 mod session;
@@ -44,7 +45,8 @@ use super::profiles::Profiles;
 use super::types::{Job, LibraryFacts, PathLocks};
 
 pub use availability::availability_of;
-pub use bench::{BenchRequest, BenchState, cpu_label, physical_cores};
+pub use bench::{BENCH_PARK_SECONDS, BenchRequest, BenchState, Parked, cpu_label, physical_cores};
+pub use by_volume::{OWNER_PATIENCE_SECONDS, VolumeOwner};
 pub use claim::{SUFFIX_BATCH, catalog_can_run, supported_for};
 pub use registry::{
     FailedLogin, Machine, PublicNames, RegisterInput, RegisterOutcome, SocketRefusal, TransferStats,
@@ -67,6 +69,11 @@ pub const PRECISION_REFUSAL: &str = "precision not available here";
 pub const DISCARDED: &str =
     "the archive was replaced or deleted while it was being read, so the result was discarded";
 
+/// How long a remote arrival's judgement may take ([`Scheduler::arrival_judging`])
+/// before its volume is answered from what the scheduler knows again (a helper that
+/// never answered).
+pub const JUDGE_PATIENCE_SECONDS: f64 = 300.0;
+
 /// Live settings (`apply_settings`).
 #[derive(Clone, Debug)]
 pub struct Settings {
@@ -77,6 +84,10 @@ pub struct Settings {
     pub concurrency: u32,
     pub autobench: bool,
     pub upgrade: UpgradeConfig,
+    /// Take work by volume (`ocr.queue_order`, [`bunko_core::Config::queue_order`]):
+    /// one lane runs every job of a volume it can, back to back, from one copy of its
+    /// archive.
+    pub by_volume: bool,
 }
 
 /// Where helper-thread work runs.
@@ -121,6 +132,11 @@ pub enum Msg {
     Walked {
         epoch: u64,
         index: OwedIndex,
+    },
+    /// What a running walk has judged so far ([`crate::ocr::owed::walk_in_parts`]).
+    WalkedPart {
+        epoch: u64,
+        part: OwedIndex,
     },
     /// The paced direct-replace job finished ([`crate::ocr::upgrade::Upgrade::run_direct`]).
     DirectUpgraded {
@@ -231,6 +247,7 @@ impl std::fmt::Debug for Msg {
         let name = match self {
             Msg::Tick => "Tick",
             Msg::Walked { .. } => "Walked",
+            Msg::WalkedPart { .. } => "WalkedPart",
             Msg::DirectUpgraded { .. } => "DirectUpgraded",
             Msg::OrphansSwept(_) => "OrphansSwept",
             Msg::Event { .. } => "Event",
@@ -277,6 +294,8 @@ pub struct Claimed {
     pub lane: u64,
     pub pid: String,
     pub machine: String,
+    /// The session it was sent to; a local claim on a remote store names its session
+    /// already while its archive is fetched ([`Msg::Spooled`]).
     pub sid: Option<String>,
     pub claim: Option<String>,
     /// `(size, mtime_ns)` at claim / submit: the file the result must match.
@@ -393,6 +412,9 @@ pub struct Scheduler {
     pub hold_logged: bool,
     /// The last [`Scheduler::storage_hold`] the tick saw (logged on change).
     pub storage_held: Option<&'static str>,
+    /// The last [`Scheduler::upgrade_hold`] the tick saw: why upgrade jobs wait while
+    /// the rest of the queue runs (logged when it begins and ends).
+    pub upgrade_held: Option<String>,
     /// This server's own OCR has come up at least once (`LocalUp`).
     pub local_was_up: bool,
     /// An automatic update is waiting for a quiet moment: no machine gets a new claim
@@ -401,7 +423,33 @@ pub struct Scheduler {
     pub last_poll_tick: f64,
     /// When the per-scan state (attempted, strikes, stopped rows...) was last reset.
     pub scan_reset_at: f64,
+    /// By volume: the machines (lanes) running each volume ([`by_volume`]), in order:
+    /// the one that started it (its owner), then each that took a job no earlier one
+    /// can run.
+    pub volume_owners: HashMap<Arc<str>, Vec<VolumeOwner>>,
+    /// By volume: volumes a job of which was claimed and that are still owed; they go
+    /// before volumes nobody started once their owner lets them go.
+    pub volumes_started: HashSet<Arc<str>>,
+    /// Remote arrivals being judged on a helper thread: rel → (how many, when the
+    /// last was sent). Until the judgement is in, the volume's manifest is busy.
+    pub judging: HashMap<String, (u32, f64)>,
+    /// Arrivals taken into the owed index (or judged) since the actor last took this
+    /// list: the actor's owed board, built after it took them, knows them.
+    pub settled_arrivals: Vec<String>,
+    /// Volumes whose last owed job ended lately (finished, or found done at claim),
+    /// with when (the wall clock), oldest first: the queue file v2 names them `done`
+    /// even when no series file ever showed them (`series_queue_snapshot`). At most
+    /// [`RECENT_FINISHED_MAX`], none older than a day.
+    pub recent_finished: IndexMap<String, f64>,
+    /// Sessions of this server's own OCR that were dropped while its processor may still
+    /// write into their `.processing/<sid>` (a runner winding down, a result it finished
+    /// as it was stopped): swept once it has wound down
+    /// ([`Scheduler::sweep_local_scratch`]).
+    pub local_scratch: HashSet<String>,
 }
+
+/// How many lately finished volumes the scheduler keeps ([`Scheduler::recent_finished`]).
+pub const RECENT_FINISHED_MAX: usize = 4096;
 
 impl Scheduler {
     pub fn new(deps: SchedDeps, settings: Settings) -> Scheduler {
@@ -475,10 +523,17 @@ impl Scheduler {
             ended_sessions: HashMap::new(),
             hold_logged: false,
             storage_held: None,
+            upgrade_held: None,
             local_was_up: false,
             update_drain: false,
             last_poll_tick: f64::NEG_INFINITY,
             scan_reset_at: f64::NEG_INFINITY,
+            volume_owners: HashMap::new(),
+            volumes_started: HashSet::new(),
+            judging: HashMap::new(),
+            settled_arrivals: Vec::new(),
+            recent_finished: IndexMap::new(),
+            local_scratch: HashSet::new(),
             deps,
         }
     }
@@ -528,15 +583,6 @@ impl Scheduler {
 
     pub fn primary(&self) -> Option<&Generation> {
         bunko_core::generations::primary_generation(&self.settings.rows)
-    }
-
-    /// `_generation_rank`: row id → position among the enabled rows.
-    pub fn rank(&self) -> HashMap<String, usize> {
-        self.enabled_rows()
-            .iter()
-            .enumerate()
-            .map(|(i, r)| (r.id.clone(), i))
-            .collect()
     }
 
     pub fn bump(&mut self) {
@@ -613,6 +659,7 @@ impl Scheduler {
         match msg {
             Msg::Tick => self.tick(),
             Msg::Walked { epoch, index } => self.walked(epoch, index),
+            Msg::WalkedPart { epoch, part } => self.walked_part(epoch, part),
             Msg::DirectUpgraded { done, failed } => self.direct_upgraded(done, failed),
             Msg::OrphansSwept(report) => self.orphans_swept(report),
             Msg::Event { pid, event } => self.on_event(&pid, event),
@@ -673,6 +720,8 @@ impl Scheduler {
         }
         self.check_sessions();
         self.check_storage_hold();
+        self.check_upgrade_hold();
+        self.note_ocr_activity();
         let now = self.mono();
         if now - self.last_poll_tick >= self.settings.poll_interval {
             self.last_poll_tick = now;
@@ -684,6 +733,18 @@ impl Scheduler {
             if lane.waiting_for_faster {
                 lane.idle_at = None;
             }
+        }
+    }
+
+    /// OCR is running (§5.3 poll cadence): a claim is in flight on the library, so a
+    /// cloud library's change feed polls at its active interval until five minutes
+    /// after the last one ends. Waiting jobs alone do not count: a job a lane can run
+    /// is claimed within a tick, and one that cannot run (no processor, a paused or
+    /// held queue, a missing backend) never is, so a held queue never keeps the feed
+    /// polling fast.
+    fn note_ocr_activity(&self) {
+        if !self.cards.is_empty() {
+            bunko_store::note_activity(&self.library(), bunko_store::Activity::Ocr);
         }
     }
 
@@ -714,6 +775,37 @@ impl Scheduler {
         self.bump_page();
     }
 
+    /// The upgrade hold began, changed (the time left) or ended: the queue page says
+    /// why upgrade jobs wait; the log has a line when it begins and ends; on release
+    /// every lane looks for work again (the upgrades run now).
+    fn check_upgrade_hold(&mut self) {
+        let now = self.upgrade_hold();
+        if now == self.upgrade_held {
+            return;
+        }
+        let was = std::mem::replace(&mut self.upgrade_held, now.clone());
+        match (&was, &now) {
+            (None, Some(reason)) => self.log(format!("OCR holds upgrade jobs: {reason}")),
+            (Some(_), None) => {
+                self.log("OCR runs upgrade jobs again (this Bunko holds the library now)");
+                for lane in &mut self.lanes {
+                    lane.idle_at = None;
+                }
+                self.maybe_start_scan();
+                self.maybe_start_direct();
+            }
+            _ => {
+                // Only the time left changed (each second in the last minute): the
+                // queue page says so; the lanes have no new work to look for.
+                self.pending_cache = None;
+                self.bump_page();
+                return;
+            }
+        }
+        self.bump();
+        self.bump_page();
+    }
+
     /// Start a full walk on a helper thread (single-flight).
     pub fn start_walk(&mut self) {
         if self.walking {
@@ -731,8 +823,17 @@ impl Scheduler {
             .iter()
             .map(|(rel, v)| (rel.clone(), (v.size, v.mtime_ns, v.pages)))
             .collect();
+        // On helper threads the walk hands over its parts as it goes; inline (tests)
+        // it answers once.
+        let parts = match &self.deps.exec {
+            Exec::Threads(tx) => Some(tx.clone()),
+            Exec::Inline => None,
+        };
+        // After the walk, the facts of sidecars that are gone or changed go (now and then,
+        // and only from a settled index: an unsettled one may not list them yet).
+        let prune = self.deps.upgrade.clone().filter(|_| self.store_settled());
         self.run_background(Box::new(move || {
-            let index = super::owed::walk(
+            let index = super::owed::walk_in_parts(
                 &library,
                 &rows,
                 facts.as_ref(),
@@ -740,9 +841,44 @@ impl Scheduler {
                     .as_deref()
                     .map(|p| p as &dyn super::owed::UpgradeProbe),
                 &known,
+                super::owed::WALK_PART_EVERY,
+                &mut |part| {
+                    if let Some(tx) = &parts {
+                        let _ = tx.send(Msg::WalkedPart { epoch, part });
+                    }
+                },
             );
+            if let Some(up) = prune {
+                up.sidecar_facts()
+                    .prune_every(super::sidecar_facts::PRUNE_EVERY);
+            }
             Msg::Walked { epoch, index }
         }));
+    }
+
+    /// A part of the running walk: its volumes join the queue at once (the walk's end
+    /// replaces the whole index as before). A large cloud library's first walk takes
+    /// many minutes of provider reads; OCR starts on what is judged meanwhile instead of
+    /// waiting for all of it.
+    fn walked_part(&mut self, epoch: u64, part: OwedIndex) {
+        if !self.walking || epoch != self.walk_epoch {
+            return;
+        }
+        for (rel, mut v) in part.volumes {
+            if let Some(old) = self.owed.volumes.get(&rel)
+                && let Some((stamp, read)) = &old.page_suffixes
+                && *stamp == (v.size, v.mtime_ns)
+            {
+                v.page_suffixes = Some((*stamp, read.clone()));
+            }
+            self.owed.volumes.insert(rel, v);
+        }
+        for lane in &mut self.lanes {
+            lane.idle_at = None;
+        }
+        self.bump();
+        self.bump_page();
+        self.maybe_start_scan();
     }
 
     fn walked(&mut self, epoch: u64, index: OwedIndex) {
@@ -763,6 +899,8 @@ impl Scheduler {
             }
         }
         self.owed = index;
+        let owed = &self.owed.volumes;
+        self.volumes_started.retain(|rel| owed.contains_key(&**rel));
         self.suffixes_failed.clear();
         self.last_walk_at = Some(self.mono());
         self.walks += 1;
@@ -856,6 +994,10 @@ impl Scheduler {
         let Some(up) = self.upgrade_probe() else {
             return;
         };
+        // A swap is a Sync write: it waits until this Bunko holds the library.
+        if self.upgrade_hold().is_some() {
+            return;
+        }
         let volumes = up.ready_volumes();
         if volumes.is_empty() {
             return;
@@ -935,8 +1077,13 @@ impl Scheduler {
         if !jobs.is_empty() {
             let volumes: HashSet<&str> = jobs.iter().map(|j| &*j.rel).collect();
             let order: Vec<String> = self.enabled_rows().iter().map(|r| r.name.clone()).collect();
+            let how = if self.settings.by_volume {
+                "volume by volume, each through its generations in run order"
+            } else {
+                "generations in run order"
+            };
             self.log(format!(
-                "Found {} missing OCR sidecar(s) across {} CBZ file(s) (generations, in run order: {}; within a generation series take turns)",
+                "Found {} missing OCR sidecar(s) across {} CBZ file(s) ({how}: {}; each generation's upgrades after its missing files; within each, series take turns)",
                 jobs.len(),
                 volumes.len(),
                 order.join(", ")
@@ -983,6 +1130,7 @@ impl Scheduler {
         if self.stopping {
             return;
         }
+        self.prune_volume_owners();
         self.drain_autobench_requests();
         let lane_ids: Vec<u64> = self.lanes.iter().map(|l| l.id).collect();
         for id in lane_ids {
@@ -1025,6 +1173,7 @@ impl Scheduler {
 
     fn stop(&mut self) {
         self.stopping = true;
+        self.forget_volume_owners();
         // Everything in flight goes back untouched: a shutdown is nobody's failure.
         let sids: Vec<String> = self.sessions.keys().cloned().collect();
         for sid in sids {
@@ -1034,12 +1183,28 @@ impl Scheduler {
         for pid in pids {
             self.drop_processor(&pid, "the server is stopping");
         }
+        // Runs parked by processors that dropped off earlier: none returns to this
+        // process.
+        self.bench_unpark_all();
     }
 
     /// Restart-free reconfiguration (`OCRWorker.apply_settings`).
     pub fn apply_settings(&mut self, settings: Settings) {
         let local_changed = self.settings.local_processing != settings.local_processing;
+        let by_volume_now = settings.by_volume && !self.settings.by_volume;
+        if !settings.by_volume {
+            // Claims in flight finish; nothing stays tied to a machine.
+            self.forget_volume_owners();
+        }
         self.settings = settings;
+        if local_changed && !self.settings.local_processing {
+            // This server's OCR stops now, not after what it holds (its session would
+            // never drain): what it runs goes back to the queue.
+            self.local_off("local processing was turned off");
+        }
+        if by_volume_now {
+            self.hold_volumes_in_flight();
+        }
         self.autobench.asked.clear();
         self.autobench.failed.clear();
         self.bump();
@@ -1074,7 +1239,12 @@ impl Scheduler {
         self.start_walk();
         let order: Vec<String> = self.enabled_rows().iter().map(|r| r.name.clone()).collect();
         self.log(format!(
-            "OCR settings applied (generations, in run order: {})",
+            "OCR settings applied (work taken {}; generations, in run order: {})",
+            if self.settings.by_volume {
+                "by volume"
+            } else {
+                "by generation"
+            },
             order.join(", ")
         ));
         if local_changed {

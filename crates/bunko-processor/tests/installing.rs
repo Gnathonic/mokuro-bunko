@@ -306,6 +306,31 @@ async fn a_failure_that_clears_registers_again() {
     let _ = tokio::time::timeout(Duration::from_secs(20), task).await;
 }
 
+/// Regression: the same failure and clear, sent back to back. A watch channel keeps
+/// only the latest value, so the session can see the install go from running straight
+/// to none without ever seeing the failure. It still registers again (this made
+/// `a_failure_that_clears_registers_again` flaky).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failure_cleared_before_the_session_looks_registers_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let (url, lib) = library().await;
+    let (tx, rx) = watch::channel(running("downloading", None));
+    let mut o = options(&url, dir.path());
+    o.install = Some(rx);
+    let stop = o.shutdown.clone();
+    let task = tokio::spawn(serve(o));
+    wait_for(&lib, 10, |l| {
+        has(l, "register:installing") && has(l, "exit:s1")
+    })
+    .await;
+    tx.send_replace(failed());
+    tx.send_replace(None);
+    wait_for(&lib, 10, |l| has(l, "register:-")).await;
+    assert_eq!(registrations(&lib), 2);
+    stop.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(20), task).await;
+}
+
 /// A retry after a failure (or an install started from the dashboard after the
 /// registration) that finishes: the processor registers again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

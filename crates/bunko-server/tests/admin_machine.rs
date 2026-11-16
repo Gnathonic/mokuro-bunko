@@ -16,6 +16,10 @@ struct Fake {
     locked: Option<String>,
     changed: Mutex<Vec<(String, bool, bool)>>,
     installs: Mutex<Vec<bool>>,
+    /// What `remove_refused` says.
+    refuse: Option<String>,
+    /// Every step of a removal, in order, shared with [`Ocr`].
+    steps: Arc<Mutex<Vec<String>>>,
 }
 
 impl Machine for Fake {
@@ -38,8 +42,14 @@ impl Machine for Fake {
         self.installs.lock().push(reinstall);
         Ok(json!({"installing": true}))
     }
+    fn remove_refused(&self) -> Option<String> {
+        self.refuse.clone()
+    }
     fn remove(&self) -> Result<Value, String> {
-        Err("An install is running: wait for it to end".into())
+        self.steps.lock().push("remove".into());
+        Ok(
+            json!({"removed": ["torch-rocm7.1-2.13.0"], "deferred": [], "failed": [], "freed": 5, "message": ""}),
+        )
     }
     fn start_job(&self, kind: &str, _engine: Option<&str>) -> Result<Value, String> {
         Ok(json!({"id": 1, "kind": kind, "state": "running", "output": [], "next": 0}))
@@ -50,6 +60,76 @@ impl Machine for Fake {
     fn logs(&self, lines: usize) -> Value {
         json!({"path": "/x/server.log", "text": format!("{lines} lines")})
     }
+}
+
+/// This server's OCR as the admin panel drives it: the settings it is handed, and when
+/// it is asked to have stopped.
+struct Ocr {
+    steps: Arc<Mutex<Vec<String>>>,
+}
+
+impl bunko_server::admin::OcrAdmin for Ocr {
+    fn runtime_status(&self, config: &Config) -> Value {
+        bunko_server::admin::NoOcr.runtime_status(config)
+    }
+    fn processors(&self, config: &Config) -> Value {
+        bunko_server::admin::NoOcr.processors(config)
+    }
+    fn generations_payload(&self, config: &Config) -> Value {
+        bunko_server::admin::NoOcr.generations_payload(config)
+    }
+    fn generation_stats(&self, config: &Config) -> Value {
+        bunko_server::admin::NoOcr.generation_stats(config)
+    }
+    fn apply(&self, config: &Config) -> Option<Value> {
+        self.steps
+            .lock()
+            .push(format!("apply local={}", config.ocr.local_processing));
+        Some(
+            json!({"applied": true, "installing": false, "restart_required": false, "reason": "", "returned": 2}),
+        )
+    }
+    fn wait_local_stopped(&self) {
+        self.steps.lock().push("stopped".into());
+    }
+    fn derive(
+        &self,
+        config: &Config,
+        spec: &Value,
+        processor: Option<&str>,
+    ) -> Result<Value, bunko_server::admin::ocr::OcrError> {
+        bunko_server::admin::NoOcr.derive(config, spec, processor)
+    }
+    fn set_pools(
+        &self,
+        config: &Config,
+        row: &bunko_core::generations::Generation,
+        processor: &str,
+        pools: &Value,
+    ) -> Result<Value, bunko_server::admin::ocr::OcrError> {
+        bunko_server::admin::NoOcr.set_pools(config, row, processor, pools)
+    }
+    fn bench(
+        &self,
+        config: &Config,
+        key: &str,
+        request: bunko_server::admin::ocr::BenchRequest,
+    ) -> Result<(u16, Value), bunko_server::admin::ocr::OcrError> {
+        bunko_server::admin::NoOcr.bench(config, key, request)
+    }
+    fn refresh_devices(&self) -> Value {
+        bunko_server::admin::NoOcr.refresh_devices()
+    }
+}
+
+fn harness_with_ocr(fake: Arc<Fake>) -> Harness {
+    Harness::with(Options {
+        machine: Some(fake.clone()),
+        ocr: Some(Arc::new(Ocr {
+            steps: fake.steps.clone(),
+        })),
+        ..Options::default()
+    })
 }
 
 fn harness(fake: Arc<Fake>) -> Harness {
@@ -214,16 +294,6 @@ async fn install_jobs_and_logs() {
         )
         .await;
     assert_eq!(r.status, 429);
-    // The machine's refusal is a 409 with its reason.
-    let r = h
-        .call(
-            "POST",
-            "/_admin/api/machine/remove",
-            Some(&admin),
-            Some(json!({})),
-        )
-        .await;
-    assert_eq!(r.status, 409);
     let r = h
         .call(
             "POST",
@@ -272,4 +342,94 @@ async fn a_cross_site_write_is_refused() {
         .unwrap();
     let r = h.send(req).await;
     assert_eq!(r.status, 403, "{}", String::from_utf8_lossy(&r.bytes));
+}
+
+/// Regression (owner report: "I changed settings to remove this machine's OCR backend,
+/// but it still keeps processing OCR tasks"). Remove deleted the packs and left OCR on
+/// this machine on: the processor went on from the libraries still loaded, and nothing
+/// stopped an install from putting a pack back. Removing the OCR backend now turns OCR
+/// on this machine off first (saved, and applied as its toggle does), waits for it to
+/// have stopped, and only then removes the packs; the answer says so.
+#[tokio::test]
+async fn remove_turns_ocr_on_this_machine_off_first() {
+    let fake = Arc::new(Fake::default());
+    let h = harness_with_ocr(fake.clone());
+    let admin = h.admin();
+    assert!(h.saved_config().ocr.local_processing || h.core.config.read().ocr.local_processing);
+    let r = h
+        .call(
+            "POST",
+            "/_admin/api/machine/remove",
+            Some(&admin),
+            Some(json!({})),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.text());
+    let v = r.json();
+    assert_eq!(
+        fake.steps.lock().as_slice(),
+        ["apply local=false", "stopped", "remove"],
+        "off, stopped, then removed"
+    );
+    assert!(!h.saved_config().ocr.local_processing, "saved off");
+    assert!(
+        !h.core.config.read().ocr.local_processing,
+        "off in the running server"
+    );
+    assert_eq!(v["local_turned_off"], true);
+    assert_eq!(v["returned"], 2);
+    assert_eq!(v["config"]["local_processing"], false);
+    assert_eq!(v["removed"][0], "torch-rocm7.1-2.13.0");
+
+    // The page shows the toggle off afterwards.
+    let r = h
+        .call("GET", "/_admin/api/machine", Some(&admin), None)
+        .await;
+    assert_eq!(r.json()["config"]["local_processing"], false);
+}
+
+/// Removed again while OCR on this machine is off: nothing to turn off, but a stop still
+/// under way is waited for before the files go.
+#[tokio::test]
+async fn remove_with_ocr_already_off_still_waits_for_it_to_stop() {
+    let fake = Arc::new(Fake::default());
+    let h = harness_with_ocr(fake.clone());
+    h.core.config.write().ocr.local_processing = false;
+    let admin = h.admin();
+    let r = h
+        .call(
+            "POST",
+            "/_admin/api/machine/remove",
+            Some(&admin),
+            Some(json!({})),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.text());
+    assert_eq!(fake.steps.lock().as_slice(), ["stopped", "remove"]);
+    assert_eq!(r.json()["local_turned_off"], false);
+    assert_eq!(r.json()["returned"], 0);
+}
+
+/// A removal the machine refuses (an install runs) changes nothing: OCR on this machine
+/// stays on.
+#[tokio::test]
+async fn a_refused_remove_leaves_ocr_on_this_machine_on() {
+    let fake = Arc::new(Fake {
+        refuse: Some("An install is running: wait for it to end".into()),
+        ..Fake::default()
+    });
+    let h = harness_with_ocr(fake.clone());
+    let admin = h.admin();
+    let r = h
+        .call(
+            "POST",
+            "/_admin/api/machine/remove",
+            Some(&admin),
+            Some(json!({})),
+        )
+        .await;
+    assert_eq!(r.status, 409);
+    assert!(r.json()["error"].as_str().unwrap().contains("install"));
+    assert!(fake.steps.lock().is_empty(), "{:?}", fake.steps.lock());
+    assert!(h.core.config.read().ocr.local_processing);
 }

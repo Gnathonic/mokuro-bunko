@@ -983,12 +983,12 @@ final), else `"none"`. Both 200 bodies end with three more keys, signed in or no
 `["volume-data.json","profiles.json","goals.json","positions.json","history/"]` (a trailing `/` is a
 per-account directory tree), then `"per_user_layers"` = `bunko_core::sidecar_names::per_user_layers()`,
 i.e. `["edit"]` (the layer ids each account keeps its own copy of; a reader pushes its `edit` layer
-only when it is listed), then `"version"` = the running `bunko_core::VERSION` (`0.8.0-beta.1` and
-on). Key order signed in: authenticated, username, role, created_at, permissions, per_user_files,
+only when it is listed), then `"version"` = the running `bunko_core::VERSION` (0.7.8 and
+on, the 0.7 line without `per_user_layers`). Key order signed in: authenticated, username, role, created_at, permissions, per_user_files,
 per_user_layers, version; anonymous: authenticated, role, permissions, per_user_files,
 per_user_layers, version. The 401/429 bodies are unchanged. `version` is reported only by builds
 that keep reading history per account: the reader turns history sync on when its numeric core
-(`/^v?(\d+)\.(\d+)\.(\d+)/`, a pre-release counting as its core) is ≥ 0.8.0, and uses
+(`/^v?(\d+)\.(\d+)\.(\d+)/`, a pre-release counting as its core) is ≥ 0.7.8, and uses
 `positions.json` only when it is listed. Pinned by `crates/bunko-server/tests/accounts_login.rs` and
 the `login-me-*` contract fixtures (where `version` is the sentinel `0.0.0`).
 

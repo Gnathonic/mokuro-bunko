@@ -63,6 +63,7 @@ impl LibraryStore for LocalStore {
             atomic_replace: true,
             server_copy: true,
             trash_on_delete: false,
+            content_versions: false,
         }
     }
 

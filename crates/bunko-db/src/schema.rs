@@ -17,12 +17,13 @@
 //!
 //! Version 7 (0.8) adds the series folder owners (`series_folder_owners`, and the
 //! one-row `series_folder_adoption` that says the existing folders were given theirs),
-//! and `idx_volume_uploads_uploader_nocase`; then the local case merge's journal
+//! `idx_volume_uploads_uploader_nocase`, `idx_volume_identities_uuid` and the OCR
+//! census's per-file cache `sidecar_facts`; then the local case merge's journal
 //! (`case_merge_groups`, `case_merge_steps`, `case_merge_blocks`,
 //! `case_merge_owner_snapshots`, see [`crate::case_merge`]) and
 //! `series_folder_adoption_deferred`, inside the same version (no bump: every 0.7 and
 //! earlier 0.8 file gains them at its next open, with nothing to migrate). Additive: a 0.7
-//! build opens a version 7 file and ignores the tables and the index.
+//! build opens a version 7 file and ignores the tables and the indexes.
 
 use crate::database::column_exists;
 use crate::error::Result;
@@ -31,7 +32,7 @@ use crate::series::load_json_object;
 use rusqlite::{Connection, OptionalExtension, params};
 
 /// 6 through 0.7 (`Database.SCHEMA_VERSION` of 0.5.2, unchanged in 0.5.3); 7 since 0.8
-/// (series folder owners).
+/// (series folder owners, the OCR census's sidecar facts).
 pub const SCHEMA_VERSION: i64 = 7;
 
 const SCHEMA_VERSION_DDL: &str = "
@@ -328,6 +329,33 @@ const VOLUME_UPLOADS_UPLOADER_NOCASE_INDEX: &str = "
                 ON volume_uploads(uploader_username COLLATE NOCASE)
             ";
 
+/// Volumes by their uuid (0.8): the analytics reading worker resolves a reader's
+/// volume uuid to its library path (design analytics.md §6).
+const VOLUME_IDENTITIES_UUID_INDEX: &str = "
+                CREATE INDEX IF NOT EXISTS idx_volume_identities_uuid
+                ON volume_identities(volume_uuid)
+            ";
+
+/// What the OCR census read off each sidecar file (0.8, [`crate::sidecar_facts`]): one
+/// row per library-relative path, valid for the version `(size, mtime_ns, version)` it
+/// was read at. A cache: dropping it costs one read of each sidecar.
+const SIDECAR_FACTS_DDL: &str = "
+                CREATE TABLE IF NOT EXISTS sidecar_facts (
+                    sidecar_path TEXT PRIMARY KEY,
+                    size INTEGER NOT NULL,
+                    mtime_ns INTEGER NOT NULL,
+                    version TEXT NOT NULL DEFAULT '',
+                    facts TEXT NOT NULL,
+                    read_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+            ";
+
+/// [`SIDECAR_FACTS_DDL`]'s rows by content version: a cloud file renamed keeps its facts.
+const SIDECAR_FACTS_VERSION_INDEX: &str = "
+                CREATE INDEX IF NOT EXISTS idx_sidecar_facts_version
+                ON sidecar_facts(version, size, mtime_ns)
+            ";
+
 /// Step 6 indexes, in 0.5.2's order. `idx_audit_created_at` is named in an `INDEXED BY`
 /// hint by the audit query, so it must exist under exactly this name.
 const INDEXES: &[&str] = &[
@@ -461,6 +489,9 @@ pub(crate) fn init(conn: &Connection) -> Result<()> {
         )?;
     }
     conn.execute(VOLUME_UPLOADS_UPLOADER_NOCASE_INDEX, [])?;
+    conn.execute(VOLUME_IDENTITIES_UUID_INDEX, [])?;
+    conn.execute(SIDECAR_FACTS_DDL, [])?;
+    conn.execute(SIDECAR_FACTS_VERSION_INDEX, [])?;
 
     // 8b. The local case merge's journal and the deferred adoptions (0.8, still version 7).
     for ddl in [

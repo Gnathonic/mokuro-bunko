@@ -31,8 +31,113 @@ use bunko_vlm::{HayaiAssets, PaddleAssets};
 pub const PPOCR: &str = "ppocr-manga";
 pub const HAYAI: &str = "hayai-nova";
 pub const PADDLE: &str = "paddle-manga";
+/// The text-box recognizers (non-commercial weights), on ONNX Runtime on the CPU.
+#[cfg(feature = "nc-models")]
+pub const CHARSPOT: &str = "charspot-small";
+#[cfg(feature = "nc-models")]
+pub const NAR: &str = "nar-small";
 /// Every engine this build runs, in catalog order.
-pub const ENGINES: [&str; 3] = [HAYAI, PADDLE, PPOCR];
+pub const ENGINES: &[&str] = &[
+    HAYAI,
+    PADDLE,
+    PPOCR,
+    #[cfg(feature = "nc-models")]
+    CHARSPOT,
+    #[cfg(feature = "nc-models")]
+    NAR,
+];
+
+/// Whether `engine`'s recognizer is one of the text-box recognizers: it runs on ONNX
+/// Runtime on the CPU and needs no backend pack.
+pub fn textbox_engine(engine: &str) -> bool {
+    !textbox_ids(engine).is_empty()
+}
+
+/// The pinned `(repo, revision)` a text-box recognizer's files come from.
+pub fn textbox_source(engine: &str) -> Option<(&'static str, &'static str)> {
+    match engine {
+        #[cfg(feature = "nc-models")]
+        CHARSPOT => Some(bunko_ocr::models::CHARSPOT_SOURCE),
+        #[cfg(feature = "nc-models")]
+        NAR => Some(bunko_ocr::models::NAR_SOURCE),
+        _ => None,
+    }
+}
+
+/// Manifest ids of a text-box recognizer's files: the graph, then the vocabulary.
+pub fn textbox_ids(engine: &str) -> Vec<&'static str> {
+    match engine {
+        #[cfg(feature = "nc-models")]
+        CHARSPOT => vec![
+            bunko_ocr::models::CHARSPOT_MODEL,
+            bunko_ocr::models::CHARSPOT_VOCABULARY,
+        ],
+        #[cfg(feature = "nc-models")]
+        NAR => vec![
+            bunko_ocr::models::NAR_MODEL,
+            bunko_ocr::models::NAR_VOCABULARY,
+        ],
+        _ => Vec::new(),
+    }
+}
+
+/// The comic-text-detector line detector (GPL-3.0 weights).
+#[cfg(feature = "gpl-models")]
+pub const CTD: &str = "ctd-lines";
+/// The AnimeText block detector (GPL-3.0 weights).
+#[cfg(feature = "gpl-models")]
+pub const ANIMETEXT: &str = "animetext-blocks";
+/// Every detector this build runs, the default first.
+pub const DETECTORS: &[&str] = &[
+    PPOCR,
+    #[cfg(feature = "gpl-models")]
+    CTD,
+    #[cfg(feature = "gpl-models")]
+    ANIMETEXT,
+];
+
+/// Whether `detector` finds text blocks (for an engine that reads blocks) rather than
+/// lines.
+pub fn block_detector(detector: &str) -> bool {
+    #[cfg(feature = "gpl-models")]
+    if detector == ANIMETEXT {
+        return true;
+    }
+    let _ = detector;
+    false
+}
+
+/// Detectors of the registry (`bunko_core::engines::DETECTORS`) this build was made
+/// without, each with the Cargo feature that brings it.
+const DETECTORS_LEFT_OUT: &[(&str, &str)] = &[
+    #[cfg(not(feature = "gpl-models"))]
+    ("ctd-lines", "gpl-models"),
+    #[cfg(not(feature = "gpl-models"))]
+    ("animetext-blocks", "gpl-models"),
+];
+
+/// Why this build does not run `detector`, when it is one the registry knows: the
+/// build was made without the feature of the detector's licence class.
+pub fn detector_left_out(detector: &str) -> Option<String> {
+    DETECTORS_LEFT_OUT
+        .iter()
+        .find(|(d, _)| *d == detector)
+        .map(|(d, feature)| {
+            format!("the {d} detector is not in this build (it was built without `{feature}`)")
+        })
+}
+
+/// Manifest ids of the files a line detector reads besides the PP-OCR files (which
+/// every row needs: the CTC recognizer reads the lines of any detector).
+pub fn detector_ids(detector: &str) -> Vec<&'static str> {
+    match detector {
+        #[cfg(feature = "gpl-models")]
+        CTD => vec![bunko_ocr::models::CTD_DETECTOR],
+        #[cfg(feature = "gpl-models")]
+        ANIMETEXT => vec![bunko_ocr::models::ANIMETEXT_DETECTOR],
+        _ => Vec::new(),
+    }
+}
 
 /// The `ocr_engine.weights` entry naming the ONNX export set: `{repo: release tag}`.
 pub const EXPORT_REPO: &str = "Gnathonic/mokuro-bunko";
@@ -244,6 +349,9 @@ pub fn engine_ids(engine: &str, precision: Precision) -> Vec<&'static str> {
 /// Manifest ids a recognizer reads at `precision` with the backends of this build:
 /// the libtorch host files, and the ONNX graphs when the ONNX recognizers are built.
 pub fn recognizer_ids(engine: &str, precision: Precision) -> Vec<&'static str> {
+    if textbox_engine(engine) {
+        return textbox_ids(engine);
+    }
     let mut ids = Vec::new();
     if cfg!(feature = "torch") {
         ids.extend(torch_host_ids(engine, precision));
@@ -279,7 +387,7 @@ pub fn list_ids(engine: &str) -> Vec<&'static str> {
 /// `EnginePipeline::prefetch`.
 pub fn download_plan(engine: Option<&str>, gpu: bool) -> Vec<&'static str> {
     let mut ids = ppocr_ids();
-    for e in ENGINES {
+    for &e in ENGINES {
         if engine.is_some_and(|want| want != e) {
             continue;
         }
@@ -463,10 +571,12 @@ mod tests {
             },
             Manifest::builtin(),
         );
-        assert_eq!(
-            available_engines(&online, |_| true),
-            vec!["hayai-nova", "paddle-manga", "ppocr-manga"]
-        );
+        // The default engines, then the ones of the restricted classes this build has.
+        let mut all = vec!["hayai-nova", "paddle-manga", "ppocr-manga"];
+        if cfg!(feature = "nc-models") {
+            all.extend(["charspot-small", "nar-small"]);
+        }
+        assert_eq!(available_engines(&online, |_| true), all);
         // no recognizer backend: ppocr-manga only
         assert_eq!(available_engines(&online, |_| false), vec!["ppocr-manga"]);
     }

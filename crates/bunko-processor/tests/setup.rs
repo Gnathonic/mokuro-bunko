@@ -129,7 +129,7 @@ async fn the_account_check_reads_role_and_protocol_without_registering() {
     );
 
     let url = library(Lib {
-        version: "0.7.9",
+        version: "0.7.0",
         ..lib()
     })
     .await;
@@ -137,7 +137,7 @@ async fn the_account_check_reads_role_and_protocol_without_registering() {
         .await
         .unwrap();
     assert!(
-        ok.notes[0].contains("and the library 0.7.9"),
+        ok.notes[0].contains("and the library 0.7.0"),
         "{:?}",
         ok.notes
     );

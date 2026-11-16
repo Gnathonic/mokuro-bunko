@@ -114,6 +114,9 @@ pub fn storage_line(st: &Storage, now: DateTime<Local>) -> Option<String> {
             None => format!("Paused: {name} asked to slow down"),
         },
         "blocked" => match h.reason.as_deref() {
+            Some("StorageFull") if st.backend == "folder" => {
+                "Paused: the library folder's disk is full".into()
+            }
             Some("StorageFull") => format!("Paused: {name} storage is full"),
             Some("DailyLimit") => format!("Paused: {name} daily limit"),
             _ => format!("Paused: {name} transfer quota"),
@@ -167,6 +170,9 @@ impl StorageNotices {
             "needs-reauth" => format!(
                 "Sign in to {name} again: open the admin panel (Storage), or choose \"Sign in again…\" in the tray menu."
             ),
+            "blocked:StorageFull" if st.backend == "folder" => {
+                "The disk that holds the library folder is full: OCR results wait until there is room.".into()
+            }
             "blocked:StorageFull" => {
                 format!("The {name} storage is full: OCR results wait until there is room.")
             }
@@ -1133,6 +1139,22 @@ mod tests {
             m.sign_in_url.as_deref(),
             Some("http://localhost:8080/_admin#storage")
         );
+        // A local folder is kept like a cloud folder: its own line.
+        let synced = now().timestamp() as f64 - 75.0;
+        assert_eq!(
+            line(&format!(
+                r#"{{"backend":"folder","path":"/srv/manga","health":{{"state":"online"}},"synced_at":{synced}}}"#
+            )),
+            "Local folder · synced 1 min ago"
+        );
+        assert_eq!(
+            line(r#"{"backend":"folder","health":{"state":"offline"}}"#),
+            "Local folder · offline, retrying"
+        );
+        assert_eq!(
+            line(r#"{"backend":"folder","health":{"state":"blocked","reason":"StorageFull"}}"#),
+            "Paused: the library folder's disk is full"
+        );
         // A library on this disk has no such line.
         let m = model(&[inst(
             cloud(r#"{"backend":"local","health":{"state":"online"}}"#),
@@ -1163,5 +1185,12 @@ mod tests {
         assert!(n.observe("server", &full).unwrap().1.contains("full"));
         let local = cloud(r#"{"backend":"local","health":{"state":"online"}}"#);
         assert!(n.observe("other", &local).is_none());
+        let folder_full =
+            cloud(r#"{"backend":"folder","health":{"state":"blocked","reason":"StorageFull"}}"#);
+        let (_, body) = n.observe("folder", &folder_full).unwrap();
+        assert!(
+            body.contains("disk that holds the library folder"),
+            "{body}"
+        );
     }
 }

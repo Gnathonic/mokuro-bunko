@@ -334,7 +334,7 @@ pub fn plan(target: &OcrTarget, rows: &[(String, String)], open_backend: bool) -
     };
     let gpu = bunko_ocr::runtime::ep_compiled().len() > 1;
     let mut engines = Vec::new();
-    for engine in models::ENGINES {
+    for &engine in models::ENGINES {
         let used = if engine == models::PPOCR {
             !rows.is_empty()
         } else {
@@ -635,7 +635,7 @@ pub fn wanted_rows(target: &OcrTarget, engine: Option<&str>) -> Vec<(String, Str
 /// generation runs is neither fetched nor missed.
 pub fn planned_ids(rows: &[(String, String)], gpu: bool) -> Vec<&'static str> {
     let mut ids: Vec<&'static str> = Vec::new();
-    for e in models::ENGINES {
+    for &e in models::ENGINES {
         let wanted = e == models::PPOCR || rows.iter().any(|(r, _)| r == e);
         if !wanted {
             continue;

@@ -750,7 +750,16 @@ fn verify_with_allowance(path: &Path, allowance: fn(u64) -> u64) -> Verified {
             Ok(f) => {
                 #[allow(deprecated)]
                 let method = f.compression().to_u16();
-                members.push((i, f.name().to_string(), f.is_dir(), method, f.size()));
+                // A name the zip crate cannot decode is a broken directory entry, not a
+                // member to leave unchecked: the archive is refused like any other.
+                let name = match f.name() {
+                    Ok(n) => n.into_owned(),
+                    Err(e) => {
+                        result.structural = Some(format!("BadZipFile: {e}"));
+                        return result;
+                    }
+                };
+                members.push((i, name, f.is_dir(), method, f.size()));
             }
             Err(e) => {
                 result.structural = Some(format!("BadZipFile: {e}"));
@@ -1139,15 +1148,14 @@ mod tests {
         assert!(v.refused.is_none(), "{:?}", v.refused);
         assert_eq!(v.damaged, vec!["p1.jpg".to_string()]);
         assert!(!v.ok());
-        // The declared 1 KiB fits a 2 KiB allowance; the real output does not.
+        // The declared 1 KiB fits a 2 KiB allowance; the real output does not. The zip
+        // crate (since 9) stops reading a member at its declared size, so the member is
+        // damaged before the running total can pass the allowance; the count against
+        // the allowance stays for a reader that does not stop there.
         let v = verify_with_allowance(&path, |_| 2048);
-        assert!(
-            v.refused
-                .as_deref()
-                .is_some_and(|r| r.contains("inflate past")),
-            "{:?}",
-            v.refused
-        );
+        assert!(!v.ok());
+        assert!(v.refused.is_none(), "{:?}", v.refused);
+        assert_eq!(v.damaged, vec!["p1.jpg".to_string()]);
         // Declared honestly but over the allowance once inflated: refused while reading.
         std::fs::write(&path, understated_zip(4 << 20, 4 << 20)).unwrap();
         assert!(verify_with_allowance(&path, |_| 64 << 20).ok());
@@ -1156,6 +1164,72 @@ mod tests {
         // An honest small archive still verifies under the real allowance.
         std::fs::write(&path, understated_zip(1000, 1000)).unwrap();
         assert!(verify_staged(&path).ok());
+    }
+
+    /// `data` with member `from` renamed to the raw bytes `to` (same length) in its local
+    /// and central headers, and the UTF-8 flag (bit 11) set to `utf8`: the names real
+    /// archives carry that the zip writer cannot write.
+    fn renamed(mut data: Vec<u8>, from: &str, to: &[u8], utf8: bool) -> Vec<u8> {
+        assert_eq!(from.len(), to.len());
+        let (mut i, mut hits) = (0, 0);
+        while i + 46 <= data.len() {
+            let (flags, len, name) = match &data[i..i + 4] {
+                b"PK\x03\x04" => (i + 6, i + 26, i + 30),
+                b"PK\x01\x02" => (i + 8, i + 28, i + 46),
+                _ => {
+                    i += 1;
+                    continue;
+                }
+            };
+            let n = u16::from_le_bytes([data[len], data[len + 1]]) as usize;
+            if &data[name..name + n] == from.as_bytes() {
+                data[name..name + n].copy_from_slice(to);
+                let f = u16::from_le_bytes([data[flags], data[flags + 1]]);
+                let f = if utf8 { f | 0x800 } else { f & !0x800 };
+                data[flags..flags + 2].copy_from_slice(&f.to_le_bytes());
+                hits += 1;
+            }
+            i += 4;
+        }
+        assert_eq!(hits, 2, "{from}: one local and one central header");
+        data
+    }
+
+    /// Member names in every encoding real archives use, none of them a valid flagged
+    /// UTF-8 name: Shift-JIS and CP437 without the flag, UTF-8 without the flag (macOS
+    /// Archive Utility), and bytes that are not UTF-8 under the flag.
+    fn odd_names() -> [(&'static str, &'static [u8], bool); 4] {
+        [
+            ("sj.jpg", b"\x83\x41.jpg", false),
+            ("cp.jpg", b"\x80\x81.jpg", false),
+            ("mac.jpg", "\u{30a4}.jpg".as_bytes(), false),
+            ("bd.jpg", b"\xff\xfe.jpg", true),
+        ]
+    }
+
+    /// zip 9 decodes a name UTF-8-or-CP437 and its `name()` became fallible; the upload
+    /// check refuses an archive whose names it cannot decode. Every real name encoding
+    /// still decodes: such uploads verify, every member read.
+    #[test]
+    fn member_names_in_any_encoding_verify() {
+        use std::io::Write;
+        let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        for (placeholder, _, _) in odd_names() {
+            w.start_file(placeholder, opts).unwrap();
+            w.write_all(&[7u8; 3000]).unwrap();
+        }
+        let mut bytes = w.finish().unwrap().into_inner();
+        for (placeholder, raw, utf8) in odd_names() {
+            bytes = renamed(bytes, placeholder, raw, utf8);
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v.cbz");
+        std::fs::write(&path, bytes).unwrap();
+        let v = verify_staged(&path);
+        assert!(v.ok(), "{}", v.describe());
+        assert_eq!(v.members, 4);
     }
 
     fn b64(data: &[u8]) -> String {

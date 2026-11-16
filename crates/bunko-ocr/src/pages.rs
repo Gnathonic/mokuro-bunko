@@ -74,6 +74,10 @@ impl ZipEntry {
     }
 }
 
+/// The most an archive member read whole (a page) may declare, uncompressed: far
+/// above any real page image.
+pub const MAX_MEMBER_BYTES: u64 = 256 * 1024 * 1024;
+
 fn le16(b: &[u8], at: usize) -> u16 {
     u16::from_le_bytes([b[at], b[at + 1]])
 }
@@ -133,7 +137,11 @@ impl ZipArchive {
             count = le64(&rec, 32);
             cd_size = le64(&rec, 40);
             cd_offset = le64(&rec, 48);
-            cd_end = eocd_pos - 20 - 56;
+            // The zip64 record and locator sit before the EOCD; an EOCD nearer the
+            // start than that is a damaged archive, not an offset to wrap around.
+            cd_end = eocd_pos
+                .checked_sub(20 + 56)
+                .ok_or_else(|| bad("corrupt zip64 end of central directory"))?;
         }
         let concat = cd_end
             .checked_sub(cd_size)
@@ -143,7 +151,9 @@ impl ZipArchive {
         file.seek(SeekFrom::Start(cd_offset + concat))
             .map_err(|e| Error::io(path, e))?;
         file.read_exact(&mut cd).map_err(|e| Error::io(path, e))?;
-        let mut entries = Vec::with_capacity(count as usize);
+        // The count is only a hint: a central directory header takes at least 46
+        // bytes, so the directory read above bounds how many entries there can be.
+        let mut entries = Vec::with_capacity(count.min(cd.len() as u64 / 46) as usize);
         let mut p = 0usize;
         while p + 46 <= cd.len() {
             if cd[p..p + 4] != [0x50, 0x4b, 0x01, 0x02] {
@@ -268,11 +278,23 @@ impl ZipArchive {
         })
     }
 
-    /// Entry `index` read whole.
+    /// Entry `index` read whole. An entry declaring more than [`MAX_MEMBER_BYTES`] is
+    /// refused before any of it is read: the CRC reader holds the output to the
+    /// declared size, so this also bounds what a compressed entry can inflate to.
     pub fn read(&mut self, index: usize) -> Result<Vec<u8>> {
         let size = self.entries.get(index).map_or(0, |e| e.size);
+        if size > MAX_MEMBER_BYTES {
+            return Err(Error::Archive {
+                path: self.path.clone(),
+                msg: format!(
+                    "{}: {size} bytes, more than the {} MiB a page may be",
+                    self.entries[index].name,
+                    MAX_MEMBER_BYTES >> 20
+                ),
+            });
+        }
         let path = self.path.clone();
-        let mut out = Vec::with_capacity(size.min(1 << 30) as usize);
+        let mut out = Vec::with_capacity(size.min(16 << 20) as usize);
         self.reader(index)?
             .read_to_end(&mut out)
             .map_err(|e| Error::io(path, e))?;
@@ -513,6 +535,137 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["v/001.jxl", "v/002.JXL"]
         );
+    }
+
+    /// A stored (uncompressed) zip of `(name, data, declared size)` members, with the
+    /// declared size written into both headers (normally `data.len()`).
+    fn stored_zip(members: &[(&str, &[u8], u32)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut central = Vec::new();
+        for (name, data, declared) in members {
+            let crc = crc32fast::hash(data);
+            let offset = out.len() as u32;
+            out.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
+            out.extend_from_slice(&[20, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+            out.extend_from_slice(&crc.to_le_bytes());
+            out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            out.extend_from_slice(&declared.to_le_bytes());
+            out.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(name.as_bytes());
+            out.extend_from_slice(data);
+            central.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
+            central.extend_from_slice(&[20, 0, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+            central.extend_from_slice(&crc.to_le_bytes());
+            central.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            central.extend_from_slice(&declared.to_le_bytes());
+            central.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            central.extend_from_slice(&[0; 12]);
+            central.extend_from_slice(&offset.to_le_bytes());
+            central.extend_from_slice(name.as_bytes());
+        }
+        let cd_offset = out.len() as u32;
+        out.extend_from_slice(&central);
+        out.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+        out.extend_from_slice(&[0; 4]);
+        out.extend_from_slice(&(members.len() as u16).to_le_bytes());
+        out.extend_from_slice(&(members.len() as u16).to_le_bytes());
+        out.extend_from_slice(&(central.len() as u32).to_le_bytes());
+        out.extend_from_slice(&cd_offset.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out
+    }
+
+    /// A zip64 end-of-central-directory record claiming `count` entries in a
+    /// directory of `cd_size` bytes at offset 0.
+    fn zip64_record(count: u64, cd_size: u64) -> Vec<u8> {
+        let mut rec = Vec::new();
+        rec.extend_from_slice(&0x0606_4b50u32.to_le_bytes());
+        rec.extend_from_slice(&44u64.to_le_bytes());
+        rec.extend_from_slice(&[45, 0, 45, 0]);
+        rec.extend_from_slice(&[0; 8]);
+        rec.extend_from_slice(&count.to_le_bytes());
+        rec.extend_from_slice(&count.to_le_bytes());
+        rec.extend_from_slice(&cd_size.to_le_bytes());
+        rec.extend_from_slice(&0u64.to_le_bytes());
+        assert_eq!(rec.len(), 56);
+        rec
+    }
+
+    fn zip64_locator(record_at: u64) -> Vec<u8> {
+        let mut loc = Vec::new();
+        loc.extend_from_slice(&0x0706_4b50u32.to_le_bytes());
+        loc.extend_from_slice(&0u32.to_le_bytes());
+        loc.extend_from_slice(&record_at.to_le_bytes());
+        loc.extend_from_slice(&1u32.to_le_bytes());
+        loc
+    }
+
+    fn eocd(comment_len: u16) -> Vec<u8> {
+        let mut e = Vec::new();
+        e.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+        e.extend_from_slice(&[0; 4]);
+        e.extend_from_slice(&[0xff; 12]);
+        e.extend_from_slice(&comment_len.to_le_bytes());
+        e
+    }
+
+    fn write(bytes: &[u8]) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v.cbz");
+        std::fs::write(&path, bytes).unwrap();
+        (dir, path)
+    }
+
+    #[test]
+    fn a_stored_zip_reads_back() {
+        let (_d, path) = write(&stored_zip(&[("1.jpg", b"one", 3), ("2.jpg", b"two", 3)]));
+        let mut zip = ZipArchive::open(&path).unwrap();
+        let names: Vec<&str> = zip.entries().iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["1.jpg", "2.jpg"]);
+        assert_eq!(zip.read(1).unwrap(), b"two");
+    }
+
+    /// Regression: the zip64 entry count went straight into `Vec::with_capacity`, so
+    /// a damaged archive claiming 2^40 entries in an empty directory made the
+    /// allocation fail, which aborts the process instead of returning an error.
+    #[test]
+    fn an_impossible_entry_count_is_only_a_hint() {
+        let mut bytes = zip64_record(1 << 40, 0);
+        bytes.extend(zip64_locator(0));
+        bytes.extend(eocd(0));
+        let (_d, path) = write(&bytes);
+        let zip = ZipArchive::open(&path).unwrap();
+        assert!(zip.entries().is_empty());
+    }
+
+    /// Regression: with the zip64 records placed after an EOCD near the start of
+    /// the file, `eocd_pos - 20 - 56` went below zero (a panic in debug builds, a
+    /// wrap to a huge directory size and a failed allocation in release).
+    #[test]
+    fn a_zip64_record_before_the_start_is_a_damaged_archive() {
+        let mut bytes = zip64_locator(20 + 22);
+        bytes.extend(eocd(56));
+        bytes.extend(zip64_record(1, 1 << 40));
+        assert_eq!(bytes.len(), 98);
+        let (_d, path) = write(&bytes);
+        let err = ZipArchive::open(&path).err().expect("refused");
+        assert!(err.to_string().contains("zip64"), "{err}");
+    }
+
+    /// Regression: a member's declared size was trusted up to 1 GiB for the buffer,
+    /// and nothing capped what a compressed member could inflate to.
+    #[test]
+    fn a_member_declaring_more_than_a_page_may_be_is_refused_unread() {
+        let huge = (MAX_MEMBER_BYTES + 1) as u32;
+        let (_d, path) = write(&stored_zip(&[
+            ("1.jpg", b"one", 3),
+            ("2.jpg", b"two", huge),
+        ]));
+        let mut zip = ZipArchive::open(&path).unwrap();
+        assert_eq!(zip.read(0).unwrap(), b"one");
+        let err = zip.read(1).unwrap_err().to_string();
+        assert!(err.contains("more than the 256 MiB a page may be"), "{err}");
     }
 
     #[test]

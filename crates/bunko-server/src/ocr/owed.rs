@@ -26,6 +26,11 @@ pub struct OwedVolume {
     pub mtime: f64,
     /// Row ids owed, in list (= run) order.
     pub rows: Vec<Arc<str>>,
+    /// The rows of `rows` owed because their layer is Bunko's own output at an older
+    /// engine revision ([`UpgradeProbe::layer_outdated`]), not because it is missing.
+    /// They are upgrades: the queue runs them after that row's missing files. Their
+    /// result replaces that file in place, a Sync write, as an upgrade's swap is.
+    pub outdated: Vec<Arc<str>>,
     /// Non-primary rows withheld because the supplied `.mokuro` names pages the archive
     /// lacks (never a failure, no record).
     pub skipped: Vec<Arc<str>>,
@@ -227,10 +232,21 @@ fn compute_in(
         return None;
     }
     let enabled: Vec<&Generation> = bunko_core::generations::enabled_generations(rows).collect();
+    let mut outdated: Vec<Arc<str>> = Vec::new();
     let mut owed: Vec<&Generation> = enabled
         .iter()
         .copied()
-        .filter(|r| !row_done(cbz, r, folder) || upgrade.is_some_and(|p| p.layer_outdated(cbz, r)))
+        .filter(|r| {
+            if !row_done(cbz, r, folder) {
+                return true;
+            }
+            // Done, but Bunko's own output at an older revision: an upgrade of the row.
+            let stale = upgrade.is_some_and(|p| p.layer_outdated(cbz, r));
+            if stale {
+                outdated.push(Arc::from(r.id.as_str()));
+            }
+            stale
+        })
         .filter(|r| writable(&r.sidecar_suffix()))
         .collect();
     let primary_done = enabled
@@ -249,6 +265,7 @@ fn compute_in(
             owed.retain(|r| r.primary);
         }
     }
+    outdated.retain(|id| owed.iter().any(|r| *r.id == **id));
     let mut wants_upgrade = false;
     if let Some(probe) = upgrade
         && primary_done
@@ -271,6 +288,7 @@ fn compute_in(
         mtime_ns: mtime_ns(&meta),
         mtime,
         rows: owed.iter().map(|r| Arc::from(r.id.as_str())).collect(),
+        outdated,
         skipped,
         missing_pages,
         upgrade: wants_upgrade,
@@ -320,6 +338,21 @@ pub fn pages_of(cbz: &Path, facts: &dyn LibraryFacts) -> Option<i64> {
     facts.page_count(cbz).or_else(|| archive_pages(cbz))
 }
 
+/// The page count a walk takes: [`pages_of`], but on a cloud library only the metadata
+/// cache's. The count feeds the queue's estimates, nothing that decides whether a
+/// volume is owed; there a zip directory is a provider read, and before the first
+/// metadata pass (which waits for the series.json files) the cache has nothing yet, so
+/// the walk would read every archive in the library for it. The cache has the count
+/// once that pass ran. A single arriving archive still has its directory read
+/// ([`pages_of`], off the scheduler's thread).
+fn walk_pages(cbz: &Path, facts: &dyn LibraryFacts, remote: bool) -> Option<i64> {
+    if remote {
+        facts.page_count(cbz)
+    } else {
+        pages_of(cbz, facts)
+    }
+}
+
 /// The full walk.
 pub fn walk(
     library: &Path,
@@ -328,7 +361,38 @@ pub fn walk(
     upgrade: Option<&dyn UpgradeProbe>,
     known: &KnownPages,
 ) -> OwedIndex {
+    walk_in_parts(
+        library,
+        rows,
+        facts,
+        upgrade,
+        known,
+        WALK_PART_EVERY,
+        &mut |_| {},
+    )
+}
+
+/// How often a running walk hands over the volumes it has judged so far.
+pub const WALK_PART_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// [`walk`], handing what it has judged to `part` every `every` while it runs, a folder
+/// at a time. On a cloud library a folder's judgement can take provider reads (a
+/// sidecar, a zip directory the metadata cache does not have yet), and a large library
+/// takes many minutes: the queue starts on the first folders meanwhile. A walk that
+/// ends within `every` hands over nothing; the returned index is always the whole.
+pub fn walk_in_parts(
+    library: &Path,
+    rows: &[Generation],
+    facts: &dyn LibraryFacts,
+    upgrade: Option<&dyn UpgradeProbe>,
+    known: &KnownPages,
+    every: std::time::Duration,
+    part: &mut dyn FnMut(OwedIndex),
+) -> OwedIndex {
     let mut index = OwedIndex::default();
+    let mut handed = std::time::Instant::now();
+    let remote = bunko_store::store_for(library).is_some_and(|s| s.caps().remote);
+    let mut since: Vec<String> = Vec::new();
     // Each folder is listed once for all of its archives.
     let mut by_folder: BTreeMap<&Path, Vec<&Path>> = BTreeMap::new();
     let archives = list_archives(library);
@@ -362,9 +426,21 @@ pub fn walk(
                 {
                     *pages
                 }
-                _ => pages_of(cbz, facts),
+                _ => walk_pages(cbz, facts, remote),
             };
+            since.push(rel.clone());
             index.volumes.insert(rel, v);
+        }
+        if !since.is_empty() && handed.elapsed() >= every {
+            let volumes = since
+                .drain(..)
+                .filter_map(|rel| index.volumes.get(&rel).map(|v| (rel, v.clone())))
+                .collect();
+            part(OwedIndex {
+                volumes,
+                orphans: Vec::new(),
+            });
+            handed = std::time::Instant::now();
         }
     }
     index
@@ -500,6 +576,53 @@ mod tests {
             vec!["g-1", "g-2"]
         );
         assert!(!index.volumes.contains_key("S/V2.cbz"));
+    }
+
+    /// A walk hands over what it judged as it goes, a folder at a time; together the
+    /// parts are the whole index, and a walk shorter than the interval hands over none.
+    #[test]
+    fn a_walk_hands_over_its_folders_as_it_goes() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = dir.path();
+        for s in ["A", "B", "C"] {
+            std::fs::create_dir_all(lib.join(s)).unwrap();
+            std::fs::write(lib.join(format!("{s}/V1.cbz")), b"PK").unwrap();
+            std::fs::write(lib.join(format!("{s}/V2.cbz")), b"PK").unwrap();
+        }
+        let mut parts: Vec<Vec<String>> = Vec::new();
+        let index = walk_in_parts(
+            lib,
+            &rows(),
+            &FileFacts,
+            None,
+            &KnownPages::new(),
+            std::time::Duration::ZERO,
+            &mut |part| parts.push(part.volumes.into_keys().collect()),
+        );
+        assert_eq!(
+            parts,
+            [
+                ["A/V1.cbz", "A/V2.cbz"],
+                ["B/V1.cbz", "B/V2.cbz"],
+                ["C/V1.cbz", "C/V2.cbz"]
+            ]
+        );
+        assert_eq!(
+            index.volumes.keys().collect::<Vec<_>>(),
+            parts.iter().flatten().collect::<Vec<_>>()
+        );
+        let mut none = 0;
+        let whole = walk_in_parts(
+            lib,
+            &rows(),
+            &FileFacts,
+            None,
+            &KnownPages::new(),
+            std::time::Duration::from_secs(3600),
+            &mut |_| none += 1,
+        );
+        assert_eq!(none, 0);
+        assert_eq!(whole.volumes, index.volumes);
     }
 
     /// Regression (upgrade test): `Vol.CBZ` is an archive to the catalog, uploads and

@@ -139,7 +139,7 @@ After DROPs:
 
 - Via `PUT /api/ocr/generations` (admin role only): the whole list (order, add, delete, rename, enabled, primary, engine, detector, patch_budget, precision, pools). Full replacement only (section 8.3).
 - Via `PUT /api/ocr/generations/<id>/pools`: one processor's pools override, never the config (8.5).
-- Via `PUT /api/settings/ocr`: `poll_interval` only (8.2). `backend` is launch-only (rejected); `engines`/`detector`/`patch_budget` are rejected as moved; `char_map` rejected.
+- Via `PUT /api/settings/ocr`: `poll_interval` only (8.2). **Rust:** also `upgrade` and `queue_order` (8.2). `backend` is launch-only (rejected); `engines`/`detector`/`patch_budget` are rejected as moved; `char_map` rejected.
 - Not editable via admin: `ocr.concurrency`, `ocr.sessions`, `ocr.local_processing`, `ocr.autobench` ("at startup" settings; config/CLI/env only).
 - Config surface: `ocr.generations` is also settable via `config set ocr.generations '<json>'`, env `MOKURO_OCR_GENERATIONS` (JSON text), and `serve --generations '<json>'` (`config.py:597-601`, `646-647`; `docs/configuration.md:614-616`). Retired keys `ocr.engines`, `ocr.detector`, `ocr.patch_budget` and their `MOKURO_OCR_*` env equivalents, and `ocr.char_map` / `MOKURO_OCR_CHAR_MAP`, are refused by name at config load (`config.py:290-330`, `670-690`). **KEEP** these refusals (a config using them must not silently half-load). Other `OcrConfig` fields: `backend` (`auto|cuda|rocm|cpu|skip`; **ADAPT**: with `ort` the backends are execution providers - DECIDE OQ-6), `poll_interval` (default 30, >=1), `concurrency` (default 1), `sessions` (default true), `local_processing` (default true), `autobench` (default true) (`config.py:332-376`).
 
@@ -495,6 +495,18 @@ Full config dict (`Config.to_dict`; OCR section: `{"backend","poll_interval","co
 ### 8.2 `PUT /api/settings/ocr`
 
 Body keys handled: `poll_interval` (int >= 1; else `400 {"error": "poll_interval must be a positive integer"}`). Rejected: `backend` -> `400 {"error": "OCR backend is launch-only. Use CLI flags/config file to change it."}`; `char_map` -> `400 {"error": "char_map was removed with the character-map system (no per-character placement mode produced output worth using; readers lay characters on a uniform grid) -- delete the key"}`; any of `engines`, `detector`, `patch_budget` -> `400 {"error": "<comma list> moved into the generations list; PUT them to /api/ocr/generations"}`. Checked in that order, under a config lock. Saves config; if `poll_interval` changed and a control handle exists, `ocr_control.apply(generations, poll_interval=float)`. Response `200`: `{"success": true, "ocr": {"backend","poll_interval","concurrency"}, "applied","installing","restart_required","reason", "ocr_runtime": {...}}` (outcome defaults `{"applied": false, "installing": false, "restart_required": <changed>, "reason": ""}`).
+
+> **Rust:** two more body keys, each optional, checked after `poll_interval`.
+> `upgrade` = `{enabled: bool, replace: [family]}` (`ocr.upgrade`; 400
+> `"upgrade must be an object"`, `"upgrade.replace must be a list"`, `"upgrade.replace
+> must be a list of strings"`, `"upgrade.replace: '<f>' is not a recipe family (an
+> engine id or 'mokuro-legacy')"`); the response's `ocr` then carries `upgrade`.
+> `queue_order` = `"auto"`, `"generation"`, `"volume"` or null (`ocr.queue_order`;
+> `"auto"`, `""` and null unset it; anything else 400 `"queue_order must be auto,
+> generation or volume"`); it counts as changed only when the order in force changes,
+> and the response's `ocr` then carries `queue_order` (as configured, `"auto"` when
+> unset) and `queue_order_effective` (`"generation"` or `"volume"`: unset means by
+> volume on a MEGA library). `GET /api/settings` carries the same three under `ocr`.
 
 ### 8.3 `GET /api/ocr/generations` and `PUT /api/ocr/generations`
 

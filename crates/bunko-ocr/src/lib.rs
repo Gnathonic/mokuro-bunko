@@ -7,12 +7,16 @@
 //!   reproduced bit-for-bit where it matters, plus the cover thumbnail;
 //! * [`pages`] — which archive members are pages, in which order, read one by one;
 //! * [`ppocr`] — PP-OCRv6 manga detection + recognition and the page-level passes;
+//! * [`blocks`] — text blocks and the seam of a block detector;
 //! * [`lines`] — the raw line records (`ppocr-lines/1`) the layout consumes.
 //!
 //! Everything is synchronous; callers on an async runtime use `spawn_blocking` or
 //! dedicated threads. Behaviour follows mokuro-bunko 0.5.2
 //! (`docs/rust-port/spec/ocr-ppocr-layout.md`).
 
+#[cfg(feature = "gpl-models")]
+pub mod animetext;
+pub mod blocks;
 pub mod error;
 pub mod image;
 pub mod lines;

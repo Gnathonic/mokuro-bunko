@@ -10,7 +10,7 @@
 //! The `reader_*` helpers act as Mokuro Reader would on that provider; they bypass call
 //! counting and fault injection.
 
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -123,8 +123,13 @@ struct State {
     next_ver: u64,
     last_ms: i64,
     calls: HashMap<FakeOp, usize>,
+    /// Change pages answered, counted as each one copies the log.
+    change_pages: usize,
     fail: HashMap<FakeOp, VecDeque<BErr>>,
     latency: Duration,
+    /// Nodes `find_named` leaves out: a provider's name search lagging behind its
+    /// files (Drive's `files.list` with a `q`).
+    search_hidden: std::collections::HashSet<Pid>,
     throttle_until: Option<Instant>,
     reorder: bool,
     reverse_lists: bool,
@@ -140,6 +145,9 @@ struct State {
     /// A misbehaving provider: this many next uploads store their bytes with the
     /// last one dropped.
     mangle_uploads: usize,
+    /// A misbehaving provider: `list_all` leaves these nodes and what is below them
+    /// out, and still answers `Ok`.
+    unlisted: HashSet<Pid>,
 }
 
 /// The in-memory provider.
@@ -168,6 +176,7 @@ fn base_caps() -> BackendCaps {
         chunk_multiple: 1,
         path_ids: false,
         duplicate_names: false,
+        content_versions: true,
     }
 }
 
@@ -214,10 +223,50 @@ impl FakeBackend {
                 cas_overwrite: cas,
                 pinned_read: cas,
                 path_ids: true,
+                // A WebDAV host's ETag (or mtime and size) names no file's bytes.
+                content_versions: false,
                 ..base_caps()
             },
             ids: Ids::Path,
             names: Names::Exact,
+            replace_is_new_node: false,
+            keeps_revisions: false,
+            roots_anywhere: false,
+            trash_flags: false,
+        })
+    }
+
+    /// A local folder (`folder::FolderBackend`) on a case-sensitive filesystem: path
+    /// ids, unique exact names, creates that never replace (no CAS on a replace),
+    /// unpinned reads, a push feed, atomic replaces, 1 ms mtimes, a trash that
+    /// removes.
+    pub fn folder_like() -> Self {
+        Self::folder("folder_like", Names::Exact)
+    }
+
+    /// A local folder on a filesystem that folds case (NTFS, APFS): as
+    /// [`FakeBackend::folder_like`], with one name per spelling-insensitive key.
+    pub fn folder_like_ci() -> Self {
+        Self::folder("folder_like_ci", Names::CaseInsensitive)
+    }
+
+    fn folder(name: &'static str, names: Names) -> Self {
+        Self::new(Profile {
+            name,
+            caps: BackendCaps {
+                cas_create: true,
+                cas_overwrite: false,
+                pinned_read: false,
+                push: true,
+                atomic_replace: true,
+                mtime_granularity_ns: 1_000_000,
+                path_ids: true,
+                // `folder::FolderBackend`'s version is the file's mtime and size.
+                content_versions: false,
+                ..base_caps()
+            },
+            ids: Ids::Path,
+            names,
             replace_is_new_node: false,
             keeps_revisions: false,
             roots_anywhere: false,
@@ -320,6 +369,17 @@ impl FakeBackend {
         self.state.lock().latency = d;
     }
 
+    /// `find_named` leaves `pid` out until [`FakeBackend::search_catches_up`]: a name
+    /// search lagging behind the files, as Drive's can. `stat` and reads still see it.
+    pub fn hide_from_search(&self, pid: &str) {
+        self.state.lock().search_hidden.insert(pid.to_string());
+    }
+
+    /// The name search sees every file again.
+    pub fn search_catches_up(&self) {
+        self.state.lock().search_hidden.clear();
+    }
+
     /// The next call of `op` fails with `e` (queued: several calls fail in order).
     pub fn fail_next(&self, op: FakeOp, e: BErr) {
         self.state.lock().fail.entry(op).or_default().push_back(e);
@@ -355,6 +415,20 @@ impl FakeBackend {
     /// Items per change page (default 500).
     pub fn set_page_size(&self, n: usize) {
         self.state.lock().page_size = n.max(1);
+    }
+
+    /// Full listings (`list_all`) leave out the nodes at `paths` and everything below
+    /// them, and still succeed: a server that cut its listing short. Every other call
+    /// (`stat`, `changes`) answers for them as before. An empty `paths` ends it.
+    pub fn leave_out_of_listings(&self, paths: &[&str]) {
+        let mut st = self.state.lock();
+        st.unlisted = paths
+            .iter()
+            .map(|p| {
+                st.resolve(&self.profile, p)
+                    .unwrap_or_else(|| panic!("no node at {p}"))
+            })
+            .collect();
     }
 
     /// `list_all` calls `hook` after every node it streams (to observe the consumer
@@ -400,6 +474,14 @@ impl FakeBackend {
     /// How many times `op` was called through the [`Backend`] trait.
     pub fn calls(&self, op: FakeOp) -> usize {
         self.state.lock().calls.get(&op).copied().unwrap_or(0)
+    }
+
+    /// How many change pages [`Backend::changes`] has answered. A page holds the
+    /// log as it was when it was counted here: a change made after that is in a
+    /// later page. [`FakeBackend::calls`] counts a call when it starts, before its
+    /// page is cut. [`FakeBackend::reset_calls`] leaves this count alone.
+    pub fn change_pages(&self) -> usize {
+        self.state.lock().change_pages
     }
 
     /// Reset every call counter and the read log.
@@ -1315,6 +1397,9 @@ impl Backend for FakeBackend {
                 stack.extend(st.live_children(r).into_iter().rev());
             }
             while let Some(p) = stack.pop() {
+                if st.unlisted.contains(&p) {
+                    continue;
+                }
                 stack.extend(st.live_children(&p).into_iter().rev());
                 out.push(st.rnode(&self.profile, &p));
             }
@@ -1358,6 +1443,7 @@ impl Backend for FakeBackend {
             .iter()
             .filter(|c| st.nodes[*c].name == name.as_bytes())
             .map(|c| st.rnode(&self.profile, c))
+            .filter(|n: &RNode| !st.search_hidden.contains(&n.pid))
             .collect();
         Ok((found, ServerTime(self.now_ms())))
     }
@@ -1378,6 +1464,7 @@ impl Backend for FakeBackend {
             items = items.into_iter().flat_map(|i| [i.clone(), i]).collect();
         }
         st.issued(end);
+        st.change_pages += 1;
         Ok(ChangePage::Page {
             items,
             next: Cursor(end.to_string()),
@@ -1480,6 +1567,11 @@ impl Backend for FakeBackend {
                             return Err(BErr::NameConflict);
                         }
                         Some(_) if prof.ids == Ids::Opaque => return Err(BErr::NameConflict),
+                        // Another spelling holds the name (case-insensitive path ids,
+                        // a local folder on NTFS or APFS): not this file's race.
+                        Some(existing) if st.nodes[&existing].name != name.as_bytes() => {
+                            return Err(BErr::NameConflict);
+                        }
                         Some(_) if prof.caps.cas_create => return Err(BErr::PreconditionFailed),
                         Some(existing) => {
                             let freeing = st.nodes[&existing].data.len() as u64;

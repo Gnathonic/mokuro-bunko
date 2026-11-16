@@ -75,6 +75,9 @@ struct LicensesArgs {
     /// Without the desktop tray (as `dist --no-tray`).
     #[arg(long)]
     no_tray: bool,
+    /// Without the restricted-licence models (as `dist --permissive-models`).
+    #[arg(long)]
+    permissive_models: bool,
 }
 
 fn main() -> Result<()> {
@@ -101,6 +104,7 @@ fn licenses_cmd(a: &LicensesArgs) -> Result<()> {
     };
     let mut build = names::Build::new(&target, a.flavor, a.ep)?;
     build.no_tray = a.no_tray;
+    build.permissive_models = a.permissive_models;
     let version = util::workspace_version(&root)?;
     let report = licenses::collect(&root, &build, &version, &[])?;
     let mut counts = std::collections::BTreeMap::<&str, usize>::new();

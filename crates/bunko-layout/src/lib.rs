@@ -42,11 +42,12 @@ pub mod sidecar;
 
 pub use json::{Separators, Value};
 pub use layout::{Block, Body, Kind, PageLayout, Ruby, column_pieces, layout_page};
-pub use reconcile::{Reconciled, reconcile_line, settle_disputes};
+pub use reconcile::{Reconciled, reconcile_line, reconcile_verbatim, settle_disputes};
 pub use records::{RawLine, RawPage};
 pub use road::EngineRoad;
 pub use script::normalize_text;
 pub use sidecar::{
-    FinishedPage, LayerStamp, Normalization, OcrEngine, Page, VolumeHeader, build_volume,
-    finish_page, layout_page_dict, normalize_sidecar, normalize_sidecar_file, write_sidecar,
+    FinishedPage, LayerStamp, Normalization, OcrEngine, Page, VolumeHeader, blocks_page,
+    build_volume, finish_page, layout_page_dict, normalize_sidecar, normalize_sidecar_file,
+    write_sidecar,
 };

@@ -659,6 +659,9 @@ fn parse_row(
                 ),
             ));
         };
+        if let Some(why) = engines::mismatch(spec, d) {
+            return Err(row_err(index, "detector", why));
+        }
         detector = Some(d.id.to_string());
     }
 
@@ -1071,6 +1074,48 @@ mod tests {
         let hayai = p.rows.iter().find(|g| g.engine == "hayai-nova").unwrap();
         assert!(hayai.primary);
         assert_eq!(hayai.detector.as_deref(), Some("ppocr-manga"));
+    }
+
+    /// The detectors that came back in 0.8 are choices of their own: a line detector
+    /// goes with every engine that takes one, a block detector only with the engines
+    /// that read blocks, and the 0.5 names still mean "the default".
+    #[test]
+    fn a_block_detector_goes_only_with_an_engine_that_reads_blocks() {
+        let rows = |engine: &str, detector: &str| {
+            json!([
+                {"name": "main", "engine": "hayai-nova", "primary": true},
+                {"name": "layer", "engine": engine, "detector": detector}
+            ])
+        };
+        let detector_of = |v: Value| {
+            let p = parse_generation_list(&v).unwrap();
+            p.rows[1].detector.clone()
+        };
+        assert_eq!(
+            detector_of(rows("charspot-small", "animetext-blocks")).as_deref(),
+            Some("animetext-blocks")
+        );
+        assert_eq!(
+            detector_of(rows("nar-small", "ctd-lines")).as_deref(),
+            Some("ctd-lines")
+        );
+        assert_eq!(
+            detector_of(rows("paddle-manga", "ctd-lines")).as_deref(),
+            Some("ctd-lines")
+        );
+        let err = parse_generation_list(&rows("paddle-manga", "animetext-blocks")).unwrap_err();
+        let text = format!("{err:?}");
+        assert!(
+            text.contains("finds text blocks") && text.contains("charspot-small, nar-small"),
+            "{text}"
+        );
+        // 0.5's names are not the new detectors: they still fall back to the default.
+        for old in ["ctd", "animetext"] {
+            assert_eq!(
+                detector_of(rows("charspot-small", old)).as_deref(),
+                Some("ppocr-manga")
+            );
+        }
     }
 
     #[test]

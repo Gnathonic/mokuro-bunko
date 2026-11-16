@@ -282,7 +282,7 @@ fn ppocr_matches_python_052() {
         .map(PathBuf::from)
         .unwrap_or_else(|| home().join(".cache/mokuro-bunko-demo/ref052-ocr/bin/python"));
     let models = std::env::var_os("BUNKO_PPOCR_MODELS").map(PathBuf::from).unwrap_or_else(|| {
-        home().join(".cache/huggingface/hub/models--Kellenok--PP-OCRv6_manga/snapshots/ba1d479e8a61a20e8318c9758c73fbbbd290b98d")
+        home().join(".cache/huggingface/hub/models--Kellenok--PP-OCRv6_manga/snapshots/d65838996a00ef6b1c73ca3a700d7a8c5fbbef8a")
     });
     let tmp = tempfile::tempdir().expect("tmp");
     let store = ModelStore::new(

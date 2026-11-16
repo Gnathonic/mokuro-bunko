@@ -89,7 +89,22 @@ pub fn verify_archive(path: &Path, cancel: &CancelToken) -> Result<Verified, Ver
         if cancel.is_cancelled() {
             return Err(VerifyCancelled);
         }
-        let name = zip.name_for_index(index).unwrap_or_default().to_string();
+        let name = match zip.name_for_index(index) {
+            Some(Ok(name)) => name.into_owned(),
+            // A name the zip crate cannot decode is a broken directory entry: the
+            // member counts as damaged (under its raw bytes), never as a directory or
+            // as a member with an empty name.
+            Some(Err(_)) => {
+                let raw = zip
+                    .by_index_data(index)
+                    .map(|e| String::from_utf8_lossy(e.name_raw()).into_owned())
+                    .unwrap_or_default();
+                result.members += 1;
+                result.damaged.push(raw);
+                continue;
+            }
+            None => continue,
+        };
         let mut member = match zip.by_index(index) {
             Ok(m) => m,
             Err(zip::result::ZipError::UnsupportedArchive(_)) => {
@@ -195,5 +210,68 @@ pub(crate) mod tests {
             describe_damaged(&names),
             "'0.jpg', '1.jpg', '2.jpg', '3.jpg', '4.jpg' and 2 more fail their CRC-32 checks"
         );
+    }
+
+    /// `data` with member `from` renamed to the raw bytes `to` (same length) in its local
+    /// and central headers, and the UTF-8 flag (bit 11) set to `utf8`: the names real
+    /// archives carry that the zip writer cannot write.
+    fn renamed(mut data: Vec<u8>, from: &str, to: &[u8], utf8: bool) -> Vec<u8> {
+        assert_eq!(from.len(), to.len());
+        let (mut i, mut hits) = (0, 0);
+        while i + 46 <= data.len() {
+            let (flags, len, name) = match &data[i..i + 4] {
+                b"PK\x03\x04" => (i + 6, i + 26, i + 30),
+                b"PK\x01\x02" => (i + 8, i + 28, i + 46),
+                _ => {
+                    i += 1;
+                    continue;
+                }
+            };
+            let n = u16::from_le_bytes([data[len], data[len + 1]]) as usize;
+            if &data[name..name + n] == from.as_bytes() {
+                data[name..name + n].copy_from_slice(to);
+                let f = u16::from_le_bytes([data[flags], data[flags + 1]]);
+                let f = if utf8 { f | 0x800 } else { f & !0x800 };
+                data[flags..flags + 2].copy_from_slice(&f.to_le_bytes());
+                hits += 1;
+            }
+            i += 4;
+        }
+        assert_eq!(hits, 2, "{from}: one local and one central header");
+        data
+    }
+
+    /// Member names in every encoding real archives use, none of them a valid flagged
+    /// UTF-8 name: Shift-JIS and CP437 without the flag, UTF-8 without the flag (macOS
+    /// Archive Utility), and bytes that are not UTF-8 under the flag.
+    fn odd_names() -> [(&'static str, &'static [u8], bool); 4] {
+        [
+            ("sj.jpg", b"\x83\x41.jpg", false),
+            ("cp.jpg", b"\x80\x81.jpg", false),
+            ("mac.jpg", "\u{30a4}.jpg".as_bytes(), false),
+            ("bd.jpg", b"\xff\xfe.jpg", true),
+        ]
+    }
+
+    /// zip 9's `name()` is fallible; an undecodable name counts as a damaged member.
+    /// Every real name encoding still decodes: such an archive verifies clean.
+    #[test]
+    fn member_names_in_any_encoding_verify() {
+        let pages: Vec<(&str, &[u8])> = odd_names()
+            .iter()
+            .map(|(placeholder, _, _)| (*placeholder, b"page bytes".as_slice()))
+            .collect();
+        let mut bytes = stored_zip(&pages);
+        for (placeholder, raw, utf8) in odd_names() {
+            bytes = renamed(bytes, placeholder, raw, utf8);
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v.cbz");
+        std::fs::write(&path, bytes).unwrap();
+        let v = verify_archive(&path, &CancelToken::new()).unwrap();
+        assert!(v.structural.is_none(), "{:?}", v.structural);
+        assert!(v.damaged.is_empty(), "{:?}", v.damaged);
+        assert!(v.skipped.is_empty(), "{:?}", v.skipped);
+        assert_eq!(v.members, 4);
     }
 }

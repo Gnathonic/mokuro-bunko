@@ -270,6 +270,168 @@ fn tunnel_status_without_cloudflared() {
         .stdout("cloudflared: not installed\nInstall from: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/\n");
 }
 
+/// A fake `cloudflared` on PATH that prints a quick-tunnel URL on stderr as the real one
+/// does, then writes `marker` a moment later and exits. The marker exists only when
+/// `tunnel cloudflare` let it run to the end instead of killing it after the URL.
+#[cfg(unix)]
+fn fake_cloudflared(env: &Env) -> (std::process::Command, std::path::PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = env.root().join("fake-bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let marker = env.root().join("cloudflared-ran-to-the-end");
+    let script = bin.join("cloudflared");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\n\
+             echo 'INF |  https://fake-tunnel.trycloudflare.com  |' >&2\n\
+             sleep 1\n\
+             echo done > '{}'\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut cmd = env.std_cmd();
+    cmd.env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .stdin(std::process::Stdio::null());
+    (cmd, marker)
+}
+
+#[cfg(unix)]
+const FAKE_TUNNEL_URL: &str = "https://fake-tunnel.trycloudflare.com";
+
+/// A line of cloudflared's log that is not UTF-8 failed the read, and the command ended
+/// with an error that took cloudflared down with it.
+#[cfg(unix)]
+#[test]
+fn tunnel_cloudflare_keeps_running_past_a_log_line_that_is_not_utf8() {
+    let env = Env::new();
+    env.write_config("");
+    let (mut cmd, marker) = fake_cloudflared(&env);
+    let script = env.root().join("fake-bin").join("cloudflared");
+    let body = std::fs::read_to_string(&script).unwrap();
+    std::fs::write(
+        &script,
+        body.replacen(
+            "#!/bin/sh\n",
+            "#!/bin/sh\nprintf 'INF \\377 not utf-8\\n' >&2\n",
+            1,
+        ),
+    )
+    .unwrap();
+    let out = cmd
+        .args(["tunnel", "cloudflare", "--cors", "no"])
+        .output()
+        .unwrap();
+    let (stdout, stderr) = (common::stdout(&out), common::stderr(&out));
+    assert!(out.status.success(), "{stdout}{stderr}");
+    assert!(stderr.contains("not utf-8"), "{stderr}");
+    assert!(
+        stdout.contains(&format!("Tunnel URL: {FAKE_TUNNEL_URL}")),
+        "{stdout}"
+    );
+    assert!(
+        marker.exists(),
+        "cloudflared was stopped early: {stdout}{stderr}"
+    );
+}
+
+/// A tunnel started without a terminal (detached, stdin /dev/null) used to read end of
+/// input at the CORS question, abort, and take cloudflared down with it.
+#[cfg(unix)]
+#[test]
+fn tunnel_cloudflare_without_a_terminal_keeps_running_and_asks_nothing() {
+    for args in [
+        &["tunnel", "cloudflare"][..],
+        &["tunnel", "cloudflare", "--cors", "ask"],
+    ] {
+        let env = Env::new();
+        env.write_config("");
+        let before = std::fs::read_to_string(env.config_path()).unwrap();
+        let (mut cmd, marker) = fake_cloudflared(&env);
+        let out = cmd.args(args).output().unwrap();
+        let (stdout, stderr) = (common::stdout(&out), common::stderr(&out));
+        assert!(out.status.success(), "{args:?}: {stdout}{stderr}");
+        assert!(
+            stdout.contains(&format!("Tunnel URL: {FAKE_TUNNEL_URL}")),
+            "{stdout}"
+        );
+        assert!(
+            stdout.contains(
+                "Not adding the tunnel URL to CORS origins (stdin is not a terminal); \
+                 pass --cors yes to add it."
+            ),
+            "{stdout}"
+        );
+        assert!(!stdout.contains("[Y/n]"), "{stdout}");
+        assert!(!stderr.contains("Aborted!"), "{stderr}");
+        assert!(
+            marker.exists(),
+            "cloudflared was stopped early: {stdout}{stderr}"
+        );
+        assert_eq!(std::fs::read_to_string(env.config_path()).unwrap(), before);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn tunnel_cloudflare_cors_no_adds_nothing() {
+    let env = Env::new();
+    env.write_config("");
+    let before = std::fs::read_to_string(env.config_path()).unwrap();
+    let (mut cmd, marker) = fake_cloudflared(&env);
+    let out = cmd
+        .args(["tunnel", "cloudflare", "--cors", "no"])
+        .output()
+        .unwrap();
+    let (stdout, stderr) = (common::stdout(&out), common::stderr(&out));
+    assert!(out.status.success(), "{stdout}{stderr}");
+    assert!(
+        stdout.contains(&format!("Not adding {FAKE_TUNNEL_URL} to CORS origins")),
+        "{stdout}"
+    );
+    assert!(!stderr.contains("Aborted!"), "{stderr}");
+    assert!(
+        marker.exists(),
+        "cloudflared was stopped early: {stdout}{stderr}"
+    );
+    assert_eq!(std::fs::read_to_string(env.config_path()).unwrap(), before);
+}
+
+#[cfg(unix)]
+#[test]
+fn tunnel_cloudflare_cors_yes_adds_the_url_without_asking() {
+    let env = Env::new();
+    env.write_config("");
+    for expected in [
+        format!("Added {FAKE_TUNNEL_URL} to CORS origins"),
+        format!("{FAKE_TUNNEL_URL} is already a CORS origin"),
+    ] {
+        let (mut cmd, marker) = fake_cloudflared(&env);
+        let _ = std::fs::remove_file(&marker);
+        let out = cmd
+            .args(["tunnel", "cloudflare", "--cors", "yes"])
+            .output()
+            .unwrap();
+        let (stdout, stderr) = (common::stdout(&out), common::stderr(&out));
+        assert!(out.status.success(), "{stdout}{stderr}");
+        assert!(stdout.contains(&expected), "{stdout}");
+        assert!(!stdout.contains("[Y/n]"), "{stdout}");
+        assert!(
+            marker.exists(),
+            "cloudflared was stopped early: {stdout}{stderr}"
+        );
+        let origins = env.config_yaml()["cors"]["allowed_origins"].clone();
+        let origins = origins.as_array().unwrap();
+        assert_eq!(
+            origins.iter().filter(|o| *o == FAKE_TUNNEL_URL).count(),
+            1,
+            "{origins:?}"
+        );
+    }
+}
+
 #[test]
 fn dyndns_status_enable_update() {
     let env = Env::new();

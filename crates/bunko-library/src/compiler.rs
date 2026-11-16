@@ -849,6 +849,31 @@ mod tests {
         }
     }
 
+    /// A series' OCR queue file (queue file v2) is no volume and no series file: a
+    /// folder holding only it is no series, and with `series.json` beside it, no more
+    /// than that, the folder is empty (its `series.json` an orphan to retire).
+    #[test]
+    fn a_series_queue_file_counts_for_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        for folder in ["Only Queue", "Queue And Series"] {
+            let path = dir.path().join(folder);
+            bunko_store::fs::create_dir(&path).unwrap();
+            bunko_store::fs::write(path.join(bunko_core::names::SERIES_QUEUE_FILE), "{}").unwrap();
+        }
+        bunko_store::fs::write(
+            dir.path().join("Queue And Series").join(SERIES_FILE_NAME),
+            "{}",
+        )
+        .unwrap();
+        assert!(iter_series_folders(dir.path()).is_empty());
+        let orphans: Vec<String> = iter_orphan_series_files(dir.path())
+            .into_iter()
+            .map(|(title, _)| title)
+            .collect();
+        assert_eq!(orphans, ["Queue And Series"]);
+        assert!(archive_names(&dir.path().join("Queue And Series")).is_empty());
+    }
+
     /// A folder another listed spelling shadows is no series (a case-sensitive disk can
     /// hold `Kingdom/` and `kingdom/`; the byte-smallest is the one reached). Written
     /// winner first, so every host lists the one folder.

@@ -73,6 +73,15 @@ pub fn checks(config: &Config) -> Vec<Row> {
     let offline = super::describe_offline(config);
     let name = provider_name(lib.backend);
     let mut out = Vec::new();
+    if lib.backend == LibraryBackend::Folder {
+        out.extend(folder_rows(config, &offline));
+        out.push(spool_row(
+            config,
+            offline["store_id"].as_str().map(|id| cloud.join(id)),
+        ));
+        out.extend(credentials_row(&cloud));
+        return out;
+    }
     match offline["store_id"].as_str() {
         Some(id) => out.push(row(
             Verdict::Pass,
@@ -125,6 +134,103 @@ pub fn checks(config: &Config) -> Vec<Row> {
     ));
     out.extend(credentials_row(&cloud));
     out
+}
+
+/// A folder library's rows: where it is (and its store), whether the folder can be
+/// reached, read and written (read-only checks: nothing is created), and its series
+/// named like a reader's own files.
+fn folder_rows(config: &Config, offline: &serde_json::Value) -> Vec<Row> {
+    let lib = &config.storage.library;
+    let path = offline["path"].as_str().map(std::path::PathBuf::from);
+    let fix = Some(
+        "Choose the folder in the admin panel (Storage), or run: mokuro-bunko library connect folder --path <folder>"
+            .to_string(),
+    );
+    let mut out = Vec::new();
+    match (offline["store_id"].as_str(), &path) {
+        (Some(id), Some(p)) => out.push(row(
+            Verdict::Pass,
+            "Library storage",
+            format!("a local folder, {} (store {id})", p.display()),
+            None,
+        )),
+        _ => {
+            out.push(row(
+                Verdict::Fail,
+                "Library storage",
+                format!(
+                    "a local folder{}: not connected ({})",
+                    lib.path
+                        .as_deref()
+                        .map(|p| format!(", {}", p.display()))
+                        .unwrap_or_default(),
+                    offline["problem"].as_str().unwrap_or("no folder set")
+                ),
+                fix,
+            ));
+            return out;
+        }
+    }
+    let Some(path) = path else {
+        return out;
+    };
+    out.push(folder_access_row(&path));
+    out.extend(reserved_series_rows(&path, None));
+    out
+}
+
+/// "Library folder: reachable / readable / writable", from read-only checks.
+// unmounted: the library folder itself, a plain path on this computer; its read-only
+// flag is a std::fs permission bit.
+#[allow(clippy::disallowed_methods)]
+fn folder_access_row(path: &Path) -> Row {
+    let shown = path.display();
+    let meta = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(e) => {
+            let parent = path.parent().is_some_and(bunko_store::fs::is_dir);
+            return row(
+                if parent { Verdict::Warn } else { Verdict::Fail },
+                "Library folder",
+                if parent {
+                    format!("{shown} does not exist ({e}): Bunko makes it when the library first connects (\"Create it?\")")
+                } else {
+                    format!("{shown} cannot be reached ({e}): Bunko keeps retrying")
+                },
+                Some("Is the drive or network share connected? In Docker, is the folder mounted into the container?".into()),
+            );
+        }
+    };
+    if !meta.is_dir() {
+        return row(
+            Verdict::Fail,
+            "Library folder",
+            format!("{shown} is a file, not a folder"),
+            Some("Choose the manga folder itself: mokuro-bunko library connect folder --path <folder>".into()),
+        );
+    }
+    if let Err(e) = bunko_store::fs::read_dir(path) {
+        return row(
+            Verdict::Fail,
+            "Library folder",
+            format!("{shown} cannot be read ({e})"),
+            Some("Give the account Bunko runs as read and write access to the folder (in Docker, set PUID/PGID to its owner).".into()),
+        );
+    }
+    if meta.permissions().readonly() {
+        return row(
+            Verdict::Warn,
+            "Library folder",
+            format!("{shown} is reachable and readable, but read-only: OCR results, covers and series info cannot be saved there"),
+            Some("Give the account Bunko runs as write access to the folder (in Docker, set PUID/PGID to its owner).".into()),
+        );
+    }
+    row(
+        Verdict::Pass,
+        "Library folder",
+        format!("{shown}: reachable, readable, writable"),
+        None,
+    )
 }
 
 /// Library folders spelled like a per-user name in any case (`history/`, `History/`,
@@ -592,6 +698,57 @@ mod tests {
         c.storage.base_path = dir.to_path_buf();
         c.storage.library.backend = b;
         c
+    }
+
+    #[test]
+    fn a_folder_library_names_its_folder_and_checks_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let manga = dir.path().join("manga");
+        bunko_store::fs::create_dir_all(manga.join("history")).unwrap();
+        bunko_store::fs::write(manga.join("history/Vol 1.cbz"), "x").unwrap();
+        let mut c = cloud_config(&dir.path().join("bunko"), LibraryBackend::Folder);
+        // No path: not connected, with the CLI fix.
+        let rows = checks(&c);
+        assert_eq!(rows[0].verdict, Verdict::Fail, "{rows:?}");
+        assert!(
+            rows[0]
+                .hint
+                .as_deref()
+                .unwrap()
+                .contains("library connect folder --path")
+        );
+        c.storage.library.path = Some(manga.clone());
+        let rows = checks(&c);
+        assert_eq!(rows[0].verdict, Verdict::Pass, "{rows:?}");
+        assert!(
+            rows[0]
+                .detail
+                .starts_with(&format!("a local folder, {} (store ", manga.display())),
+            "{}",
+            rows[0].detail
+        );
+        let access = rows.iter().find(|r| r.label == "Library folder").unwrap();
+        assert_eq!(access.verdict, Verdict::Pass, "{access:?}");
+        assert!(access.detail.contains("reachable, readable, writable"));
+        assert!(
+            rows.iter().any(|r| r.label == "Reserved series name"),
+            "{rows:?}"
+        );
+        // Gone with its parent: cannot be reached.
+        c.storage.library.path = Some(dir.path().join("gone/manga"));
+        let rows = checks(&c);
+        let access = rows.iter().find(|r| r.label == "Library folder").unwrap();
+        assert_eq!(access.verdict, Verdict::Fail, "{access:?}");
+        assert!(access.detail.contains("cannot be reached"));
+        // Inside Bunko's own folder: refused, with why.
+        c.storage.library.path = Some(dir.path().join("bunko/cloud"));
+        let rows = checks(&c);
+        assert_eq!(rows[0].verdict, Verdict::Fail);
+        assert!(
+            rows[0].detail.contains("Bunko's own folder"),
+            "{}",
+            rows[0].detail
+        );
     }
 
     #[test]

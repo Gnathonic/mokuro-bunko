@@ -2,5 +2,5 @@
 // in a foreground service, with its web UI in a WebView. Build with ./build.sh, which
 // cross-compiles the native library first. See docs/rust-port/MOBILE.md.
 plugins {
-    id("com.android.application") version "9.4.1" apply false
+    id("com.android.application") version "9.5.1" apply false
 }

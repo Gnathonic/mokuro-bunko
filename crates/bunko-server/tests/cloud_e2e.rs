@@ -1,7 +1,7 @@
 //! A whole server on a cloud library (the in-memory `FakeBackend`), write side: an
 //! un-OCR'd volume is OCR'd by this server's own processor (`FakePipeline`) and its
-//! sidecar, the covers, `series.json`, `catalog.json` and the queue file (listing the
-//! result in `done[]`) land in the cloud folder; the lease marker appears; a store that
+//! sidecar, the covers, `series.json`, `catalog.json` and the series' queue file (the
+//! result in its `done`) land in the cloud folder; the lease marker appears; a store that
 //! stops mid-upload resumes after a restart with exactly one copy of each result.
 
 // Fixtures are checked with std::fs on purpose.
@@ -106,9 +106,14 @@ fn config(base: PathBuf) -> Config {
 }
 
 fn options() -> ServeOptions {
+    options_paced(Duration::from_millis(5))
+}
+
+/// [`options`] with the fake OCR taking `page_delay` per page.
+fn options_paced(page_delay: Duration) -> ServeOptions {
     let pipeline = bunko_processor::FakePipeline::new(bunko_processor::FakeConfig {
         engines: vec![bunko_core::engines::DEFAULT_ENGINE.into()],
-        page_delay: Duration::from_millis(5),
+        page_delay,
         overlap: 1,
         ..Default::default()
     });
@@ -132,8 +137,18 @@ impl Server {
         tune: Option<bunko_server::storage::testing::Tune>,
         before: impl FnOnce(&Services),
     ) -> Server {
+        Server::start_with(base, fake, tune, before, options()).await
+    }
+
+    async fn start_with(
+        base: &std::path::Path,
+        fake: &Arc<FakeBackend>,
+        tune: Option<bunko_server::storage::testing::Tune>,
+        before: impl FnOnce(&Services),
+        opts: ServeOptions,
+    ) -> Server {
         bunko_server::storage::testing::register_tuned(base, fake.clone(), tune);
-        let services = Services::new(config(base.to_path_buf()), None, &options()).unwrap();
+        let services = Services::new(config(base.to_path_buf()), None, &opts).unwrap();
         before(&services);
         let stop = CancellationToken::new();
         let running = start_library_services(&services, stop.clone());
@@ -227,24 +242,29 @@ async fn an_unocrd_cloud_volume_is_ocrd_and_everything_lands_in_the_cloud() {
     let catalog = json_at(&fake, "catalog.json").expect("catalog.json in the cloud");
     assert!(catalog.to_string().contains("Series"), "{catalog}");
 
-    // The cloud queue file: nothing pending, the result in `done[]`.
+    // The series' queue file (queue file v2): nothing pending, the volume in `done`.
+    // No root queue file is written.
     eventually(
-        "the queue file with its done entry",
+        "the series' queue file with its done entry",
         Duration::from_secs(30),
         || {
-            json_at(&fake, ".mokuro-queue.json").is_some_and(|q| {
-                q["done"]
-                    .as_array()
-                    .is_some_and(|d| d.iter().any(|e| e["volume"] == "Vol 2"))
-            })
+            json_at(&fake, "Series/.mokuro-series-queue.json")
+                .is_some_and(|q| q["done"].get("Vol 2").is_some())
         },
     )
     .await;
-    let queue = json_at(&fake, ".mokuro-queue.json").unwrap();
+    let queue = json_at(&fake, "Series/.mokuro-series-queue.json").unwrap();
     assert_eq!(queue["instance_id"], store.instance_id());
-    assert_eq!(queue["pending_volumes"], 0, "{queue}");
+    assert_eq!(queue["vols"], serde_json::json!({}), "{queue}");
+    assert!(node(&fake, ".mokuro-queue.json").is_none());
     // Exactly one copy of everything Bunko wrote.
-    for name in ["Vol 2.mokuro", "Vol 1.webp", "Vol 2.webp", "series.json"] {
+    for name in [
+        "Vol 2.mokuro",
+        "Vol 1.webp",
+        "Vol 2.webp",
+        "series.json",
+        ".mokuro-series-queue.json",
+    ] {
         assert_eq!(copies(&fake, "Series", name).await, 1, "{name}");
     }
     // Nothing on disk under the synthetic root.
@@ -570,5 +590,59 @@ async fn an_emptied_cloud_folder_retires_its_series_file_only_while_online() {
     assert!(!catalog.to_string().contains("\"Gone\""), "{catalog}");
     assert!(store.conflicts().is_empty(), "{:?}", store.conflicts());
     fake.set_list_hook(None);
+    server.stop().await;
+}
+
+/// Regression (§5.3 poll cadence): OCR running on a cloud library keeps its change
+/// feed at the active interval (Drive: 30 s) instead of the idle 5 min, and the admin
+/// storage status says why. Nothing noted OCR work before, so the feed stayed idle.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ocr_running_turns_the_cloud_feed_to_its_active_interval() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("storage");
+    let fake = fake_library();
+    // Vol 2 (3 pages) takes about 6 s to OCR: the claim is in flight for a few ticks.
+    let server = Server::start_with(
+        &base,
+        &fake,
+        Some(quick),
+        |_| {},
+        options_paced(Duration::from_secs(2)),
+    )
+    .await;
+    let store = server.store();
+    eventually("OCR noted on the feed", Duration::from_secs(60), || {
+        store
+            .poll_cadence()
+            .because
+            .contains(&bunko_store::Activity::Ocr)
+    })
+    .await;
+    assert!(
+        node(&fake, "Series/Vol 2.mokuro").is_none(),
+        "noted while the claim runs, not after"
+    );
+    let c = store.poll_cadence();
+    assert!(c.active && !c.push, "{c:?}");
+    assert_eq!(c.every, Duration::from_secs(30), "Drive's active interval");
+    let storage = server.services.storage.clone().unwrap();
+    let st = tokio::task::spawn_blocking(move || storage.status_json())
+        .await
+        .unwrap();
+    assert_eq!(st["poll"]["every_s"], 30, "{st}");
+    assert_eq!(st["poll"]["active"], true, "{st}");
+    assert!(
+        st["poll"]["because"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("ocr")),
+        "{st}"
+    );
+    eventually(
+        "the OCR result in the cloud",
+        Duration::from_secs(60),
+        || node(&fake, "Series/Vol 2.mokuro").is_some(),
+    )
+    .await;
     server.stop().await;
 }

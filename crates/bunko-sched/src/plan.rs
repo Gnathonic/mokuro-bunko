@@ -173,6 +173,19 @@ pub fn lanes_from_running(
     pricing: &dyn Pricing,
     now: f64,
 ) -> (Vec<Lane>, Vec<Object>) {
+    let (lanes, priced, _) =
+        lanes_from_running_at(running, lane_count, lane_machines, pricing, now);
+    (lanes, priced)
+}
+
+/// [`lanes_from_running`], also saying which lane each running card is on.
+fn lanes_from_running_at(
+    running: &[Object],
+    lane_count: usize,
+    lane_machines: Option<&[String]>,
+    pricing: &dyn Pricing,
+    now: f64,
+) -> (Vec<Lane>, Vec<Object>, Vec<usize>) {
     let lane_machines = lane_machines.filter(|m| !m.is_empty());
     let mut lanes: Vec<Lane> = match lane_machines {
         Some(machines) => machines
@@ -200,6 +213,7 @@ pub fn lanes_from_running(
     order.sort_by_key(SlotKey::sort_key);
 
     let mut taken: HashSet<usize> = HashSet::new();
+    let mut lane_of: Vec<usize> = vec![0; priced.len()];
     for key in order {
         let jobs = &by_slot[&key];
         let wanted: Option<String> = jobs.iter().find_map(|i| {
@@ -220,6 +234,9 @@ pub fn lanes_from_running(
             }
         };
         taken.insert(position);
+        for &i in jobs {
+            lane_of[i] = position;
+        }
         let machine: Option<String> = if lane_machines.is_some() {
             match &wanted {
                 Some(w) if !w.is_empty() => Some(w.clone()),
@@ -250,7 +267,7 @@ pub fn lanes_from_running(
         lane.used = true;
         lane.free_in = if known { cursor } else { f64::INFINITY };
     }
-    (lanes, priced)
+    (lanes, priced, lane_of)
 }
 
 fn free_lane(lanes: &[Lane], taken: &HashSet<usize>, machine: Option<&str>) -> Option<usize> {
@@ -403,22 +420,35 @@ pub struct PlanInputs<'a> {
     pub refusal_for: Option<RefusalFn<'a>>,
     /// Why a row no lane may take is held (else `"no connected machine can run <name>"`).
     pub hold_for: Option<HoldFn<'a>>,
+    /// The library takes work by volume: a volume's jobs stay on the lane that took
+    /// its first (a running card's lane, else the lane its first planned job went to)
+    /// while that lane may run them.
+    pub by_volume: bool,
 }
 
 /// `plan_queue`: price the running cards, then walk the queue across the
 /// lanes, each item to the lane that finishes it first (else the lane that
 /// frees first). An item that cannot be priced blocks everything behind it;
-/// a held item (no lane may take its row) blocks nothing.
+/// a held item (no lane may take its row, or the caller marked it `held` with
+/// its `reason`) blocks nothing.
 pub fn plan_queue(running: &[Object], pending: &[Object], inputs: &PlanInputs<'_>) -> QueuePlan {
     let pricing = inputs.pricing;
     let now = inputs.now;
-    let (mut lanes, priced) = lanes_from_running(
+    let (mut lanes, priced, lane_of) = lanes_from_running_at(
         running,
         inputs.lane_count,
         inputs.lane_machines,
         pricing,
         now,
     );
+    // By volume: the lane each volume's jobs stay on.
+    let volume_of = |entry: &Object| (py_str(entry.get("series")), py_str(entry.get("volume")));
+    let mut volume_lane: HashMap<(String, String), usize> = HashMap::new();
+    if inputs.by_volume {
+        for (entry, lane) in priced.iter().zip(&lane_of) {
+            volume_lane.entry(volume_of(entry)).or_insert(*lane);
+        }
+    }
     let median = median_pages(pending);
     let mut planned: Vec<Object> = Vec::new();
     let mut blocked_by: Option<String> = None;
@@ -451,6 +481,16 @@ pub fn plan_queue(running: &[Object], pending: &[Object], inputs: &PlanInputs<'_
         entry.insert("pages".into(), pages.map_or(Value::Null, Value::from));
         entry.insert("rough".into(), Value::Bool(rough));
 
+        if truthy(entry.get("held")) {
+            let reason = entry
+                .get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or("held")
+                .to_owned();
+            no_prediction(&mut entry, &reason);
+            planned.push(entry);
+            continue;
+        }
         if let Some(blocked) = &blocked_by {
             no_prediction(
                 &mut entry,
@@ -476,7 +516,13 @@ pub fn plan_queue(running: &[Object], pending: &[Object], inputs: &PlanInputs<'_
             planned.push(entry);
             continue;
         }
-        let lane_index = earliest_finish_lane(&lanes, &open_lanes, &generation_id, pages, pricing)
+        let pinned = inputs
+            .by_volume
+            .then(|| volume_lane.get(&volume_of(&entry)).copied())
+            .flatten()
+            .filter(|lane| open_lanes.contains(lane));
+        let lane_index = pinned
+            .or_else(|| earliest_finish_lane(&lanes, &open_lanes, &generation_id, pages, pricing))
             .unwrap_or_else(|| {
                 let mut best = open_lanes[0];
                 for &i in &open_lanes[1..] {
@@ -520,6 +566,9 @@ pub fn plan_queue(running: &[Object], pending: &[Object], inputs: &PlanInputs<'_
         lane.generation_id = Some(generation_id.clone());
         lane.free_in = seconds;
         lane.used = true;
+        if inputs.by_volume {
+            volume_lane.entry(volume_of(&entry)).or_insert(lane_index);
+        }
         entry.insert("eta_seconds".into(), Value::from(round_int(seconds)));
         entry.insert("eta_at".into(), Value::String(iso_utc(now + seconds)));
         entry.insert("rate_source".into(), Value::String(estimate.source.clone()));
@@ -744,6 +793,83 @@ mod tests {
         }
     }
 
+    fn vol_item(volume: &str, gen_id: &str, pages: i64) -> Object {
+        serde_json::json!({"series": "S", "volume": volume, "generation": gen_id, "generation_id": gen_id, "pages": pages})
+            .as_object()
+            .cloned()
+            .unwrap()
+    }
+
+    /// By volume, a volume's second job stays on the lane that took its first, even
+    /// when another lane is free sooner; by generation it goes to the free lane.
+    #[test]
+    fn by_volume_keeps_a_volumes_jobs_on_its_lane() {
+        let machines = vec!["slow".to_owned(), "slow".to_owned()];
+        let items = [
+            vol_item("A", "g1", 10),
+            vol_item("A", "g2", 10),
+            vol_item("B", "g1", 10),
+        ];
+        let plan_with = |by_volume: bool| {
+            let inputs = PlanInputs {
+                lane_count: 2,
+                lane_machines: Some(&machines),
+                pricing: &Fixed,
+                now: 0.0,
+                through: None,
+                refusal_for: None,
+                hold_for: None,
+                by_volume,
+            };
+            plan_queue(&[], &items, &inputs)
+        };
+        // 5 s startup + 10 pages at 1 page/s.
+        let by_generation = plan_with(false);
+        assert_eq!(by_generation.pending[0]["eta_seconds"], 15);
+        assert_eq!(
+            by_generation.pending[1]["eta_seconds"], 15,
+            "the other lane"
+        );
+        assert_eq!(
+            by_generation.pending[2]["eta_seconds"], 25,
+            "after A's first job, on the lane warm for its row"
+        );
+        let by_volume = plan_with(true);
+        assert_eq!(by_volume.pending[0]["eta_seconds"], 15);
+        assert_eq!(
+            by_volume.pending[1]["eta_seconds"], 30,
+            "after A's first job, on its lane (a new row costs a startup)"
+        );
+        assert_eq!(
+            by_volume.pending[2]["eta_seconds"], 15,
+            "B takes the free lane"
+        );
+    }
+
+    /// A running card pins its volume's next jobs to its lane.
+    #[test]
+    fn by_volume_follows_a_running_card() {
+        let machines = vec!["slow".to_owned(), "fast".to_owned()];
+        let card = serde_json::json!({"series": "S", "volume": "A", "generation_id": "g1", "slot": 0, "machine": "slow", "total_pages": 10, "done_pages": 5, "first_page_at": -5.0, "session_ready": true})
+            .as_object()
+            .cloned()
+            .unwrap();
+        let inputs = PlanInputs {
+            lane_count: 2,
+            lane_machines: Some(&machines),
+            pricing: &Fixed,
+            now: 0.0,
+            through: None,
+            refusal_for: None,
+            hold_for: None,
+            by_volume: true,
+        };
+        let plan = plan_queue(&[card], &[vol_item("A", "g2", 10)], &inputs);
+        // The slow lane: 5 pages left, then a startup and 10 pages; the fast lane
+        // would finish it in 6 s.
+        assert_eq!(plan.pending[0]["eta_seconds"], 20);
+    }
+
     fn item(gen_id: &str, pages: i64) -> Object {
         serde_json::json!({"series": "S", "volume": "V", "generation": "Row", "generation_id": gen_id, "pages": pages})
             .as_object()
@@ -764,6 +890,7 @@ mod tests {
             through: None,
             refusal_for: Some(&refusal),
             hold_for: Some(&hold),
+            by_volume: false,
         };
         let plan = plan_queue(&[], &[item("g-2", 10), item("g-1", 100)], &inputs);
         assert_eq!(
@@ -775,5 +902,34 @@ mod tests {
         assert_eq!(plan.pending[1]["eta_seconds"], 15);
         assert_eq!(plan.pending[1]["eta_at"], "1970-01-01T00:00:15Z");
         assert_eq!(plan.done_in, Some(15.0));
+    }
+
+    /// An item the caller marked held (an upgrade waiting for the library's lease) says
+    /// its own reason and blocks nothing; the rest of the queue is planned.
+    #[test]
+    fn items_marked_held_say_why_and_block_nothing() {
+        let inputs = PlanInputs {
+            lane_count: 1,
+            lane_machines: None,
+            pricing: &Fixed,
+            now: 0.0,
+            through: None,
+            refusal_for: None,
+            hold_for: None,
+            by_volume: false,
+        };
+        let mut held = item("g-1", 10);
+        held.insert("held".into(), Value::Bool(true));
+        held.insert("reason".into(), Value::from("Upgrades wait"));
+        let plan = plan_queue(&[], &[held, item("g-1", 100)], &inputs);
+        assert_eq!(plan.pending[0]["reason"], "Upgrades wait");
+        assert_eq!(plan.pending[0]["held"], true);
+        assert!(plan.pending[0]["eta_at"].is_null());
+        assert!(
+            plan.pending[1]["eta_seconds"].is_number(),
+            "{:?}",
+            plan.pending[1]
+        );
+        assert!(plan.pending[1].get("held").is_none());
     }
 }

@@ -654,6 +654,27 @@ impl LibraryRuntime {
         true
     }
 
+    /// Whether series `title`'s compiled metadata may still change from work already
+    /// asked for: its own recompile (or a full pass) is armed, queued or running. The
+    /// queue file v2's settle rule (§5.4): a finished job leaves the file only once
+    /// this is false, so a reader that sees it gone finds the new `series.json`.
+    pub fn series_regeneration_pending(&self, title: &str) -> bool {
+        let key = normalize_volume_title_key(title);
+        let armed = {
+            let timers = self.timers.lock();
+            timers.full.task.is_some()
+                || timers
+                    .series
+                    .get(&key)
+                    .is_some_and(|(slot, _)| slot.task.is_some())
+        };
+        if armed {
+            return true;
+        }
+        let queue = self.worker.queue.lock();
+        queue.running || queue.full || queue.series.contains_key(&key)
+    }
+
     /// Whether a timer (full or any series) is armed. For tests and diagnostics.
     pub fn has_pending_pass(&self) -> bool {
         let armed = {
@@ -879,7 +900,7 @@ fn series_list(titles: &[String]) -> String {
     text
 }
 
-/// `total_volumes` and `pending_ocr` from the library index.
+/// `total_volumes`, `pending_ocr` and `total_series` from the library index.
 struct IndexCounts(Arc<LibraryIndexCache>);
 
 impl LibraryCounts for IndexCounts {
@@ -890,6 +911,17 @@ impl LibraryCounts for IndexCounts {
 
     fn pending_ocr(&self) -> Result<u64, String> {
         Ok(self.0.get_snapshot().pending_ocr.len() as u64)
+    }
+
+    fn total_series(&self) -> Result<u64, String> {
+        // Folder spellings of one title (case, whitespace) are one series.
+        let snapshot = self.0.get_snapshot();
+        let keys: std::collections::HashSet<String> = snapshot
+            .series
+            .iter()
+            .map(|s| bunko_db::fold_series_title_key(&s.name))
+            .collect();
+        Ok(keys.len() as u64)
     }
 }
 

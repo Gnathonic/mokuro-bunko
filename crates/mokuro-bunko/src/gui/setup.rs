@@ -5,8 +5,6 @@
 //! own `/setup` page.)
 
 use serde::Deserialize;
-use serde_json::{Value, json};
-use std::path::{Path, PathBuf};
 
 /// The processor wizard's answers (and the processor settings page's).
 #[derive(Debug, Default, Deserialize)]
@@ -36,7 +34,9 @@ mod full {
     use super::*;
     use bunko_processor::config::{DEFAULT_ARCHIVE_MEMORY_MB, TlsVerify, default_name};
     use bunko_processor::setup as ps;
+    use serde_json::{Value, json};
     use serde_yaml_ng::{Mapping, Value as Yaml};
+    use std::path::Path;
 
     fn tls(raw: &str) -> Result<TlsVerify, String> {
         ps::parse_tls_verify(if raw.is_empty() { "true" } else { raw }).map_err(|e| e.0)
@@ -292,63 +292,5 @@ mod full {
             };
             assert!(put_processor_keys(&mut data, &bad).is_err());
         }
-    }
-}
-
-/// The directories and files a picker may show under `dir`: subdirectories, and
-/// with `files`, the files whose extension is in `exts` (empty: none).
-pub fn list_dir(dir: &Path, exts: &[String]) -> Result<Value, String> {
-    let dir = std::fs::canonicalize(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    if !dir.is_dir() {
-        return Err(format!("{} is not a folder", dir.display()));
-    }
-    let mut dirs = Vec::new();
-    let mut files = Vec::new();
-    let rd = std::fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    for e in rd.flatten().take(5000) {
-        let name = e.file_name().to_string_lossy().into_owned();
-        if name.starts_with('.') {
-            continue;
-        }
-        let Ok(ft) = e.file_type() else { continue };
-        let is_dir = ft.is_dir() || (ft.is_symlink() && e.path().is_dir());
-        if is_dir {
-            dirs.push(name);
-        } else if !exts.is_empty() {
-            let ext = Path::new(&name)
-                .extension()
-                .map(|x| x.to_string_lossy().to_ascii_lowercase())
-                .unwrap_or_default();
-            if exts.iter().any(|x| x.eq_ignore_ascii_case(&ext)) {
-                files.push(name);
-            }
-        }
-    }
-    dirs.sort_by_key(|a| a.to_lowercase());
-    files.sort_by_key(|a| a.to_lowercase());
-    let parent: Option<PathBuf> = dir.parent().map(Path::to_path_buf);
-    Ok(
-        json!({"path": dir, "parent": parent, "dirs": dirs, "files": files,
-              "sep": std::path::MAIN_SEPARATOR.to_string()}),
-    )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn picker_lists_folders_and_chosen_files() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir(dir.path().join("Manga")).unwrap();
-        std::fs::create_dir(dir.path().join(".hidden")).unwrap();
-        std::fs::write(dir.path().join("cert.PEM"), "x").unwrap();
-        std::fs::write(dir.path().join("notes.txt"), "x").unwrap();
-        let v = list_dir(dir.path(), &[]).unwrap();
-        assert_eq!(v["dirs"], json!(["Manga"]));
-        assert_eq!(v["files"], json!([]));
-        let v = list_dir(dir.path(), &["pem".into()]).unwrap();
-        assert_eq!(v["files"], json!(["cert.PEM"]));
-        assert!(list_dir(&dir.path().join("nope"), &[]).is_err());
     }
 }

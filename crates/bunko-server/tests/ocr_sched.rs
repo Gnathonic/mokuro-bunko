@@ -1285,14 +1285,72 @@ fn a_mismatched_result_name_removes_only_its_claim_directory() {
     assert!(claim_dir.is_dir());
 }
 
+/// Regression (review finding): a processor that dropped off between uploading a result
+/// and its `volume_done` left that result in `.processing/<sid>/<claim>` for good: the
+/// drop forgot the upload, and nothing ever swept the directory. A session's end
+/// removes its uploads; the drop now does too, and its claim goes back as before.
+#[test]
+fn a_processor_that_drops_off_leaves_no_uploaded_result_behind() {
+    let mut h = harness(vec![primary()]);
+    h.add("A/V1.cbz", 3);
+    h.at(0.0);
+    let mut p = h.connect("box", 1);
+    let ops = p.drain();
+    let sid = opened(&ops)[0].clone();
+    let (claim, sidecar) = ops
+        .iter()
+        .find_map(|o| match o {
+            Op::Volume(v) => Some((v.claim.clone(), v.sidecar_name.clone())),
+            _ => None,
+        })
+        .expect("a volume was sent");
+    // Its result arrived, as the upload stores it; its `volume_done` never does.
+    let session_dir = h.storage().join(".processing").join(&sid);
+    let claim_dir = session_dir.join(&claim);
+    std::fs::create_dir_all(&claim_dir).unwrap();
+    std::fs::write(claim_dir.join(bunko_proto::RESULT_FILE), b"{}").unwrap();
+    // A half-written upload of the same session.
+    std::fs::create_dir_all(session_dir.join("v99")).unwrap();
+    std::fs::write(
+        session_dir
+            .join("v99")
+            .join(format!("{}.part", bunko_proto::RESULT_FILE)),
+        b"{",
+    )
+    .unwrap();
+    h.s.handle(Msg::ResultStored {
+        pid: p.pid.clone(),
+        sid: sid.clone(),
+        claim: claim.clone(),
+        name: sidecar,
+        sha256: "0".repeat(64),
+    });
+    assert!(claim_dir.join(bunko_proto::RESULT_FILE).is_file());
+
+    h.s.handle(Msg::Drop {
+        pid: p.pid.clone(),
+        reason: "the socket closed".into(),
+    });
+
+    assert!(h.s.claims.is_empty(), "{:?}", h.s.claims);
+    assert!(h.s.results.is_empty());
+    assert!(!session_dir.exists(), "its uploads were left behind");
+    assert!(h.s.failures.is_empty(), "a drop records nothing");
+    assert!(!h.library().join("A/V1.mokuro").exists());
+    // The volume goes to the next processor, whose upload has a directory of its own.
+    let mut q = h.connect("other", 1);
+    assert_eq!(names(&volumes(&q.drain())), ["A/V1.cbz"]);
+}
+
 /// This server's own hardware: a local machine on a channel, as `LocalUp` makes it.
 fn local_up(h: &mut H, formats: &[&str]) -> tokio::sync::mpsc::UnboundedReceiver<Op> {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let catalog: bunko_proto::Catalog = serde_json::from_value(serde_json::json!({
-        "engines": ["hayai-nova", "paddle-manga", "ppocr-manga"],
+        "engines": ENGINES,
         "detectors": ["ppocr-manga"],
         "devices": [{"id": "cpu", "label": "CPU"},
                     {"id": "gpu:0", "label": "GPU 0", "formats": formats, "provider": "rocm", "arch": "gfx1201"}],
+        "engine_revisions": current_revisions(ENGINES),
     }))
     .unwrap();
     let host = bunko_proto::HostInfo {
@@ -1488,9 +1546,10 @@ fn fp32_device_autobenches_once(device: serde_json::Value) {
     h.add("A/V2.cbz", 4);
     h.at(0.0);
     let catalog = serde_json::json!({
-        "engines": ["hayai-nova", "paddle-manga", "ppocr-manga"],
+        "engines": ENGINES,
         "detectors": ["ppocr-manga"],
         "devices": [{"id": "cpu", "label": "CPU", "formats": ["fp32", "bf16"], "provider": "cpu", "arch": "x86_64"}, device.clone()],
+        "engine_revisions": current_revisions(ENGINES),
     });
     let mut p = h.connect_catalog("box", 1, catalog);
     h.at(0.0);
@@ -1578,6 +1637,7 @@ fn forced_bf16_still_runs_where_a_package_exists() {
     let mut h = h;
     let rdna2 = serde_json::json!({
         "engines": ["hayai-nova", "ppocr-manga"], "detectors": ["ppocr-manga"],
+        "engine_revisions": current_revisions(["hayai-nova", "ppocr-manga"]),
         "devices": [{"id": "cpu", "label": "CPU", "provider": "cpu", "arch": "x86_64", "formats": ["fp32"]},
                     {"id": "gpu:0", "label": "GPU 0", "formats": ["fp32", "fp16", "bf16"], "provider": "rocm", "arch": "gfx1030"}],
     });
@@ -1593,6 +1653,7 @@ fn forced_bf16_still_runs_where_a_package_exists() {
     );
     let turing = serde_json::json!({
         "engines": ["hayai-nova", "ppocr-manga"], "detectors": ["ppocr-manga"],
+        "engine_revisions": current_revisions(["hayai-nova", "ppocr-manga"]),
         "devices": [{"id": "gpu:0", "label": "GPU 0", "formats": ["fp32", "fp16"], "provider": "cuda", "arch": "sm_75"}],
     });
     let _q = h.connect_catalog("turing", 1, turing);
@@ -1601,6 +1662,7 @@ fn forced_bf16_still_runs_where_a_package_exists() {
     // A CPU with a bf16 package runs a forced bf16 row (the engines allow it there).
     let cpu = serde_json::json!({
         "engines": ["hayai-nova", "ppocr-manga"], "detectors": ["ppocr-manga"],
+        "engine_revisions": current_revisions(["hayai-nova", "ppocr-manga"]),
         "devices": [{"id": "cpu", "label": "CPU", "formats": ["fp32", "bf16"], "provider": "cpu", "arch": "x86_64"},
                     {"id": "gpu:0", "label": "no package", "formats": [], "provider": "cuda", "arch": "sm_89"}],
     });
@@ -1612,11 +1674,14 @@ fn forced_bf16_still_runs_where_a_package_exists() {
 
 /// A processor whose build of the row's engine is older than this library's revision
 /// is offered none of its work: its output would be outdated the moment it landed, and
-/// the upgrade would queue the volume again. One announcing the current revision (or,
-/// as every 0.7 processor, none: revision 1) is.
+/// the upgrade would queue the volume again. One announcing the current revision is. A
+/// 0.7 processor announces none, which counts as revision 1: refused like any other
+/// older build once the engine is past its first revision.
 #[test]
 fn a_processor_with_an_older_engine_revision_gets_no_work() {
     let engine = primary().engine;
+    let now = bunko_layout::sidecar::engine_revision(&engine);
+    let older = now - 1;
     let mut h = harness(vec![primary()]);
     h.add("A/V1.cbz", 2);
     h.at(0.0);
@@ -1628,16 +1693,34 @@ fn a_processor_with_an_older_engine_revision_gets_no_work() {
             "engine_revisions": {&engine: revision},
         })
     };
-    let mut stale = h.connect_catalog("stale", 1, catalog(0));
-    assert!(opened(&stale.drain()).is_empty(), "offered to revision 0");
+    let mut stale = h.connect_catalog("stale", 1, catalog(older));
+    assert!(
+        opened(&stale.drain()).is_empty(),
+        "offered to revision {older}"
+    );
     let why = h.s.refusal(&stale.pid, &primary()).expect("a refusal");
-    assert!(why.contains("revision 0"), "{why}");
-    let mut current = h.connect_catalog("current", 1, catalog(1));
+    assert!(why.contains(&format!("revision {older},")), "{why}");
+    let mut current = h.connect_catalog("current", 1, catalog(now));
     assert_eq!(opened(&current.drain()).len(), 1);
     assert!(h.s.refusal(&current.pid, &primary()).is_none());
-    // A 0.7 processor announces no revisions: revision 1, current today.
-    let old = h.connect_with("old", 1, serde_json::json!([&engine]));
-    assert!(h.s.refusal(&old.pid, &primary()).is_none());
+    // A 0.7 processor announces no revisions: that is revision 1, whatever the engine
+    // is at today. Refused when 1 is older than the library's, with those words.
+    let old = h.connect_catalog(
+        "old",
+        1,
+        serde_json::json!({
+            "engines": [&engine],
+            "detectors": ["ppocr-manga"],
+            "devices": [{"id": "cpu", "label": "CPU"}],
+        }),
+    );
+    let why = h.s.refusal(&old.pid, &primary());
+    if now > 1 {
+        let why = why.expect("a refusal of a 0.7 processor");
+        assert!(why.contains("revision 1,"), "{why}");
+    } else {
+        assert!(why.is_none(), "{why:?}");
+    }
 }
 
 /// An installed sidecar carries its install time, its revision (1 where the runner
@@ -1855,4 +1938,501 @@ fn bunkos_own_older_revision_at_the_destination_is_replaced_in_place() {
         ["V1.cbz", "V1.fast.mokuro", "V1.mokuro"]
     );
     assert!(rejected_reasons(&h).is_empty());
+}
+
+// --- a large queue, and processors that come and go -------------------------------------
+
+/// The ids of the benchmarks queued or running on `machine`, in line order.
+fn line_bids(h: &H, machine: &str) -> Vec<String> {
+    h.s.bench
+        .lines
+        .get(machine)
+        .map(|l| l.iter().map(|r| r.bid.clone()).collect())
+        .unwrap_or_default()
+}
+
+/// A processor that has measured none of its rows takes nothing until its benchmarks
+/// land. Once a row's benchmark is asked for, its claims pass over that row's other
+/// volumes without looking at them in the library. Each look lists the volume's folder
+/// several times (a provider index read on a cloud library), and claims that looked at
+/// every one of a large queue's volumes stalled the scheduler for seconds per claim.
+/// What shows it here: volumes gone since the walk stay listed, as nothing looked.
+#[test]
+fn an_unmeasured_processor_passes_over_the_volumes_of_a_row_it_waits_to_measure() {
+    let mut h = harness(vec![primary()]);
+    h.s.settings.autobench = true;
+    for v in 1..=4 {
+        h.add(&format!("A/V{v}.cbz"), 2);
+    }
+    h.at(0.0);
+    for v in 2..=4 {
+        std::fs::remove_file(h.library().join(format!("A/V{v}.cbz"))).unwrap();
+    }
+    let mut p = h.connect_gpu("box", &["fp32"]);
+    assert!(
+        bench_op(&p.drain()).is_some(),
+        "the row's benchmark is asked for"
+    );
+    for v in 2..=4 {
+        assert!(
+            h.s.owed.volumes.contains_key(&format!("A/V{v}.cbz")),
+            "V{v} was looked at"
+        );
+    }
+}
+
+/// A processor reconnects whenever its link drops or its backend changes. One that
+/// comes back unchanged carries on with the benchmarks it had queued: the one it was
+/// running is sent again with the sample already packed, and none is asked for again.
+/// Each ask packed a new sample from the library and logged "Benchmarking ...", for
+/// every row on every reconnect.
+#[test]
+fn a_processor_back_unchanged_carries_on_with_its_benchmarks() {
+    let mut h = harness(vec![primary(), layer("g-2", "fast")]);
+    h.s.settings.autobench = true;
+    h.add("A/V1.cbz", 2);
+    h.at(0.0);
+    let mut p = h.connect_gpu("box", &["fp32"]);
+    let first = bench_op(&p.drain()).expect("the first autobench");
+    let bids = line_bids(&h, "box");
+    assert_eq!(bids.len(), 2, "one benchmark per row");
+    assert_eq!(bids[0], first.bid);
+    let sample = h
+        .storage()
+        .join(".processing")
+        .join(format!("{}.cbz", first.bid));
+    assert!(sample.is_file());
+    for _ in 0..3 {
+        h.s.handle(Msg::Drop {
+            pid: p.pid.clone(),
+            reason: "the socket closed".into(),
+        });
+        assert!(line_bids(&h, "box").is_empty(), "no line while it is away");
+        assert!(!h.s.held("box"), "nothing is held for a machine away");
+        p = h.connect_gpu("box", &["fp32"]);
+        let again = bench_op(&p.drain()).expect("the running benchmark is sent again");
+        assert_eq!(again.bid, first.bid);
+        assert_eq!(line_bids(&h, "box"), bids, "no benchmark asked for again");
+        assert!(sample.is_file(), "its sample is kept");
+    }
+    // It ends as any benchmark does, and the queued one follows.
+    h.event(
+        &p,
+        Event::BenchDone {
+            bid: first.bid.clone(),
+            detail: detail(serde_json::json!({"best": {"trial": 1, "pages_per_second": 4.0}, "precision": "fp32", "precision_mode": "auto-accuracy"})),
+        },
+    );
+    assert_eq!(h.s.bench_get("g-1", "box")["state"], "done");
+    let next = bench_op(&p.drain()).expect("the queued benchmark follows");
+    assert_eq!(next.bid, bids[1]);
+}
+
+/// A processor back with another catalog (a pack installed, a card gone) is measured
+/// for what it is now: what it had queued is given up and asked for again.
+#[test]
+fn a_processor_back_changed_has_its_benchmarks_asked_again() {
+    let mut h = harness(vec![primary()]);
+    h.s.settings.autobench = true;
+    h.add("A/V1.cbz", 2);
+    h.at(0.0);
+    let mut p = h.connect_gpu("box", &["fp32"]);
+    let first = bench_op(&p.drain()).expect("the first autobench");
+    h.s.handle(Msg::Drop {
+        pid: p.pid.clone(),
+        reason: "the socket closed".into(),
+    });
+    let mut p = h.connect_gpu("box", &["fp32", "fp16"]);
+    let again = bench_op(&p.drain()).expect("asked for again");
+    assert_ne!(again.bid, first.bid);
+    let sample = h
+        .storage()
+        .join(".processing")
+        .join(format!("{}.cbz", first.bid));
+    assert!(!sample.exists(), "the old sample is removed");
+}
+
+/// A processor that stays away has its benchmarks given up after
+/// [`BENCH_PARK_SECONDS`], as one that left did at once before; back later, it is
+/// measured afresh.
+#[test]
+fn a_processor_away_too_long_has_its_benchmarks_given_up() {
+    let mut h = harness(vec![primary()]);
+    h.s.settings.autobench = true;
+    h.add("A/V1.cbz", 2);
+    h.at(0.0);
+    let mut p = h.connect_gpu("box", &["fp32"]);
+    let first = bench_op(&p.drain()).expect("the first autobench");
+    h.s.handle(Msg::Drop {
+        pid: p.pid.clone(),
+        reason: "the socket closed".into(),
+    });
+    h.at(bunko_server::ocr::sched::BENCH_PARK_SECONDS + 60.0);
+    let got = h.s.bench_get("g-1", "box");
+    assert_eq!(got["state"], "failed", "{got}");
+    assert_eq!(got["error"], "box disconnected");
+    let sample = h
+        .storage()
+        .join(".processing")
+        .join(format!("{}.cbz", first.bid));
+    assert!(!sample.exists(), "its sample is removed");
+    let mut p = h.connect_gpu("box", &["fp32"]);
+    let again = bench_op(&p.drain()).expect("measured afresh");
+    assert_ne!(again.bid, first.bid);
+}
+
+/// A processor back while it installs its backend runs no benchmark (one would fail
+/// there and leave the row unmeasured): its line carries on once it is available.
+#[test]
+fn a_processor_back_while_installing_carries_on_once_available() {
+    let mut h = harness(vec![primary()]);
+    h.s.settings.autobench = true;
+    h.add("A/V1.cbz", 2);
+    h.at(0.0);
+    let mut p = h.connect_gpu("box", &["fp32"]);
+    let first = bench_op(&p.drain()).expect("the first autobench");
+    let catalog = h.s.machines[&p.pid].catalog_value.clone();
+    let host = h.s.machines[&p.pid].host_value.clone();
+    h.s.handle(Msg::Drop {
+        pid: p.pid.clone(),
+        reason: "the socket closed".into(),
+    });
+    // It registers again, unchanged but still installing (a pack it fetches).
+    let mut p = reconnect_installing(&mut h, "box", host, catalog);
+    assert!(
+        bench_op(&p.drain()).is_none(),
+        "nothing runs while it installs"
+    );
+    h.event(
+        &p,
+        Event::Availability(bunko_proto::Availability::default()),
+    );
+    let again = bench_op(&p.drain()).expect("its benchmark carries on");
+    assert_eq!(again.bid, first.bid);
+}
+
+/// Register `name` again with `host` and `catalog`, paused while it installs, and open
+/// its socket.
+fn reconnect_installing(
+    h: &mut H,
+    name: &str,
+    host: serde_json::Value,
+    catalog: serde_json::Value,
+) -> Proc {
+    let username = format!("acct-{name}");
+    let (reply, mut rx) = tokio::sync::oneshot::channel();
+    h.s.handle(Msg::Register {
+        input: bunko_server::ocr::sched::RegisterInput {
+            username: username.clone(),
+            body: serde_json::json!({
+                "protocol": 3, "name": name, "host": host, "catalog": catalog,
+                "max_sessions": 1,
+                "availability": {"paused": true, "reason": "installing"},
+            }),
+            account_stamp: None,
+        },
+        reply,
+    });
+    let pid = match rx.try_recv().unwrap() {
+        bunko_server::ocr::sched::RegisterOutcome::Ok(r) => r.processor_id,
+        other => panic!("register refused: {other:?}"),
+    };
+    let (tx, ops) = tokio::sync::mpsc::unbounded_channel();
+    let (reply, mut rx) = tokio::sync::oneshot::channel();
+    h.s.handle(Msg::SocketOpen {
+        pid: pid.clone(),
+        username,
+        ops: tx,
+        reply,
+    });
+    rx.try_recv().unwrap().unwrap();
+    Proc {
+        pid,
+        name: name.into(),
+        ops,
+    }
+}
+
+/// A benchmark parked for its machine's return shows as queued and can be cancelled.
+/// It used to read as idle (or an old result) for up to ten minutes, and cancelling it
+/// was refused.
+#[test]
+fn a_parked_benchmark_shows_as_queued_and_cancels() {
+    let mut h = harness(vec![primary()]);
+    h.s.settings.autobench = true;
+    h.add("A/V1.cbz", 2);
+    h.at(0.0);
+    let mut p = h.connect_gpu("box", &["fp32"]);
+    let first = bench_op(&p.drain()).expect("the first autobench");
+    h.s.handle(Msg::Drop {
+        pid: p.pid.clone(),
+        reason: "the socket closed".into(),
+    });
+    let got = h.s.bench_get("g-1", "box");
+    assert_eq!(got["state"], "queued", "{got}");
+    assert_eq!(got["waiting_for_machine"], true, "{got}");
+    let got = h.s.bench_cancel("g-1", "box").expect("cancelled");
+    assert_eq!(got["state"], "cancelled", "{got}");
+    assert!(h.s.bench.parked.is_empty());
+    let sample = h
+        .storage()
+        .join(".processing")
+        .join(format!("{}.cbz", first.bid));
+    assert!(!sample.exists(), "its sample is removed");
+}
+
+/// A clean stop ends the runs parked for processors that dropped off earlier and
+/// removes their samples: no processor returns to this process, and nothing else
+/// removes them from `.processing`.
+#[test]
+fn a_stop_removes_the_samples_of_parked_benchmarks() {
+    let mut h = harness(vec![primary()]);
+    h.s.settings.autobench = true;
+    h.add("A/V1.cbz", 2);
+    h.at(0.0);
+    let mut p = h.connect_gpu("box", &["fp32"]);
+    let first = bench_op(&p.drain()).expect("the first autobench");
+    h.s.handle(Msg::Drop {
+        pid: p.pid.clone(),
+        reason: "the socket closed".into(),
+    });
+    let sample = h
+        .storage()
+        .join(".processing")
+        .join(format!("{}.cbz", first.bid));
+    assert!(sample.is_file(), "kept for the return");
+    h.s.handle(Msg::Stop);
+    assert!(h.s.bench.parked.is_empty());
+    assert!(!sample.exists(), "a parked sample outlived the stop");
+}
+
+/// A machine back but still paused when its parked runs expire did not disconnect: the
+/// error says it never became available.
+#[test]
+fn a_parked_benchmark_of_a_paused_machine_expires_as_unavailable() {
+    let mut h = harness(vec![primary()]);
+    h.s.settings.autobench = true;
+    h.add("A/V1.cbz", 2);
+    h.at(0.0);
+    let mut p = h.connect_gpu("box", &["fp32"]);
+    bench_op(&p.drain()).expect("the first autobench");
+    let catalog = h.s.machines[&p.pid].catalog_value.clone();
+    let host = h.s.machines[&p.pid].host_value.clone();
+    h.s.handle(Msg::Drop {
+        pid: p.pid.clone(),
+        reason: "the socket closed".into(),
+    });
+    let _p = reconnect_installing(&mut h, "box", host, catalog);
+    h.at(bunko_server::ocr::sched::BENCH_PARK_SECONDS + 60.0);
+    let got = h.s.bench_get("g-1", "box");
+    assert_eq!(got["state"], "failed", "{got}");
+    assert_eq!(
+        got["error"], "box did not become available within 10 minutes",
+        "{got}"
+    );
+}
+
+/// This server's own OCR turned on or off, as a settings save applies it (`Msg::Apply`).
+fn set_local_processing(h: &mut H, on: bool) {
+    let mut s = h.s.settings.clone();
+    s.local_processing = on;
+    h.s.handle(Msg::Apply {
+        settings: Box::new(s),
+        reply: None,
+    });
+}
+
+/// Regression (owner report): this server's OCR, turned off in the settings mid-queue,
+/// went on claiming volumes for itself for minutes, still weighed itself when placing
+/// volumes and still showed as a machine. The setting retired only its idle lanes; the
+/// busy one stayed, and its session never drained. Turned off, it stops at once: what it
+/// ran goes back to the queue unrecorded and on to the processor that is connected,
+/// nothing more is sent to it, it is no machine any more, nothing it ran is installed,
+/// and its scratch directory goes once its processor has wound down. Turned on again,
+/// it takes work as before.
+#[test]
+fn turning_local_processing_off_stops_this_servers_ocr_at_once() {
+    let mut h = harness(vec![primary()]);
+    h.s.settings.local_processing = true;
+    for rel in ["A/V1.cbz", "A/V2.cbz"] {
+        h.add(rel, 4);
+    }
+    h.at(0.0);
+    let mut local = local_up(&mut h, &["fp32"]);
+    h.at(1.0);
+    let sent = drain_rx(&mut local);
+    let sid = opened(&sent)[0].clone();
+    let held = volumes(&sent);
+    assert_eq!(held.len(), 2, "{sent:?}");
+    let event = |h: &mut H, event: Event| {
+        h.s.handle(Msg::Event {
+            pid: "local".into(),
+            event,
+        })
+    };
+    event(&mut h, ready(&sid));
+    event(&mut h, started(&sid, &held[0].1, 4));
+    // The runner finished the other volume just as it was told to stop: its result
+    // waits in the scratch directory, as the in-process processor leaves it.
+    let scratch = h.storage().join(".processing").join(&sid);
+    let result_dir = scratch.join(&held[1].1);
+    std::fs::create_dir_all(&result_dir).unwrap();
+    std::fs::write(result_dir.join(bunko_proto::RESULT_FILE), b"{}").unwrap();
+    // A processor connects with nothing left to take.
+    let mut p = h.connect("box", 1);
+    assert!(volumes(&p.drain()).is_empty());
+
+    set_local_processing(&mut h, false);
+
+    assert!(!h.s.machines.contains_key("local"), "still a machine");
+    assert!(
+        h.s.lanes.iter().all(|l| l.pid != "local"),
+        "{:?}",
+        h.s.lanes
+    );
+    assert!(h.s.sessions.values().all(|s| !s.local));
+    assert!(
+        h.s.claims.values().all(|c| c.pid == p.pid),
+        "{:?}",
+        h.s.claims
+    );
+    assert!(h.s.failures.is_empty(), "turning it off records nothing");
+    // What it held went to the processor that is connected.
+    let mut taken = names(&volumes(&p.drain()));
+    taken.sort();
+    assert_eq!(taken, ["A/V1.cbz", "A/V2.cbz"]);
+    // Nothing more goes to this server: its link is closed.
+    for dt in [2.0, 40.0, 80.0] {
+        h.at(dt);
+    }
+    let sent = drain_rx(&mut local);
+    assert!(volumes(&sent).is_empty(), "{sent:?}");
+    assert!(matches!(
+        local.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
+    ));
+    assert!(h.s.processors().iter().all(|m| m["local"] != true));
+    assert!(
+        h.s.connected_machines()
+            .iter()
+            .all(|m| m["machine"] != "local")
+    );
+    assert!(!h.library().join("A/V1.mokuro").exists());
+    assert!(!h.library().join("A/V2.mokuro").exists());
+    // Its scratch directory goes once its processor has wound down.
+    assert!(
+        scratch.is_dir(),
+        "kept while its runner may still write there"
+    );
+    h.run(|s| s.sweep_local_scratch());
+    assert!(!scratch.exists(), "left behind");
+
+    // Turned on again: it comes up and takes work again.
+    set_local_processing(&mut h, true);
+    let mut local = local_up(&mut h, &["fp32"]);
+    let arrived = h.add("B/V1.cbz", 4);
+    h.s.handle(Msg::ArchiveArrived(arrived));
+    h.at(81.0);
+    let sent = drain_rx(&mut local);
+    assert!(
+        volumes(&sent)
+            .iter()
+            .any(|(_, _, a)| std::path::Path::new(a).ends_with("B/V1.cbz")),
+        "{sent:?}"
+    );
+}
+
+/// A lane of this server claims nothing while its own OCR is off, and its open session
+/// drains, however the setting got there (defense in depth: turning it off drops this
+/// server's machine, lanes and sessions at once).
+#[test]
+fn a_lane_of_this_server_claims_nothing_while_local_processing_is_off() {
+    let mut h = harness(vec![primary()]);
+    h.s.settings.local_processing = true;
+    for rel in ["A/V1.cbz", "A/V2.cbz", "A/V3.cbz"] {
+        h.add(rel, 4);
+    }
+    h.at(0.0);
+    let mut local = local_up(&mut h, &["fp32"]);
+    h.at(1.0);
+    let sent = drain_rx(&mut local);
+    let sid = opened(&sent)[0].clone();
+    let held = volumes(&sent);
+    assert_eq!(held.len(), 2, "{sent:?}");
+    let lane = h.s.lanes.iter().find(|l| l.pid == "local").unwrap().id;
+    // The setting flips under the lane, without the settings path.
+    h.s.settings.local_processing = false;
+    assert_eq!(h.s.claim(lane, Some("g-1")), (None, false));
+    assert_eq!(h.s.claim(lane, None), (None, false));
+    // A volume that ends frees a slot of its session that nothing refills.
+    h.s.handle(Msg::Event {
+        pid: "local".into(),
+        event: Event::VolumeFailed {
+            sid: sid.clone(),
+            id: held[0].1.clone(),
+            error: "the page pipeline failed".into(),
+        },
+    });
+    let sent = drain_rx(&mut local);
+    assert!(volumes(&sent).is_empty(), "{sent:?}");
+    assert!(
+        h.s.sessions[&sid].draining.is_some(),
+        "{:?}",
+        h.s.sessions[&sid]
+    );
+}
+
+/// A local claim's archive fetched from a cloud library for a session that is gone
+/// (this server's OCR was turned off meanwhile) names a job that may be another
+/// machine's claim by then: the late fetch leaves that claim alone. It used to give it
+/// back to the queue, and the processor's result was then thrown away as late.
+#[test]
+fn a_late_cloud_fetch_leaves_another_machines_claim_alone() {
+    let mut h = harness(vec![primary()]);
+    let cbz = h.add("A/V1.cbz", 4);
+    h.at(0.0);
+    let mut p = h.connect("box", 1);
+    let sent = p.drain();
+    assert_eq!(names(&volumes(&sent)), ["A/V1.cbz"]);
+    let job = Job::new("A/V1.cbz", "g-1");
+    let hold = bunko_server::ocr::sched::SpoolHold(Arc::new(bunko_store::LocalPath::InPlace(cbz)));
+    let late = job.clone();
+    h.run(move |s| s.spooled("a-session-that-ended", &late, Ok(hold)));
+    assert_eq!(
+        h.s.claims.get(&job).map(|c| c.pid.clone()),
+        Some(p.pid.clone()),
+        "the processor's claim was given back"
+    );
+    let late = job.clone();
+    h.run(move |s| s.spooled("a-session-that-ended", &late, Err("gone".into())));
+    assert_eq!(
+        h.s.claims.get(&job).map(|c| c.pid.clone()),
+        Some(p.pid.clone()),
+        "the processor's claim was given back"
+    );
+}
+
+/// A benchmark on this server cut short by turning its OCR off says so: it failed with
+/// "local disconnected", the internal machine id, as if a processor had dropped off.
+#[test]
+fn a_benchmark_cut_short_by_turning_this_servers_ocr_off_says_so() {
+    let mut h = harness(vec![primary()]);
+    h.s.settings.autobench = true;
+    h.s.settings.local_processing = true;
+    h.add("A/V1.cbz", 6);
+    h.at(0.0);
+    let mut ops = local_up(&mut h, &["fp32"]);
+    h.at(0.0);
+    let op = bench_op(&drain_rx(&mut ops)).expect("an autobench of this server");
+
+    set_local_processing(&mut h, false);
+
+    let got = h.s.bench_get("g-1", "local");
+    assert_eq!(got["state"], "failed", "{got}");
+    assert_eq!(got["error"], "OCR on this machine was turned off", "{got}");
+    let sample = h
+        .storage()
+        .join(".processing")
+        .join(format!("{}.cbz", op.bid));
+    assert!(!sample.exists(), "its sample is removed");
 }

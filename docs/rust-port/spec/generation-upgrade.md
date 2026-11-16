@@ -188,9 +188,12 @@ For each candidate, in this order:
    is `(cbz, primary generation id, upgrade=True)` in the existing scheduler.
    Nothing new is stored: like every other job, it is recomputed from the
    filesystem on each scan.
-   - **Order.** Upgrade jobs come after every ordinary job of every generation,
-     round-robin by series like the rest, and niced like a non-first row. A
-     volume with no OCR always beats one with old OCR.
+   - **Order.** Each generation's upgrade jobs come right after that
+     generation's missing files and before the next generation's, round-robin
+     by series in a group of their own (own cursor). A layer Bunko wrote at an
+     older engine revision counts as an upgrade of its row. Upgrade jobs are
+     niced like a non-first row. A volume with no OCR still beats one with old
+     OCR.
    - **Where it runs.** Any machine that can run the primary row can run it,
      including remote processors. The processor runs a normal job. The
      library decides at install time that this one ends in a swap, from its
@@ -312,7 +315,8 @@ counts them.
 - **Swap:** an injected crash after the rename, before the bookkeeping. The
   rerun must converge.
 - **Watcher:**
-  - upgrade jobs order after ordinary ones;
+  - upgrade jobs order after their generation's missing files and before the
+    next generation's;
   - a remote processor's result is swapped, not `_1`-suffixed;
   - `publish_guard` still drops a result whose archive changed.
 - **End to end:** the ~/Downloads samples with their shipped `.mokuro` files.

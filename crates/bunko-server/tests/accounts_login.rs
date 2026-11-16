@@ -71,7 +71,7 @@ async fn me_valid_creds_returns_identity_and_permissions() {
     // The layer ids each account keeps its own copy of (D27): the reader pushes its
     // corrections only when `edit` is listed.
     assert_eq!(b["per_user_layers"], json!(["edit"]));
-    // The running version, last: reading history is per account from 0.8.0 on.
+    // The running version, last: reading history is per account from 0.7.8 on.
     assert_eq!(b["version"], bunko_core::VERSION);
     assert!(
         text.ends_with(&format!(

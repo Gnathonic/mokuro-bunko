@@ -32,7 +32,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::sched::{self, Exec, Msg, SchedDeps, Scheduler, Settings};
 use super::types::{self, LibraryFacts, PathLocks};
-use super::{actor, api, queue_api, queue_file, upgrade};
+use super::{actor, api, queue_api, queue_file, series_queue, upgrade};
 use crate::core::Core;
 
 pub use super::sched::BenchRequest;
@@ -86,6 +86,12 @@ pub trait BackgroundInstall: Send + Sync {
     /// `Err` why it cannot start.
     fn start(&self) -> Result<bool, String>;
 
+    /// [`Self::start`] for a settings change (local processing turned on), which is no
+    /// retry: what an earlier failure says to wait for still waits. Same answer.
+    fn start_for_settings(&self) -> Result<bool, String> {
+        self.start()
+    }
+
     /// Bumped each time an install ends (done or failed): the local processor (re)starts
     /// with what is installed then, when that is a backend ([`Self::backend_ready`]).
     fn finished(&self) -> tokio::sync::watch::Receiver<u64>;
@@ -97,6 +103,15 @@ pub trait BackgroundInstall: Send + Sync {
     fn backend_ready(&self) -> bool {
         true
     }
+}
+
+/// Why [`OcrControl::ask_within`] got no answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unanswered {
+    /// The scheduler is not running.
+    Stopped,
+    /// It did not get to the question in time.
+    Busy,
 }
 
 /// What the OCR module is handed.
@@ -124,8 +139,11 @@ struct Inner {
     /// Which start of the local processor is current: a stopped one's late "it ended"
     /// must not drop its successor.
     local_gen: std::sync::atomic::AtomicU64,
-    /// One (re)start of the local processor at a time.
+    /// One (re)start or stop of the local processor at a time. The server's stop takes
+    /// it too: a wind-down under way (OCR on this machine just turned off) ends first.
     local_restart: tokio::sync::Mutex<()>,
+    /// The server is stopping: no local processor starts any more.
+    stopped: std::sync::atomic::AtomicBool,
     /// The runtime `start` ran in (restarts from synchronous code use it).
     runtime: Mutex<Option<tokio::runtime::Handle>>,
     upgrade: Arc<upgrade::Upgrade>,
@@ -133,7 +151,12 @@ struct Inner {
     running_jobs: actor::RunningJobs,
     /// What the scheduler thread last published of its failing volumes.
     failing: actor::FailingVolumes,
+    /// What the scheduler thread last published of the rows each volume is owed.
+    owed: actor::OwedVolumes,
+    /// Archives that arrived after the published owed board was built.
+    fresh: actor::FreshArrivals,
     queue_file: queue_file::QueueFile,
+    series_queue: series_queue::SeriesQueueHttp,
     status: queue_api::StatusCache,
     storage: PathBuf,
 }
@@ -141,6 +164,16 @@ struct Inner {
 /// The public handle of the OCR orchestrator (cheap to clone).
 #[derive(Clone)]
 pub struct OcrControl(Arc<Inner>);
+
+/// What [`OcrControl::ask_within`] got back.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Asked<T> {
+    Answer(T),
+    /// The scheduler is running but did not answer in time (busy, or starting).
+    TimedOut,
+    /// The scheduler is not running.
+    Gone,
+}
 
 /// `generator`: `mokuro-bunko <version>`.
 pub fn generator() -> String {
@@ -156,6 +189,7 @@ pub fn settings_from_config(config: &Config, local_available: bool) -> Settings 
         concurrency: config.ocr.concurrency.max(1),
         autobench: config.ocr.autobench,
         upgrade: config.ocr.upgrade.clone(),
+        by_volume: config.queue_order() == bunko_core::config::QueueOrder::Volume,
     }
 }
 
@@ -233,11 +267,15 @@ impl OcrControl {
             local_finished: Mutex::new(None),
             local_gen: std::sync::atomic::AtomicU64::new(0),
             local_restart: tokio::sync::Mutex::new(()),
+            stopped: std::sync::atomic::AtomicBool::new(false),
             runtime: Mutex::new(None),
             upgrade: up,
             running_jobs: actor::RunningJobs::default(),
             failing: actor::FailingVolumes::default(),
+            owed: actor::OwedVolumes::default(),
+            fresh: actor::FreshArrivals::default(),
             queue_file: queue_file::QueueFile::default(),
+            series_queue: series_queue::SeriesQueueHttp::new(),
             status: queue_api::StatusCache::default(),
             storage: layout.base.clone(),
         }))
@@ -264,6 +302,11 @@ impl OcrControl {
         &self.0.queue_file
     }
 
+    /// The HTTP sink of the queue file v2 (one file per series).
+    pub fn series_queue_state(&self) -> &series_queue::SeriesQueueHttp {
+        &self.0.series_queue
+    }
+
     pub(crate) fn status_cache(&self) -> &queue_api::StatusCache {
         &self.0.status
     }
@@ -288,6 +331,22 @@ impl OcrControl {
             .cloned()
     }
 
+    /// The manifest's `pending` for `rel` (library-relative archive path) as the
+    /// scheduler last published it (within seconds), without finishing times; None
+    /// before it first published. Never waits on the scheduler.
+    pub fn owed_pending(&self, rel: &str) -> Option<Vec<serde_json::Value>> {
+        let board = self.0.owed.read().clone()?;
+        Some(board.pending(rel))
+    }
+
+    /// `rel` (library-relative archive path) arrived after the published owed board
+    /// was built: the board's `[]` for it says nothing. Read it before
+    /// [`Self::owed_pending`] (an arrival is settled after the board that knows it is
+    /// published). Never waits on the scheduler.
+    pub fn arrival_unsettled(&self, rel: &str) -> bool {
+        actor::arrival_unsettled(&self.0.fresh, rel)
+    }
+
     /// Start the scheduler thread, the in-process processor (full build, local
     /// processing on) and the stop watcher. Must be called inside a tokio runtime.
     pub fn start(&self, stop: CancellationToken) {
@@ -300,6 +359,8 @@ impl OcrControl {
             rx,
             self.0.running_jobs.clone(),
             self.0.failing.clone(),
+            self.0.owed.clone(),
+            self.0.fresh.clone(),
         ) {
             Ok(handle) => *self.0.thread.lock() = Some(handle),
             Err(e) => {
@@ -365,7 +426,8 @@ impl OcrControl {
 
     /// Stop this server's local processor (if it runs) and start it again when local
     /// processing is on: after an OCR backend install, or local processing turned on.
-    /// What it was running goes back to the queue unrecorded.
+    /// What it was running goes back to the queue unrecorded. A processor let go
+    /// earlier (local processing turned off) has wound down before a new one starts.
     pub async fn restart_local(&self, why: &str) {
         let Some(factory) = self.0.local.clone() else {
             return;
@@ -384,23 +446,10 @@ impl OcrControl {
         };
         if running {
             tracing::info!("Restarting this server's OCR: {why}");
-            // A new generation first: the old processor's "ended" must not drop the new.
-            self.0
-                .local_gen
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            self.send(Msg::Drop {
-                pid: types::LOCAL.into(),
-                reason: format!("restarting: {why}"),
-            });
-            let old = self.0.local_finished.lock().take();
-            if let Some(f) = old
-                && tokio::time::timeout(LOCAL_STOP_WAIT, f).await.is_err()
-            {
-                tracing::warn!(
-                    "this server's OCR was still stopping after {}s; starting the new one anyway",
-                    LOCAL_STOP_WAIT.as_secs()
-                );
-            }
+            self.retire_local(&format!("restarting: {why}"), "starting the new one anyway")
+                .await;
+        } else {
+            self.wind_down_local("starting the new one anyway").await;
         }
         if wanted {
             if !running {
@@ -408,6 +457,57 @@ impl OcrControl {
             }
             self.start_local(factory.as_ref());
         }
+    }
+
+    /// Local processing was turned off: the scheduler dropped this server's OCR in the
+    /// same step (what it ran is back in the queue). Wait for its processor to wind
+    /// down (its sessions end, their models freed) and sweep what they left in
+    /// `.processing`. Turned on again meanwhile, nothing is stopped: the start that
+    /// turned it on waited for the old processor itself.
+    pub async fn stop_local(&self, why: &str) {
+        if self.0.local.is_none() {
+            return;
+        }
+        let _one = self.0.local_restart.lock().await;
+        let wanted = self.ask(|s| s.settings().local_processing).await;
+        if wanted == Some(false) {
+            self.retire_local(why, "going on without it").await;
+        }
+    }
+
+    /// Let this server's running processor go: a new generation first (its late events
+    /// and its "it ended" are no successor's), dropped from the scheduler (what it runs
+    /// goes back to the queue unrecorded; nothing when it is gone already), then
+    /// [`Self::wind_down_local`].
+    async fn retire_local(&self, reason: &str, if_slow: &str) {
+        self.0
+            .local_gen
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.send(Msg::Drop {
+            pid: types::LOCAL.into(),
+            reason: reason.to_string(),
+        });
+        self.wind_down_local(if_slow).await;
+    }
+
+    /// Wait (bounded) for the processor the scheduler let go to wind down, its sessions
+    /// ended and their models freed, then remove what they left in `.processing`.
+    async fn wind_down_local(&self, if_slow: &str) {
+        // It is no longer the current one: its late events and its end are nobody's.
+        self.0
+            .local_gen
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let old = self.0.local_finished.lock().take();
+        if let Some(f) = old
+            && tokio::time::timeout(LOCAL_STOP_WAIT, f).await.is_err()
+        {
+            tracing::warn!(
+                "this server's OCR was still stopping after {}s; {if_slow}",
+                LOCAL_STOP_WAIT.as_secs()
+            );
+        }
+        // Its runners have stopped writing: their scratch goes.
+        let _ = self.ask(|s| s.sweep_local_scratch()).await;
     }
 
     /// An install ended. Done: this server's OCR (re)starts with the new backend. Failed:
@@ -452,6 +552,7 @@ impl OcrControl {
             })
             .await;
         if let Some((true, false)) = state {
+            self.wind_down_local("starting the new one anyway").await;
             tracing::info!("Starting this server's OCR: {why}");
             self.start_local(factory.as_ref());
         }
@@ -468,7 +569,29 @@ impl OcrControl {
         handle.spawn(async move { me.restart_local(&why).await });
     }
 
+    /// [`Self::stop_local`] from synchronous code (the settings apply path).
+    fn stop_local_soon(&self, why: &str) {
+        let handle = self.0.runtime.lock().clone();
+        let Some(handle) = handle else {
+            return;
+        };
+        let me = self.clone();
+        let why = why.to_string();
+        handle.spawn(async move { me.stop_local(&why).await });
+    }
+
     fn start_local(&self, factory: &dyn LocalProcessorFactory) {
+        if self.0.stopped.load(std::sync::atomic::Ordering::SeqCst) {
+            return; // The server is stopping.
+        }
+        // Each start is a generation of its own, taken before its `LocalUp`: a processor
+        // let go before it (turned off, restarted, or one that stopped by itself) never
+        // speaks for it or drops it.
+        let generation = self
+            .0
+            .local_gen
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
         let results = self.0.storage.join(".processing");
         // unmounted: the `.processing` spool, beside the library.
         #[allow(clippy::disallowed_methods)]
@@ -502,7 +625,6 @@ impl OcrControl {
         let tx = self.0.tx.clone();
         let mut events = channels.events;
         let me = self.clone();
-        let generation = self.0.local_gen.load(std::sync::atomic::Ordering::SeqCst);
         let current =
             move || me.0.local_gen.load(std::sync::atomic::Ordering::SeqCst) == generation;
         tokio::spawn(async move {
@@ -521,25 +643,43 @@ impl OcrControl {
                     return;
                 }
             }
-            if current() {
-                let _ = tx.send(Msg::Drop {
-                    pid: types::LOCAL.into(),
-                    reason: "the local processor stopped".into(),
-                });
-            }
+            // Judged when the scheduler takes it: a successor whose `LocalUp` came first
+            // is the current one by then, and stays.
+            let _ = tx.send(Msg::Query(Box::new(move |s: &mut Scheduler| {
+                if current() {
+                    s.drop_processor(types::LOCAL, "the local processor stopped");
+                }
+            })));
         });
     }
 
     /// Stop the scheduler (in-flight volumes go back unrecorded) and wait for it, then
     /// for the local processor it let go of: its sessions wind down and free their
-    /// models before this returns (bounded), not under the process exit.
+    /// models before this returns (bounded), not under the process exit. A stop, restart
+    /// or start of the local processor under way (OCR on this machine turned off just
+    /// before) ends first: it may hold the processor's end and be waiting for it.
     pub async fn stop(&self) {
+        self.0
+            .stopped
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         // A paced direct-upgrade job ends after its current volume.
         self.0.upgrade.halt();
         self.send(Msg::Stop);
         let handle = self.0.thread.lock().take();
         if let Some(h) = handle {
             let _ = tokio::task::spawn_blocking(move || h.join()).await;
+        }
+        // Bounded: that wind-down waits for the processor at most LOCAL_STOP_WAIT itself,
+        // and with the scheduler gone it gets no answer to wait for.
+        let waited = tokio::time::timeout(
+            LOCAL_STOP_WAIT + Duration::from_secs(5),
+            self.0.local_restart.lock(),
+        )
+        .await;
+        if waited.is_err() {
+            tracing::warn!(
+                "this server's OCR was still being stopped or restarted; exiting anyway"
+            );
         }
         let local = self.0.local_finished.lock().take();
         if let Some(f) = local
@@ -561,17 +701,30 @@ impl OcrControl {
         &self,
         f: impl FnOnce(&mut Scheduler) -> T + Send + 'static,
     ) -> Option<T> {
+        self.ask_with_deadline(Duration::from_secs(30), f)
+            .await
+            .ok()
+    }
+
+    /// [`Self::ask`] with its own deadline, saying why no answer came.
+    pub async fn ask_with_deadline<T: Send + 'static>(
+        &self,
+        wait: Duration,
+        f: impl FnOnce(&mut Scheduler) -> T + Send + 'static,
+    ) -> Result<T, Unanswered> {
         let (reply, rx) = tokio::sync::oneshot::channel();
         let q: sched::Query = Box::new(move |s: &mut Scheduler| {
             let _ = reply.send(f(s));
         });
         if !self.send(Msg::Query(q)) {
-            return None;
+            return Err(Unanswered::Stopped);
         }
-        tokio::time::timeout(Duration::from_secs(30), rx)
-            .await
-            .ok()?
-            .ok()
+        match tokio::time::timeout(wait, rx).await {
+            Ok(Ok(v)) => Ok(v),
+            // The scheduler dropped the question: it stopped.
+            Ok(Err(_)) => Err(Unanswered::Stopped),
+            Err(_) => Err(Unanswered::Busy),
+        }
     }
 
     /// [`Self::ask`] from synchronous code (a blocking thread), with a deadline.
@@ -580,20 +733,42 @@ impl OcrControl {
         wait: Duration,
         f: impl FnOnce(&mut Scheduler) -> T + Send + 'static,
     ) -> Option<T> {
+        match self.ask_within(wait, f) {
+            Asked::Answer(t) => Some(t),
+            Asked::TimedOut | Asked::Gone => None,
+        }
+    }
+
+    /// [`Self::ask_blocking`] that tells a scheduler too busy to answer within `wait`
+    /// from one that is not running.
+    pub fn ask_within<T: Send + 'static>(
+        &self,
+        wait: Duration,
+        f: impl FnOnce(&mut Scheduler) -> T + Send + 'static,
+    ) -> Asked<T> {
         let (reply, rx) = std::sync::mpsc::channel();
         let q: sched::Query = Box::new(move |s: &mut Scheduler| {
             let _ = reply.send(f(s));
         });
         if !self.send(Msg::Query(q)) {
-            return None;
+            return Asked::Gone;
         }
-        rx.recv_timeout(wait).ok()
+        match rx.recv_timeout(wait) {
+            Ok(t) => Asked::Answer(t),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Asked::TimedOut,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Asked::Gone,
+        }
     }
 
     // --- hooks the DAV layer calls (from blocking threads) ------------------------------------
 
     /// A library `.cbz` is in place (PUT, MOVE/COPY into place): queue its OCR now.
     pub fn archive_arrived(&self, cbz: &Path) {
+        // Noted before the scheduler hears of it: a manifest asked meanwhile must not
+        // read the published board's `[]` as "nothing owed".
+        if let Some(rel) = types::arrival_rel(&self.0.core.layout.library(), cbz) {
+            actor::note_arrival(&self.0.fresh, rel);
+        }
         self.send(Msg::ArchiveArrived(cbz.to_path_buf()));
     }
 
@@ -640,19 +815,38 @@ impl OcrControl {
         let settings = settings_from_config(config, self.has_local());
         self.0.upgrade.configure(&settings.upgrade, &settings.rows);
         let wanted_local = settings.local_processing;
-        let local_running = if self.0.pending.lock().is_some() {
+        let (local_was_running, local_running, returned) = if self.0.pending.lock().is_some() {
             // Not started yet: the new settings simply become the starting ones.
             if let Some((s, _)) = self.0.pending.lock().as_mut() {
                 s.apply_settings(settings);
             }
-            wanted_local
+            (false, wanted_local, 0)
         } else {
+            // Turned off, the scheduler drops this server's OCR in this same step: what
+            // it held (not being installed) goes back to the queue.
             self.ask_blocking(Duration::from_secs(10), move |s| {
+                let was = s.machines.contains_key(types::LOCAL);
+                let held = |s: &Scheduler| {
+                    s.claims
+                        .values()
+                        .filter(|c| c.pid == types::LOCAL && !c.settling)
+                        .count()
+                };
+                let before = held(s);
                 s.apply_settings(settings);
-                s.machines.contains_key(types::LOCAL)
+                let returned = before.saturating_sub(held(s));
+                (was, s.machines.contains_key(types::LOCAL), returned)
             })
-            .unwrap_or(false)
+            .unwrap_or((false, false, 0))
         };
+        if !wanted_local
+            && self.has_local()
+            && self.0.pending.lock().is_none()
+            && (local_was_running || self.0.local_finished.lock().is_some())
+        {
+            // Its processor winds down (its models freed) and its scratch goes.
+            self.stop_local_soon("local processing was turned off");
+        }
         let restart_required = false;
         let mut installing = false;
         let mut reason = String::new();
@@ -662,7 +856,7 @@ impl OcrControl {
         } else if wanted_local && !local_running && self.0.pending.lock().is_none() {
             // Turned on: install the OCR backend first if it is missing (in the
             // background; its end starts this server's OCR), else start it now.
-            match self.installer().map(|i| i.start()) {
+            match self.installer().map(|i| i.start_for_settings()) {
                 Some(Ok(true)) => {
                     installing = true;
                     reason = "installing the OCR backend in the background; this server's OCR starts when it is done".into();
@@ -680,7 +874,19 @@ impl OcrControl {
                 }
             }
         }
-        json!({"applied": true, "installing": installing, "restart_required": restart_required, "reason": reason})
+        json!({"applied": true, "installing": installing, "restart_required": restart_required, "reason": reason, "returned": returned})
+    }
+
+    /// From a blocking thread: wait (bounded) until this server's OCR, turned off, has
+    /// wound down (its sessions ended, its engine freed, its scratch swept). A stop
+    /// under way is waited for. Nothing is stopped while local processing is on.
+    pub fn wait_local_stopped(&self, why: &str) {
+        let handle = tokio::runtime::Handle::try_current()
+            .ok()
+            .or_else(|| self.0.runtime.lock().clone());
+        if let Some(h) = handle {
+            h.block_on(self.stop_local(why));
+        }
     }
 
     /// Cut off every processor of an account now (disabled, deleted, re-roled).
@@ -798,4 +1004,25 @@ pub fn processor_router(ocr: OcrControl) -> axum::Router {
 /// `/queue`, `/queue/`, `/queue/api/config`, `/queue/api/status`, `/queue/<file>`.
 pub fn queue_router(ocr: OcrControl) -> axum::Router {
     queue_api::router(ocr)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bunko_core::config::{LibraryBackend, QueueOrder};
+
+    /// The live settings take work by volume on a MEGA library (its transfer quota
+    /// counts every download) unless `ocr.queue_order` says otherwise.
+    #[test]
+    fn settings_take_work_by_volume_on_mega_unless_set() {
+        let mut config = Config::default();
+        assert!(!settings_from_config(&config, true).by_volume);
+        config.storage.library.backend = LibraryBackend::Mega;
+        assert!(settings_from_config(&config, true).by_volume);
+        config.ocr.queue_order = Some(QueueOrder::Generation);
+        assert!(!settings_from_config(&config, true).by_volume);
+        config.storage.library.backend = LibraryBackend::GDrive;
+        config.ocr.queue_order = Some(QueueOrder::Volume);
+        assert!(settings_from_config(&config, true).by_volume);
+    }
 }

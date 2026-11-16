@@ -376,7 +376,8 @@ Predicates (`auth.py:114-165`), all on the path with `"/" + path.strip("/")` nor
   matched in any case (0.8: `History/` and `Goals.json` ARE the caller's `history/` and `goals.json`;
   PathCase rewrites the first segment to the canonical spelling before auth, and the physical path
   is built from the canonical name; a library folder spelled like one is hidden and named by
-  doctor). `is_progress_path` covers all of
+  doctor; 0.7.8 backported these names to the 0.7 line, where they match exactly and
+  case-sensitively and `History/` is a library series). `is_progress_path` covers all of
   them: PUT, MKCOL and DELETE there need `WRITE_PROGRESS` (so `registered` keeps its own history);
   MOVE, COPY, LOCK, UNLOCK and PROPPATCH on or into `history` are refused (403, 401 anonymous).
 * `is_inbox_path`, `is_admin_path` (`startswith("/_admin")`), `is_processor_path`
@@ -1495,7 +1496,7 @@ Document (`build_document`, `queue_file.py:64-95`; `json.dumps(..., separators=(
  "generated_at": "YYYY-MM-DDTHH:MM:SSZ",          # UTC, excluded from the ETag
  "held": null | {"reason": <plain code string>},
  "next_check_after": null | <int seconds>,        # recheck_after(all jobs, now) (section 9)
- "pending_volumes": <int>,                        # ALL waiting volumes; `volumes` lists running + only the next 100 waiting
+ "pending_volumes": <int>,                        # every waiting volume (a job waiting, none running); volumes list every running job + the next 100 waiting jobs, soonest first
  "volumes": [ {"series": s, "volume": v,
                "path": "/mokuro-reader/<enc s>/<enc v>.cbz",          # percent-encoded, safe "!*'()"
                "manifest": "/catalog/api/manifest?series=<enc>&volume=<enc>",

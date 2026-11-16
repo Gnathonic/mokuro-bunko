@@ -14,8 +14,8 @@ fn main() -> anyhow::Result<()> {
         intra_threads: threads,
         ..Default::default()
     };
-    let det = Model::load(&dir.join("det/manga_det_v0.2.onnx"), &opts)?;
-    let rec = Model::load(&dir.join("rec/manga_rec_v0.2.onnx"), &opts)?;
+    let det = Model::load(&dir.join("det/manga_det.onnx"), &opts)?;
+    let rec = Model::load(&dir.join("rec/manga_rec.onnx"), &opts)?;
     for _ in 0..3 {
         let t = Instant::now();
         det.run_f32(&[1, 3, 1120, 704], vec![0.1; 3 * 1120 * 704])?;

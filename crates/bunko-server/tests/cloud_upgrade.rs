@@ -30,9 +30,24 @@ use sha2::Digest;
 const ROOT: &str = "mokuro-reader";
 
 const LEGACY: &str = r#"{"version": "0.2.1", "title": "S", "volume": "Vol 1", "pages": [{"img_path": "001.jpg", "blocks": []}, {"img_path": "002.jpg", "blocks": []}, {"img_path": "003.jpg", "blocks": []}]}"#;
+/// A hayai-nova sidecar as 0.7 wrote it: its block carries no `revision` (read as 1).
+/// A test that means the engine's output of today takes [`hayai`].
 const HAYAI: &str = r#"{"version":"0.2.5","title":"S","volume":"Vol 1","volume_uuid":"vu","ocr_engine":{"id":"hayai-nova","detector":"ppocr-manga","patch_budget":512},"pages":[{"img_path":"001.jpg","blocks":[]},{"img_path":"002.jpg","blocks":[]},{"img_path":"003.jpg","blocks":[]}]}"#;
 const HAYAI_UNSTAMPED: &str = r#"{"version":"0.2.5","title":"S","volume":"Vol 1","volume_uuid":"vu","pages":[{"img_path":"001.jpg","blocks":[]},{"img_path":"002.jpg","blocks":[]},{"img_path":"003.jpg","blocks":[]}]}"#;
 const BUNKO_OLD: &str = r#"{"version":"0.2.1","title":"S","volume":"Vol 1","ocr_engine":{"id":"mokuro","generator":"mokuro-bunko 0.5.3"},"pages":[{"img_path":"001.jpg","blocks":[]},{"img_path":"002.jpg","blocks":[]},{"img_path":"003.jpg","blocks":[]}]}"#;
+
+/// [`HAYAI`] from a processor that is up to date: the primary's recipe at the engine's
+/// current revision (`bunko_layout::sidecar::engine_revision`), whatever that is today.
+fn hayai() -> &'static str {
+    static CURRENT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        let revision = bunko_layout::sidecar::engine_revision("hayai-nova");
+        HAYAI.replace(
+            r#""id":"hayai-nova","#,
+            &format!(r#""id":"hayai-nova","revision":{revision},"#),
+        )
+    });
+    &CURRENT
+}
 
 fn cbz(pages: usize) -> Vec<u8> {
     let mut z = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
@@ -73,12 +88,27 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> 
     tokio::task::spawn_blocking(f).await.unwrap()
 }
 
+/// The lease runs, and its first claim waits an hour before it may hold the lease.
+fn slow_claim(c: &mut bunko_remote::RemoteStoreConfig) {
+    c.lease = true;
+    c.lease_settle = Some(Duration::from_secs(3600));
+    c.retry_base = Duration::from_millis(50);
+}
+
 impl Cloud {
     /// A server over `fake`, with the reader's files already in it, after its first sync.
     async fn start(fake: Arc<FakeBackend>) -> Cloud {
+        Cloud::start_tuned(fake, no_lease).await
+    }
+
+    /// [`Cloud::start`] with the store's settings tuned by `tune`.
+    async fn start_tuned(
+        fake: Arc<FakeBackend>,
+        tune: fn(&mut bunko_remote::RemoteStoreConfig),
+    ) -> Cloud {
         let dir = tempfile::tempdir().unwrap();
         let base = dir.path().join("storage");
-        bunko_server::storage::testing::register_tuned(&base, fake.clone(), Some(no_lease));
+        bunko_server::storage::testing::register_tuned(&base, fake.clone(), Some(tune));
         let mut c = Config::default();
         c.storage.base_path = base;
         c.storage.library.backend = LibraryBackend::GDrive;
@@ -229,7 +259,7 @@ impl Cloud {
     }
 
     async fn bunko_layer(&self, rel: &str) {
-        self.bunko_put(rel, HAYAI, "hayai-nova", "ppocr-manga")
+        self.bunko_put(rel, hayai(), "hayai-nova", "ppocr-manga")
             .await;
     }
 }
@@ -274,7 +304,7 @@ async fn a_stamp_less_cloud_sidecar_is_replaced_with_no_copy_and_never_deleted_f
 
     assert_eq!(
         cloud.cloud_bytes("Series/Vol 1.mokuro").as_deref(),
-        Some(sealed(HAYAI).as_str())
+        Some(sealed(hayai()).as_str())
     );
     assert_no_copy(&cloud, &fake, "Vol 1");
     let store = cloud.store().clone();
@@ -305,12 +335,12 @@ async fn a_stamp_less_cloud_sidecar_is_replaced_in_place_with_no_copy() {
         .unwrap();
     let (trashed, deleted) = (fake.trashed_log().len(), fake.deleted_log().len());
     cloud
-        .upgrade_generated("Series/Vol 1.cbz", HAYAI)
+        .upgrade_generated("Series/Vol 1.cbz", hayai())
         .await
         .unwrap();
     assert_eq!(
         cloud.cloud_bytes("Series/Vol 1.mokuro").as_deref(),
-        Some(HAYAI)
+        Some(hayai())
     );
     let now = fake
         .node_at(&format!("{ROOT}/Series/Vol 1.mokuro"))
@@ -349,7 +379,7 @@ async fn a_failed_upload_skips_the_cloud_volume_until_the_next_census() {
     cloud.upgrade_direct("Series/Vol 1.cbz").await.unwrap();
     assert_eq!(
         cloud.cloud_bytes("Series/Vol 1.mokuro").as_deref(),
-        Some(sealed(HAYAI).as_str())
+        Some(sealed(hayai()).as_str())
     );
     assert_no_copy(&cloud, &fake, "Vol 1");
 }
@@ -372,7 +402,7 @@ async fn a_reader_overwrite_in_the_cloud_forgets_the_row_and_is_upgraded() {
             .truncate(true)
             .open(&tmp)
             .unwrap();
-        f.write_all(HAYAI.as_bytes()).unwrap();
+        f.write_all(hayai().as_bytes()).unwrap();
         drop(f);
         let intent = WriteIntent::new(
             Mode::CreateNew,
@@ -384,7 +414,7 @@ async fn a_reader_overwrite_in_the_cloud_forgets_the_row_and_is_upgraded() {
         bunko_store::fs::publish(&tmp, &bare, &intent).unwrap();
     })
     .await;
-    cloud.proof("Series/Vol 1.mokuro", HAYAI, "hayai-nova", "ppocr-manga");
+    cloud.proof("Series/Vol 1.mokuro", hayai(), "hayai-nova", "ppocr-manga");
     assert_eq!(cloud.judge("Series/Vol 1.cbz").await, Verdict::Current);
 
     // The reader re-uploads it from its DB: no stamp.
@@ -398,12 +428,12 @@ async fn a_reader_overwrite_in_the_cloud_forgets_the_row_and_is_upgraded() {
     }
     assert_eq!(cloud.judge("Series/Vol 1.cbz").await, Verdict::NeedsOcr);
     cloud
-        .upgrade_generated("Series/Vol 1.cbz", HAYAI)
+        .upgrade_generated("Series/Vol 1.cbz", hayai())
         .await
         .unwrap();
     assert_eq!(
         cloud.cloud_bytes("Series/Vol 1.mokuro").as_deref(),
-        Some(HAYAI)
+        Some(hayai())
     );
     assert_no_copy(&cloud, &fake, "Vol 1");
 }
@@ -436,7 +466,7 @@ async fn every_outdated_cloud_main_is_replaced_without_a_copy_and_layers_stay() 
     }
     fake.reader_put(
         &format!("{ROOT}/Series/Vol 3.hayai-nova.mokuro"),
-        HAYAI.as_bytes(),
+        hayai().as_bytes(),
     );
     let cloud = Cloud::start(fake.clone()).await;
     cloud
@@ -447,7 +477,7 @@ async fn every_outdated_cloud_main_is_replaced_without_a_copy_and_layers_stay() 
     cloud.upgrade_direct("Series/Vol 1.cbz").await.unwrap();
     assert_eq!(
         cloud.cloud_bytes("Series/Vol 1.mokuro").as_deref(),
-        Some(sealed(HAYAI).as_str())
+        Some(sealed(hayai()).as_str())
     );
     assert_no_copy(&cloud, &fake, "Vol 1");
 
@@ -464,7 +494,7 @@ async fn every_outdated_cloud_main_is_replaced_without_a_copy_and_layers_stay() 
         .unwrap_err();
     assert!(err.contains("not proven"), "{err}");
     cloud
-        .upgrade_generated("Series/Vol 3.cbz", HAYAI)
+        .upgrade_generated("Series/Vol 3.cbz", hayai())
         .await
         .unwrap();
     assert_no_copy(&cloud, &fake, "Vol 3");
@@ -472,7 +502,7 @@ async fn every_outdated_cloud_main_is_replaced_without_a_copy_and_layers_stay() 
         cloud
             .cloud_bytes("Series/Vol 3.hayai-nova.mokuro")
             .as_deref(),
-        Some(HAYAI),
+        Some(hayai()),
         "never deleted"
     );
 
@@ -480,7 +510,7 @@ async fn every_outdated_cloud_main_is_replaced_without_a_copy_and_layers_stay() 
     cloud.proof("Series/Vol 4.mokuro", BUNKO_OLD, "mokuro", "ctd");
     assert_eq!(cloud.judge("Series/Vol 4.cbz").await, Verdict::NeedsOcr);
     cloud
-        .upgrade_generated("Series/Vol 4.cbz", HAYAI)
+        .upgrade_generated("Series/Vol 4.cbz", hayai())
         .await
         .unwrap();
     assert_no_copy(&cloud, &fake, "Vol 4");
@@ -511,7 +541,7 @@ async fn every_outdated_cloud_main_is_replaced_without_a_copy_and_layers_stay() 
     assert!(err.contains("not proven"), "{err}");
     let trashed = fake.trashed_log().len();
     cloud
-        .upgrade_generated("Series/Vol 2.cbz", HAYAI)
+        .upgrade_generated("Series/Vol 2.cbz", hayai())
         .await
         .unwrap();
     assert_no_copy(&cloud, &fake, "Vol 2");
@@ -533,6 +563,19 @@ async fn collect(
     row: bunko_core::generations::Generation,
     result: String,
 ) -> bunko_server::ocr::collect::Outcome {
+    let job = bunko_server::ocr::types::Job::new(cbz, &row.id);
+    collect_job(cloud, job, row, result, None).await
+}
+
+/// [`collect`] of `job` (an upgrade job when `upgrade` is given).
+async fn collect_job(
+    cloud: &Cloud,
+    job: bunko_server::ocr::types::Job,
+    row: bunko_core::generations::Generation,
+    result: String,
+    upgrade: Option<Arc<Upgrade>>,
+) -> bunko_server::ocr::collect::Outcome {
+    let cbz = job.rel.to_string();
     let dir = cloud
         .dir
         .path()
@@ -542,7 +585,7 @@ async fn collect(
     std::fs::write(&out, result).unwrap();
     let layout = cloud.services.core.layout.clone();
     let req = bunko_server::ocr::collect::CollectRequest {
-        job: bunko_server::ocr::types::Job::new(cbz, &row.id),
+        job,
         rows: vec![
             bunko_core::generations::default_generation("g-1"),
             row.clone(),
@@ -565,9 +608,54 @@ async fn collect(
         sid: "s-1".into(),
         claim: "c-1".into(),
         congestion: None,
-        upgrade: None,
+        upgrade,
     };
     blocking(move || bunko_server::ocr::collect::run(req).outcome).await
+}
+
+/// An upgrade job's result that arrives while this Bunko is still claiming the cloud
+/// library (its settle wait, §9.2): the swap is a Sync write, which the store refuses
+/// until it holds the library. That is no failure of the volume: the job goes back to
+/// the queue (`Held`), and the cloud's main sidecar is as it was, with nothing left in
+/// the outbox. (It failed with the store's refusal hidden behind "No such file or
+/// directory": the store had moved the result into its outbox and dropped it, and the
+/// copy fallback then found no file.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_upgrade_result_while_the_library_is_being_claimed_is_held() {
+    use bunko_server::ocr::collect::Outcome;
+    let fake = Arc::new(FakeBackend::drive_like());
+    library(&fake, LEGACY);
+    let cloud = Cloud::start_tuned(fake.clone(), slow_claim).await;
+    let store = cloud.store().clone();
+    let until = Instant::now() + Duration::from_secs(20);
+    while store.lease().and_then(|l| l.claiming_left()).is_none() {
+        assert!(Instant::now() < until, "the settle wait");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(cloud.judge("Series/Vol 1.cbz").await, Verdict::NeedsOcr);
+    let primary = bunko_core::generations::default_generation("g-1");
+    let job = bunko_server::ocr::types::Job::upgrade("Series/Vol 1.cbz", &primary.id);
+    let outcome = collect_job(&cloud, job, primary, hayai().to_string(), Some(cloud.up())).await;
+    let Outcome::Held(reason) = &outcome else {
+        panic!("held, not failed: {outcome:?}");
+    };
+    assert!(reason.contains("still claiming the library"), "{reason}");
+    assert!(!reason.contains("No such file"), "{reason}");
+    assert_eq!(
+        cloud.cloud_bytes("Series/Vol 1.mokuro").as_deref(),
+        Some(LEGACY),
+        "the cloud's main sidecar is untouched"
+    );
+    assert!(
+        store.outbox().iter().all(|o| !o.dest.ends_with(".mokuro")),
+        "{:?}",
+        store.outbox()
+    );
+    assert!(cloud.upgrade_audits().is_empty());
+    assert!(
+        store.lease().and_then(|l| l.claiming_left()).is_some(),
+        "still claiming throughout"
+    );
 }
 
 /// The rename race on a cloud library (critique S6): what a reader moved to the

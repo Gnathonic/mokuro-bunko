@@ -527,6 +527,11 @@ pub(crate) fn respond(hit: Hit, tail_xml: &str, gzip: bool) -> Response<Body> {
     );
     resp.headers_mut()
         .insert(VARY, HeaderValue::from_static("Accept-Encoding"));
+    // For the request accounting: what the listing is before compression.
+    resp.extensions_mut().insert(crate::ListingInfo {
+        raw_len: total,
+        gzip,
+    });
     resp
 }
 

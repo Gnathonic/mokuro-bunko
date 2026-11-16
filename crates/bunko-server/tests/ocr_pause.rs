@@ -196,9 +196,10 @@ fn a_processor_registering_paused_gets_no_work() {
             body: json!({
                 "protocol": 3,
                 "name": "box",
-                "catalog": {"engines": ["hayai-nova", "paddle-manga", "ppocr-manga"],
+                "catalog": {"engines": ENGINES,
                             "detectors": ["ppocr-manga"],
-                            "devices": [{"id": "cpu", "label": "CPU"}]},
+                            "devices": [{"id": "cpu", "label": "CPU"}],
+                            "engine_revisions": current_revisions(ENGINES)},
                 "availability": {"paused": true, "until": "2030-01-01T08:00:00Z", "reason": "schedule"},
             }),
             account_stamp: None,

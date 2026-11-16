@@ -398,7 +398,9 @@ fn restrict_to_owner(path: &Path, shown: &Path) -> Option<String> {
     }
     #[cfg(windows)]
     {
+        use bunko_update::tools::Windowless;
         let principal = std::process::Command::new("whoami")
+            .windowless()
             .output()
             .ok()
             .filter(|o| o.status.success())
@@ -415,6 +417,7 @@ fn restrict_to_owner(path: &Path, shown: &Path) -> Option<String> {
         let done = std::process::Command::new("icacls")
             .arg(path)
             .args(["/inheritance:r", "/grant:r", &format!("{principal}:F")])
+            .windowless()
             .output();
         match done {
             Ok(o) if o.status.success() => None,

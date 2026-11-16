@@ -1,5 +1,5 @@
-// First-run setup (one path, 0.8 §11): where the library lives (this computer, Google
-// Drive, OneDrive, MEGA or a WebDAV server), Connect (one button: the server picks
+// First-run setup (one path, 0.8 §11): where the library lives (this computer, a
+// folder you choose, Google Drive, OneDrive, MEGA or a WebDAV server), Connect (one button: the server picks
 // the sign-in flow), Check, whether readers connect to this Bunko, the admin account
 // (then who may join and remote access, when readers connect), OCR on this machine
 // (full build) or "Connect a processor" (lite build), Done. Done follows the first
@@ -17,7 +17,7 @@
 
     const NAMES = {
         local: 'this computer', gdrive: 'Google Drive', onedrive: 'OneDrive',
-        mega: 'MEGA', webdav: 'the WebDAV server',
+        mega: 'MEGA', webdav: 'the WebDAV server', folder: 'the library folder',
     };
     const OAUTH = ['gdrive', 'onedrive'];
     const isCloud = () => where !== 'local';
@@ -95,6 +95,19 @@
                 r.disabled = r.value !== pinned;
             });
         }
+        // Local folder: the path on file, fixed when MOKURO_LIBRARY_PATH sets it.
+        const conf = (storage && storage.configured) || {};
+        const libPath = conf.path || lib.path;
+        if (libPath && !$('folder-path').value) $('folder-path').value = libPath;
+        const pinnedPath = (conf.pinned || {}).path || (options.pinned || {}).path;
+        if (pinnedPath) {
+            $('folder-path').value = pinnedPath;
+            $('folder-path').readOnly = true;
+            $('folder-pinned').textContent = 'Set by MOKURO_LIBRARY_PATH.';
+            $('folder-pinned').hidden = false;
+        }
+        // Browse… lists this computer's folders: only for a browser on this computer.
+        $('folder-browse').hidden = !options.local || !!pinnedPath;
         if (!storage) {
             // This server cannot change where its library lives (an older one).
             document.querySelectorAll('input[name="where"]').forEach((r) => { r.disabled = r.value !== 'local'; });
@@ -215,8 +228,10 @@
     function setupConnect() {
         const name = NAMES[where];
         const conf = (storage && storage.configured) || {};
-        $('connect-title').textContent = 'Connect ' + name;
-        $('connect-lede').textContent = OAUTH.includes(where)
+        $('connect-title').textContent = where === 'folder' ? 'Choose the library folder' : 'Connect ' + name;
+        $('connect-lede').textContent = where === 'folder'
+            ? 'The folder Mokuro Reader\'s Local Folder uses. Bunko reads and writes it in place.'
+            : OAUTH.includes(where)
             ? (options.local
                 ? 'One sign-in: the ' + (where === 'gdrive' ? 'Google' : 'Microsoft') + ' page opens in a new tab.'
                 : where === 'onedrive'
@@ -236,6 +251,8 @@
         }
         $('connect-mega').hidden = where !== 'mega';
         $('connect-webdav').hidden = where !== 'webdav';
+        $('connect-folder').hidden = where !== 'folder';
+        $('folder-picker').hidden = true;
         if (where === 'webdav' && conf.webdav) {
             if (conf.webdav.url && !$('dav-url').value) $('dav-url').value = conf.webdav.url;
             if (conf.webdav.username && !$('dav-user').value) $('dav-user').value = conf.webdav.username;
@@ -247,7 +264,7 @@
         $('connect-code-link').textContent = where === 'onedrive'
             ? 'Use a sign-in code instead (work or school accounts)'
             : 'Use a code instead';
-        $('connect-btn').textContent = 'Connect';
+        $('connect-btn').textContent = where === 'folder' ? 'Use this folder' : 'Connect';
         $('connect-live').hidden = true;
         $('connect-paste').hidden = true;
         showError($('connect-error'), '');
@@ -266,11 +283,20 @@
                 password: $('dav-password').value, allow_http: $('dav-http').checked,
             };
         }
+        if (where === 'folder') body.path = $('folder-path').value.trim();
         if (flow) body.flow = flow;
         return body;
     }
 
+    // A full path: /…, ~, a drive letter (D:\ or D:/) or a share (\\server\share).
+    const FULL_PATH = /^(\/|~|[A-Za-z]:[\\/]|\\\\)/;
+
     function validateConnect() {
+        if (where === 'folder') {
+            const p = $('folder-path').value.trim();
+            if (!p) return 'Enter the folder\'s full path.';
+            if (!FULL_PATH.test(p)) return 'Enter the full path: it starts with / or a drive letter.';
+        }
         if (where === 'mega' && (!$('mega-email').value.trim() || !$('mega-password').value)) return 'Enter the MEGA email and password';
         if (where === 'webdav') {
             const url = $('dav-url').value.trim();
@@ -405,7 +431,7 @@
                 row.className = 'setup-actions';
                 const use = document.createElement('button');
                 use.className = 'btn btn--danger btn--sm';
-                use.textContent = 'Use this account\'s library instead';
+                use.textContent = s.provider === 'folder' ? 'Use this folder instead' : 'Use this account\'s library instead';
                 use.onclick = async () => {
                     try {
                         await postJSON('setup/api/storage/connect/account', { use_this_account: true });
@@ -444,7 +470,7 @@
                 live.hidden = true;
                 break;
             case 'connected':
-                p('Connected as ' + (s.account || 'your account') + '.');
+                p(s.provider === 'folder' ? 'Folder: ' + (s.account || '?') + '.' : 'Connected as ' + (s.account || 'your account') + '.');
                 break;
             default:
                 live.hidden = true;
@@ -462,7 +488,9 @@
 
     function renderCheck(s) {
         const c = s.check || {};
-        $('check-account').textContent = 'Signed in to ' + (NAMES[s.provider] || '') + ' as ' + (s.account || '?') + '.';
+        $('check-account').textContent = s.provider === 'folder'
+            ? 'Folder: ' + (c.folder || s.account || '?')
+            : 'Signed in to ' + (NAMES[s.provider] || '') + ' as ' + (s.account || '?') + '.';
         $('check-summary').textContent = c.summary || '';
         const pairing = c.pairing || s.pairing;
         $('check-pairing').hidden = !pairing;
@@ -474,7 +502,7 @@
         $('check-switch').hidden = !(c.offer_switch && c.other_pairing);
         if (c.other_pairing) $('check-switch').textContent = 'Try ' + pairingLabel(c.other_pairing);
         $('check-create').hidden = !!c.found;
-        $('check-create').textContent = 'Create ' + (c.folder || 'mokuro-reader') + '/';
+        $('check-create').textContent = s.provider === 'folder' ? 'Create it' : 'Create ' + (c.folder || 'mokuro-reader') + '/';
         $('check-offers').hidden = $('check-switch').hidden && $('check-create').hidden;
         $('check-next').disabled = !c.found;
         showError($('check-error'), '');
@@ -518,12 +546,80 @@
         }
     }
 
+    // ---- Browse… (Local folder, a browser on this computer only) ---------------------------
+
+    // An inline folder browser over setup/api/fs: the current folder, Up, the drives
+    // (Windows), the subfolders, and "Use this folder", which fills the path.
+    function folderPicker() {
+        const box = $('folder-picker');
+        const input = $('folder-path');
+        showError($('connect-error'), '');
+        const el = (tag, cls, text) => {
+            const e = document.createElement(tag);
+            if (cls) e.className = cls;
+            if (text != null) e.textContent = text;
+            return e;
+        };
+        const at = el('p', 'fs-picker__path');
+        const list = el('ul', 'fs-picker__list');
+        const err = el('p', 'form-error');
+        err.setAttribute('role', 'alert');
+        err.hidden = true;
+        const actions = el('div', 'fs-picker__actions');
+        const close = el('button', 'btn btn--secondary btn--sm', 'Close');
+        const use = el('button', 'btn btn--primary btn--sm', 'Use this folder');
+        close.type = use.type = 'button';
+        actions.append(close, use);
+        box.replaceChildren(at, list, err, actions);
+        box.hidden = false;
+        let current = null;
+        const row = (label, path) => {
+            const li = el('li');
+            const b = el('button', 'fs-picker__item', label);
+            b.type = 'button';
+            b.onclick = () => load(path, false);
+            li.appendChild(b);
+            return li;
+        };
+        async function load(path, first) {
+            let d;
+            try {
+                d = await getJSON('setup/api/fs?path=' + encodeURIComponent(path || ''));
+            } catch (e) {
+                // A typed path that is not there yet: start at the home folder.
+                if (first && path) return load('', false);
+                showError(err, e.message);
+                return;
+            }
+            showError(err, '');
+            current = d;
+            at.textContent = d.path;
+            const join = (n) => d.path + (d.path.endsWith(d.sep) ? '' : d.sep) + n;
+            const items = [];
+            if (d.parent) items.push(row('\u2191 Up', d.parent));
+            (d.drives || []).filter((x) => x !== d.path).forEach((x) => items.push(row(x, x)));
+            d.dirs.forEach((n) => items.push(row('\u{1F4C1} ' + n, join(n))));
+            if (!d.dirs.length) items.push(el('li', 'fs-picker__empty', 'No folders in here.'));
+            if (d.truncated) items.push(el('li', 'fs-picker__empty', 'This folder holds more than 5,000 entries: only some are shown. Type the path to go further.'));
+            list.replaceChildren(...items);
+        }
+        close.onclick = () => { box.hidden = true; };
+        use.onclick = () => {
+            if (current) input.value = current.path;
+            box.hidden = true;
+            input.focus();
+        };
+        load(input.value.trim(), true);
+    }
+
     // ---- readers -----------------------------------------------------------------------
 
     let readersSet = false;
     function enterReaders() {
         const name = NAMES[where];
-        $('readers-no-text').textContent = isCloud()
+        $('readers-no-text').textContent = where === 'folder'
+            ? 'Mokuro Reader on this computer keeps reading the folder directly (Local Folder, in Chrome or Edge); Bunko adds OCR, covers and series info.'
+            : isCloud()
             ? 'Mokuro Reader keeps reading from your ' + (where === 'webdav' ? 'WebDAV server' : name) + '; Bunko adds OCR, covers and series info.'
             : 'Bunko only OCRs the library and adds covers and series info here.';
         if (!readersSet) {
@@ -909,6 +1005,8 @@
         $('connect-paste-url').addEventListener('keydown', (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); pasteAddress(); } });
         $('connect-back').addEventListener('click', () => { stopPolling(); $('connect-paste').hidden = true; show('step-where'); });
         $('connect-code-link').addEventListener('click', (ev) => { ev.preventDefault(); connect('device'); });
+        $('folder-browse').addEventListener('click', folderPicker);
+        $('folder-path').addEventListener('keydown', (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); connect(null); } });
         $('check-back').addEventListener('click', () => { setupConnect(); show('step-connect'); });
         $('check-next').addEventListener('click', next);
         $('check-create').addEventListener('click', createFolder);
