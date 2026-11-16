@@ -370,6 +370,16 @@ impl MergeState {
             .components()
             .filter_map(|c| c.as_os_str().to_str().map(fold))
             .collect();
+        // A series' OCR queue file (queue file v2) is Bunko's own status file, rewritten
+        // as jobs start and end and regenerated after any merge: its writes leave the
+        // series quiet, as the root's status files leave the root.
+        if segs.len() >= 2
+            && segs
+                .last()
+                .is_some_and(|n| *n == fold(crate::names::SERIES_QUEUE_FILE))
+        {
+            return;
+        }
         let now = Instant::now();
         let mut q = self.events.lock();
         q.push_back((now, segs));

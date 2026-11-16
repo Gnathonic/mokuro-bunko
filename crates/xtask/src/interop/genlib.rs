@@ -90,7 +90,7 @@ pub fn cbz_bytes(tag: &str) -> Result<Vec<u8>> {
         zip.start_file(format!("{p:03}.jpg"), options)?;
         zip.write_all(PAGE)?;
     }
-    zip.set_comment(tag.to_string());
+    zip.set_comment(tag.to_string())?;
     Ok(zip.finish()?.into_inner())
 }
 

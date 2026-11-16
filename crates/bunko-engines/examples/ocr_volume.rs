@@ -5,7 +5,8 @@
 //! MOKURO_MODELS_DIR=~/.cache/mokuro-bunko-demo/models-v1 \
 //! cargo run -p bunko-engines --release --example ocr_volume -- \
 //!     hayai-nova path/to/volume.cbz out.mokuro [--backend cpu] [--precision fp32] \
-//!     [--stage-workers detect=3] [--device gpu:0] [--uuids TITLE,VOLUME]
+//!     [--stage-workers detect=3] [--device gpu:0] [--uuids TITLE,VOLUME] \
+//!     [--detector ctd-lines] [--patch-budget 256]
 //! ```
 //!
 //! Memory is reported from `/proc/self/status` (Linux): RSS once the session is
@@ -48,7 +49,7 @@ fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.len() < 3 {
         bail!(
-            "usage: ocr_volume <engine> <archive.cbz> <out.mokuro> [--backend B] [--precision P] [--stage-workers k=n,...] [--device D] [--models DIR]"
+            "usage: ocr_volume <engine> <archive.cbz> <out.mokuro> [--backend B] [--precision P] [--stage-workers k=n,...] [--device D] [--models DIR] [--detector D] [--patch-budget N]"
         );
     }
     let (engine, archive, out) = (&args[0], PathBuf::from(&args[1]), PathBuf::from(&args[2]));
@@ -58,6 +59,8 @@ fn main() -> Result<()> {
     let mut models = std::env::temp_dir().join("bunko-engines-models");
     let mut uuids: (Option<String>, Option<String>) = (None, None);
     let mut pick: Option<String> = None;
+    let mut detector: Option<String> = None;
+    let mut patch_budget: u32 = 512;
     let mut i = 3;
     while i + 1 < args.len() {
         let v = &args[i + 1];
@@ -70,6 +73,8 @@ fn main() -> Result<()> {
                 pools.stage_device.insert("engine".into(), v.clone());
             }
             "--models" => models = PathBuf::from(v),
+            "--detector" => detector = Some(v.clone()),
+            "--patch-budget" => patch_budget = v.parse()?,
             "--uuids" => {
                 let (t, v) = v.split_once(',').context("--uuids TITLE,VOLUME")?;
                 uuids = (Some(t.into()), Some(v.into()));
@@ -91,8 +96,8 @@ fn main() -> Result<()> {
         id: "g-1".into(),
         name: engine.clone(),
         engine: engine.clone(),
-        detector: None,
-        patch_budget: 512,
+        detector,
+        patch_budget,
         precision,
         pools,
         precision_pick: pick,

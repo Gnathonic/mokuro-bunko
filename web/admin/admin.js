@@ -110,6 +110,11 @@ function initTabs() {
             } else {
                 stopStatusRefresh();
             }
+            if (tabId === 'analytics') {
+                window.bunkoAnalytics.open();
+            } else if (window.bunkoAnalytics) {
+                window.bunkoAnalytics.close();
+            }
             if (tabId === 'connectivity') {
                 loadTunnelStatus();
                 loadDynDNSStatus();
@@ -916,6 +921,7 @@ async function loadSettings() {
         document.getElementById('settings-queue-display').value = data.queue?.display || 'normal';
         // OCR
         document.getElementById('settings-ocr-interval').value = data.ocr?.poll_interval || 30;
+        showQueueOrder(data.ocr || {});
         renderOcrRuntimeStatus(data.ocr_runtime || {}, data.ocr || {});
     } catch (err) {
         showToast('Failed to load settings: ' + err.message, 'error');
@@ -1124,14 +1130,24 @@ async function saveCatalogSettings() {
     }
 }
 
-// The scan interval is all `PUT /settings/ocr` still carries; engines,
-// detector and patch budget moved into the generation rows below.
+// How the queue takes work (`ocr.queue_order`): the setting, and what it comes
+// to now (Automatic depends on the library's storage).
+function showQueueOrder(ocr) {
+    document.getElementById('settings-ocr-queue-order').value = ocr.queue_order || 'auto';
+    const now = ocr.queue_order_effective === 'volume' ? 'by volume' : 'by generation';
+    document.getElementById('settings-ocr-queue-order-now').textContent = 'The queue takes work ' + now + ' now.';
+}
+
+// The queue order and the scan interval are what `PUT /settings/ocr` carries;
+// engines, detector and patch budget moved into the generation rows above.
 async function saveOcrSettings() {
     try {
         const result = await apiPut('/settings/ocr', {
+            queue_order: document.getElementById('settings-ocr-queue-order').value,
             poll_interval: parseInt(document.getElementById('settings-ocr-interval').value, 10),
         });
-        showToast(liveApplyMessage(result, 'Scan interval saved'), result?.restart_required ? 'warning' : 'success');
+        if (result?.ocr) showQueueOrder(result.ocr);
+        showToast(liveApplyMessage(result, 'Queue settings saved'), result?.restart_required ? 'warning' : 'success');
     } catch (err) {
         showToast(err.message, 'error');
     }
@@ -1843,7 +1859,7 @@ function genRowHtml(row, index) {
         '<div class="gen__fields">' +
         genNameFieldHtml(row, index, shown) +
         genSelectFieldHtml(row, index, 'engine', 'Engine',
-            genCatalog.engines.map((e) => ({ value: e.id, label: e.id, title: e.label || e.id })), row.engine,
+            genCatalogOptions(genCatalog.engines), row.engine,
             false, genCatalogLabel(genCatalog.engines, row.engine),
             shown && shown.field === 'engine') +
         genDetectorFieldHtml(row, index, locked, effective, shown) +
@@ -1934,7 +1950,30 @@ function genNameRowHtml(row, index, shown) {
 function genCatalogLabel(list, value) {
     const found = (list || []).find((item) => item.id === value);
     const label = found && found.label ? String(found.label) : '';
-    return label && label !== value ? label : '';
+    const text = label && label !== value ? label : '';
+    const terms = genLicenceNote(found);
+    return text && terms ? text + ' (' + terms + ')' : (text || terms);
+}
+
+// What to know about a model whose weights are not under a permissive licence:
+// the licence, and that the weights are only fetched once a row uses the model.
+// Nothing for the default (permissive) ones.
+function genLicenceNote(item) {
+    if (!item || !item.license || !item.license_class || item.license_class === 'permissive') return '';
+    return item.license + ' weights, downloaded when a row uses it';
+}
+
+// The options of an engine or detector select: the id, with the licence beside
+// it when the weights are not permissively licensed.
+function genCatalogOptions(list) {
+    return (list || []).map((item) => {
+        const restricted = item.license && item.license_class && item.license_class !== 'permissive';
+        return {
+            value: item.id,
+            label: restricted ? item.id + ' (' + item.license + ')' : item.id,
+            title: item.label || item.id,
+        };
+    });
 }
 
 // A field's label with its description as a tooltip, and the hidden text
@@ -1982,8 +2021,13 @@ function genDetectorFieldHtml(row, index, locked, effective, shown) {
         const hint = detectorLabel
             ? detectorLabel + ' — finds the text regions this engine reads.'
             : 'Finds the text regions this engine reads.';
+        // A block detector goes only with an engine that reads blocks; the row's
+        // own detector stays listed so a mismatch can be seen and changed.
+        const engine = genEngine(row.engine);
+        const offered = genCatalog.detectors.filter((d) =>
+            d.line_level !== false || (engine && engine.reads_blocks) || d.id === row.detector);
         return genSelectFieldHtml(row, index, 'detector', 'Detector',
-            genCatalog.detectors.map((d) => ({ value: d.id, label: d.id, title: d.label || d.id })),
+            genCatalogOptions(offered),
             row.detector || '', false, hint,
             !!(shown && shown.field === 'detector'));
     }
@@ -4640,7 +4684,9 @@ function auditToHash() {
     AUDIT_KEYS.forEach((key) => { if (auditState[key]) params.set(key, auditState[key]); });
     const qs = params.toString();
     try {
-        history.replaceState(null, '', '#audit' + (qs ? '?' + qs : ''));
+        // The page's own path: a bare '#...' resolves against the injected
+        // <base href> (the mount root), so a refresh would open the home page.
+        history.replaceState(null, '', window.location.pathname + window.location.search + '#audit' + (qs ? '?' + qs : ''));
     } catch (_) { /* a sandboxed frame may refuse; the filters still apply */ }
 }
 
@@ -5002,7 +5048,8 @@ function renderMachine(m) {
     const parts = [];
     // "rocm7.1 for 0.7.0-beta.4": a pack belongs to one release.
     const packSize = (p) => formatBytes(p.size) + ' on disk' + (p.external_size
-        ? ', of which ' + formatBytes(p.external_size) + " came from NVIDIA's CUDA wheels" : '');
+        ? ', of which ' + formatBytes(p.external_size) + " came from NVIDIA's CUDA wheels" : '') +
+        (p.removing ? ', removed when the server next starts' : '');
     const loadedPack = b.loaded && (m.packs || []).find((p) => p.in_use);
     if (b.loaded) {
         parts.push('In use: ' + b.loaded.variant + ' for ' + b.loaded.version +
@@ -5015,6 +5062,7 @@ function renderMachine(m) {
     });
     if (b.need && b.need.state === 'install') parts.push('Missing: the ' + b.need.variant + ' pack');
     if (b.need && b.need.state === 'off') parts.push('OCR here is off');
+    if (b.need && b.need.extra) parts.push('Not installed: the optional ' + b.need.extra.variant + ' pack (' + b.need.extra.text + ')');
     if (!parts.length) parts.push(b.need ? b.need.text : '-');
     document.getElementById('machine-pack').textContent = parts.join(' · ');
     renderMachineVulkan(m.vulkan);
@@ -5037,11 +5085,13 @@ function renderMachine(m) {
 
     renderMachineInstall(m.install);
     const running = m.install && m.install.state === 'running';
-    document.getElementById('machine-install-btn').hidden = !(b.need && b.need.state === 'install') || running;
+    document.getElementById('machine-install-btn').hidden = !(b.need && (b.need.state === 'install' || b.need.extra)) || running;
     document.getElementById('machine-install-btn').textContent =
         m.install && m.install.state === 'failed' ? 'Retry' : 'Install';
     document.getElementById('machine-reinstall-btn').hidden = running || !(m.packs || []).some((p) => p.removable);
-    document.getElementById('machine-remove-btn').hidden = running || !(m.packs || []).some((p) => p.removable);
+    // A pack already set to go at the next start offers no second Remove.
+    document.getElementById('machine-remove-btn').hidden = running ||
+        !(m.packs || []).some((p) => p.removable && !p.removing);
     if (running) startMachineInstallPolling();
 
     // Engines and models: what each engine needs on this machine (the models-v1 files
@@ -5190,14 +5240,27 @@ async function machineInstall(reinstall) {
 }
 
 async function machineRemove() {
-    if (!confirm('Remove the installed OCR backend? OCR here stops until it is installed again.')) return;
+    const on = document.getElementById('machine-local').checked;
+    if (!confirm('Remove the installed OCR backend?' + (on
+        ? ' OCR on this machine is turned off first: what it is reading goes back to the queue for' +
+            ' the processors, and it stays off until you turn it on again (which installs the backend again).'
+        : ''))) return;
     try {
         const r = await apiPost('/machine/remove', {});
-        showToast('Removed ' + (r.removed || []).join(', ') + (r.freed ? ' (' + formatBytes(r.freed) + ')' : '') +
-            (r.message ? '. ' + r.message : ''), 'success');
+        const parts = [];
+        if (r.local_turned_off) {
+            parts.push('OCR on this machine is off' + (r.returned
+                ? ' (' + r.returned + ' volume' + (r.returned === 1 ? '' : 's') + ' back in the queue)' : ''));
+        }
+        if ((r.removed || []).length) {
+            parts.push('Removed ' + r.removed.join(', ') + (r.freed ? ' (' + formatBytes(r.freed) + ')' : ''));
+        }
+        if (r.message) parts.push(r.message);
+        showToast(parts.join('. ') || 'Nothing to remove', (r.failed || []).length ? 'error' : 'success');
         loadMachine();
     } catch (e) {
         showToast(e.message || String(e), 'error');
+        loadMachine();
     }
 }
 

@@ -69,6 +69,9 @@ pub struct Build {
     pub ep: Ep,
     /// Built without the desktop tray (`xtask dist --no-tray`: the Docker images).
     pub no_tray: bool,
+    /// Built without the models whose weights are not under a permissive licence
+    /// (`xtask dist --permissive-models`: no `gpl-models`, no `nc-models`).
+    pub permissive_models: bool,
 }
 
 impl Build {
@@ -85,6 +88,7 @@ impl Build {
             flavor,
             ep,
             no_tray: false,
+            permissive_models: false,
         })
     }
 
@@ -111,14 +115,6 @@ impl Build {
     pub fn cargo_features(&self) -> (bool, Vec<&'static str>) {
         match self.flavor {
             Flavor::Lite => (true, vec![]),
-            Flavor::Full if self.no_tray => {
-                let (_, f) = Build {
-                    no_tray: false,
-                    ..self.clone()
-                }
-                .cargo_features();
-                (true, f)
-            }
             Flavor::Full => {
                 let mut f = vec!["ocr"];
                 match self.ep {
@@ -131,7 +127,19 @@ impl Build {
                     Ep::Coreml => f.push("coreml"),
                     Ep::Webgpu => f.push("webgpu"),
                 }
-                (false, f)
+                // The default features are the release build: OCR, the tray and the
+                // models of both restricted licence classes. A build that leaves any of
+                // them out turns the defaults off and names what it keeps.
+                let defaults = !self.no_tray && !self.permissive_models;
+                if !defaults {
+                    if !self.no_tray {
+                        f.push("tray");
+                    }
+                    if !self.permissive_models {
+                        f.extend(["gpl-models", "nc-models"]);
+                    }
+                }
+                (!defaults, f)
             }
         }
     }
@@ -342,6 +350,32 @@ mod tests {
         let b = Build::new("x86_64-unknown-linux-musl", Flavor::Lite, None).unwrap();
         assert_eq!(b.cargo_features(), (true, vec![]));
         assert!(Build::new("x86_64-unknown-linux-musl", Flavor::Lite, Some(Ep::Cuda)).is_err());
+    }
+
+    /// The default features are the release build; leaving the tray or the restricted
+    /// model classes out turns them off and names the rest.
+    #[test]
+    fn builds_that_leave_a_default_out_name_what_they_keep() {
+        let full = Build::new("x86_64-unknown-linux-gnu", Flavor::Full, None).unwrap();
+        let docker = Build {
+            no_tray: true,
+            ..full.clone()
+        };
+        assert_eq!(
+            docker.cargo_features(),
+            (true, vec!["ocr", "gpl-models", "nc-models"])
+        );
+        let permissive = Build {
+            permissive_models: true,
+            ..full.clone()
+        };
+        assert_eq!(permissive.cargo_features(), (true, vec!["ocr", "tray"]));
+        let both = Build {
+            no_tray: true,
+            permissive_models: true,
+            ..full
+        };
+        assert_eq!(both.cargo_features(), (true, vec!["ocr"]));
     }
 
     #[test]

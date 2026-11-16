@@ -108,6 +108,10 @@ pub struct VolumeOutlook {
     pub pending: Vec<Value>,
     /// Seconds until the reader should re-fetch the manifest; `None` = `null`.
     pub recheck_after: Option<Value>,
+    /// The OCR queue did not answer in time and has published nothing to answer from
+    /// yet (it is starting): what is pending is unknown, not empty. The manifest is then
+    /// 503 with `Retry-After`, so a reader keeps watching.
+    pub busy: bool,
 }
 
 /// What the OCR module tells the manifest about a volume. Called from blocking
@@ -131,6 +135,9 @@ pub struct LibraryDeps {
     pub outlook: Option<Arc<dyn OutlookSource>>,
     /// Manifest layer order; `None` = alphabetical.
     pub layer_order: Option<LayerOrder>,
+    /// The catalog's "Popular" order (`popular_rank` per series while
+    /// `analytics.enabled`); `None` = no ranks.
+    pub popular: Option<crate::analytics::popular::Popularity>,
 }
 
 impl LibraryDeps {
@@ -142,6 +149,7 @@ impl LibraryDeps {
             ocr_status: None,
             outlook: None,
             layer_order: None,
+            popular: None,
         }
     }
 }

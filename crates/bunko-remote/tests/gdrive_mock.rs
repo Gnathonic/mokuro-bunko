@@ -813,6 +813,72 @@ async fn replace_keeps_the_id_and_skips_identical_bytes() {
     );
 }
 
+/// The Status fast path (queue file v2 §6.6): an overwrite is one media PATCH by id,
+/// with no `files.get` preflight and no same-content check.
+#[tokio::test]
+async fn overwrite_is_one_media_patch_by_id() {
+    let e = env().await;
+    let r = e.mock.mkdir("root", "mokuro-reader");
+    let dir = e.mock.mkdir(&r, "Example Saga");
+    let f = e
+        .mock
+        .put(&dir, ".mokuro-series-queue.json", b"{\"v\":2,\"rev\":1}");
+    let before = e.mock.requests().len();
+    let units = e.be.units_used();
+    let s2 = src(b"{\"v\":2,\"rev\":2}");
+    let n =
+        e.be.overwrite(&f, None, s2.source(), &mut op())
+            .await
+            .unwrap();
+    let reqs = e.mock.requests()[before..].to_vec();
+    assert_eq!(reqs.len(), 1, "{reqs:?}");
+    assert_eq!(reqs[0].method, "PATCH");
+    assert_eq!(reqs[0].path, format!("/upload/drive/v3/files/{f}"));
+    assert_eq!(
+        reqs[0].query.get("uploadType").map(String::as_str),
+        Some("multipart")
+    );
+    assert_eq!(e.be.units_used() - units, units::UPDATE);
+    assert_eq!(e.mock.data(&f), b"{\"v\":2,\"rev\":2}");
+    assert_eq!(
+        (n.pid.as_str(), n.parent.as_deref(), n.trashed),
+        (f.as_str(), Some(dir.as_str()), false)
+    );
+    assert_eq!(
+        n.hash,
+        Some((HashKind::Sha256, hex_sha256(b"{\"v\":2,\"rev\":2}")))
+    );
+
+    // Drive writes a file in the trash all the same: the answer says where it is.
+    e.mock.lock().files.get_mut(&f).unwrap().trashed = true;
+    let s3 = src(b"{\"v\":2,\"rev\":3}");
+    let n =
+        e.be.overwrite(&f, None, s3.source(), &mut op())
+            .await
+            .unwrap();
+    assert!(n.trashed);
+
+    // A file that is gone is NotFound.
+    e.mock.lock().delete(&f);
+    assert_eq!(
+        e.be.overwrite(&f, None, s3.source(), &mut op()).await,
+        Err(BErr::NotFound)
+    );
+
+    // A version to check still takes the preflight.
+    let g = e.mock.put(&dir, "series.json", b"{}");
+    let cur = e.be.stat(&g).await.unwrap().unwrap();
+    let before = e.mock.requests().len();
+    e.be.overwrite(&g, Some(&cur.cver), s3.source(), &mut op())
+        .await
+        .unwrap();
+    let reqs = e.mock.requests()[before..].to_vec();
+    assert_eq!(
+        reqs.iter().map(|r| r.method.as_str()).collect::<Vec<_>>(),
+        ["GET", "PATCH"]
+    );
+}
+
 #[tokio::test]
 async fn metadata_writes_and_queries() {
     let e = env().await;
@@ -1109,4 +1175,89 @@ async fn unit_costs_follow_the_limits_page() {
     let c = e.be.start_cursor().await.unwrap();
     e.be.changes(&c).await.unwrap();
     assert_eq!(e.be.units_used() - u0, units::GET + units::CHANGES);
+}
+
+/// The Status fast path end to end (queue file v2 §6.6, §12.1): a store on the Drive
+/// driver writes a series' queue file it already holds with one call in the
+/// governor's api log, which is one media PATCH by id on the wire.
+#[test]
+fn a_status_write_through_the_store_is_one_call_and_one_patch() {
+    use bunko_remote::{RemoteStore, RemoteStoreConfig};
+    use bunko_store::{Durability, LibraryStore, Mode, Origin, WriteIntent, fs};
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let sim = rt.block_on(bunko_cloudsim::start());
+    let mock = sim.drive("default");
+    mock.lock().strict_bunko = true;
+    let r = mock.mkdir("root", "mokuro-reader");
+    let dir = mock.mkdir(&r, "Example Saga");
+    mock.put(&dir, "Example Saga 01.cbz", b"zip");
+    let tmp = tempfile::tempdir().unwrap();
+    let mut dcfg = GDriveConfig::new(tmp.path().join("drive"));
+    dcfg.api_base = sim.drive_api_base();
+    let be = Arc::new(GDriveBackend::new(Arc::new(StaticToken::new("tok")), dcfg).unwrap());
+    let root = tmp.path().join("cloud/s/library");
+    let mut cfg = RemoteStoreConfig::new(&root, tmp.path().join("cloud/s"), "mokuro-reader");
+    cfg.poll_active = Duration::from_secs(3600);
+    cfg.poll_idle = Duration::from_secs(3600);
+    cfg.lease = false;
+    cfg.retry_base = Duration::from_millis(20);
+    cfg.mount_id = 3;
+    let store = RemoteStore::open_shared(cfg, be).unwrap();
+    store.set_lease_gate(Arc::new(|| true));
+    let _mount = bunko_store::mount(store.clone() as Arc<dyn LibraryStore>);
+    assert!(store.wait_steady(Duration::from_secs(30)));
+
+    let dest = root.join("Example Saga").join(".mokuro-series-queue.json");
+    let write = |n: u32| {
+        let src = tmp.path().join(format!("q{n}.json"));
+        std::fs::write(&src, format!("{{\"v\":2,\"rev\":{n}}}")).unwrap();
+        fs::publish(
+            &src,
+            &dest,
+            &WriteIntent::new(
+                Mode::Replace { base: None },
+                Origin::Status,
+                Durability::Deferred,
+            ),
+        )
+        .unwrap();
+        assert!(store.wait_outbox_idle(Duration::from_secs(30)));
+    };
+    write(1);
+    let id = mock
+        .lock()
+        .child(&dir, ".mokuro-series-queue.json")
+        .expect("the file is created");
+    let calls = store.api_stats().total_hour();
+    let before = mock.requests().len();
+    write(2);
+    let after = store.api_stats().total_hour();
+    assert_eq!(after.calls - calls.calls, 1, "one call in the api log");
+    assert_eq!(after.units - calls.units, units::UPDATE);
+    let reqs = mock.requests()[before..].to_vec();
+    assert_eq!(reqs.len(), 1, "{reqs:?}");
+    assert_eq!(
+        (reqs[0].method.as_str(), reqs[0].path.as_str()),
+        ("PATCH", format!("/upload/drive/v3/files/{id}").as_str())
+    );
+    assert_eq!(mock.data(&id), b"{\"v\":2,\"rev\":2}");
+
+    // Deleted behind the store's back: the PATCH's 404 falls back to a create.
+    mock.lock().delete(&id);
+    write(3);
+    let id2 = mock
+        .lock()
+        .child(&dir, ".mokuro-series-queue.json")
+        .expect("created again");
+    assert_ne!(id2, id);
+    assert_eq!(mock.data(&id2), b"{\"v\":2,\"rev\":3}");
+    drop(_mount);
+    drop(store);
+    drop(sim);
+    rt.shutdown_timeout(Duration::from_secs(5));
 }

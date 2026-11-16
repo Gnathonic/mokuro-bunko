@@ -29,7 +29,7 @@ export = [
     "onnxconverter-common==1.16.0",
     "numpy==2.5.3",
     "ml-dtypes==0.6.0",
-    "pillow==12.3.0",
+    "pillow==13.0.0",
 ]
 
 [project.scripts]

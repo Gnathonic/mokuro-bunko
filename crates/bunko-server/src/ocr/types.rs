@@ -87,6 +87,14 @@ pub fn rel_of(library: &Path, path: &Path) -> Option<String> {
     Some(parts.join("/"))
 }
 
+/// The library-relative path of an arriving archive the scheduler takes in: a volume
+/// archive outside the per-user tree. None for anything else (it is no volume).
+pub fn arrival_rel(library: &Path, path: &Path) -> Option<String> {
+    let rel = rel_of(library, path)?;
+    (bunko_library::sidecar::is_cbz_name(&rel) && !bunko_core::reader_tree::is_per_user_rel(&rel))
+        .then_some(rel)
+}
+
 /// Is `path` in the per-user tree at the library root (a cloud library's progress user
 /// keeps `history/`, `goals.json`, … beside the series)? It is that account's, never
 /// library content: no OCR, cover, metadata or shared-listing work for it, whatever its

@@ -137,7 +137,13 @@ impl File {
         }
         let st = match self {
             File::Tokio(f) => St::Tokio(f),
-            File::Stream(s) => St::Remote(s.file.into_inner()),
+            File::Stream(s) => {
+                // The whole span is read straight through: say so before the first
+                // read, so a remote file fetches it in large requests from the start.
+                let mut f = s.file.into_inner();
+                f.will_read(start, len);
+                St::Remote(f)
+            }
         };
         let init = (Some(st), start, len, true);
         futures_util::stream::unfold(init, |(st, start, left, first)| async move {

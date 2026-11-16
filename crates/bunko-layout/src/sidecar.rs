@@ -19,10 +19,12 @@ use crate::records::{RawLine, RawPage};
 pub const MOKURO_FORMAT_VERSION: &str = "0.2.5";
 
 /// `RECOGNIZER_REPOS` (engine -> recognizer repo).
-pub const RECOGNIZER_REPOS: [(&str, &str); 3] = [
+pub const RECOGNIZER_REPOS: [(&str, &str); 5] = [
     ("hayai-nova", "JustANormalTinkerer/hayai-ocr-v2.5-nova"),
     ("paddle-manga", "sorryhyun/paddleocr-vl-1.6-manga-lora"),
     ("ppocr-manga", "Kellenok/PP-OCRv6_manga"),
+    ("charspot-small", "muscgab/manga-ocr-charspot-small"),
+    ("nar-small", "muscgab/manga-ocr-nar-small"),
 ];
 
 /// Each composed engine's output revision, written as `ocr_engine.revision`. Bump an
@@ -30,10 +32,11 @@ pub const RECOGNIZER_REPOS: [(&str, &str); 3] = [
 /// change): with upgrades on, every older sealed file of that engine is OCR'd again,
 /// and processors announcing an older revision are offered none of its work.
 pub const ENGINE_REVISIONS: [(&str, u32); 3] =
-    [("hayai-nova", 1), ("paddle-manga", 1), ("ppocr-manga", 1)];
+    [("hayai-nova", 2), ("paddle-manga", 2), ("ppocr-manga", 2)];
 
-/// `engine`'s current output revision; 1 for an engine not in [`ENGINE_REVISIONS`]
-/// (and an absent `ocr_engine.revision` reads as 1, so 0.7 files are current).
+/// `engine`'s current output revision; 1 for an engine not in [`ENGINE_REVISIONS`].
+/// An absent `ocr_engine.revision` reads as 1 (what 0.7 wrote): current for an engine
+/// still at 1, old output for one that has moved on.
 pub fn engine_revision(engine: &str) -> u32 {
     ENGINE_REVISIONS
         .iter()
@@ -227,6 +230,44 @@ pub fn finish_page(
     }
 }
 
+/// One mokuro page from the blocks of a block detector: `blocks[k]` holds the lines the
+/// block reader found in block `k`, in its reading order. The blocks and their lines
+/// are kept as they are (no furigana filter, no roles, no merging: the detector and
+/// the reader decided all that); the layout only puts the blocks in reading order and
+/// builds them. A line says itself which way it runs.
+pub fn blocks_page(blocks: &[Vec<RawLine>], width: i64, height: i64, version: &str) -> Page {
+    use crate::layout::{Kind, Line, build_block, measure, order_blocks};
+
+    let mut measured: Vec<Vec<Line>> = Vec::new();
+    let mut index = 0usize;
+    for block in blocks {
+        let mut lines = Vec::new();
+        for raw in block {
+            let raw = raw.rounded();
+            if let Some(mut line) = measure(index, &raw).filter(|l| !l.text.is_empty()) {
+                line.vertical = raw.vertical;
+                lines.push(line);
+            }
+            index += 1;
+        }
+        if !lines.is_empty() {
+            measured.push(lines);
+        }
+    }
+    let groups: Vec<Vec<&Line>> = measured.iter().map(|b| b.iter().collect()).collect();
+    let kinds = vec![Kind::Text; groups.len()];
+    let order = order_blocks(&groups, &kinds, &[]);
+    Page {
+        version: version.to_string(),
+        img_width: width,
+        img_height: height,
+        blocks: order
+            .iter()
+            .map(|&i| build_block(&groups[i], width as f64, height as f64, 0.0))
+            .collect(),
+    }
+}
+
 /// The `ocr_engine` block of a composed engine's sidecar.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OcrEngine {
@@ -244,6 +285,9 @@ pub struct OcrEngine {
     pub weights: Vec<(String, String)>,
     /// What the recognizer computed in; omitted when none loaded (ppocr-manga).
     pub precision: Option<String>,
+    /// The parts a reader names the OCR by, in display order: `(role, name,
+    /// version)`, the version empty when the model has none. Omitted when empty.
+    pub parts: Vec<(String, String, String)>,
 }
 
 impl OcrEngine {
@@ -265,6 +309,7 @@ impl OcrEngine {
             patch_budget: PATCH_BUDGET_ENGINES.contains(&engine).then_some(patches),
             weights: Vec::new(),
             precision: None,
+            parts: Vec::new(),
         }
     }
 
@@ -295,6 +340,22 @@ impl OcrEngine {
         }
         if let Some(p) = self.precision.as_ref().filter(|p| !p.is_empty()) {
             items.push(("precision".to_string(), Value::Str(p.clone())));
+        }
+        if !self.parts.is_empty() {
+            let part = |(role, name, version): &(String, String, String)| {
+                let mut fields = vec![
+                    ("role".to_string(), Value::Str(role.clone())),
+                    ("name".to_string(), Value::Str(name.clone())),
+                ];
+                if !version.is_empty() {
+                    fields.push(("version".to_string(), Value::Str(version.clone())));
+                }
+                Value::Object(fields)
+            };
+            items.push((
+                "parts".to_string(),
+                Value::Array(self.parts.iter().map(part).collect()),
+            ));
         }
         Value::Object(items)
     }
@@ -525,6 +586,84 @@ mod tests {
         );
     }
 
+    fn read_line(text: &str, x0: f64, y0: f64, x1: f64, y1: f64, vertical: bool) -> RawLine {
+        RawLine {
+            quad: vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
+            score: 0.9,
+            text: text.to_string(),
+            conf: 0.9,
+            vertical,
+            angle: 0.0,
+            char_confs: Vec::new(),
+        }
+    }
+
+    /// A block detector's blocks stand as they were found: every line kept (a short
+    /// line beside a long one is no furigana here), in the reader's order, and the
+    /// blocks in reading order (right to left).
+    #[test]
+    fn a_block_detectors_blocks_stand_and_are_put_in_reading_order() {
+        let left = vec![
+            read_line("こんにちは", 160.0, 100.0, 200.0, 400.0, true),
+            read_line("ね", 110.0, 100.0, 150.0, 140.0, true),
+        ];
+        let right = vec![
+            read_line("あ", 800.0, 100.0, 840.0, 140.0, true),
+            read_line("", 700.0, 100.0, 740.0, 140.0, true),
+        ];
+        let page = blocks_page(&[left, right, Vec::new()], 1000, 1400, "0.2.5");
+        assert_eq!((page.img_width, page.img_height), (1000, 1400));
+        let lines: Vec<&[String]> = page.blocks.iter().map(|b| b.lines.as_slice()).collect();
+        assert_eq!(
+            lines,
+            [
+                &["あ".to_string()][..],
+                &["こんにちは".into(), "ね".into()][..]
+            ]
+        );
+        assert!(page.blocks.iter().all(|b| b.vertical));
+        assert_eq!(page.blocks[1].lines_coords.len(), 2);
+        // The one-character line is as wide as it is tall: it runs the way its
+        // reader said, not the way its box looks.
+        let across = vec![read_line("OK", 100.0, 100.0, 180.0, 140.0, false)];
+        assert!(!blocks_page(&[across], 1000, 1400, "0.2.5").blocks[0].vertical);
+        assert!(blocks_page(&[], 10, 10, "0.2.5").blocks.is_empty());
+    }
+
+    /// The parts a reader labels the OCR by close the block; a part without a version
+    /// has no `version` key.
+    #[test]
+    fn engine_block_lists_its_parts_last() {
+        let mut e = OcrEngine::new("charspot-small", None, 0);
+        e.detector = "animetext-blocks".into();
+        e.parts = vec![
+            ("recognizer".into(), "Charspot Small".into(), String::new()),
+            ("detector".into(), "AnimeText".into(), "12x".into()),
+        ];
+        let v = e.to_value();
+        let Value::Object(items) = &v else {
+            panic!("{v:?}")
+        };
+        assert_eq!(items.last().map(|(k, _)| k.as_str()), Some("parts"));
+        let Some(Value::Array(parts)) = v.get("parts") else {
+            panic!("{v:?}")
+        };
+        assert_eq!(parts.len(), 2);
+        assert!(parts[0].get("version").is_none());
+        assert_eq!(parts[1].get("version"), Some(&Value::Str("12x".into())));
+        assert_eq!(
+            parts[0].get("name"),
+            Some(&Value::Str("Charspot Small".into()))
+        );
+        // None: no key at all, as before.
+        assert!(
+            OcrEngine::new("hayai-nova", None, 512)
+                .to_value()
+                .get("parts")
+                .is_none()
+        );
+    }
+
     #[test]
     fn engine_block_carries_its_revision_after_the_id() {
         let block = OcrEngine::new("hayai-nova", None, 512).to_value();
@@ -533,8 +672,10 @@ mod tests {
         };
         let keys: Vec<&str> = items.iter().map(|(k, _)| k.as_str()).collect();
         assert_eq!(&keys[..3], ["id", "revision", "recognizer"]);
-        assert_eq!(block.get("revision"), Some(&Value::Int(1)));
-        assert_eq!(engine_revision("hayai-nova"), 1);
+        let current = engine_revision("hayai-nova");
+        assert_eq!(block.get("revision"), Some(&Value::Int(i64::from(current))));
+        // 0.8's line detector (PP-OCR manga v0.3) made every engine's output new.
+        assert!(ENGINE_REVISIONS.iter().all(|(_, r)| *r >= 2));
         assert_eq!(
             engine_revision("no-such-engine"),
             1,

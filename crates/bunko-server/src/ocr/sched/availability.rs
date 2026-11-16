@@ -89,6 +89,7 @@ impl Scheduler {
         self.bump();
         self.bump_page();
         if !now_paused {
+            self.bench_machine_back(pid);
             self.maybe_start_scan();
         }
     }

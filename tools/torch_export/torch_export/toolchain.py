@@ -153,4 +153,5 @@ def fetch_windows_cross(work: Path = WORK) -> None:
         z.extractall(win / "cuda", [n for n in z.namelist() if n.startswith("nvidia/cu13/")])
     if not (win / LLVM_MINGW).exists():
         with tarfile.open(win / (LLVM_MINGW + ".tar.xz")) as t:
-            t.extractall(win)
+            # "data": no member may land outside `win` (absolute names, `..`, links out).
+            t.extractall(win, filter="data")

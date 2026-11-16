@@ -13,9 +13,13 @@ const reporter = [['list']];
 if (process.env.RIG_PW_JSON) reporter.push(['json', { outputFile: process.env.RIG_PW_JSON }]);
 if (process.env.RIG_JUNIT) reporter.push(['junit', { outputFile: process.env.RIG_JUNIT }]);
 
+// The shared suite on a library folder (the folder provider) runs its Local Folder specs
+// only: the others sign the reader in to a cloud, which a folder is not.
+const folderOnly = process.env.RIG_SUITE === 'shared' && process.env.RIG_PROVIDER === 'folder';
+
 export default defineConfig({
     testDir: path.resolve(here, process.env.RIG_SUITE ?? '.'),
-    testMatch: '**/*.spec.mjs',
+    testMatch: folderOnly ? '**/*-local-folder.spec.mjs' : '**/*.spec.mjs',
     // One server and one cloud per suite: specs run one at a time, each in a fresh
     // browser context (fixtures.mjs).
     workers: 1,

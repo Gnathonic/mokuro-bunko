@@ -8,6 +8,8 @@
 
 mod contours;
 mod ctc;
+#[cfg(feature = "gpl-models")]
+pub mod ctd;
 #[cfg(test)]
 mod cv_golden;
 mod detect;
@@ -22,7 +24,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 pub use ctc::{IDEOGRAPHIC_SPACE, MISSING_GLYPH, REC_HEIGHT, recognizer_width};
-pub use detect::{DEFAULT_SIDE, detector_input_size};
+pub use detect::{DEFAULT_SIDE, DbParams, detector_input_size};
 pub use geometry::Quad;
 pub use reader::{LayoutHooks, NoLayout, PpocrPageReader, ReadLines, page_to_json};
 
@@ -162,10 +164,20 @@ fn par_map<T: Sync, U: Send>(items: &[T], threads: usize, f: impl Fn(&T) -> U + 
     })
 }
 
+/// Another source of a page's line quads for [`PpOcr`]. Its lines are read by the CTC
+/// recognizer, joined, probed and voted on exactly like the PP-OCR detector's, and laid
+/// out by the same layout.
+pub trait LineDetector: Send + Sync + std::fmt::Debug {
+    /// The page's line quads in page pixels with their scores, and what was run.
+    fn detect(&self, bgr: &BgrImage) -> Result<(Vec<(Quad, f64)>, DetectorInfo)>;
+}
+
 /// The detector + recognizer pair and the page policies.
 #[derive(Clone)]
 pub struct PpOcr {
     det: Arc<Model>,
+    /// The line detector in place of `det`, when the row asks for another one.
+    lines: Option<Arc<dyn LineDetector>>,
     rec: Arc<Model>,
     vocab: Arc<Vec<String>>,
     side: u32,
@@ -205,12 +217,19 @@ impl PpOcr {
             .unwrap_or(4);
         Self {
             det,
+            lines: None,
             rec,
             vocab,
             side: DEFAULT_SIDE,
             tile: TileMode::Auto,
             prep_threads,
         }
+    }
+
+    /// Take the page's lines from `detector` instead of the PP-OCR detector.
+    pub fn with_line_detector(mut self, detector: Arc<dyn LineDetector>) -> Self {
+        self.lines = Some(detector);
+        self
     }
 
     /// Detector side limit and tile policy (the runner always uses 1120 / auto).
@@ -315,6 +334,10 @@ impl PpOcr {
 
     /// Rotated line quads of a page with scores, and what was run.
     pub fn detect(&self, bgr: &BgrImage) -> Result<(Vec<Line>, DetectorInfo)> {
+        if let Some(other) = &self.lines {
+            let (found, info) = other.detect(bgr)?;
+            return Ok((sort_lines(found), info));
+        }
         let (w, h) = (bgr.width(), bgr.height());
         let mut info = DetectorInfo {
             side: self.side,

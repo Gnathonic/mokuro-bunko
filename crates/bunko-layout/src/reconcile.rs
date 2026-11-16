@@ -469,6 +469,38 @@ fn slice(t: &[char], a: usize, b: usize) -> String {
     t[a..b].iter().collect()
 }
 
+/// The merge for a recognizer whose read stands as it is: the engine's text, and the
+/// CTC read only where the engine read nothing.
+///
+/// [`reconcile_line`] gives a generative engine back what it cannot write or tends to
+/// lose (printed widths, brackets, dashes, characters it skipped) and takes over when
+/// it runs away. A recognizer without a decoder does none of that, and patching the
+/// CTC read into its text brings some of the CTC's own mistakes along. The gain is
+/// small: on 1,000 JMangaBench_Read boxes read through the whole pipeline, boxes read
+/// exactly went from 87.4% to 87.5% for manga-ocr-charspot-small and from 88.0% to
+/// 89.0% for manga-ocr-nar-small. A line the CTC read nothing in is engine-only, and
+/// judged like any other.
+pub fn reconcile_verbatim(vlm: &str, ctc: &str) -> Reconciled {
+    let text: String = vlm.chars().filter(|c| !is_space(*c)).collect();
+    let ctc_text = py::strip(ctc).to_string();
+    if text.is_empty() {
+        let notes = if ctc_text.is_empty() {
+            vec![]
+        } else {
+            vec!["empty".to_string()]
+        };
+        return Reconciled::new(ctc_text, vlm, ctc, None, Source::Ctc, notes);
+    }
+    let theirs = values(&tokens(&chars(&ctc_text), true));
+    if theirs.is_empty() {
+        let mut r = Reconciled::new(text, vlm, ctc, None, Source::Merged, vec![]);
+        r.engine_only = true;
+        return r;
+    }
+    let agreement = ratio(&values(&tokens(&chars(&text), false)), &theirs);
+    Reconciled::new(text, vlm, ctc, Some(agreement), Source::Merged, vec![])
+}
+
 /// Merge the engine's read of a line with the CTC read.
 ///
 /// `ctc` should already be `layout::normalize_text`-ed; `cells` is the quad's

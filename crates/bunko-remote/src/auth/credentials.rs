@@ -128,10 +128,12 @@ impl SecretKey {
 
 /// One store's credentials. Which fields are set depends on the provider:
 /// OAuth (gdrive, onedrive): tokens and `client_id`; MEGA: `mega_session`; WebDAV:
-/// `webdav_password`.
+/// `webdav_password`; a local folder: none (the entry is a stub that names the folder
+/// in `account_id`, so Disconnect and switching libraries treat it like a cloud store).
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredCredential {
-    /// The `storage.library.backend` name: `gdrive`, `onedrive`, `mega`, `webdav`.
+    /// The `storage.library.backend` name: `gdrive`, `onedrive`, `mega`, `webdav`,
+    /// `folder`.
     pub provider: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refresh_token: Option<String>,

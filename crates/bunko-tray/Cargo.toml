@@ -50,7 +50,7 @@ tokio = { workspace = true }
 [target.'cfg(any(windows, target_os = "macos"))'.dependencies]
 # The Windows/macOS tray: tray-icon + muda menus + the tao event loop (MIT/Apache-2.0).
 tray-icon = { version = "0.24", default-features = false }
-tao = { version = "0.34", default-features = false, features = ["rwh_06"] }
+tao = { version = "0.37", default-features = false, features = ["rwh_06"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -59,7 +59,7 @@ libc = "0.2"
 # The Startup-folder shortcut that "Start at login" toggles (the same file install.ps1 -Startup writes).
 mslnk = "0.1"
 # Whether a server or processor the tray watches is still running (discover::pid_alive).
-windows-sys = { version = "0.60", features = ["Win32_Foundation", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }
 
 [dev-dependencies]
 tempfile.workspace = true

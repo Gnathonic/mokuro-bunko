@@ -460,6 +460,10 @@ impl OcrAdmin for OcrControl {
         Some(self.apply_config(config))
     }
 
+    fn wait_local_stopped(&self) {
+        OcrControl::wait_local_stopped(self, "its OCR backend is being removed");
+    }
+
     fn prune(&self, known_ids: &[String]) {
         let storage = self.storage().to_path_buf();
         let _ = bunko_sched::bench_file::BenchFile::new(&storage).prune(known_ids);

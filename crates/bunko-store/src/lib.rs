@@ -20,12 +20,12 @@ pub use file::{DirEntry, File, OpenOptions, ReadDir, RemoteEntry, RemoteFile};
 pub use latency::{interactive, is_interactive};
 pub use local::LocalStore;
 pub use meta::{FileType, Meta, RemoteMeta, Version};
-pub use mount::{MountGuard, mount, same_store, store_for};
+pub use mount::{MountGuard, mount, note_activity, same_store, store_for};
 pub use store::{
-    Blocked, Capacity, Caps, Classifier, Durability, ErrorClass, Health, LEASE_CLAIMING,
-    LibraryStore, LocalPath, Mode, OpId, Origin, Published, SpoolPin, StoreError, WatchEvent,
-    WatchGuard, WatchSink, WriteIntent, classify, conflict, crosses_devices, error_message,
-    is_conflict, is_unavailable, register_classifier, retry_after, store_error, unavailable,
-    unavailable_for,
+    Activity, Blocked, Capacity, Caps, Claiming, Classifier, Durability, ErrorClass, Health,
+    LEASE_CLAIMING, LibraryStore, LocalPath, Mode, OpId, Origin, Published, SpoolPin, StoreError,
+    WatchEvent, WatchGuard, WatchSink, WriteIntent, classify, conflict, crosses_devices,
+    error_message, is_conflict, is_unavailable, register_classifier, retry_after, store_error,
+    unavailable, unavailable_for,
 };
 pub use watch::Translate;

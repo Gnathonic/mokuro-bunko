@@ -54,7 +54,16 @@ pub trait Machine: Send + Sync {
     /// Install (or retry) the OCR backend now; `reinstall`: even if it is in place.
     fn install(&self, reinstall: bool) -> Result<Value, String>;
 
-    /// Remove the installed backend packs of this server's storage.
+    /// Why the installed packs cannot be removed now (an install runs), or None. Asked
+    /// before anything changes: removing them turns OCR on this machine off first.
+    fn remove_refused(&self) -> Option<String> {
+        None
+    }
+
+    /// Remove the installed backend packs of this server's storage. Called once OCR on
+    /// this machine is off and its processor has stopped. Returns `{removed, deferred,
+    /// failed, freed, message}`: `deferred` are packs this process has loaded where they
+    /// cannot be deleted while loaded (removed when the server next starts).
     fn remove(&self) -> Result<Value, String>;
 
     /// Start a job (`doctor`, `models-download`, `models-verify`); its summary.

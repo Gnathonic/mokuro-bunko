@@ -71,28 +71,52 @@ fn origin_authority(origin: &str) -> Option<String> {
 /// dropped.
 fn request_hosts(headers: &HeaderMap) -> Vec<String> {
     let mut out = Vec::new();
-    let mut push = |v: &str| {
-        let v = v.trim().to_ascii_lowercase();
-        let v = v
-            .strip_suffix(":80")
-            .or_else(|| v.strip_suffix(":443"))
-            .map(str::to_string)
-            .unwrap_or(v);
-        if !v.is_empty() {
-            out.push(v);
-        }
-    };
-    if let Some(h) = headers.get(header::HOST).and_then(|v| v.to_str().ok()) {
-        push(h);
+    if let Some(h) = headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .and_then(normalize_host)
+    {
+        out.push(h);
     }
     if let Some(h) = headers
         .get("x-forwarded-host")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.split(',').next())
+        .and_then(normalize_host)
     {
-        push(h);
+        out.push(h);
     }
     out
+}
+
+/// A `Host` value lowercased, default ports dropped; `None` when empty.
+fn normalize_host(v: &str) -> Option<String> {
+    let v = v.trim().to_ascii_lowercase();
+    let v = v
+        .strip_suffix(":80")
+        .or_else(|| v.strip_suffix(":443"))
+        .map(str::to_string)
+        .unwrap_or(v);
+    (!v.is_empty()).then_some(v)
+}
+
+/// Is `origin` this server's own by the [`check_origin`] rule: it names the `Host` or
+/// the first `X-Forwarded-Host`, and a `Host` without a port matches any port of that
+/// name. Analytics uses it to tell Bunko's own pages from cross-origin callers.
+pub fn is_own_origin(origin: &str, headers: &HeaderMap) -> bool {
+    origin_authority(origin).is_some_and(|authority| {
+        request_hosts(headers)
+            .iter()
+            .any(|host| same_authority(&authority, host))
+    })
+}
+
+/// [`is_own_origin`] against one `Host` value.
+pub fn origin_names_host(origin: &str, host: &str) -> bool {
+    match (origin_authority(origin), normalize_host(host)) {
+        (Some(authority), Some(host)) => same_authority(&authority, &host),
+        _ => false,
+    }
 }
 
 /// `host` and `port` of `host[:port]` (`[v6]:port` too).
@@ -129,11 +153,7 @@ pub fn check_origin(headers: &HeaderMap, cors: &CorsConfig) -> Option<Refusal> {
     let Ok(origin) = origin.to_str() else {
         return Some((403, CROSS_ORIGIN));
     };
-    if let Some(authority) = origin_authority(origin)
-        && request_hosts(headers)
-            .iter()
-            .any(|host| same_authority(&authority, host))
-    {
+    if is_own_origin(origin, headers) {
         return None;
     }
     if cors.is_origin_allowed(origin) {
@@ -328,5 +348,24 @@ mod tests {
             check(&del, &h(&[host, ("origin", "http://localhost:5173")]), &off),
             Some((403, CROSS_ORIGIN))
         );
+    }
+
+    #[test]
+    fn own_origin_helpers() {
+        let fwd = h(&[
+            ("host", "127.0.0.1:8080"),
+            ("x-forwarded-host", "bunko.example.com"),
+        ]);
+        assert!(is_own_origin("https://bunko.example.com", &fwd));
+        assert!(is_own_origin("http://127.0.0.1:8080", &fwd));
+        assert!(!is_own_origin("https://reader.example", &fwd));
+        assert!(!is_own_origin("null", &fwd));
+        assert!(origin_names_host("https://example.com:8443", "example.com"));
+        assert!(origin_names_host("https://example.com", "Example.com:443"));
+        assert!(!origin_names_host(
+            "https://example.com:8443",
+            "example.com:8080"
+        ));
+        assert!(!origin_names_host("https://example.com", ""));
     }
 }

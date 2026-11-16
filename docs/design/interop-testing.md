@@ -99,9 +99,11 @@ and OCR-status APIs) are not read by the reader and stay out:
   (the body `requestBunkoToken` sends; the 429 once the limiter is hot);
 - `GET /catalog/api/manifest?series=&volume=` (with OCR, a layer and a cover; without;
   Japanese names; an unknown volume);
-- `.mokuro-queue.json`: the HTTP copy and its `If-None-Match` 304, and the cloud copy
-  (`bunko_remote::status::cloud_queue_doc`) with `done[]` and, cut to size,
-  `truncated: true`. `done[]` and `truncated` exist only in the cloud copy;
+- the v1 `.mokuro-queue.json` over HTTP and its `If-None-Match` 304 (no cloud copy is
+  stored since queue file v2); the queue file v2 of a series
+  (`<Series>/.mokuro-series-queue.json`): the virtual HTTP copy with `live`, its 304,
+  an existing series with nothing owed, the PUT refused 405, the stored copy, and a
+  bridged listing that leaves it out (`queue-file-v2.md` §12.2);
 - `.mokuro-bunko.json` as `active` and as `released`. The file has only those two
   states: "claiming" and "held" are both `active`, the difference being whether the
   settle wait has passed. `released` is written by a disconnect; a shutdown writes
@@ -291,11 +293,11 @@ shaped profiles (§8.2).
 | Suite | Parties | Checks |
 |---|---|---|
 | `dav` | reader ↔ Bunko (local library) | connect, list, open and read a volume, progress write and read-back, sidecar PUT, Basic (UTF-8 password) and Bearer auth, token renewal and logout revocation, CORS preflight from the reader's origin |
-| `api` | reader ↔ Bunko | the reader's queue poller and pending view on a real queue (304s, `done[]`), login and account flows, nav config with readers off, error banners for 401/429/503 |
-| `bridge` | reader ↔ Bunko ↔ cloudsim (each provider) and rclone | reader reads through Bunko from a cloud library; bridge PUT; 503 during the lease claim; restart resumes |
+| `api` | reader ↔ Bunko | the reader's series-page queue reads and pending view on a real queue (304s; the v1 root for older readers), login and account flows, nav config with readers off, error banners for 401/429/503 |
+| `bridge` | reader ↔ Bunko ↔ cloudsim (each provider), rclone and a library folder | reader reads through Bunko from a cloud library; bridge PUT; 503 during the lease claim; restart resumes |
 | `direct` | reader ↔ cloudsim (each provider) and rclone | reader alone: list, read, upload, 401 refresh, revoked token banner, 403 quota, 429 backoff, 412 conflict |
-| `shared` | reader and Bunko on one cloudsim folder (each provider) and rclone | the M7 exit checks: Bunko progress for a volume the reader uploaded; sidecar pulled on `done[]`; reader stops writing `series.json`/`catalog.json` while the marker is fresh and resumes 2 × ttl after Bunko stops or at once on `released`; edits go up as `<Vol>.edit.mokuro` and never as the main sidecar; a Bunko case merge shows as a rename with progress kept; duplicate roots (two top-level `mokuro-reader` folders plus a nested one) converge into the canonical root whether Bunko, the reader or both merge them, with the nested root untouched and no `Suspect` |
-| `cloud` | Bunko ↔ cloudsim and rclone (no reader) | the Rust-side Bunko ↔ cloud scenarios at process level: cold start, adoption, outbox under faults, lease handover, quota pauses |
+| `shared` | reader and Bunko on one cloudsim folder (each provider), rclone and a library folder (its Local Folder specs) | the M7 exit checks: Bunko progress for a volume the reader uploaded; sidecar pulled once its job leaves the series' queue file (one series file read, no root queue file); reader stops writing `series.json`/`catalog.json` while the marker is fresh and resumes 2 × ttl after Bunko stops or at once on `released`; edits go up as `<Vol>.edit.mokuro` and never as the main sidecar; a Bunko case merge shows as a rename with progress kept; duplicate roots (two top-level `mokuro-reader` folders plus a nested one) converge into the canonical root whether Bunko, the reader or both merge them, with the nested root untouched and no `Suspect` |
+| `cloud` | Bunko ↔ cloudsim, rclone and a library folder (no reader) | the Rust-side Bunko ↔ cloud scenarios at process level: cold start, adoption, outbox under faults, lease handover, quota pauses; on a folder, a reader's writes and renames on the disk and the folder unplugged |
 | `perf` | all of the above, shaped | §8 |
 
 The 0.8 crossplay scenarios run inside those suites, one spec each (their checks are in
@@ -313,18 +315,40 @@ needed on either side):
 | S7 Allow on first connect | `dav/allow-first-connect` | `dav` | none |
 | S8 a spine offset cleared (no PUT on the next two syncs) | `dav/`, `shared/spine-offset-clear` | `dav`; `shared` on every cloud | none |
 | S9 reader-only dedup, then a Bunko restart with no hold | `direct/dup-roots`; its restart in `shared/dup-roots-lease` | `direct` and `shared`; google, mega | `dedup` |
+| A folder library: the reader's writes, renames, an unplugged folder | `cloud` scenarios `reader-writes`, `reader-rename`, `unplug` (Rust, `rig/cloud.rs`) | `cloud`; folder | none |
+| A folder library: the OCR round trip with the reader's Local Folder on it | `shared/ocr-local-folder` | `shared`; folder | `series-queue-v2`, `local-folder` |
+
+**The `folder` provider** is a library folder on the rig's disk that Bunko keeps as its
+storage backend (`storage.library.backend: folder`, `storage.library.path`), as it keeps
+a cloud: the folder is the library root, the part a cloud's `mokuro-reader` folder plays.
+It runs `cloud`, `bridge` and `shared`; `shared` on a folder runs only its Local Folder
+specs (`*-local-folder.spec.mjs`, playwright.config.mjs), since the others sign the
+reader in to a cloud. The reader's Local Folder opens a folder only through the File
+System Access picker (`showDirectoryPicker`), which Playwright cannot answer (Chromium
+aborts it: "Intercepted by Page.setInterceptFileChooserDialog()"), and the OPFS storage
+Chromium offers instead is no folder on disk that Bunko could read. So the rig drops the
+library folder on the reader's page (CDP `Input.dispatchDragEvent` with its path), which
+gives the page a real handle to it (`DataTransferItem.getAsFileSystemHandle`); the
+reader's driver hands that to its Local Folder in place of the picker (`connectFolder`,
+capability `local-folder`). For the reader to write there with no prompt, such a spec
+runs (`test.use({folderBrowser: true})`) in full Chromium (`channel: 'chromium'`; the
+headless shell denies the grant) on a fresh profile whose File System Access write
+guard allows the reader's origin (`interop/e2e/rig/local-folder.mjs`). `direct` has no
+folder specs: the reader's own vitest suite covers its Local Folder alone.
 
 A spec that needs a capability (`test.use({ needs: [...] })`) FAILS when the reader's
 driver lacks it, unless `interop/pending-reader-caps.txt` lists that capability: then it
 is skipped and the results JSON reports the skip with its capability. A Bunko change
 that needs a newer reader than `interop/reader.ref` lists the capability there until
-the PR that bumps `reader.ref` empties it again. The file lists nothing today; I3 is
-done only while it lists nothing.
+the PR that bumps `reader.ref` empties it again. It lists `series-queue-v2` (queue file
+v2) and `local-folder` (the driver's `connectFolder`) until `reader.ref` pins a reader
+with them; I3 is done only while it lists nothing.
 
 **As built (I3, runner core):** `cargo xtask interop rig <suites> [--provider P,…]
 [--bin B] [--cloudsim-bin C] [--reader-dir D | --reader-ref SHA] [--grep G] [--headed]
 [--keep]`. Suites and providers expand to the pairs that apply (`dav` and `api` on
-`local`, the others on `google`, `microsoft`, `mega` and `rclone`; `all` for either).
+`local`; `direct` on `google`, `microsoft`, `mega` and `rclone`; `bridge`, `shared` and
+`cloud` on those and `folder`; `all` for either).
 `--bin` must be a testing build (checked through `processor-fake --help`). `--grep`
 keeps the scenarios and specs whose name contains G, as plain case-sensitive text in
 every suite (Playwright gets it escaped, inside `/…/`, with `--pass-with-no-tests`). Each pair
@@ -430,6 +454,19 @@ load). The set is v1 from the first `reader.ref` on: a method added after that c
 with `apiVersion` 2, or behind a capability. `providerStatus` reads what the app last
 published (the store the banner and the read-only gates read) and never publishes it
 itself, so a state the app keeps to itself fails the spec as the user would miss it.
+`open` and `pendingOcr` are asked a second time, once, when the reader answers
+`No volume <id> on this device` (`driver.mjs`). The pinned reader's driver finds a
+volume that is not installed by two reads of its `volumes` table: the row by id, then
+every row, to work out the placeholders. The app makes a listed volume a row by itself
+about 100 ms after its catalog first shows it (the cover service's batch), which is
+about when a spec that has just connected opens it. A row that lands between the two
+reads is missed by the first and hides the placeholder from the second, and the driver
+has no volume for an id `library()` gave a moment before (seen once in CI, `bridge` on
+microsoft; reproduced by holding the batch until the first read was answered). Asked
+again, the first read finds the row; a volume that is not there fails both asks, and no
+method that changes anything is asked twice. A user cannot meet it: a card downloads
+the volume it shows, with no lookup by id. The second ask goes once `reader.ref` pins a
+driver that makes one read of the table.
 
 **As built (I3, `dav` and `api`, on `local`).** While any route is on, Playwright
 answers every CORS preflight itself, permissively, so a server whose CORS a browser
@@ -454,13 +491,19 @@ account, so the limiter and revocations stay its own.
   `volume-data.json` (not another's) and a second browser context reads it back; an edit
   goes up as the account's `<Vol>.edit.mokuro`, the main sidecar byte for byte as it
   was, the edit a 404 to another account.
-- `api/queue`: a connect polls the queue file at once; with `Vol 2` claimed and held by
-  processor-fake, the next looks (the tab hidden and shown again) are 304s under
-  `If-None-Match` and the volume's card shows the job; once the hold file exists the
-  job leaves the file (a 200 under a new tag), the card clears and the image-only volume
-  installed on the device gets the server's OCR through its manifest. A Bunko server's
-  queue file has no `done[]` (that list is the cloud-direct queue's, `shared`):
-  completion here is the volume leaving the file, and its manifest.
+- `api/queue` (queue file v2, `queue-file-v2.md` §12.4): an older reader's client
+  (Node, asking as the recorded `queue-get*` requests do) still gets the frozen v1 root
+  `.mokuro-queue.json` listing the held `Vol 2`, and a 304 under its tag. A v2 reader
+  (capability `series-queue-v2`) reads no queue file on the library grid or with `Vol 2`
+  open, through more than one 30 s WebDAV floor and a tab switch; on the series page it
+  reads that one series' virtual `.mokuro-series-queue.json` (200, then a 304 under
+  `If-None-Match`) and the card shows the job; once the hold file exists it reads a new
+  file (a 200 under another tag), the card clears and the image-only volume gets the
+  server's OCR (the scoped pull of that series). It never reads the v1 root of a v2
+  Bunko. The queue reads are named off the browser's own requests
+  (`interop/e2e/rig/queue-reads.mjs`, which names them on every wire: WebDAV paths,
+  Drive's `files.list` `q` and `alt=media` ids, Graph paths and item ids, MEGA `g`
+  handles, ids looked up in `/_sim/tree`).
 - `api/banners`: 401 at connect (`Authentication failed - check your credentials`,
   type `auth`); 401 mid-session after a password change elsewhere (`needsAttention`, and
   after a reload the pre-filled sign-in form); 429 past the limiter's ten failures
@@ -552,10 +595,19 @@ Backup, to the end of its run, metadata writes included), and reads what it wrot
 only after `settleSeriesWrites`: the run's listing starts work of its own after the
 run (a folder with archives and no `series.json` is backfilled), whose writes wait
 out a debounce and decide at its end whether to write.
-- `shared/ocr`: an image-only `Vol 3` the reader uploaded is queued by Bunko; the card
-  shows the job from the holder's `.mokuro-queue.json`; once processor-fake lets go the
-  queue file lists it in `done[]`, Bunko's sidecar is beside the archive and the
-  volume's OCR is on the device.
+- `shared/ocr` (queue file v2, `queue-file-v2.md` §12.4; capability
+  `series-queue-v2`, flow in `shared/ocr-flow.mjs`): the marker carries `series_queue`
+  (`queue: null`) and the store holds no root `.mokuro-queue.json`, before and after;
+  the reader reads no queue file on the library grid. An image-only `Vol 3` the reader
+  uploaded is queued by Bunko: `Rig Series/.mokuro-series-queue.json` lists it in
+  `vols`, under the holder's `instance_id` and with no `live`. The series page reads
+  that file and no other series' (a watch of the upload reads only its own series),
+  and the card shows the job; once processor-fake lets go the volume leaves `vols`
+  with a `done` entry, Bunko's sidecar is beside the archive and the volume's OCR is
+  on the device. `shared/ocr-local-folder` is the same flow on the `folder` provider,
+  the reader's Local Folder signed in to the library folder Bunko keeps (dropped on
+  its page, §7.1), its checks read off the folder on disk (no request log: a folder is
+  read with no network).
 - `shared/edits`: an edit goes up as `Vol 1.edit.mokuro` (an `edited` block, no
   `ocr_engine`); the reader writes no `Vol 1.mokuro`, through two more syncs, and the
   main is byte for byte as it was.
@@ -628,7 +680,12 @@ out a debounce and decide at its end whether to write.
   `steady`, `online` and `held` with no `suspect` sample, its marker beats in C (the
   marker is written into `roots()[0]`, so that is the canonical root; the admin API
   has no roots list), the reader trusts it again, and Bunko serves the library, C's
-  series and the nested one. S9's reader-alone part lives in `direct` and its restart
+  series and the nested one. Its "every file written since Bunko started" leaves out a
+  version a replace sent to the trash on its own while a file of its name in C is at
+  least as new (`replacedBelow`): until it sees the marker the reader still writes
+  into C (a `series.json` it compiles after its merge, in the second Bunko starts),
+  Bunko replaces that file, and MEGA, with no atomic replace, sends the reader's node
+  to the Rubbish Bin with its stamp. S9's reader-alone part lives in `direct` and its restart
   here: the `direct` suite runs no Bunko.
 - What they caught (each fixed test-first, its rig run failing before): Bunko never
   saw a `mokuro-reader` folder made while it ran (it located roots only at startup),
@@ -796,6 +853,15 @@ out a debounce and decide at its end whether to write.
   Under load, S4 on `dav` also caught Bunko publishing a cover it made from an archive
   the reader had moved away meanwhile, under the old name: the old folder never
   emptied (`thumbs`: no cover for an archive that is gone).
+  On `microsoft` and `rclone`, both caught the queue v2 reader installing a finished
+  image-only volume's first OCR through its upgrade pass, which the scoped pull runs
+  before the listing cache shows the sidecar to the image-only installer. The pass
+  fitted `img_path` onto the device's image names, so a renamed main lost its block
+  (S6), and kept the reader's series uuid while the other volume took Bunko's, so the
+  series rename refused the volume as not local (S4). Both installers now make one
+  write. Past that, S4 on every cloud caught Bunko keeping the old folder's series
+  file once the reader had moved every volume out: its `done` tail keeps a file a day,
+  so the folder never emptied. A series file whose folder holds no archive now goes.
 - The driver reads the listing the provider cache holds now, not `cloudFiles`, whose
   incremental updates arrive on a 300 ms trailing edge: a `deleteVolume` right after
   `renameVolume` otherwise found the renamed volume not backed up.
@@ -848,8 +914,25 @@ server stands by and answers writes 503 `storage-lease`; once the first stops, i
 takes the library over and its PUT lands) and **quota-pause** (a full provider: a
 PUT answers 507, the next one 507 without reaching the provider, health blocked by
 `StorageFull`). The hold lifts at the first storage probe, five minutes on; the suite
-does not wait for it. On rclone, outbox-faults and quota-pause are skipped (no fault
-knobs). Measured locally (wall time, setup included): google 25–38 s, microsoft 22–34 s,
+does not wait for it. On rclone and on a folder, outbox-faults and quota-pause are
+skipped (no fault knobs).
+
+On a folder (`rig/folder.rs`: `<work>/folder/Library`, a root not named
+`mokuro-reader`, seeded with the same files, the library folder's prefix dropped, plus a
+series of its own for the rename) the suite also runs three scenarios that skip
+themselves elsewhere: **reader-writes** (a new volume written as Chromium's File System
+Access writes, an empty file and its bytes in `<name>.crswap` until the write closes:
+neither the catalog nor the bridge has it for the 6 s the write stays open; the bridge
+serves the reader's bytes within 10 s of the swap, and the catalog lists it within 30 s,
+since it compiles a series only after 10 s of quiet; then a sidecar replaced the same
+way is served with its old bytes until the swap and with the new ones within 10 s),
+**reader-rename** (a series renamed as the reader's Local Folder renames: per syncable
+file, archive, sidecar, cover and `series.json`, a copy then a delete, and the old
+folder pruned only if empty by then: the catalog moves the volume, two
+walks later nothing of either name is queued, its sidecar moved with it and no numbered
+sidecar exists) and, last, **unplug** (the folder's parent renamed away: the store goes
+offline and the catalog stays as it was; renamed back: the store is online and holds the
+lease, and the catalog and the folder's volumes are unchanged after a walk). Measured locally (wall time, setup included): google 25–38 s, microsoft 22–34 s,
 mega 87–100 s (one MEGA command a second, and a 30 s lease ttl so a heartbeat keeps
 writes open). On rclone the suite first checks the CORS preflight a browser would send
 from an allowed origin (`OPTIONS` asking for PROPFIND with `Authorization`): it must
@@ -1040,7 +1123,14 @@ to `main` and `0.8/remote-storage`, and on demand; `catalog-perf` is unchanged.
   |---|---|---|
   | local | `dav,api` | `local` |
   | google, microsoft, mega, rclone | `bridge,direct,shared` | that one |
-  | cloud | `cloud` | `all` |
+  | cloud | `cloud` | `google,microsoft,mega,rclone` |
+  | folder | `cloud,bridge,shared` | `folder` |
+
+  The folder leg runs `cloud`, `bridge` and `shared` (its Local Folder specs, the folder
+  dropped on the reader's page, §7.1); there is no `direct` on a folder. The cloud leg
+  names its four providers rather than `all`, so the folder's `cloud` suite runs in one
+  leg only. `playwright install chromium` brings full Chromium beside the headless
+  shell, which the Local Folder specs need.
 
   The rclone and cloud legs use the rig's pinned rclone download. The reader's build
   cache is per machine (rig/reader.rs), so a leg runs `vite build` once more over the

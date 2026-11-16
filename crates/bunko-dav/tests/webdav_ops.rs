@@ -37,6 +37,86 @@ async fn propfind_root_lists_only_the_reader_root() {
     assert!(t.contains("<D:propstat><D:prop><D:getetag /></D:prop><D:status>HTTP/1.1 404 Not Found</D:status></D:propstat>"));
 }
 
+/// A body nested ~150k deep (just under the 1 MiB body limit) is a 400, and the server is
+/// still there for the next request. It used to overflow the stack and abort the process.
+#[tokio::test]
+async fn deeply_nested_bodies_are_400_not_a_crash() {
+    let env = Env::new();
+    let nest = |depth: usize| format!("{}{}", "<a>".repeat(depth), "</a>".repeat(depth));
+    let propfind = format!(
+        "<D:propfind xmlns:D=\"DAV:\"><D:prop>{}</D:prop></D:propfind>",
+        nest(149_000)
+    );
+    assert!(propfind.len() < 1024 * 1024);
+    let r = env
+        .req(
+            None,
+            "PROPFIND",
+            "/",
+            &[("depth", "0")],
+            propfind.as_bytes(),
+        )
+        .await;
+    assert_eq!(r.code(), 400);
+
+    let proppatch = format!(
+        "<D:propertyupdate xmlns:D=\"DAV:\" xmlns:Z=\"urn:z\"><D:set><D:prop><Z:a>{}</Z:a></D:prop></D:set></D:propertyupdate>",
+        nest(149_000)
+    );
+    let path = "/mokuro-reader/manga1.cbz";
+    let r = env
+        .req(Some("admin"), "PROPPATCH", path, &[], proppatch.as_bytes())
+        .await;
+    assert_eq!(r.code(), 400);
+
+    let lock = format!(
+        "<D:lockinfo xmlns:D=\"DAV:\"><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype><D:owner>{}</D:owner></D:lockinfo>",
+        nest(149_000)
+    );
+    let r = env
+        .req(Some("admin"), "LOCK", path, &[], lock.as_bytes())
+        .await;
+    assert_eq!(r.code(), 400);
+
+    // A dead property nested deeply, but within the limit, is still kept.
+    let ok = format!(
+        "<D:propertyupdate xmlns:D=\"DAV:\" xmlns:Z=\"urn:z\"><D:set><D:prop><Z:a>{}</Z:a></D:prop></D:set></D:propertyupdate>",
+        nest(200)
+    );
+    let r = env
+        .req(Some("admin"), "PROPPATCH", path, &[], ok.as_bytes())
+        .await;
+    assert_eq!(r.code(), 207);
+    assert!(r.text().contains("HTTP/1.1 200 OK"), "{}", r.text());
+    let named =
+        br#"<D:propfind xmlns:D="DAV:" xmlns:Z="urn:z"><D:prop><Z:a/></D:prop></D:propfind>"#;
+    let r = env
+        .req(Some("admin"), "PROPFIND", path, &[("depth", "0")], named)
+        .await;
+    assert_eq!(r.code(), 207);
+    assert_eq!(
+        r.text().matches("<a xmlns=\"\"").count(),
+        200,
+        "{}",
+        r.text()
+    );
+
+    let r = env
+        .req(None, "PROPFIND", "/", &[("depth", "0")], PROPFIND_ALLPROP)
+        .await;
+    assert_eq!(r.code(), 207);
+
+    // The same LOCK body nested a few levels is granted: the 400 above is the depth.
+    let lock = format!(
+        "<D:lockinfo xmlns:D=\"DAV:\"><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype><D:owner>{}</D:owner></D:lockinfo>",
+        nest(3)
+    );
+    let r = env
+        .req(Some("admin"), "LOCK", path, &[], lock.as_bytes())
+        .await;
+    assert_eq!(r.code(), 200, "{}", r.text());
+}
+
 #[tokio::test]
 async fn propfind_reader_root_shows_own_progress_first() {
     let env = Env::new();
@@ -642,6 +722,23 @@ async fn put_preconditions() {
         .await
         .code(),
         412
+    );
+}
+
+/// The OCR scheduler names an archive's ETag in a volume op ([`strong_file_etag`]): a
+/// processor keeps a copy for a volume's next job and matches it by that ETag, so it
+/// must be the one a GET serves.
+#[tokio::test]
+async fn the_volume_op_etag_is_the_one_the_archive_is_served_with() {
+    let env = Env::new();
+    let r = env
+        .req(None, "GET", "/mokuro-reader/series/vol1.cbz", &[], b"")
+        .await;
+    assert_eq!(r.code(), 200);
+    let meta = bunko_store::fs::metadata(env.lib("series/vol1.cbz")).unwrap();
+    assert_eq!(
+        r.header("etag"),
+        Some(bunko_dav::strong_file_etag(&meta).as_str())
     );
 }
 
@@ -1374,6 +1471,41 @@ async fn listings_hide_staging_files_and_symlinks_stay_contained() {
         );
         assert!(outside.join("secret.txt").exists());
     }
+}
+
+/// A series' OCR queue file (a cloud store's copy, in any spelling) is in no listing of
+/// its folder, at any depth; a folder of that name and the name at the library root are
+/// not Bunko's file and stay listed.
+#[tokio::test]
+async fn listings_hide_the_series_queue_file() {
+    let env = Env::new();
+    std::fs::write(env.lib("series/.mokuro-series-queue.json"), b"{}").unwrap();
+    std::fs::write(env.lib("series/.MOKURO-SERIES-QUEUE.JSON"), b"{}").unwrap();
+    std::fs::write(env.lib(".mokuro-series-queue.json"), b"{}").unwrap();
+    for (path, depth) in [
+        ("/mokuro-reader/series", "1"),
+        ("/mokuro-reader", "infinity"),
+    ] {
+        let r = env
+            .req(None, "PROPFIND", path, &[("depth", depth)], b"")
+            .await;
+        assert_eq!(r.code(), 207);
+        let t = r.text();
+        assert!(!t.contains("series/.mokuro-series-queue.json"), "{t}");
+        assert!(
+            !t.to_lowercase()
+                .contains("series/.mokuro-series-queue.json"),
+            "{t}"
+        );
+        assert!(t.contains("/mokuro-reader/series/vol1.cbz"), "{t}");
+    }
+    let r = env
+        .req(None, "PROPFIND", "/mokuro-reader", &[("depth", "1")], b"")
+        .await;
+    assert!(
+        r.text()
+            .contains("/mokuro-reader/.mokuro-series-queue.json")
+    );
 }
 
 /// Adding an OCR file is an `upload`; overwriting it an `edit`; re-sending its exact bytes

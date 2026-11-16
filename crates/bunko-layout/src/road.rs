@@ -24,7 +24,7 @@ use crate::layout::{PageLayout, column_pieces};
 use crate::py::{self, hypot, round_digits};
 use crate::reconcile::{
     CONFIRMED_CONF, Reconciled, engine_only_verdict, line_cells, needs_second_read, overlap_repeat,
-    page_summary, reconcile_line, settle_disputes, token_cap,
+    page_summary, reconcile_line, reconcile_verbatim, settle_disputes, token_cap,
 };
 use crate::records::{RawLine, RawPage};
 use crate::script::normalize_text;
@@ -191,6 +191,21 @@ impl EngineRoad {
                     self.in_body.contains(&i),
                     Some(line.conf),
                     Some(&line.char_confs),
+                )
+            })
+            .collect()
+    }
+
+    /// The first reads of an engine whose text stands as it is
+    /// ([`reconcile_verbatim`]): `texts[k]` for target `k`.
+    pub fn take_first(&self, lines: &[RawLine], texts: &[String]) -> Vec<Reconciled> {
+        self.targets
+            .iter()
+            .enumerate()
+            .map(|(k, &i)| {
+                reconcile_verbatim(
+                    texts.get(k).map(String::as_str).unwrap_or(""),
+                    &normalize_text(py::strip(&lines[i].text)),
                 )
             })
             .collect()

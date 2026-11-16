@@ -1,0 +1,19 @@
+{
+  "after": "series-queue-get",
+  "expect": {
+    "headers": [
+      "etag"
+    ],
+    "status": [
+      304
+    ]
+  },
+  "request": {
+    "auth": "basic:reader",
+    "headers": {
+      "if-none-match": "\"etag\""
+    },
+    "method": "GET",
+    "path": "/mokuro-reader/Contract%20Series/.mokuro-series-queue.json"
+  }
+}

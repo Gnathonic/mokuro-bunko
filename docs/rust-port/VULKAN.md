@@ -142,7 +142,14 @@ is skipped there.
 * **Runtime failure** mid-volume: the runtime is demoted on that device and the same read
   is retried on the next runtime; with none left the session's GPU→CPU fallback applies.
 * **Downloads stay on demand.** `install-ocr` fetches the Vulkan pack (~18 MB) first and
-  the libtorch pack second on a machine with a GPU (`hwdetect::vulkan_wanted`); a runtime's
+  the libtorch pack second on a machine with a GPU (`hwdetect::vulkan_wanted`). The
+  background install of `serve` and `processor serve` fetches the libtorch pack alone
+  (`MOKURO_INSTALL_NO_EXTRAS=1`) and then the Vulkan pack on its own
+  (`install-ocr --variant vulkan --no-models`). That fetch does not mark the machine as
+  installing, and a failed one waits before the next try (`.optional-pack.json`;
+  `install_ocr::Need::Extra`). The exception is a machine whose only GPU route it is
+  (`Need::Extra { route: true }`: `ocr.backend: vulkan`, or a libtorch choice of `cpu`):
+  its first fetch is waited for as an install is. A runtime's
   graphs (~0.8–1 GB each) are fetched when a benchmark trial or a session first needs them
   (`models download` on a Vulkan-only GPU fetches them smallest first).
 * **Windows.** Windows lists its GPUs through DXGI: AMD and Intel adapters (no libtorch GPU
@@ -158,11 +165,15 @@ Sans/Serif CJK by `tools/vulkan_selftest/make_crops.py`, vertical and horizontal
 blurred ones, no copyrighted pages) and must return the golden texts exactly — what libtorch
 fp32 on the CPU reads from them (`examples/vulkan_check golden`). Any difference skips the
 runtime on that device (cached until runtime/pack/driver/model change). libtorch itself is
-the reference and is not self-tested.
+the reference and is not self-tested. hayai-nova's goldens are read at patch budget 512: a
+recognizer for 256 or 384 self-tests a load at 512 first, then loads at its own budget, and
+the verdict serves every budget. A pack from before 0.8.0 refuses budgets other than 512;
+that refusal is no verdict against the runtime (the session asks for a pack update).
 
 Checking a runtime by hand: `MOKURO_VULKAN_PACK=… MOKURO_VULKAN_MODELS_DIR=…
 cargo run -p bunko-engines --example vulkan_check -- check hayai-nova <golden.json>
---runtime ncnn|webgpu [--device gpu:N]`.
+--runtime ncnn|webgpu [--device gpu:N] [--budget 256]` (at a budget other than 512 the
+crops that read differently are listed, not failed).
 
 ## 6. Surfaces and tests
 
@@ -173,7 +184,8 @@ cargo run -p bunko-engines --example vulkan_check -- check hayai-nova <golden.js
   Vulkan (ncnn / WebGPU). The benchmark's trials and winner (`fp32@ncnn` …) are in the
   generations' precision view, as every precision trial.
 * `install-ocr`: `--variant vulkan`; with a GPU, `--if-needed` installs the Vulkan pack
-  first (never fatal) then the libtorch pack.
+  first (never fatal) then the libtorch pack. The background installer fetches it
+  separately, so a missing Vulkan pack never holds a machine whose libtorch pack works.
 * Tests: `bunko-engines` `vulkan::tests` (selection, cache, mismatch, load failure,
   crash marker, mid-volume failover with fake runtimes; exceptions; KFD map),
   `precision::tests::backend_qualified_formats_resolve_to_a_backend`,

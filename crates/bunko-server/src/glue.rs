@@ -1,7 +1,7 @@
 //! Adapters between the OCR scheduler and the library/catalog runtime.
 
 use crate::library::{ArchiveEvents, OcrStatusSource, OutlookSource, VolumeOutlook};
-use crate::ocr::OcrControl;
+use crate::ocr::{Asked, OcrControl};
 use serde_json::{Map, Value};
 use std::path::Path;
 use std::time::Duration;
@@ -26,21 +26,52 @@ impl OutlookSource for OcrGlue {
             return VolumeOutlook::default();
         };
         let ocr = self.0.clone();
+        let asked = rel.clone();
         // 0.5.2 waited at most 1 s for the pending list when serving a manifest.
         let answer = blocking(move || {
-            ocr.ask_blocking(Duration::from_secs(1), move |s| {
-                (s.volume_pending(&rel, None), s.now())
+            ocr.ask_within(Duration::from_secs(1), move |s| {
+                let judging = s.arrival_judging(&asked);
+                (s.volume_pending(&asked, None), s.now(), judging)
             })
         });
+        let busy = VolumeOutlook {
+            busy: true,
+            ..VolumeOutlook::default()
+        };
         match answer {
-            Some((pending, now)) => {
+            // A cloud arrival not judged yet: unknown, not "nothing owed" (`[]` makes a
+            // reader take the volume as finished and stop watching it).
+            Asked::Answer((pending, _, true)) if pending.is_empty() => busy,
+            Asked::Answer((pending, now, _)) => {
                 let recheck = bunko_sched::outlook::recheck_after(&pending, now);
                 VolumeOutlook {
                     pending,
                     recheck_after: recheck.map(Value::from),
+                    busy: false,
                 }
             }
-            None => VolumeOutlook::default(),
+            // Too busy to price the volume in time: the rows it owes as the scheduler
+            // last published them, without finishing times. Not `[]` for "unknown": a
+            // reader told `[]` takes the volume as finished and stops watching it. Not a
+            // 503 either while there is an answer: a deep link would import the volume
+            // without its layers. Busy only before anything was published, or for a
+            // volume that arrived after the board was built and that it lists nothing
+            // for (read before the board: see `arrival_unsettled`).
+            Asked::TimedOut => match (self.0.arrival_unsettled(&rel), self.0.owed_pending(&rel)) {
+                (fresh, Some(pending)) if !(fresh && pending.is_empty()) => {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0.0, |d| d.as_secs_f64());
+                    let recheck = bunko_sched::outlook::recheck_after(&pending, now);
+                    VolumeOutlook {
+                        pending,
+                        recheck_after: recheck.map(Value::from),
+                        busy: false,
+                    }
+                }
+                _ => busy,
+            },
+            Asked::Gone => VolumeOutlook::default(),
         }
     }
 }

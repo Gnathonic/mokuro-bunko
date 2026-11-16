@@ -22,7 +22,9 @@ Contents: 1 Global conventions - 2 Static serving - 3 Templating - 4 Shared nav.
 - Every authenticated fetch sends `Authorization: Bearer <token>`. Basic auth is never sent by
   the pages (the server must still accept Basic on `/login/api/me` etc. for the reader).
 - localStorage keys (catalog only): `mokuro_catalog_title_lang` (native|english|folder),
-  `mokuro_catalog_sort` (title|newest|densest|rating), `mokuro_reader_url` (user override URL).
+  `mokuro_catalog_sort` (title|popular|newest|densest|rating), `mokuro_reader_url` (user override URL).
+  (0.8: `popular` is offered only when some series carries a `popular_rank`; a saved `popular`
+  without ranks sorts by title.)
 - Page-level guards (client side only): account, admin redirect to `/login` when no token;
   queue redirects to `/login` on 401 or when `public_access=false` and no token.
 - Bearer token invalid/expired/revoked: `/login/api/me` -> 401 `{authenticated:false,error}`;
@@ -272,7 +274,10 @@ search), `tag` (string; appended `" (tag)"` after bracket-stripping, only for al
 `community` (`{score (0-100 number), genres[string], tags, source}` - score shown as `★ x.x`,
 genres drive chips/search/sort), `latest_volume_modified` (sort "newest"), `total_pages`,
 `total_chars` (sort "densest" = chars/pages), `damaged_volumes` (int), `missing_pages` (int;
-badge + "Missing pages" filter chip only when some series has `damaged_volumes>0`).
+badge + "Missing pages" filter chip only when some series has `damaged_volumes>0`),
+`popular_rank` (0.8, int >= 1, only on series with whole downloads in the last 30 days and only
+while `analytics.enabled`; sort "popular" = rank ascending, equal ranks and unranked series by
+title; the server sends the order only, never a count).
 `volumes[]` fields read: `name`, `cover`, `ocr_pending` (bool -> "OCR pending" badge unless that
 volume is the active OCR job), `missing_pages`, `page_count` (damage badge title). Client matches
 `ocrStatus.series === series.name && ocrStatus.volume === volume.name`.
@@ -388,13 +393,16 @@ UI state is kept in the URL hash `#audit?q=..&actor=..` (client only).
 | `PUT /_admin/api/settings/cors` | `{enabled, allowed_origins:[string]}` | `error` |
 | `PUT /_admin/api/settings/catalog` | `{enabled, use_as_homepage, reader_url}` | `error` |
 | `PUT /_admin/api/settings/queue` | `{show_in_nav, public_access, display}` display in `minimal\|normal\|detailed` | `error` (400 also has `field:"display"`) |
-| `PUT /_admin/api/settings/ocr` | `{poll_interval: int>=1}` | `applied`, `restart_required`, `installing`, `reason` (toast text; `restart_required` -> warning style). 400 `error` |
+| `PUT /_admin/api/settings/ocr` | `{poll_interval: int>=1}`; Rust also `upgrade: {enabled, replace:[family]}` and `queue_order: "auto"\|"generation"\|"volume"\|null` (each optional) | `applied`, `restart_required`, `installing`, `reason` (toast text; `restart_required` -> warning style); with `queue_order` sent, `ocr.{queue_order, queue_order_effective}`. 400 `error` (`"queue_order must be auto, generation or volume"`, `"upgrade must be an object"`, ...) |
 | `PUT /_admin/api/settings/dyndns` | `{provider, domain, update_url, interval, token?}` (token only when typed; masked `****` never accepted back) | `error` |
 
 `GET /_admin/api/settings` JS reads: `registration.{mode, default_role, allow_anonymous_browse,
 allow_anonymous_download, require_login(legacy fallback)}`, `cors.{enabled, allowed_origins[]}`,
 `catalog.{enabled, use_as_homepage, reader_url}`, `queue.{show_in_nav, public_access, display}`,
-`ocr.{poll_interval, backend}`, `dyndns.{provider, domain, update_url, interval}`, and
+`ocr.{poll_interval, backend}` (Rust also `ocr.upgrade.{enabled, replace[]}`, `ocr.queue_order`
+= `auto|generation|volume` as configured, `auto` when unset, and `ocr.queue_order_effective` =
+`generation|volume`, the order in force: unset means by volume on a MEGA library),
+`dyndns.{provider, domain, update_url, interval}`, and
 `ocr_runtime` = `{available, configured_backend, installed, installed_backend, env_path,
 engines_env_path, engines_installed, detector_ready, supported_backends[], cli_hint, driver_hint,
 active_generations|generations|active_engines|engines (array of name strings or {name|id}),

@@ -344,6 +344,16 @@ impl Limits {
         }
     }
 
+    /// A local folder: 8 concurrent calls, 2 transfers (spinning disks and network
+    /// shares thrash at more).
+    pub fn folder() -> Limits {
+        Limits {
+            concurrency: 8,
+            transfers: 2,
+            ..Limits::unlimited()
+        }
+    }
+
     /// WebDAV: 3 concurrent requests.
     pub fn webdav() -> Limits {
         Limits {
@@ -1324,6 +1334,24 @@ impl<B: Backend> Backend for Governed<B> {
         let size = upload_size(&src);
         self.gov
             .run_bytes(CallKind::Upload, size, self.inner.upload(to, src, op))
+            .await
+            .map(|(n, _)| n)
+    }
+
+    async fn overwrite(
+        &self,
+        pid: &str,
+        if_cver: Option<&str>,
+        src: UploadSource<'_>,
+        op: &mut OpCtx,
+    ) -> Result<RNode, BErr> {
+        let size = upload_size(&src);
+        self.gov
+            .run_bytes(
+                CallKind::Upload,
+                size,
+                self.inner.overwrite(pid, if_cver, src, op),
+            )
             .await
             .map(|(n, _)| n)
     }

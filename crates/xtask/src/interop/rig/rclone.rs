@@ -126,12 +126,17 @@ pub fn install(tools: &Path) -> Result<PathBuf> {
         return Ok(bin);
     }
     let mut zip = zip::ZipArchive::new(std::fs::File::open(&zip_path)?)?;
-    let name = (0..zip.len())
-        .filter_map(|i| zip.name_for_index(i).map(str::to_string))
-        .find(|n| n.rsplit('/').next() == Some(exe.as_str()))
-        .with_context(|| format!("{} holds no {exe}", zip_path.display()))?;
+    // A name the zip crate cannot decode is an error, as for every archive xtask reads.
+    let mut index = None;
+    for (i, name) in zip.file_names().enumerate() {
+        if name?.rsplit('/').next() == Some(exe.as_str()) {
+            index = Some(i);
+            break;
+        }
+    }
+    let index = index.with_context(|| format!("{} holds no {exe}", zip_path.display()))?;
     let mut bytes = Vec::new();
-    zip.by_name(&name)?.read_to_end(&mut bytes)?;
+    zip.by_index(index)?.read_to_end(&mut bytes)?;
     std::fs::create_dir_all(&dir)?;
     let part = dir.join(format!("{exe}.part"));
     std::fs::write(&part, bytes)?;

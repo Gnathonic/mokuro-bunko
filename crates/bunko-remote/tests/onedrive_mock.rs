@@ -747,6 +747,44 @@ async fn replaces_use_a_session_with_if_match() {
     );
 }
 
+/// The Status fast path (queue file v2 §6.6): a small overwrite is one PUT of the
+/// item's content by id, with `If-Match`.
+#[tokio::test]
+async fn overwrite_is_one_put_by_id() {
+    let e = env().await;
+    let l = library(&e.mock);
+    let old = e.be.stat(&l.catalog).await.unwrap().unwrap();
+    let before = e.mock.requests().len();
+    let s = src(b"[\"queue\"]");
+    let n =
+        e.be.overwrite(&l.catalog, Some(&old.cver), s.source(), &mut op())
+            .await
+            .unwrap();
+    let reqs = e.mock.requests()[before..].to_vec();
+    assert_eq!(reqs.len(), 1, "{reqs:?}");
+    assert_eq!(reqs[0].method, "PUT");
+    assert!(
+        reqs[0].path.ends_with(&format!("{}/content", l.catalog)),
+        "{reqs:?}"
+    );
+    assert_eq!(reqs[0].if_match.as_deref(), Some(old.cver.as_str()));
+    assert_eq!(n.pid, l.catalog);
+    assert_ne!(n.cver, old.cver);
+    assert_eq!(e.mock.data(&l.catalog), b"[\"queue\"]");
+    // A version that no longer holds: 412, nothing written.
+    let s2 = src(b"[\"stale\"]");
+    assert_eq!(
+        e.be.overwrite(&l.catalog, Some(&old.cver), s2.source(), &mut op())
+            .await,
+        Err(BErr::PreconditionFailed)
+    );
+    assert_eq!(e.mock.data(&l.catalog), b"[\"queue\"]");
+    assert_eq!(
+        e.be.overwrite("nope", None, s2.source(), &mut op()).await,
+        Err(BErr::NotFound)
+    );
+}
+
 #[tokio::test]
 async fn folders_rename_and_move_by_patch() {
     let e = env().await;

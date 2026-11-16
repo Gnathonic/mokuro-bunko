@@ -67,6 +67,9 @@ pub struct FakeConfig {
     /// Every page gets one text block reading this (`processor-fake --page-text`), so a
     /// reader has a block to correct; without it, pages are blank.
     pub page_text: Option<String>,
+    /// A cancelled volume ends with `RunError::Fatal` instead of `Cancelled`, as a page
+    /// pipeline whose feeder saw the cancel first may report it.
+    pub fatal_on_cancel: bool,
 }
 
 /// The fake engine. Cheap to clone (clones share their counters).
@@ -319,7 +322,10 @@ fn pages(archive: &Path) -> Result<Vec<String>, String> {
     let mut names = Vec::new();
     for i in 0..zip.len() {
         let mut member = zip.by_index(i).map_err(|e| e.to_string())?;
-        let name = member.name().to_string();
+        // A name the zip crate cannot decode is not a page.
+        let Ok(name) = member.name().map(|n| n.into_owned()) else {
+            continue;
+        };
         let lower = name.to_ascii_lowercase();
         if member.is_dir()
             || ![
@@ -370,6 +376,28 @@ impl VolumeRunner for FakeRunner {
     }
 
     fn run_volume(
+        &self,
+        archive: &Path,
+        meta: &VolumeMeta,
+        out: &Path,
+        progress: &dyn Fn(PageProgress),
+        cancel: &CancelToken,
+    ) -> Result<VolumeOutcome, RunError> {
+        match self.run(archive, meta, out, progress, cancel) {
+            Err(RunError::Cancelled) if self.pipeline.config.fatal_on_cancel => Err(
+                RunError::Fatal("the OCR pipeline stopped before this volume did".into()),
+            ),
+            other => other,
+        }
+    }
+
+    fn stats(&self) -> Option<PipelineReport> {
+        self.counters()
+    }
+}
+
+impl FakeRunner {
+    fn run(
         &self,
         archive: &Path,
         meta: &VolumeMeta,
@@ -470,11 +498,11 @@ impl VolumeRunner for FakeRunner {
         Ok(VolumeOutcome {
             pages: total,
             failed_pages: 0,
-            stats: self.stats(),
+            stats: self.counters(),
         })
     }
 
-    fn stats(&self) -> Option<PipelineReport> {
+    fn counters(&self) -> Option<PipelineReport> {
         let elapsed = self.started.elapsed().as_secs_f64();
         let items = self.items.load(Ordering::SeqCst);
         Some(PipelineReport {

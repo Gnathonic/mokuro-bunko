@@ -1,0 +1,47 @@
+{
+ "header": {
+  "format": 1,
+  "device": "device-b",
+  "month": "legacy",
+  "first_seq": 0,
+  "last_seq": 0,
+  "count": 2,
+  "legacy": true
+ },
+ "events": [
+  {
+   "device": "legacy:00000000-0000-4000-8000-0000000000a1",
+   "seq": 1790942400000,
+   "t": 1790942400000,
+   "kind": "page",
+   "volume": "00000000-0000-4000-8000-0000000000a1",
+   "first_page": 4,
+   "last_page": 4,
+   "page_chars": [
+    0
+   ],
+   "chars_before": 400,
+   "dwell_ms": 30000,
+   "layout": "unknown",
+   "orientation": "unknown",
+   "viewport": null
+  },
+  {
+   "device": "legacy:00000000-0000-4000-8000-0000000000a1",
+   "seq": 1790942430000,
+   "t": 1790942430000,
+   "kind": "page",
+   "volume": "00000000-0000-4000-8000-0000000000a1",
+   "first_page": 5,
+   "last_page": 5,
+   "page_chars": [
+    0
+   ],
+   "chars_before": 480,
+   "dwell_ms": null,
+   "layout": "unknown",
+   "orientation": "unknown",
+   "viewport": null
+  }
+ ]
+}

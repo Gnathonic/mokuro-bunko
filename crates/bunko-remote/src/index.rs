@@ -26,7 +26,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rusqlite::{Connection, OptionalExtension, Row, Transaction, TransactionBehavior, params};
 
 use crate::backend::{HashKind, Pid, RNode};
-use crate::names::{CONTROL_FILES, effective_mtime_ns, fold, is_safe_segment, nfc};
+use crate::names::{CONTROL_FILES, effective_mtime_ns, fold, fold_path_pid, is_safe_segment, nfc};
 
 /// The merged root's entry id.
 pub const ROOT_EID: i64 = 1;
@@ -677,6 +677,52 @@ impl Index {
         v
     }
 
+    /// Every file one folder below the root whose name folds to `fold` (every spelling),
+    /// with its path: the series' queue files (queue file v2), by path.
+    pub fn series_level_files(&self, fold: &str) -> Vec<(RelPath, Entry)> {
+        let sql = format!(
+            "SELECT {ENTRY_COLS}, p.name FROM entry e JOIN entry p ON e.parent_eid = p.eid \
+             WHERE p.parent_eid = ?1 AND p.kind = ?2 AND e.fold = ?3 AND e.kind = ?4 \
+             ORDER BY p.name, e.name"
+        );
+        soft(
+            self.conn.prepare_cached(&sql).and_then(|mut s| {
+                s.query_map(params![ROOT_EID, KIND_DIR, fold, KIND_FILE], |r| {
+                    let e = entry_from_row(r)?;
+                    let folder: String = r.get(13)?;
+                    Ok((folder, e))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()
+            }),
+            "series_level_files",
+        )
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(folder, e)| {
+            let rel = RelPath::from_segments([folder, e.name.clone()])?;
+            Some((rel, e))
+        })
+        .collect()
+    }
+
+    /// Does a folder one below the root, in any spelling folding to `fold`, hold a
+    /// volume archive (a file named `*.cbz` in any case, a pending create included)?
+    /// A series folder without one has no volume left (queue file v2: its series file
+    /// goes, as its `series.json` does).
+    pub fn folder_holds_archive(&self, fold: &str) -> bool {
+        let sql = "SELECT 1 FROM entry e JOIN entry p ON e.parent_eid = p.eid \
+                   WHERE p.parent_eid = ?1 AND p.kind = ?2 AND p.fold = ?3 \
+                   AND e.kind = ?4 AND e.fold LIKE '%.cbz' LIMIT 1";
+        soft(
+            self.conn
+                .prepare_cached(sql)
+                .and_then(|mut s| s.exists(params![ROOT_EID, KIND_DIR, fold, KIND_FILE])),
+            "folder_holds_archive",
+        )
+        // An index that cannot answer is not an empty folder.
+        .unwrap_or(true)
+    }
+
     /// Every `(parent_eid, fold)` that more than one entry shares: the case-variant
     /// sets a case merge looks at (§5.9), by parent then fold.
     pub fn fold_collisions(&self) -> Vec<(i64, String)> {
@@ -851,6 +897,48 @@ impl Index {
                     .or_insert_with(|| self.entry_pids(*eid).iter().any(|p| !removing.contains(p)))
             })
             .count() as u64
+    }
+
+    /// For a path-id provider (a pid is the node's path): the top of each subtree that
+    /// would leave with `removing`, by pid, i.e. the nodes of `removing` whose provider
+    /// parent is not one of them. A node whose path another node outside `removing`
+    /// has in another spelling ([`fold_path_pid`]; the old pid of a case-only rename,
+    /// which a server that folds case still answers for) is neither a top nor a
+    /// parent here, so what was really lost below a renamed folder is a top of its
+    /// own.
+    pub fn removal_tops(&self, removing: &HashSet<Pid>) -> Vec<Pid> {
+        if removing.is_empty() {
+            return Vec::new();
+        }
+        let kept: HashSet<String> = soft(
+            self.conn
+                .prepare_cached("SELECT pid FROM node")
+                .and_then(|mut s| {
+                    s.query_map([], |r| r.get::<_, Pid>(0))?
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                }),
+            "removal_tops",
+        )
+        .unwrap_or_default()
+        .iter()
+        .filter(|p| !removing.contains(*p))
+        .map(|p| fold_path_pid(p))
+        .collect();
+        let lost: std::collections::HashMap<&str, Option<Pid>> = removing
+            .iter()
+            .filter(|p| !kept.contains(&fold_path_pid(p)))
+            .filter_map(|p| {
+                let row = self.node_row(&self.conn, p).ok().flatten()?;
+                Some((p.as_str(), row.parent_pid))
+            })
+            .collect();
+        let mut tops: Vec<Pid> = lost
+            .iter()
+            .filter(|(_, parent)| parent.as_deref().is_none_or(|q| !lost.contains_key(q)))
+            .map(|(p, _)| p.to_string())
+            .collect();
+        tops.sort();
+        tops
     }
 
     /// The nodes whose provider parent is `pid`, placed or not.

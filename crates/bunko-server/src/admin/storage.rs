@@ -4,7 +4,8 @@
 //! request comes from; a pasted redirect address for the paste flow), the account
 //! choice, "Create it?", Disconnect (Wait / Export /
 //! Discard), "This computer", Take over, "Keep this copy" / "Keep that copy" of a
-//! blocked case merge, and whether readers connect. No answer ever
+//! blocked case merge, whether readers connect, and Browse… for a library folder
+//! (`/api/fs`, an admin on this machine only). No answer ever
 //! carries a token, password or session blob.
 
 use super::{AdminState, ApiRequest, blocking, error, ok};
@@ -19,11 +20,36 @@ pub(super) fn control(s: &AdminState) -> Arc<StorageControl> {
     s.storage_control.clone()
 }
 
-fn origin(req: &ApiRequest) -> RequestOrigin {
-    let loopback = req.ctx.peer.is_loopback()
+/// The request comes from this machine: a loopback peer, and a loopback client address
+/// when proxy headers name another one.
+fn loopback(req: &ApiRequest) -> bool {
+    req.ctx.peer.is_loopback()
         && (req.ctx.client_ip == req.ctx.peer.to_string()
-            || crate::http::client_ip::is_loopback(&req.ctx.client_ip));
-    RequestOrigin::of(loopback, req.user_agent.as_deref())
+            || crate::http::client_ip::is_loopback(&req.ctx.client_ip))
+}
+
+fn origin(req: &ApiRequest) -> RequestOrigin {
+    RequestOrigin::of(loopback(req), req.user_agent.as_deref()).on_this_machine(req.this_machine)
+}
+
+/// `GET /api/fs?path=…`: Browse… for the library folder, the subfolders of a folder on
+/// this machine. An admin in a browser on this machine only: 403 for one elsewhere (or
+/// forwarded by a proxy, or on a page naming another host), as the folder path is then
+/// typed (it would show them what is on the server's disk).
+pub(super) async fn fs(req: &ApiRequest) -> Response {
+    if !req.this_machine {
+        return error(403, crate::fs_browse::REMOTE_REFUSAL);
+    }
+    let q = super::parse_qs(&req.query);
+    let dir = match crate::fs_browse::requested_over_http(super::query_one(&q, "path").as_deref()) {
+        Ok(p) => p,
+        Err(e) => return error(400, e),
+    };
+    match blocking(move || crate::fs_browse::list_dir(&dir, &[])).await {
+        Ok(Ok(v)) => ok(v),
+        Ok(Err(e)) => error(400, e),
+        Err(r) => r,
+    }
 }
 
 /// `GET /api/storage`: the `library.storage` block.

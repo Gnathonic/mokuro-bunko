@@ -1,0 +1,44 @@
+{
+  "body": {
+    "v": 2,
+    "instance_id": "<id-1>",
+    "rev": 1,
+    "at": 946684800,
+    "clock_at": 946684800,
+    "series": "日本語シリーズ",
+    "rows": [],
+    "vols": {},
+    "done": {},
+    "live": {
+      "held": {
+        "reason": "no-processor"
+      },
+      "held_rows": [],
+      "clock": [
+        [
+          946684800,
+          946684800
+        ],
+        [
+          946771200,
+          946771200
+        ]
+      ],
+      "clock_at": 946684800,
+      "batch_s": 5
+    }
+  },
+  "headers": {
+    "cache-control": "no-cache",
+    "content-type": "application/json",
+    "etag": "\"etag\"",
+    "vary": "Accept-Encoding"
+  },
+  "request": {
+    "auth": "basic:reader",
+    "headers": {},
+    "method": "GET",
+    "path": "/mokuro-reader/%E6%97%A5%E6%9C%AC%E8%AA%9E%E3%82%B7%E3%83%AA%E3%83%BC%E3%82%BA/.mokuro-series-queue.json"
+  },
+  "status": 200
+}

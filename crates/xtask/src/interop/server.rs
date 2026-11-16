@@ -1,14 +1,15 @@
 //! One throwaway Bunko server for a scenario: an isolated config and data dir, setup
 //! completed over the API, catalog on, nothing reaching the network. A rig server can
-//! also keep its library in a cloud account (cloudsim, or rclone's WebDAV), signed in
-//! the way a connected server is: its credentials file and `storage.library`.
+//! also keep its library in a cloud account (cloudsim, or rclone's WebDAV), or in a
+//! library folder on this disk, signed in the way a connected server is: its
+//! credentials file and `storage.library`.
 
 use super::http;
 use anyhow::{Context, Result, bail};
 use base64::Engine as _;
 use sha2::{Digest as _, Sha256};
 use std::net::{SocketAddr, TcpListener};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -38,17 +39,61 @@ pub enum Backend {
 }
 
 /// A cloud sign-in as a connected server keeps it: the `storage.library` backend and
-/// one entry of `<base>/cloud/credentials.json`.
+/// one entry of `<base>/cloud/credentials.json`. A library folder keeps one too: a stub
+/// with no secret, as the connect flow writes it.
 #[derive(Debug, Clone)]
 pub struct CloudLogin {
-    /// `storage.library.backend`: `gdrive`, `onedrive`, `mega` or `webdav`.
+    /// `storage.library.backend`: `gdrive`, `onedrive`, `mega`, `webdav` or `folder`.
     pub backend: &'static str,
-    /// The account id the store id is made from (WebDAV: `user@url`).
+    /// The account id the store id is made from (WebDAV: `user@url`; a folder: its
+    /// path, [`folder_account_id`]).
     pub account_id: String,
     /// The credentials entry, `provider` and `account_id` filled in on write.
     pub credential: serde_json::Value,
     /// WebDAV: the server's URL and user (`storage.library.webdav`).
     pub webdav: Option<(String, String)>,
+    /// A folder: the library folder (`storage.library.path`).
+    pub path: Option<PathBuf>,
+}
+
+/// A folder library's sign-in: the stub the connect flow writes (`provider: folder`,
+/// the path as both account id and label) and `storage.library.path`.
+pub fn folder_login(path: &Path) -> CloudLogin {
+    let account_id = folder_account_id(path);
+    CloudLogin {
+        backend: "folder",
+        account_id: account_id.clone(),
+        credential: serde_json::json!({"account_label": account_id}),
+        webdav: None,
+        path: Some(path.to_path_buf()),
+    }
+}
+
+/// The account id of a folder library, `bunko_remote::folder::account_id` for a path
+/// with no `~`: lexically normalised (no `.` or `..`, no trailing separator), never
+/// resolved. Copied, not shared, as [`store_id`] is.
+pub fn folder_account_id(path: &Path) -> String {
+    let mut out = PathBuf::new();
+    let mut depth = 0usize;
+    for c in path.components() {
+        match c {
+            Component::Prefix(_) | Component::RootDir => out.push(c.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if depth > 0 {
+                    out.pop();
+                    depth -= 1;
+                } else if !out.has_root() {
+                    out.push("..");
+                }
+            }
+            Component::Normal(s) => {
+                out.push(s);
+                depth += 1;
+            }
+        }
+    }
+    out.to_string_lossy().into_owned()
 }
 
 /// An account the rig creates through the admin API after setup.
@@ -115,6 +160,12 @@ fn config_yaml(dir: &Path, port: u16, o: &ServerOptions) -> String {
                 "    webdav:\n      url: {}\n      username: {}\n",
                 yaml_str(url),
                 yaml_str(user)
+            ));
+        }
+        if let Some(path) = &login.path {
+            y.push_str(&format!(
+                "    path: {}\n",
+                yaml_str(&path.to_string_lossy())
             ));
         }
     }
@@ -467,5 +518,53 @@ impl Server {
 impl Drop for Server {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_account_is_its_path_lexically_normalised() {
+        assert_eq!(folder_account_id(Path::new("/srv/manga")), "/srv/manga");
+        assert_eq!(folder_account_id(Path::new("/srv/manga/")), "/srv/manga");
+        assert_eq!(
+            folder_account_id(Path::new("/srv/./x/../manga//")),
+            "/srv/manga"
+        );
+        assert_eq!(folder_account_id(Path::new("/../srv")), "/srv");
+        assert_eq!(folder_account_id(Path::new("/")), "/");
+    }
+
+    #[test]
+    fn a_folder_library_is_configured_by_its_path_and_keeps_a_stub() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("shelf").join("Library");
+        let login = folder_login(&folder);
+        let o = ServerOptions {
+            backend: Backend::Cloud(login.clone()),
+            ..ServerOptions::default()
+        };
+        let y = config_yaml(dir.path(), 1, &o);
+        let want = format!("  library:\n    backend: folder\n    folder: {CLOUD_FOLDER}\n");
+        assert!(y.contains(&want), "{y}");
+        let path_line = format!("    path: {}\n", yaml_str(&folder.to_string_lossy()));
+        assert!(y.contains(&path_line), "{y}");
+        assert!(!y.contains("webdav:"), "{y}");
+
+        write_credentials(dir.path(), &login).unwrap();
+        let doc: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(dir.path().join("cloud/credentials.json")).unwrap(),
+        )
+        .unwrap();
+        let account = folder_account_id(&folder);
+        let id = store_id("folder", "", &account, CLOUD_FOLDER);
+        assert_eq!(
+            doc["stores"][&id],
+            serde_json::json!({"provider": "folder", "account_id": account,
+                               "account_label": account})
+        );
     }
 }

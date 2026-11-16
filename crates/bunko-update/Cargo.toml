@@ -26,7 +26,7 @@ flate2 = "1"
 tar = "0.4"
 zip = { workspace = true }
 # OCR backend packs (.tar.zst).
-zstd = "0.13"
+zstd = "0.14"
 
 [dev-dependencies]
 tempfile.workspace = true

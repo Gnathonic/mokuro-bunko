@@ -24,6 +24,11 @@ use unicode_normalization::UnicodeNormalization;
 
 use crate::fold_table::{DEFAULT_IGNORABLE, FOLD_MAP};
 
+/// The OCR queue file v2 in each series folder (`docs/design/queue-file-v2.md`): Bunko
+/// generates it, serves it over HTTP from memory and (as the lease holder) writes it to
+/// a connected store. Recognised in every spelling the fold joins ([`is_fixed_name`]).
+pub const SERIES_QUEUE_FILE: &str = ".mokuro-series-queue.json";
+
 pub use crate::fold_table::FOLD_UCD;
 
 /// The fold's version. A change of it (a UCD bump included) is a new sidecar names

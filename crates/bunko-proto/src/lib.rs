@@ -461,9 +461,24 @@ pub struct VolumeOp {
     /// Library's `st_size` at claim time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<u64>,
-    /// Library's strong ETag at claim time (for `If-Range`).
+    /// Library's strong ETag at claim time: for `If-Range`, and to match a copy kept
+    /// for this archive ([`VolumeOp::keep_archive`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub etag: Option<String>,
+    /// More jobs of this archive follow on this processor (the library takes work by
+    /// volume): keep the copy after this claim ends, for a later claim of the same
+    /// archive, size and `etag`. Older processors ignore it and download each claim.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub keep_archive: bool,
+    /// The archives (`archive` paths) whose copies this processor should go on keeping
+    /// (the volumes the library runs on it by volume; empty by generation). A copy kept
+    /// of any other archive is dropped on receipt. This library sends it on every remote
+    /// volume op; None (an older library) says nothing. The library may wait hours for
+    /// a volume's next job (a storage hold, a benchmark), and only it knows when the
+    /// copy is no longer wanted: a processor drops a kept copy on its own only once it
+    /// has waited 6 hours with no job of it. Older processors ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kept_archives: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -723,6 +738,8 @@ mod tests {
             volume_uuid: Some("u".into()),
             size: Some(3),
             etag: None,
+            keep_archive: false,
+            kept_archives: None,
         });
         let text = serde_json::to_string(&op).unwrap();
         assert!(text.starts_with(r#"{"op":"volume","sid":"s1""#), "{text}");
@@ -730,6 +747,23 @@ mod tests {
         assert_eq!(back, op);
         let hb: Op = serde_json::from_str(r#"{"op":"heartbeat"}"#).unwrap();
         assert_eq!(hb, Op::Heartbeat);
+    }
+
+    /// An older library sends no `keep_archive`, and a `false` one is not written, so
+    /// an older processor reads exactly what it read before.
+    #[test]
+    fn volume_op_keep_archive_defaults_false_and_is_omitted() {
+        let text = r#"{"op":"volume","sid":"s","claim":"v1","archive":"/a.cbz","sidecar_name":"a.mokuro","title":"A","volume_title":"a"}"#;
+        let Op::Volume(mut op) = serde_json::from_str::<Op>(text).unwrap() else {
+            panic!("not a volume op");
+        };
+        assert!(!op.keep_archive);
+        assert!(!serde_json::to_string(&op).unwrap().contains("keep_archive"));
+        op.keep_archive = true;
+        op.etag = Some("\"1.0-3\"".into());
+        let sent = serde_json::to_string(&op).unwrap();
+        assert!(sent.contains(r#""keep_archive":true"#), "{sent}");
+        assert_eq!(serde_json::from_str::<VolumeOp>(&sent).unwrap(), op);
     }
 
     #[test]

@@ -551,6 +551,15 @@ mod tests {
             fold_series_title_key("DR STONE")
         );
         assert_eq!(fold_series_title_key("A\u{3000}\u{1c}B"), "a b");
+        // The ASCII path (no NFC) folds as the general one does.
+        assert_eq!(
+            fold_series_title_key("\u{1f} Dr\t\u{1c}Stone\x0b"),
+            "dr stone"
+        );
+        assert_eq!(
+            fold_series_title_key("\u{1f} Dr\t\u{1c}Stone\x0b\u{e9}"),
+            "dr stone \u{e9}"
+        );
     }
 
     #[test]

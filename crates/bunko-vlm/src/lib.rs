@@ -151,9 +151,63 @@ pub struct RecognizerInfo {
     pub patch_budget: Option<u32>,
 }
 
+/// One text block to be read whole: an upright crop of the page with the block's lines.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BlockCrop {
+    pub image: Rgb,
+    /// The quads of the block's lines in pixels of `image`, in the block's line order.
+    pub lines: Vec<Quad>,
+    /// What the line reader read in each line: a hint for a recognizer that has to
+    /// share a block's text out without knowing where its characters are.
+    pub hints: Vec<String>,
+}
+
+/// One line a block reader found in a block's crop.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LineRead {
+    pub text: String,
+    /// `[x0, y0, x1, y1]` in pixels of the crop.
+    pub bbox: [f32; 4],
+    /// Whether the line runs top to bottom.
+    pub vertical: bool,
+    /// One confidence per character of `text`; empty when the recognizer gives none.
+    pub confs: Vec<f32>,
+}
+
+/// A recognizer that reads a whole text block in one go and says which of the block's
+/// lines each part of the text belongs to.
+pub trait BlockReader: Send + Sync {
+    /// Reads blocks whose lines a line detector found: for each block the text of each
+    /// of its lines, in the order of [`BlockCrop::lines`] (Python `strip()`, no NFKC,
+    /// as [`Recognizer::read`]).
+    fn read_blocks(&self, blocks: &[BlockCrop]) -> Result<Vec<Vec<String>>, VlmError>;
+
+    /// Reads the crops of blocks a block detector found, where nothing says where the
+    /// lines are: for each crop its lines in reading order, as the recognizer itself
+    /// finds them. A recognizer that cannot tell lines apart answers one line, the
+    /// whole crop.
+    fn read_lines(&self, crops: &[Rgb]) -> Result<Vec<Vec<LineRead>>, VlmError>;
+}
+
 /// A line recognizer. Implementations are `Send + Sync`: worker threads share one.
 pub trait Recognizer: Send + Sync {
     fn info(&self) -> &RecognizerInfo;
+
+    /// The block reader of a recognizer made to read whole text blocks: the pipeline
+    /// then hands it each block of the page once instead of each line. `None` (the
+    /// default) for the recognizers that read line by line.
+    fn block_reader(&self) -> Option<&dyn BlockReader> {
+        None
+    }
+
+    /// Whether the recognizer's text stands as read. `false` (the default) for the
+    /// generative recognizers: the pipeline gives them back what they cannot write or
+    /// tend to lose from the line reader's text, and takes over when they run away.
+    /// `true` for a recognizer without a decoder, whose text is only replaced where it
+    /// read nothing.
+    fn verbatim(&self) -> bool {
+        false
+    }
 
     /// The first-read crops of one line (spec §3.1).
     fn crop(&self, page: &Bgr, quad: &Quad, vertical: bool) -> CropSet;

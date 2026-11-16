@@ -191,6 +191,10 @@ test("the browser's CORS preflights from the reader's origin pass", async ({ rea
     await cdp.send('Network.enable');
 
     await connect(reader, rig, account);
+    // The reader keeps working after connect: a preflight it has just sent has no answer
+    // yet. Each one recorded is judged once it has its answer (or failed).
+    const unsettled = () => [...preflights.values()].filter((p) => !p.response && !p.failed).map((p) => p.url);
+    await expect.poll(unsettled, { message: 'preflights still waiting for an answer', timeout: 15_000 }).toEqual([]);
     const seen = [...preflights.values()];
     expect(seen.length, 'preflights the browser sent to Bunko').toBeGreaterThan(0);
     const lower = (h) => Object.fromEntries(Object.entries(h ?? {}).map(([k, v]) => [k.toLowerCase(), v]));

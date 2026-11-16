@@ -76,7 +76,10 @@ LABEL org.opencontainers.image.source="https://github.com/Gnathonic/mokuro-bunko
 # libatomic1, libdw1t64, libelf1t64, libnuma1 (+ the unversioned libnuma.so, which
 # libtorch's ROCm build dlopen()s): host libraries the AMD (rocm7.1) pack expects, as
 # on a desktop; about 1.5 MB, LGPL/GPL Debian packages like the rest of the base.
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tini nginx gettext-base \
+# `upgrade`: the base image lags trixie-security (its zlib1g had two fixed CVEs).
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get -o Dpkg::Options::=--force-confold upgrade -y \
+    && apt-get install -y --no-install-recommends ca-certificates tini nginx gettext-base \
         libatomic1 libdw1t64 libelf1t64 libnuma1 \
     && ln -s libnuma.so.1 /usr/lib/x86_64-linux-gnu/libnuma.so && ldconfig \
     && rm -rf /var/lib/apt/lists/* /etc/nginx/sites-enabled/default

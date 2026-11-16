@@ -57,13 +57,32 @@ fn load(dir: &Path, prefix: &str, out: &mut Vec<Record>, errors: &mut Vec<String
     }
 }
 
-/// The value at a dot path (`volumes.0.manifest`).
-fn at<'a>(v: &'a Value, path: &str) -> Option<&'a Value> {
-    path.split('.').try_fold(v, |cur, part| match cur {
-        Value::Object(m) => m.get(part),
-        Value::Array(a) => part.parse::<usize>().ok().and_then(|i| a.get(i)),
-        _ => None,
-    })
+/// The values at a dot path (`volumes.0.manifest`), one per branch: `*` stands for
+/// every key of an object or element of an array (`vols.*.0.0`: each volume's first
+/// job's row), and an empty one is a missing value, as is a step that is not there.
+fn at<'a>(v: &'a Value, path: &str) -> Vec<Option<&'a Value>> {
+    let mut cur = vec![Some(v)];
+    for part in path.split('.') {
+        cur = cur
+            .into_iter()
+            .flat_map(|v| -> Vec<Option<&'a Value>> {
+                match (v, part) {
+                    (None, _) => vec![None],
+                    (Some(Value::Object(m)), "*") if !m.is_empty() => {
+                        m.values().map(Some).collect()
+                    }
+                    (Some(Value::Array(a)), "*") if !a.is_empty() => a.iter().map(Some).collect(),
+                    (Some(_), "*") => vec![None],
+                    (Some(Value::Object(m)), _) => vec![m.get(part)],
+                    (Some(Value::Array(a)), _) => {
+                        vec![part.parse::<usize>().ok().and_then(|i| a.get(i))]
+                    }
+                    (Some(_), _) => vec![None],
+                }
+            })
+            .collect();
+    }
+    cur
 }
 
 /// Every way `resp` misses the record's `expect`.
@@ -91,7 +110,10 @@ fn check(expect: &Value, resp: &Resp) -> Vec<String> {
         match resp.json() {
             Some(body) => {
                 for f in fields {
-                    if at(&body, f).is_none_or(Value::is_null) {
+                    if at(&body, f)
+                        .into_iter()
+                        .any(|v| v.is_none_or(Value::is_null))
+                    {
                         bad.push(format!("body field {f} is missing or null"));
                     }
                 }
@@ -110,14 +132,16 @@ fn check(expect: &Value, resp: &Resp) -> Vec<String> {
         match resp.json() {
             Some(body) => {
                 for f in nullable {
-                    if at(&body, f).is_none() {
+                    if at(&body, f).into_iter().any(|v| v.is_none()) {
                         bad.push(format!("body field {f} is missing (it may be null)"));
                     }
                 }
                 for (f, want) in values.into_iter().flatten() {
-                    match at(&body, f) {
-                        Some(got) if got == want => {}
-                        got => bad.push(format!("body field {f} is {got:?}, not {want}")),
+                    for got in at(&body, f) {
+                        match got {
+                            Some(got) if got == want => {}
+                            got => bad.push(format!("body field {f} is {got:?}, not {want}")),
+                        }
                     }
                 }
             }
@@ -347,4 +371,46 @@ async fn replay_the_reader_requests() {
         failures.len(),
         failures.join("\n")
     );
+}
+
+#[test]
+fn a_wildcard_step_checks_every_branch_and_none_is_missing() {
+    let body = serde_json::json!({
+        "vols": {"A": [[0, "q", null]], "B": [[1, "r", 5, 9]]},
+        "empty": {},
+    });
+    let got = |p: &str| at(&body, p);
+    let resp = Resp {
+        status: 200,
+        headers: Default::default(),
+        body: serde_json::to_vec(&body).unwrap(),
+    };
+    assert_eq!(
+        got("vols.*.0.0"),
+        vec![Some(&Value::from(0)), Some(&Value::from(1))]
+    );
+    // Present in both, null in one: a nullable field passes, a required one fails.
+    assert_eq!(
+        got("vols.*.0.2"),
+        vec![Some(&Value::Null), Some(&Value::from(5))]
+    );
+    assert!(
+        check(
+            &serde_json::json!({"status": [200], "body_fields": ["vols.*.0.2"]}),
+            &resp
+        )
+        .iter()
+        .any(|p| p.contains("vols.*.0.2"))
+    );
+    assert!(
+        check(
+            &serde_json::json!({"status": [200], "nullable_fields": ["vols.*.0.2"]}),
+            &resp
+        )
+        .is_empty()
+    );
+    // Missing in one branch, and a wildcard over nothing, are missing.
+    assert_eq!(got("vols.*.0.3"), vec![None, Some(&Value::from(9))]);
+    assert_eq!(got("empty.*"), vec![None]);
+    assert_eq!(got("vols.A.0.1"), vec![Some(&Value::from("q"))]);
 }

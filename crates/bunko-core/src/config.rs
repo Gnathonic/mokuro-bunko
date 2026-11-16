@@ -8,6 +8,12 @@ use serde_json::{Map, Value, json};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
+mod analytics;
+pub use analytics::{
+    ANALYTICS_FIELDS, AnalyticsConfig, AnalyticsRetention, CrawlConfig, DEFAULT_GEO_URL, GeoConfig,
+    LibraryScanConfig,
+};
+
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
     #[error("{0}")]
@@ -324,6 +330,50 @@ impl Default for UpgradeConfig {
     }
 }
 
+/// `ocr.queue_order`: how the OCR queue takes work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueueOrder {
+    /// Each generation runs across the library in the order of `ocr.generations`, with
+    /// one archive download per job.
+    Generation,
+    /// One machine runs every job of a volume back to back from one download of its
+    /// archive; volumes come in the order their first job would by generation.
+    Volume,
+}
+
+impl QueueOrder {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            QueueOrder::Generation => "generation",
+            QueueOrder::Volume => "volume",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<QueueOrder> {
+        match s.trim() {
+            "generation" => Some(QueueOrder::Generation),
+            "volume" => Some(QueueOrder::Volume),
+            _ => None,
+        }
+    }
+}
+
+/// `ocr.queue_order` as written: unset, empty or `auto` is None (the library backend
+/// decides, [`Config::queue_order`]).
+pub fn parse_queue_order(value: Option<&str>) -> Result<Option<QueueOrder>, ConfigError> {
+    let Some(v) = value
+        .map(str::trim)
+        .filter(|v| !v.is_empty() && *v != "auto")
+    else {
+        return Ok(None);
+    };
+    QueueOrder::parse(v).map(Some).ok_or_else(|| {
+        invalid(format!(
+            "Invalid ocr.queue_order: {v} (expected generation, volume or auto)"
+        ))
+    })
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct OcrConfig {
     pub backend: String,
@@ -336,6 +386,9 @@ pub struct OcrConfig {
     pub upgrade: UpgradeConfig,
     /// The Vulkan pack's runtimes in order of preference (docs/rust-port/VULKAN.md).
     pub vulkan_backends: Vec<String>,
+    /// `ocr.queue_order` as configured; None: by volume on a MEGA library, else by
+    /// generation ([`Config::queue_order`]).
+    pub queue_order: Option<QueueOrder>,
 }
 
 impl Default for OcrConfig {
@@ -350,6 +403,7 @@ impl Default for OcrConfig {
             generations: generations::default_generations(),
             upgrade: UpgradeConfig::default(),
             vulkan_backends: VULKAN_RUNTIMES.iter().map(|s| s.to_string()).collect(),
+            queue_order: None,
         }
     }
 }
@@ -419,15 +473,19 @@ pub enum LibraryBackend {
     OneDrive,
     Mega,
     WebDav,
+    /// A folder chosen by path (`storage.library.path`), kept like a cloud folder: the
+    /// folder Mokuro Reader's Local Folder uses.
+    Folder,
 }
 
 impl LibraryBackend {
-    pub const ALL: [LibraryBackend; 5] = [
+    pub const ALL: [LibraryBackend; 6] = [
         LibraryBackend::Local,
         LibraryBackend::GDrive,
         LibraryBackend::OneDrive,
         LibraryBackend::Mega,
         LibraryBackend::WebDav,
+        LibraryBackend::Folder,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -437,6 +495,7 @@ impl LibraryBackend {
             LibraryBackend::OneDrive => "onedrive",
             LibraryBackend::Mega => "mega",
             LibraryBackend::WebDav => "webdav",
+            LibraryBackend::Folder => "folder",
         }
     }
 
@@ -445,7 +504,8 @@ impl LibraryBackend {
         Self::ALL.into_iter().find(|b| b.as_str() == s)
     }
 
-    /// Every backend but `local` keeps the library in a cloud folder.
+    /// Every backend but `local` keeps the library in a cloud folder (`folder` counts:
+    /// Bunko keeps it exactly as it keeps a cloud folder).
     pub fn is_cloud(self) -> bool {
         self != LibraryBackend::Local
     }
@@ -547,6 +607,15 @@ pub struct LibraryConfig {
     /// The library folder in the cloud account.
     pub folder: String,
     pub webdav: WebDavLibraryConfig,
+    /// `backend: folder`: the library folder, as written (`~` is expanded where it is
+    /// used). Kept, and ignored, while another backend is set.
+    pub path: Option<PathBuf>,
+    /// The folders a browser on another computer (the setup wizard, the admin panel)
+    /// may connect a folder library in: at or under one of these only. Empty (the
+    /// default): none. Set in `config.yaml` or `MOKURO_LIBRARY_FOLDER_ROOTS` only;
+    /// no HTTP call changes it. The CLI, the desktop app and a browser on the server
+    /// itself are not held to it.
+    pub folder_roots: Vec<PathBuf>,
     pub cache_mb: u32,
     pub spool_gb: u32,
     pub outbox_hold_mb: u32,
@@ -569,6 +638,8 @@ impl Default for LibraryConfig {
             backend: LibraryBackend::Local,
             folder: "mokuro-reader".into(),
             webdav: WebDavLibraryConfig::default(),
+            path: None,
+            folder_roots: Vec::new(),
             cache_mb: 1024,
             spool_gb: 4,
             outbox_hold_mb: 2048,
@@ -589,6 +660,11 @@ impl Default for LibraryConfig {
 const LIBRARY_ENV: &[(&str, &str)] = &[
     ("MOKURO_LIBRARY_BACKEND", "storage.library.backend"),
     ("MOKURO_LIBRARY_FOLDER", "storage.library.folder"),
+    ("MOKURO_LIBRARY_PATH", "storage.library.path"),
+    (
+        "MOKURO_LIBRARY_FOLDER_ROOTS",
+        "storage.library.folder_roots",
+    ),
     ("MOKURO_WEBDAV_URL", "storage.library.webdav.url"),
     ("MOKURO_WEBDAV_USERNAME", "storage.library.webdav.username"),
     (
@@ -626,6 +702,16 @@ impl LibraryConfig {
         l.webdav.url = get_opt_str(&webdav, "url");
         l.webdav.username = get_opt_str(&webdav, "username");
         l.webdav.allow_http = get_bool(&webdav, "storage.library.webdav", "allow_http", false)?;
+        l.path = get_opt_str(&m, "path").map(PathBuf::from);
+        l.folder_roots = match m.get("folder_roots") {
+            // One path as a string is one root (a path may hold a comma).
+            Some(Value::String(s)) => split_roots(s),
+            _ => get_list(&m, SEC, "folder_roots", &[])?
+                .into_iter()
+                .filter(|r| !r.trim().is_empty())
+                .map(PathBuf::from)
+                .collect(),
+        };
         l.cache_mb = get_positive(&m, SEC, "cache_mb", d.cache_mb)?;
         l.spool_gb = get_positive(&m, SEC, "spool_gb", d.spool_gb)?;
         l.outbox_hold_mb = get_positive(&m, SEC, "outbox_hold_mb", d.outbox_hold_mb)?;
@@ -665,6 +751,8 @@ impl LibraryConfig {
                 "backend",
                 "folder",
                 "webdav",
+                "path",
+                "folder_roots",
                 "cache_mb",
                 "spool_gb",
                 "outbox_hold_mb",
@@ -736,6 +824,28 @@ impl LibraryConfig {
                 )));
             }
         }
+        if let Some(path) = &self.path {
+            let full = storage::expand_user(path);
+            if !full.is_absolute() {
+                return Err(invalid(format!(
+                    "storage.library.path: {} is not a full path",
+                    path.display()
+                )));
+            }
+        }
+        for root in &self.folder_roots {
+            if !storage::expand_user(root).is_absolute() {
+                return Err(invalid(format!(
+                    "storage.library.folder_roots: {} is not a full path",
+                    root.display()
+                )));
+            }
+        }
+        if self.backend == LibraryBackend::Folder && self.path.is_none() {
+            return Err(invalid(
+                "storage.library.backend: folder needs storage.library.path (MOKURO_LIBRARY_PATH)",
+            ));
+        }
         if self.backend == LibraryBackend::WebDav && self.webdav.url.is_none() {
             return Err(invalid(
                 "storage.library.backend: webdav needs storage.library.webdav.url (MOKURO_WEBDAV_URL)",
@@ -792,6 +902,12 @@ impl LibraryConfig {
                 "username": self.webdav.username,
                 "allow_http": self.webdav.allow_http,
             },
+            "path": self.path.as_ref().map(|p| p.to_string_lossy()),
+            "folder_roots": self
+                .folder_roots
+                .iter()
+                .map(|p| p.to_string_lossy())
+                .collect::<Vec<_>>(),
             "cache_mb": self.cache_mb,
             "spool_gb": self.spool_gb,
             "outbox_hold_mb": self.outbox_hold_mb,
@@ -844,6 +960,8 @@ impl LibraryConfig {
             "webdav.username" => self.webdav.username = opt(),
             "webdav.allow_http" => self.webdav.allow_http = b()?,
             "webdav.password" => return Err(invalid(WEBDAV_PASSWORD_REFUSED)),
+            "path" => self.path = opt().map(PathBuf::from),
+            "folder_roots" => self.folder_roots = split_roots(value),
             "cache_mb" => self.cache_mb = pos()?,
             "spool_gb" => self.spool_gb = pos()?,
             "outbox_hold_mb" => self.outbox_hold_mb = pos()?,
@@ -877,6 +995,8 @@ impl LibraryConfig {
         "webdav.url",
         "webdav.username",
         "webdav.allow_http",
+        "path",
+        "folder_roots",
         "cache_mb",
         "spool_gb",
         "outbox_hold_mb",
@@ -935,6 +1055,8 @@ pub struct Config {
     pub ocr: OcrConfig,
     pub dyndns: DynDnsConfig,
     pub update: UpdateConfig,
+    /// New in 0.8: server-side usage analytics (`analytics.sqlite`).
+    pub analytics: AnalyticsConfig,
     /// Notes about migrated settings (removed engines/detectors), for logs and admin UI.
     pub warnings: Vec<String>,
     /// Sections/keys this version does not know, preserved verbatim on save.
@@ -1079,6 +1201,19 @@ fn get_list(
             "{sec}.{key}: expected a list, got {other}"
         ))),
     }
+}
+
+/// `storage.library.folder_roots` from one string (`MOKURO_LIBRARY_FOLDER_ROOTS`,
+/// `config set`): the paths split as `PATH` is, on `:` (`;` on Windows), since a path
+/// may hold a comma; `null` or empty is none.
+fn split_roots(s: &str) -> Vec<PathBuf> {
+    let s = s.trim();
+    if s.is_empty() || s == "null" {
+        return Vec::new();
+    }
+    std::env::split_paths(s)
+        .filter(|p| !p.as_os_str().is_empty())
+        .collect()
 }
 
 fn split_list(s: &str) -> Vec<String> {
@@ -1345,6 +1480,7 @@ impl Config {
             "vulkan_backends",
             &OcrConfig::default().vulkan_backends,
         )?;
+        c.ocr.queue_order = parse_queue_order(get_opt_str(&s, "queue_order").as_deref())?;
         c.ocr.validate()?;
         let ocr_extra = leftovers(
             s,
@@ -1358,6 +1494,7 @@ impl Config {
                 "generations",
                 "upgrade",
                 "vulkan_backends",
+                "queue_order",
             ],
         );
 
@@ -1392,6 +1529,9 @@ impl Config {
             &["check", "channel", "manifest_url", "auto", "public_key"],
         );
 
+        let (analytics, analytics_extra) = AnalyticsConfig::from_map(section(data, "analytics")?)?;
+        c.analytics = analytics;
+
         // Preserve whatever we did not understand.
         let known_sections = [
             ("server", server_extra),
@@ -1406,6 +1546,7 @@ impl Config {
             ("ocr", ocr_extra),
             ("dyndns", dyndns_extra),
             ("update", update_extra),
+            ("analytics", analytics_extra),
         ];
         for (name, extra) in known_sections {
             if !extra.is_empty() {
@@ -1428,6 +1569,7 @@ impl Config {
                         | "ocr"
                         | "dyndns"
                         | "update"
+                        | "analytics"
                 )
             {
                 c.extra.insert(k.clone(), v.clone());
@@ -1567,6 +1709,9 @@ impl Config {
         if self.ocr.vulkan_backends != OcrConfig::default().vulkan_backends {
             ocr["vulkan_backends"] = json!(self.ocr.vulkan_backends);
         }
+        if let Some(order) = self.ocr.queue_order {
+            ocr["queue_order"] = json!(order.as_str());
+        }
         if self.ocr.upgrade != UpgradeConfig::default() {
             ocr["upgrade"] =
                 json!({"enabled": self.ocr.upgrade.enabled, "replace": self.ocr.upgrade.replace});
@@ -1586,6 +1731,14 @@ impl Config {
                 }),
             ),
         );
+        // Written once it differs from the default, so a file that never set it stays as
+        // it was (the admin settings answer shows the section either way).
+        if self.analytics != AnalyticsConfig::default() || self.extra.contains_key("analytics") {
+            out.insert(
+                "analytics".into(),
+                merge("analytics", self.analytics.to_value()),
+            );
+        }
         if self.update != UpdateConfig::default() || self.extra.contains_key("update") {
             out.insert(
                 "update".into(),
@@ -1617,6 +1770,13 @@ impl Config {
         if let Some(field) = key.strip_prefix("storage.library.") {
             self.storage.library.set_field(field, value)?;
             return self.storage.library.validate();
+        }
+        if let Some(field) = key.strip_prefix("analytics.") {
+            let mut next = self.analytics.clone();
+            next.set_field(field, value)?;
+            next.validate()?;
+            self.analytics = next;
+            return Ok(());
         }
         let parts: Vec<&str> = key.split('.').collect();
         if parts.len() != 2 {
@@ -1730,6 +1890,7 @@ impl Config {
                 validate_vulkan_backends(&list)?;
                 self.ocr.vulkan_backends = list;
             }
+            "ocr.queue_order" => self.ocr.queue_order = parse_queue_order(Some(value))?,
             "ocr.generations" => {
                 let parsed = generations::parse_generation_list(&Value::String(value.to_string()))?;
                 self.apply_parsed_generations(parsed);
@@ -1764,6 +1925,7 @@ impl Config {
                     "ocr",
                     "dyndns",
                     "update",
+                    "analytics",
                 ]
                 .contains(&parts[0]);
                 return Err(ConfigError::UnknownKey(if section_ok {
@@ -1814,6 +1976,7 @@ impl Config {
         "ocr.local_processing",
         "ocr.autobench",
         "ocr.vulkan_backends",
+        "ocr.queue_order",
         "ocr.generations",
         "dyndns.enabled",
         "dyndns.provider",
@@ -1826,6 +1989,19 @@ impl Config {
         "update.manifest_url",
         "update.auto",
         // Not `update.public_key`: a key is trusted only from the config file itself.
+        "analytics.enabled",
+        "analytics.flush_seconds",
+        "analytics.retention.ip_days",
+        "analytics.retention.hourly_days",
+        "analytics.retention.host_minute_days",
+        "analytics.retention.crawl_days",
+        "analytics.crawl.window_hours",
+        "analytics.crawl.min_series",
+        "analytics.crawl.min_coverage",
+        "analytics.library_scan.interval_hours",
+        "analytics.library_scan.page_formats",
+        "analytics.geo.enabled",
+        "analytics.geo.url",
     ];
 
     /// Apply `MOKURO_<SECTION>_<KEY>` variables plus the `MOKURO_HOST`/`PORT`/`STORAGE` aliases.
@@ -1912,6 +2088,18 @@ impl Config {
     /// `processes_locally` in 0.5.2 plus the lite build's lack of an OCR runtime.
     pub fn processes_locally(&self, ocr_available: bool) -> bool {
         ocr_available && self.ocr.backend != "skip" && self.ocr.local_processing
+    }
+
+    /// How the OCR queue takes work: `ocr.queue_order` when set, else by volume on a
+    /// MEGA library (its transfer quota counts every download, and by volume each
+    /// archive is downloaded once), else by generation.
+    pub fn queue_order(&self) -> QueueOrder {
+        self.ocr
+            .queue_order
+            .unwrap_or(match self.library_backend() {
+                LibraryBackend::Mega => QueueOrder::Volume,
+                _ => QueueOrder::Generation,
+            })
     }
 }
 
@@ -2187,6 +2375,73 @@ mod tests {
             .unwrap();
         assert_eq!(paddle.detector.as_deref(), Some("ppocr-manga"));
         assert!(c.to_yaml().contains("engine: mokuro"));
+    }
+
+    #[test]
+    fn queue_order_follows_the_library_backend_unless_set() {
+        let mut c = Config::default();
+        assert_eq!(c.queue_order(), QueueOrder::Generation);
+        c.storage.library.backend = LibraryBackend::Mega;
+        assert_eq!(c.queue_order(), QueueOrder::Volume);
+        c.ocr.queue_order = Some(QueueOrder::Generation);
+        assert_eq!(
+            c.queue_order(),
+            QueueOrder::Generation,
+            "set beats the default"
+        );
+        c.storage.library.backend = LibraryBackend::Local;
+        c.ocr.queue_order = Some(QueueOrder::Volume);
+        assert_eq!(c.queue_order(), QueueOrder::Volume);
+        for other in [
+            LibraryBackend::GDrive,
+            LibraryBackend::OneDrive,
+            LibraryBackend::WebDav,
+        ] {
+            let mut c = Config::default();
+            c.storage.library.backend = other;
+            assert_eq!(c.queue_order(), QueueOrder::Generation, "{other:?}");
+        }
+    }
+
+    #[test]
+    fn queue_order_is_saved_only_when_set() {
+        let c = Config::from_value(&yaml("ocr: {queue_order: volume}")).unwrap();
+        assert_eq!(c.ocr.queue_order, Some(QueueOrder::Volume));
+        assert_eq!(c.to_value()["ocr"]["queue_order"], "volume");
+        let again = Config::from_value(&c.to_value()).unwrap();
+        assert_eq!(again.ocr.queue_order, Some(QueueOrder::Volume));
+        for unset in [
+            "ocr: {queue_order: auto}",
+            "ocr: {queue_order: ''}",
+            "ocr: {}",
+        ] {
+            let c = Config::from_value(&yaml(unset)).unwrap();
+            assert_eq!(c.ocr.queue_order, None, "{unset}");
+            assert!(c.to_value()["ocr"].get("queue_order").is_none(), "{unset}");
+        }
+    }
+
+    #[test]
+    fn queue_order_rejects_an_unknown_value() {
+        let e = Config::from_value(&yaml("ocr: {queue_order: series}")).unwrap_err();
+        assert!(e.to_string().contains("ocr.queue_order"), "{e}");
+        assert!(
+            Config::default()
+                .set_by_dotted_key("ocr.queue_order", "fastest")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn queue_order_dotted_key_and_env() {
+        let mut c = Config::default();
+        c.set_by_dotted_key("ocr.queue_order", "volume").unwrap();
+        assert_eq!(c.ocr.queue_order, Some(QueueOrder::Volume));
+        c.set_by_dotted_key("ocr.queue_order", "auto").unwrap();
+        assert_eq!(c.ocr.queue_order, None);
+        c.apply_env_overrides(|k| (k == "MOKURO_OCR_QUEUE_ORDER").then(|| "generation".into()))
+            .unwrap();
+        assert_eq!(c.ocr.queue_order, Some(QueueOrder::Generation));
     }
 
     #[test]
@@ -2521,5 +2776,179 @@ mod tests {
             Config::default().set_by_dotted_key("storage.library.webdav.password", "x"),
             Err(ConfigError::Invalid(_))
         ));
+    }
+
+    /// `backend: folder` with `storage.library.path`: parsed, kept as written, set by
+    /// dotted key and by `MOKURO_LIBRARY_PATH`, and refused without a full path.
+    #[test]
+    fn library_folder_backend() {
+        let full = if cfg!(windows) {
+            r"D:\Manga"
+        } else {
+            "/srv/manga"
+        };
+        let c = Config::from_value(&yaml(&format!(
+            "storage:\n  library:\n    backend: folder\n    path: '{full}'\n"
+        )))
+        .unwrap();
+        assert_eq!(c.library_backend(), LibraryBackend::Folder);
+        assert!(c.is_cloud_library());
+        assert_eq!(c.storage.library.path.as_deref(), Some(Path::new(full)));
+        assert_eq!(c.storage.library.folder, "mokuro-reader");
+        let v = c.to_value();
+        assert_eq!(v["storage"]["library"]["backend"], "folder");
+        assert_eq!(v["storage"]["library"]["path"], full);
+        let again = Config::from_value(&v).unwrap();
+        assert_eq!(again.storage, c.storage);
+        assert_eq!(
+            LibraryBackend::parse("folder"),
+            Some(LibraryBackend::Folder)
+        );
+
+        // `~` is a full path; it stays as written in the file.
+        let c = Config::from_value(&yaml(
+            "storage: {library: {backend: folder, path: '~/Manga'}}",
+        ))
+        .unwrap();
+        assert_eq!(
+            c.storage.library.path.as_deref(),
+            Some(Path::new("~/Manga"))
+        );
+
+        // A path kept while another backend is set is ignored, not refused.
+        let c = Config::from_value(&yaml(&format!(
+            "storage: {{library: {{backend: local, path: '{full}'}}}}"
+        )))
+        .unwrap();
+        assert_eq!(c.library_backend(), LibraryBackend::Local);
+        assert!(c.storage.library.path.is_some());
+
+        // The two refusals.
+        let bad = |y: &str| {
+            Config::from_value(&yaml(y))
+                .err()
+                .unwrap_or_else(|| panic!("accepted: {y}"))
+                .to_string()
+        };
+        let e = bad("storage: {library: {backend: folder}}");
+        assert!(
+            e.contains("folder needs storage.library.path (MOKURO_LIBRARY_PATH)"),
+            "{e}"
+        );
+        let e = bad("storage: {library: {backend: folder, path: manga}}");
+        assert!(
+            e.contains("storage.library.path: manga is not a full path"),
+            "{e}"
+        );
+
+        // Dotted keys: the path first, then the backend; `null` clears the path.
+        let mut c = Config::default();
+        assert!(
+            c.set_by_dotted_key("storage.library.backend", "folder")
+                .is_err()
+        );
+        c.set_by_dotted_key("storage.library.path", full).unwrap();
+        c.set_by_dotted_key("storage.library.backend", "folder")
+            .unwrap();
+        assert_eq!(c.library_backend(), LibraryBackend::Folder);
+        assert!(
+            c.set_by_dotted_key("storage.library.path", "relative/dir")
+                .is_err()
+        );
+        assert!(LibraryConfig::KEYS.contains(&"path"));
+        let mut c = Config::default();
+        c.set_by_dotted_key("storage.library.path", full).unwrap();
+        c.set_by_dotted_key("storage.library.path", "null").unwrap();
+        assert_eq!(c.storage.library.path, None);
+
+        // The environment pins it; the backend may come before its path.
+        let env = |k: &str| match k {
+            "MOKURO_LIBRARY_BACKEND" => Some("folder".to_string()),
+            "MOKURO_LIBRARY_PATH" => Some(full.to_string()),
+            _ => None,
+        };
+        let mut c = Config::default();
+        c.apply_env_overrides(env).unwrap();
+        assert_eq!(c.library_backend(), LibraryBackend::Folder);
+        assert_eq!(c.storage.library.path.as_deref(), Some(Path::new(full)));
+        let mut c = Config::default();
+        let e = c
+            .apply_env_overrides(|k: &str| {
+                (k == "MOKURO_LIBRARY_BACKEND").then(|| "folder".to_string())
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("MOKURO_LIBRARY_PATH"), "{e}");
+        let mut c = Config::default();
+        let e = c
+            .apply_env_overrides(|k: &str| {
+                (k == "MOKURO_LIBRARY_PATH").then(|| "relative".to_string())
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("MOKURO_LIBRARY_PATH") && e.contains("full path"),
+            "{e}"
+        );
+    }
+
+    /// `storage.library.folder_roots`: none by default; a list (or one path) in the
+    /// file, split as `PATH` from `MOKURO_LIBRARY_FOLDER_ROOTS` and `config set`; every
+    /// root a full path; written back as a list.
+    #[test]
+    fn library_folder_roots() {
+        let (a, b, sep) = if cfg!(windows) {
+            (r"D:\Manga", r"E:\Comics, Manga", ";")
+        } else {
+            ("/library", "/srv/comics, manga", ":")
+        };
+        assert!(Config::default().storage.library.folder_roots.is_empty());
+        let c = Config::from_value(&yaml(&format!(
+            "storage:\n  library:\n    folder_roots: ['{a}', '{b}']\n"
+        )))
+        .unwrap();
+        assert_eq!(
+            c.storage.library.folder_roots,
+            vec![PathBuf::from(a), PathBuf::from(b)]
+        );
+        let v = c.to_value();
+        assert_eq!(v["storage"]["library"]["folder_roots"], json!([a, b]));
+        assert_eq!(Config::from_value(&v).unwrap().storage, c.storage);
+        // One path as a string: one root, its comma kept.
+        let c = Config::from_value(&yaml(&format!(
+            "storage: {{library: {{folder_roots: '{b}'}}}}"
+        )))
+        .unwrap();
+        assert_eq!(c.storage.library.folder_roots, vec![PathBuf::from(b)]);
+        let e = Config::from_value(&yaml("storage: {library: {folder_roots: [manga]}}"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("storage.library.folder_roots: manga is not a full path"),
+            "{e}"
+        );
+        // The environment and `config set`: split as PATH is.
+        let joined = format!("{a}{sep}{b}");
+        let mut c = Config::default();
+        c.apply_env_overrides(|k: &str| {
+            (k == "MOKURO_LIBRARY_FOLDER_ROOTS").then(|| joined.clone())
+        })
+        .unwrap();
+        assert_eq!(
+            c.storage.library.folder_roots,
+            vec![PathBuf::from(a), PathBuf::from(b)]
+        );
+        let mut c = Config::default();
+        c.set_by_dotted_key("storage.library.folder_roots", a)
+            .unwrap();
+        assert_eq!(c.storage.library.folder_roots, vec![PathBuf::from(a)]);
+        assert!(
+            c.set_by_dotted_key("storage.library.folder_roots", "relative")
+                .is_err()
+        );
+        c.set_by_dotted_key("storage.library.folder_roots", "")
+            .unwrap();
+        assert!(c.storage.library.folder_roots.is_empty());
+        assert!(LibraryConfig::KEYS.contains(&"folder_roots"));
     }
 }

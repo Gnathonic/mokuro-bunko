@@ -173,8 +173,14 @@ pub(super) async fn install(s: &AdminState, req: &ApiRequest) -> Response {
         .unwrap_or_else(|r| r)
 }
 
-/// `POST /api/machine/remove`: delete the installed packs.
-pub(super) async fn remove(s: &AdminState) -> Response {
+/// `POST /api/machine/remove`: this machine runs no OCR any more, then its installed
+/// packs go. OCR on this machine is turned off first, saved and applied as its toggle
+/// does (`ocr.local_processing: false`: what it was reading goes back to the queue, its
+/// engine shuts down, and nothing installs a pack again while it is off), and the
+/// removal waits for it to have stopped. Answers the machine's `{removed, deferred,
+/// failed, freed, message}` plus `local_turned_off`, `returned` (volumes back in the
+/// queue) and `config`.
+pub(super) async fn remove(s: &AdminState, req: &ApiRequest) -> Response {
     let m = match machine(s) {
         Ok(m) => m,
         Err(r) => return r,
@@ -182,9 +188,62 @@ pub(super) async fn remove(s: &AdminState) -> Response {
     if let Err(r) = cooldown(s, "remove") {
         return r;
     }
-    blocking(move || result(m.remove()))
-        .await
-        .unwrap_or_else(|r| r)
+    let s2 = s.clone();
+    let actor = req.actor().unwrap_or_default();
+    blocking(move || {
+        // Refused before anything changes (an install would put a pack back).
+        if let Some(why) = m.remove_refused() {
+            return error(409, why);
+        }
+        let on = s2.core().config.read().ocr.local_processing;
+        if on && std::env::var_os("MOKURO_OCR_LOCAL_PROCESSING").is_some() {
+            return error(
+                409,
+                "OCR on this machine is set by MOKURO_OCR_LOCAL_PROCESSING: set it to false to remove the OCR backend",
+            );
+        }
+        let mut returned = 0;
+        if on {
+            let snapshot = {
+                let _guard = s2.config_lock.lock();
+                s2.core().config.write().ocr.local_processing = false;
+                if let Err(r) = save_config(&s2) {
+                    return r;
+                }
+                s2.core().config.read().clone()
+            };
+            tracing::info!(
+                "admin '{actor}': OCR on this machine off, to remove its OCR backend"
+            );
+            if let Some(v) = s2.ocr().apply(&snapshot) {
+                returned = v.get("returned").and_then(Value::as_u64).unwrap_or(0);
+            }
+        }
+        // Its processor has stopped (engine freed, scratch swept) before its files go.
+        s2.ocr().wait_local_stopped();
+        tracing::info!("admin '{actor}': remove the OCR backend");
+        let config = {
+            let c = s2.core().config.read();
+            json!({"local_processing": c.ocr.local_processing, "backend": c.ocr.backend})
+        };
+        match m.remove() {
+            Ok(mut v) => {
+                if let Value::Object(o) = &mut v {
+                    o.insert("local_turned_off".into(), json!(on));
+                    o.insert("returned".into(), json!(returned));
+                    o.insert("config".into(), config);
+                }
+                ok(v)
+            }
+            Err(e) if on => error(
+                409,
+                format!("OCR on this machine is off now, but its OCR backend was not removed: {e}"),
+            ),
+            Err(e) => error(409, e),
+        }
+    })
+    .await
+    .unwrap_or_else(|r| r)
 }
 
 /// `POST /api/machine/jobs {kind, engine?}`: doctor, models-download, models-verify.

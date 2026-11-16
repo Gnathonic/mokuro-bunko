@@ -84,20 +84,23 @@ base_path/
 └── mokuro.db                # SQLite database
 ```
 
-With a cloud library (`storage.library.backend` other than `local`) there is no
-`library/` folder on disk: the library is the cloud folder, and `cloud/` holds
-Bunko's local state for it.
+With a cloud library or a library folder you chose (`storage.library.backend`
+other than `local`) Bunko's own `library/` folder is not used: the library is the
+cloud folder (or `storage.library.path`), and `cloud/` holds Bunko's local state
+for it.
 
 #### Library location
 
-New in 0.8. The library is `base_path/library/` (`local`, the default), or the
-Mokuro Reader folder of a cloud account.
+New in 0.8. The library is `base_path/library/` (`local`, the default), a folder
+you choose (`folder`: the one Mokuro Reader's Local Folder uses), or the Mokuro
+Reader folder of a cloud account.
 
 ```yaml
 storage:
   library:
-    backend: local          # local | gdrive | onedrive | mega | webdav
+    backend: local          # local | folder | gdrive | onedrive | mega | webdav
     folder: mokuro-reader   # the library folder in the cloud account
+    path: null              # backend folder: the library folder, e.g. /srv/manga or D:\Manga
     webdav: {url: null, username: null, allow_http: false}
     cache_mb: 1024
     spool_gb: 4
@@ -117,8 +120,10 @@ storage:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `backend` | string | `local` | `local`, `gdrive` (Google Drive), `onedrive`, `mega` or `webdav`. `MOKURO_LIBRARY_BACKEND`. |
-| `folder` | string | `mokuro-reader` | The library folder in the cloud account (the one Mokuro Reader uses). `MOKURO_LIBRARY_FOLDER`. |
+| `backend` | string | `local` | `local`, `folder` (a folder you choose), `gdrive` (Google Drive), `onedrive`, `mega` or `webdav`. `MOKURO_LIBRARY_BACKEND`. |
+| `folder` | string | `mokuro-reader` | The library folder in the cloud account (the one Mokuro Reader uses). `MOKURO_LIBRARY_FOLDER`. With `backend: folder` it is only the name the library's top folder is known by, whatever it is called on disk: leave it as it is. |
+| `path` | string | — | Required for `folder`: the library folder, a full path as the server sees it (`/srv/manga`, `D:\Manga`, `\\files.example.com\manga`; `~` is expanded). It may not be Bunko's `base_path`, hold it, or lie inside it, except in `base_path/library/` (so a library on this computer can become a folder library in place); nor Bunko's settings folder or one holding it; nor a system folder (see [Which folders](#which-folders)). Ignored by the other backends. `MOKURO_LIBRARY_PATH`. |
+| `folder_roots` | list | `[]` | The folders a browser on another computer (the setup wizard, the admin panel's Storage tab) may connect a library folder in: at or under one of these only, and none when empty. Only `config.yaml` and `MOKURO_LIBRARY_FOLDER_ROOTS` (paths separated as in `PATH`: `:`, `;` on Windows) set it; no page or API call changes it. The CLI, the desktop app and a browser on the server itself are not held to it. Each a full path. In Docker, the library mount (`/library`). |
 | `webdav.url` | string | — | The WebDAV server's folder URL; required for `webdav`. `http://` is refused unless `webdav.allow_http` is `true`, except for a server on this machine (`localhost`, `127.0.0.0/8`, `[::1]`). `MOKURO_WEBDAV_URL`. |
 | `webdav.username` | string | — | `MOKURO_WEBDAV_USERNAME`. |
 | `webdav.allow_http` | boolean | `false` | Allow a plain `http://` URL (the password then travels unencrypted). Not needed for a loopback host (`localhost`, `127.0.0.0/8`, `[::1]`). `MOKURO_WEBDAV_ALLOW_HTTP`. |
@@ -127,9 +132,9 @@ storage:
 | `outbox_hold_mb` | integer | `2048` | New OCR claims wait while this many MiB of results are still uploading. At most `outbox_max_gb`. |
 | `outbox_max_gb` | integer | `8` | Uploads beyond this many GiB in the outbox are refused. |
 | `quiet_s` | integer | `120` | Seconds a removed file counts as recently removed (a reader replacing a file deletes it first). |
-| `poll.active_s`, `poll.idle_s` | integer | provider default | How often the cloud folder is checked for changes, while busy and while idle. |
+| `poll.active_s`, `poll.idle_s` | integer | provider default | How often the cloud folder is checked for changes, while busy and while idle. A library folder is watched, so changes usually show within seconds; these are its fallback (60 s and 300 s), for network shares and Docker Desktop, where the watcher sees nothing. |
 | `drive_background_units_per_min` | integer | `20000` | Google Drive API quota units per minute for background work. |
-| `status_files` | boolean | `true` | Write the OCR queue and server status files into the cloud folder for readers. |
+| `status_files` | boolean | `true` | Write each series' OCR queue file (`<Series>/.mokuro-series-queue.json`) into the cloud folder, and the queue's hold and work clock into the lease marker, for readers that read the cloud directly. Off: neither is written; Bunko's WebDAV still serves the queue files. |
 | `dedup` | boolean | `true` | Google Drive and MEGA: merge folders that have the same name in the same place (two `mokuro-reader` folders, two copies of a series folder) the way Mokuro Reader does, and tell readers so they leave it to Bunko. On Google Drive a copy that looks empty to Bunko can still hold files added through the Drive website (Bunko, like Mokuro Reader, sees only the files made through Mokuro Reader's Google project); the merge moves that copy to Drive's trash with them, for 30 days, as Mokuro Reader's merge does. After a merge `volume-data.json`, `goals.json` and `positions.json` can stay as two copies until a reader reading the cloud folder directly writes them again; of two copies of any other file (folders and Bunko's own status files excepted, which are kept as both) the strictly newer stays and the other goes to the trash (on a tie, or when a time is unknown, the copy in the folder that is kept stays). |
 | `progress_user` | string | — | When readers are served too: the Bunko user who owns the cloud folder's per-account files: the progress files, the reading history and the OCR corrections (`<Vol>.edit.mokuro`) Mokuro Reader keeps there. A reader that reads the cloud folder directly shares them with that account. With nobody chosen they belong to no one and nobody sees the corrections (the Storage tab counts them). Choosing another account moves no file: it gets the cloud folder's corrections as they are, the previous account's corrections kept on this server (`users/<u>/edits`) are not brought into the cloud folder, and correction files without an owner are looked for only when Bunko starts. |
 | `google_project` | string | `release` | Which Mokuro Reader's Google project Bunko signs in with, so it sees that reader's Drive files: `release` (reader.mokuro.app) or `beta`. `MOKURO_GOOGLE_PROJECT`. Becomes `custom` by itself when `oauth.google` is set; `custom` without it is refused. |
@@ -166,6 +171,95 @@ On the command line, `--browser`, `--device` or `--paste` choose the sign-in
 instead. `--browser` without a desktop prints the address to open on this
 computer; `$BROWSER` is used to open it when set. Pasting needs a terminal: run
 `docker exec -it <container> mokuro-bunko library connect onedrive`.
+
+#### A library folder you choose
+
+`backend: folder` keeps the library in `storage.library.path`, read and written in
+place: on this computer, a second disk or a mounted network share. Choose the same
+folder as Mokuro Reader's **Local Folder** (Chrome or Edge on a desktop); the folder
+itself is the library's top folder, as the `mokuro-reader` folder is in a cloud
+account. Bunko treats it exactly like a cloud folder: it writes the reader's queue
+file (`.mokuro-queue.json`) and its marker (`.mokuro-bunko.json`) at the top, and the
+OCR files, covers, `series.json` and `catalog.json` next to the volumes. It is
+distinct from `local`, whose library is Bunko's own `base_path/library/`.
+
+```yaml
+storage:
+  library:
+    backend: folder
+    path: /srv/manga
+```
+
+`mokuro-bunko library connect folder --path /srv/manga` does the same and checks the
+folder first (`--create` makes it when it is missing; only the last folder of the
+path is made). In the setup wizard and the Storage tab, **Browse…** lists the
+server's folders only in a browser on the server's own machine; from anywhere else,
+type the path.
+
+##### Which folders
+
+A folder library lets Bunko read, write, rename and remove files there, so which
+folders may be chosen depends on who chooses:
+
+- **The server's operator** (`config.yaml`, `MOKURO_LIBRARY_PATH`, `mokuro-bunko
+  library connect folder`, the desktop app) and **a browser on the server itself**
+  (connected over `localhost`, naming this machine as its host, and not forwarded by
+  a proxy) may choose any folder but those below.
+- **A browser on another computer** (an admin, or someone with the setup code; also
+  a request a proxy on the same machine forwards) may choose only a folder at or
+  under one of `storage.library.folder_roots`, which is empty unless set. A refusal
+  says how to allow it: set the root in `config.yaml` (or
+  `MOKURO_LIBRARY_FOLDER_ROOTS`) on the server and restart, or connect the folder
+  from the server itself. Its Check also tells it nothing about folders it cannot
+  use: a file, a missing folder and a missing parent read the same.
+- **Nobody** may choose the top of the system disk (`/`; on Windows the system drive,
+  `C:\`; another drive's top, `D:\`, is fine), a system folder (`/bin`, `/boot`,
+  `/dev`, `/etc`, `/lib*`, `/proc`, `/root`, `/run` except `/run/media`, `/sbin`,
+  `/sys`, `/usr`, `/var` itself and `/var/lib`, `/var/log`, `/var/cache`, `/var/spool`
+  and the like, and on macOS `/System`, `/Library` and `/private/etc`; on Windows
+  `C:\Windows`, `C:\Program Files*`, `C:\ProgramData` and any drive's
+  `$Recycle.Bin` and `System Volume Information`), Bunko's own folder (`base_path`,
+  except `base_path/library/`), Bunko's settings folder (where `config.yaml` is by
+  default), or a folder holding either. Paths are checked as written and with
+  symbolic links resolved (a link whose target does not exist yet included: it is
+  checked where it points), without case.
+- **Network shares and device paths** on Windows (`\\server\share`, `\\?\…`,
+  `\\.\…`) are taken only from the operator (`config.yaml`, the environment, the
+  CLI): the setup and admin pages refuse them before anything opens them, as opening
+  one makes Windows connect to that computer with the server's credentials.
+
+- **Switching** to another folder, to a cloud account or to This computer is a
+  different library: Disconnect first. The old folder is left as it is.
+- **Disconnect** leaves every file in the folder where it is; only the marker says
+  that this Bunko let it go.
+- **Removed files** go to the hidden `.mokuro-bunko-trash/` folder inside the
+  library, renamed to `*.bunko-trashed`, so no reader lists them. They are kept 30
+  days; until then they can be moved back by hand.
+- **A missing folder** (an unplugged disk, a share that is down) makes the library
+  offline: Bunko retries and removes nothing. A library folder that is gone while
+  its parent is still there (deleted or renamed) is held as a changed library, as a
+  cloud folder that disappears is.
+- **Names**: the library's paths are case-insensitive and case-preserving on every
+  host, as on Windows. On Windows, Bunko cannot write a name Windows refuses
+  (`<>:"|?*`, a trailing dot or space, `CON`, `NUL`…): that write shows as failed in
+  the Storage tab, and is not retried. A folder made case-insensitive on its own (`chattr +F`) inside a
+  case-sensitive disk is not noticed.
+- **Links**: symbolic links (and junctions on Windows) inside the library are not
+  listed and never followed. Nothing Bunko reads, writes, moves, trashes or deletes
+  goes through a linked folder, so a link cannot lead it outside the library; a
+  `.mokuro-bunko-trash` that is a link is refused, and its purge never empties what
+  it leads to.
+- **Network shares** have no change notifications: changes show at
+  `poll.idle_s`. Disks whose timestamps are coarse (FAT: 2 s) can miss two
+  same-size changes by another program within one tick.
+- **Docker**: mount the folder and point `MOKURO_LIBRARY_PATH` at the mount (see
+  [deployment](deployment.md)). Bunko never changes the folder's owner: run it as
+  that owner (`PUID`/`PGID`). A browser on the Docker host is not on the server's
+  machine (it reaches the container through Docker's network), so to choose the
+  folder in the setup wizard or the Storage tab, set `MOKURO_LIBRARY_FOLDER_ROOTS`
+  to the mount (`/library`).
+- **Windows service**: a service does not see mapped drive letters; use the share's
+  UNC path (`\\files.example.com\manga`).
 
 #### Upload verdicts
 
@@ -506,16 +600,32 @@ The manifest is read with exactly the rules of the volume's `.cbz` (anonymous
 download setting, credentials, 401 challenge) and gets the same CORS
 headers, whether or not `catalog.enabled` is on. A missing `series` or
 `volume` parameter is 400, a series or volume that resolves outside the
-library is 403, and a missing volume is 404.
+library is 403, and a missing volume is 404. When the OCR queue does not
+answer within a second, `pending` lists the jobs the volume owed when the
+queue last published its state (within seconds), each with `"eta": null`,
+and `recheck_after` is 300. An empty `pending` would read as "nothing left
+to run". The manifest is 503 with `Retry-After: 5` in two cases only: while
+the queue is starting and has published nothing yet, and for a volume the
+queue has not taken in yet (one that arrived after the queue last published
+its state, or, on a cloud library, one whose archive the queue is still
+reading).
 
 #### OCR queue file
 
 `GET /mokuro-reader/.mokuro-queue.json` (also `HEAD`) is the head of the
-pending OCR queue, one entry per volume, for a reader to poll instead of a
-timer per volume. It lists every volume with a job running, then at most the
-next 100 waiting volumes in queue order. `pending_volumes` counts all waiting
-volumes, so a reader can tell when the list is cut short (an unlisted
-volume's timing is in its manifest):
+pending OCR queue, grouped by volume, for a reader to poll instead of a
+timer per volume. It lists every running job, the jobs about to start
+(claimed by a machine that is still fetching the archive or opening its
+session: `queued`, with no `eta`), then the next 100 waiting jobs by when
+they will finish, to the nearest five minutes (jobs in the same five minutes
+keep queue order; jobs the queue cannot time yet come after every timed
+one, in queue order; while the whole queue is held, queue order alone). A volume carries only its listed jobs, running ones
+first, then soonest first; volumes come in the order of their soonest job,
+those with a job running first. A listed volume also shows its jobs no
+connected machine can run, as `held`. A job that is not listed is still
+owed, not done: the volume's manifest names every job it owes.
+`pending_volumes` counts every volume with a job waiting and none running,
+listed or not, so a reader can tell when the list is cut short:
 
 ```json
 {"version": 1, "generated_at": "2026-09-28T16:00:00Z", "held": null, "next_check_after": 95,
@@ -537,8 +647,24 @@ It carries `Cache-Control: no-cache` and a strong `ETag`, with a 304 on
 `If-None-Match`, and is gzipped when accepted. It is rebuilt at most once
 a second, and an ETA is republished only when it moves by a minute or
 more, so ETA jitter alone does not change the ETag; a running job's
-`progress` does, as pages complete. With the 100-volume cap, the file does
+`progress` does, as pages complete. With the 100-job cap, the file does
 not grow with the queue.
+
+#### OCR queue file per series
+
+Newer readers read the queue one series at a time:
+`GET /mokuro-reader/<series>/.mokuro-series-queue.json` lists every job that
+series owes (running ones with their start and predicted finish, waiting ones
+with a position on a shared work clock, untimed ones with none) and the
+volumes that finished in the last day. It is built from memory, with the same
+read rules, `ETag`/304 and 405 on writes as the file above, and a `live`
+block with the hold and the clock. On a cloud library the Bunko that holds
+the library's lease also writes it into each series folder that owes OCR
+(and the hold and clock into the lease marker), so a reader connected
+straight to the cloud sees the queue too. It is rewritten only when a job is
+added, starts or finishes, or an estimate moves by more than a quarter of the
+time left, in batches paced for each provider (`status_files: false` turns
+the cloud copies off).
 
 A `.cbz` written over WebDAV (PUT, or MOVE/COPY into place) joins the OCR
 queue as the request completes, instead of at the next poll. A PUT that
@@ -620,6 +746,137 @@ dyndns:
 ```
 
 `mokuro-bunko dyndns setup` fills these in interactively.
+
+### Analytics
+
+New in 0.8. The admin panel's **Analytics** tab: what is downloaded and read and by
+whom, what each kind of traffic costs, how healthy the server is, and which IPs crawl
+the catalog. WebDAV counts like the web pages and JSON APIs: every request, whatever
+its method (PROPFIND, GET, PUT, MOVE, LOCK, ...), is counted by protocol, method and
+category.
+
+```yaml
+analytics:
+  enabled: true
+  flush_seconds: 60
+  retention:
+    ip_days: 30
+    hourly_days: 90
+    host_minute_days: 7
+    crawl_days: 90
+  crawl:
+    window_hours: 6
+    min_series: 20
+    min_coverage: 0.25
+  library_scan:
+    interval_hours: 6
+    page_formats: true
+  geo:
+    enabled: false
+    url: "https://download.db-ip.com/free/dbip-country-lite-{year}-{month}.mmdb.gz"
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enabled` | boolean | `true` | Count requests. Off, the counting layer passes every request through untouched and nothing is written; what is stored stays viewable in the admin panel. |
+| `flush_seconds` | integer | `60` | How often the in-memory counters are written to the database (5 to 3600). A crash loses at most this much. |
+| `retention.ip_days` | integer | `30` | Days rows with a raw client IP are kept: the per-IP totals, the IPs an anonymous visitor came from, failed sign-ins per IP and username (their daily count is kept forever), the slowest requests (those at most 7 days) and a crawl episode's address. Afterwards only pseudonymous ids remain. Also how often the anonymous ids' salt is replaced. |
+| `retention.hourly_days` | integer | `90` | Days the hourly traffic, latency and error rows are kept. Daily totals (errors included) are kept forever. The last two complete days keep their hourly rows whatever this says, because their daily totals are still being rebuilt from them. |
+| `retention.host_minute_days` | integer | `7` | Days the per-minute memory and CPU samples are kept. |
+| `retention.crawl_days` | integer | `90` | Days a crawl episode is kept after its last request. Its client IP is kept only `retention.ip_days`; afterwards the episode shows a salted id of the address instead. |
+| `crawl.window_hours` | integer | `6` | The window the crawl detector looks at, per client IP (1 to 168). |
+| `crawl.min_series` | integer | `20` | Distinct series an IP must touch in the window (1 to 1,000,000), by downloading a volume or by asking about one series (a `Depth: 1` or `infinity` listing of its folder, its catalog page or manifest; `series.json` and covers are not counted)... |
+| `crawl.min_coverage` | number | `0.25` | ...that are at least this share of the catalog's series (above 0, at most 1), for an episode to open: an IP needs the larger of the two counts (with the defaults and a 30-series library, 20). Folder spellings of one title count as one series. Crawlers are reported only: nothing is blocked or slowed. |
+| `library_scan.interval_hours` | integer | `6` | How often the library's file types are counted (1 to 720); the first scan runs 2 minutes after start, and **Rescan now** (`POST /_admin/api/analytics/library/rescan`) runs one at once. The scan only lists folders and reads file sizes, so on a cloud library it is answered from the store's index and downloads nothing. |
+| `library_scan.page_formats` | boolean | `true` | Also count the page image formats inside archives (a library on this disk only; reads each archive's zip directory, never the pages, at most 20 archives a second). Each archive is read once and again only when its size or modification time changes, so a restart does not read the library again. |
+| `geo.enabled` | boolean | `false` | Opt-in: download DB-IP's free *IP to Country Lite* database (CC BY 4.0, ≤ 64 MiB compressed and uncompressed) to `<storage>/analytics/country.mmdb`, refresh it monthly, and show a rough country per IP, for WebDAV and web requests alike. Loopback, private, link-local, CGNAT (`100.64.0.0/10`) and unique-local IPv6 addresses are `LAN`; an address the database does not place is `ZZ` (unknown). Lookups stay on this server. Off (or with `enabled: false`), nothing is downloaded and no country is recorded; none is either until a database has loaded, local addresses included. |
+| `geo.url` | string | the DB-IP download | Where the database comes from, an `https://` URL (a redirect away from HTTPS is refused); `{year}` and `{month}` are filled in (the current month, else the previous one when this month's answers 404). A download is checked (it must open as a MaxMind DB and pass a full verification) before it replaces the stored file, so a failed or damaged one keeps the database there was; a failure is logged, shown in Analytics → Clients & geography, and tried again after 6 hours or on **Refresh database** (`POST /_admin/api/analytics/geo/refresh`). |
+
+The data lives in `analytics.sqlite` beside `mokuro.db` (its own file: it never
+slows the main database, and deleting it resets the analytics). Requests are counted
+in memory and written in one transaction per `flush_seconds`; complete days are
+rolled into daily totals once an hour. An account's traffic is attributed to the
+account (`u:<name>`); an OCR processor's (`p:<name>`) counts as bandwidth but not as
+downloads, reading, active users or crawling; an anonymous request is attributed to a
+pseudonymous id, the start of a salted SHA-256 of its client IPv4 address or IPv6
+`/64` (`a:<12 hex>`), so a visitor can be counted once without long-lived rows
+keeping the address. The salt is replaced every `retention.ip_days` and the old one
+deleted, so once the raw IPs are gone an id can no longer be traced back to its
+address (a visitor is one id within such a period only); a day keeps at most 10,000
+anonymous visitors apart, the rest count together as `a:other`. A download counts
+toward popularity once most of the file (95 %) was sent that day, so a one-byte range
+probe is no download. If `analytics.sqlite` is damaged (SQLite or its `quick_check`
+says so) it is moved aside as `analytics.sqlite.broken-<time>` and a new one is made
+(the moved file holds raw IPs too, so the hourly upkeep deletes it once it is
+`retention.ip_days` old);
+if it is healthy but cannot be opened (locked by another process, read-only) it is
+left as it is and the analytics are kept in memory for that run. The client
+IP is the one the server resolves, so `server.trusted_proxies` applies. Byte counts
+are response and request **body** bytes (headers and TLS are not counted); behind the
+image's nginx (`MOKURO_NGINX_ACCEL=1`) the archives nginx sends are counted from the
+file's size as estimates. Every key is also editable in the admin panel (Analytics →
+Settings, `PUT /_admin/api/settings/analytics`) and through `MOKURO_ANALYTICS_*`
+variables, dots as underscores (`MOKURO_ANALYTICS_RETENTION_IP_DAYS=14`).
+
+**Reading** is counted from the files Mokuro Reader syncs, whichever WebDAV client
+writes them: about ten seconds after an account's `positions.json`,
+`history/<device>/*.events` or `volume-data.json` is written (a PUT, or a MOVE into
+place), the server reads the file back from that account's own tree and compares it
+with what it saw before, so a file uploaded twice, another device's merged copy, a
+volume listed twice in one file (its last entry counts, as in the reader), or the
+reader's DELETE-then-PUT never counts twice. A new reading position is a *read*
+of that volume on that day (a position first seen more than 48 hours old is not); the
+reading history adds the time spent (one page view counts for 15 minutes at most) and
+the pages read as Mokuro Reader's own statistics count them: each page once per read
+of a volume (a restart reads it again), whichever device or upload brings it, so a
+two-page spread or turning back never counts a page twice, and a page flicked past
+faster than 1,500 characters a minute adds its time but not the page.
+`volume-data.json` gives each account's progress and finished volumes for the
+completion funnel, and the device names the reader shows. Volumes
+are matched to the library's series by their volume id, else by the series the
+reader names; a volume of no known series is shown as `(unknown)`. Files larger than
+the reader writes (4 MiB for `positions.json`, 16 MiB for a history file, 32 MiB for
+`volume-data.json`) and history files of a newer format are skipped.
+
+**Crawl detection** counts, per client IP, the distinct series it touched in the
+window: by downloading a volume (a `GET` answered 200 or 206), or by asking about one
+series (a WebDAV `PROPFIND` of a series folder with `Depth: 1` or `infinity`,
+`/catalog/api/series?name=`, a manifest). Mokuro Reader's normal sync does not count:
+its one `Depth: infinity` listing of the whole library, the `series.json` files it
+refreshes (every one on a first sync), the covers it shows, the `HEAD` before each
+download and its own progress files are not signals, so reading a few series never
+opens an episode, while an rclone or davfs2 mirror, a metadata walk over WebDAV or a
+script walking the catalog does. One known false positive: when the reader's
+`Depth: infinity` listing fails with an unexpected error (a timeout or a server error
+on a large library), it lists that sync folder by folder instead, and that walk is
+reported as a `metadata` episode. An episode is
+`download` when the downloads alone cross the thresholds, `metadata` when nothing was
+downloaded, `mixed` otherwise; it ends after a whole window without a request from
+that IP. Detection is per IP (a crawl split over many addresses, each under
+`min_series`, is not seen). At most 4,096 IPs are tracked (least recently used go
+first, an open episode last) and their touches are capped at 300,000 (about 6 MiB).
+
+**Server readings** are sampled every 15 s: the process's memory (RSS and peak), its
+CPU time as a percent of one core (two busy cores read 200 %), open connections and
+requests in flight (their highest per interval), and the machine's memory, or the
+container's cgroup memory limit when that is lower. Linux and Android read `/proc`
+(Docker and the musl build included), Windows and macOS their system calls; anywhere
+else the panel says the platform does not report them. Four samples make a minute
+(kept `retention.host_minute_days`), minutes make hours (kept `retention.hourly_days`).
+
+The client mix (Analytics → Clients & geography) is read from each request's
+`Origin` and `User-Agent`. A request whose `Origin` is the configured reader
+(`catalog.reader_url`, or the hosted reader of the default `cors.allowed_origins`)
+counts as the hosted Mokuro Reader; another cross-origin browser on WebDAV or
+`/login/api/*` as a reader on another origin; Bunko's own pages as the web UI (its own
+origin is decided as the CSRF check decides it: `Host` or `X-Forwarded-Host`, and a
+`Host` without a port, as `proxy_set_header Host $host` sends it, matches any port;
+a browser on an origin `cors.allowed_origins` refuses is Bunko's page too); WebDAV
+requests from anything that is not a browser as WebDAV clients, named when the user
+agent says which (rclone, davfs2, the Windows mini-redirector, Finder, Cyberduck, GNOME
+Files, Kodi, Nextcloud, WinSCP), with curl, wget, Python, Go and Node.js tools and
+crawler bots told apart too. Distinct visitors per app, client, browser or OS are
+counted only within `retention.ip_days` (an anonymous visitor stands for an IP).
 
 ### Updates
 
@@ -777,6 +1034,7 @@ ocr:
   concurrency: 1
   local_processing: true
   autobench: true
+  # queue_order: volume   # unset: volume on a MEGA library, generation otherwise
   upgrade:
     enabled: false
     replace: [mokuro-legacy, mokuro]
@@ -798,6 +1056,7 @@ run on this machine.
 | `sessions` | boolean | `true` | Accepted so old files load, and ignored: models always stay loaded between volumes. | Never. |
 | `local_processing` | boolean | `true` | Whether the machine serving the library runs OCR at all. A file edit applies at the next start; the admin panel's Machine card applies it at once (refused when `MOKURO_OCR_LOCAL_PROCESSING` sets it). | `false` on a small always-on server that leaves OCR to [remote processors](#remote-ocr-processors). |
 | `autobench` | boolean | `true` | Benchmark a generation on a machine the first time it is seen there, and apply the widths found, before offering it volumes. At startup. | `false` if you prefer to run the derived settings and benchmark by hand. |
+| `queue_order` | string | unset | How the queue takes work: `generation` or `volume` (see [Queue order](#queue-order-by-generation-or-by-volume)). Unset (or `auto`): `volume` on a MEGA library, `generation` otherwise. Live (Admin → OCR). | `volume` to download each archive once (any cloud library with a transfer quota); `generation` for the first generation across the whole library soonest. |
 | `upgrade.enabled` | boolean | `false` | Replace old primary OCR with the current primary generation's (see [Replacing old OCR](#replacing-old-ocr)). | After moving from 0.5.x, when you want the whole library on the new engine. |
 | `upgrade.replace` | list | `[mokuro-legacy, mokuro]` | Which existing primary sidecars may be replaced: an engine id, or `mokuro-legacy` for files written by mokuro itself. | To also re-run when you change the primary's recipe, list the primary's own engine. |
 | `generations` | list | one `hayai-nova` row | The OCR recipes every volume gets a sidecar from, in the order the queue runs them. | To add OCR layers, change engines, or reorder. See below. |
@@ -884,8 +1143,8 @@ ocr:
 | `primary` | `false` | Exactly one enabled row must have it. That row writes the bare `<Volume>.mokuro`, which readers take character counts from. Every OCR file of a volume carries the same volume id: the `.mokuro`'s when one exists, else the id readers already give a volume with no `.mokuro`. Any engine may be the primary one. |
 | `enabled` | `true` | A disabled row queues nothing and writes nothing. Its name stays reserved. |
 | `engine` | — (required) | One of the [engines](#ocr-engines). |
-| `detector` | `ppocr-manga` | The [text detector](#ocr-detectors) for `hayai-nova` and `paddle-manga`. Ignored (and stored as `null`) for `ppocr-manga`, which brings its own. |
-| `patch_budget` | `512` | `256`, `384` or `512`: the resolution `hayai-nova` reads each line at. Reaches no other engine. |
+| `detector` | `ppocr-manga` | The [text detector](#ocr-detectors) of every engine but `ppocr-manga`: `ppocr-manga`, `ctd-lines`, or (for the engines that read blocks) `animetext-blocks`. Ignored (and stored as `null`) for the `ppocr-manga` engine, which brings its own. |
+| `patch_budget` | `512` | `256`, `384` or `512`: the resolution `hayai-nova` reads each line at, on every backend (libtorch, ncnn, WebGPU, the CPU). A backend pack from before 0.8.0 reads 512 only; at another budget its session stops with "update the OCR backend pack" (`mokuro-bunko install-ocr --force`). Reaches no other engine. |
 | `precision` | `auto-accuracy` | The row's [precision mode](#precision-modes), the same on every machine: `auto-accuracy`, `auto-balanced`, `auto-speed`, or `fp32` / `bf16` / `fp16` only. `ppocr-manga` fixes its own and ignores it. |
 | `pools` | `{}` (derive) | Where each stage of this row runs and how wide. See [Pools](#pools-stages-and-devices). |
 
@@ -956,6 +1215,58 @@ Existing `<Volume>.mokuro` files are untouched. See
 > `MOKURO_OCR_*` variables) are refused at startup with a message saying what
 > to write instead.
 
+#### Queue order: by generation or by volume
+
+`ocr.queue_order` (Admin → OCR → Queue order) sets how the queue takes work:
+
+- **By generation** (`generation`): each generation runs across the whole
+  library in the order of `ocr.generations`, each generation's upgrades after
+  its missing files, series taking turns. Every job downloads the volume's
+  archive again (a processor fetches it from the library; on a cloud library
+  this server's own OCR fetches it from the provider, unless the spool still
+  holds it). The first generation reaches every volume soonest.
+- **By volume** (`volume`): each volume runs on one machine, its jobs back
+  to back from one download of its archive, and volumes start in the order
+  their first job would come by generation (with several machines or lanes,
+  several volumes run at once, one per lane). While that machine
+  is connected and able to run the volume's next job, no other machine is
+  offered it. A job that machine cannot run (an engine it does not have, a
+  generation stopped or backed off there) goes to another machine, which
+  downloads the archive itself and then runs every other job of the volume
+  the first machine cannot. A volume never starts at a later job while
+  some machine can run its first. A volume whose machine left goes before
+  volumes nobody started.
+- Unset or `auto`: by volume on a **MEGA** library, whose transfer quota
+  counts every download, and by generation otherwise. A set value always
+  wins. A change of the library's storage changes the automatic choice the
+  next time the OCR settings are applied or the server restarts.
+
+By volume costs throughput: a machine loads each generation's models again
+for every volume (a session runs one generation), it takes no volume ahead
+of the one it runs, and it runs the rest of a volume even when another
+machine would be faster. A volume waits for its machine through that
+machine's benchmark or hold (a storage hold, an update): the jobs it can run
+are offered to no other machine meanwhile, however long the hold lasts. A
+machine that keeps a volume but takes none of its jobs for 10 minutes, while
+not held or benchmarking, gives the volume up.
+
+The archive is downloaded once per volume per machine:
+
+- This server's own OCR on a cloud library keeps the volume's spooled archive
+  pinned from its first job until its last job ends (or the volume is given
+  up), so the provider sends it once even when other archives need the
+  spool's room (`storage.library.spool_gb`).
+- A processor of this release keeps its copy between the volume's jobs when
+  the library asks it to (`processor.archive_memory_mb` holds it, or the
+  processor's storage), until the library no longer runs the volume there
+  (it says so with each job it sends), the connection ends, or 6 hours pass
+  with no job of the volume. A copy makes way for a new download that has
+  no room without it. Only a job that finished keeps its copy. Older
+  processors download the archive for each job.
+
+The queue page, the reader's queue file and the ETAs follow the order: by
+volume a volume's jobs are planned back to back on the machine running it.
+
 #### Replacing old OCR
 
 By default a volume that already has a `<Volume>.mokuro` is considered done,
@@ -979,8 +1290,9 @@ current primary generation:
 - If another layer already holds the primary's recipe made from the current
   archive, and its seal (`ocr_engine.seal`) proves Bunko wrote it, its bytes
   become the new primary at once. Otherwise the volume gets an upgrade job,
-  queued behind every ordinary job (a volume with no OCR always beats one with
-  old OCR) and runnable on any machine.
+  queued at the primary generation's place: after its missing files and
+  before the next generation's (a volume with no OCR still beats one with old
+  OCR). It is runnable on any machine.
 - The new file **replaces** the old primary outright, in one atomic rename;
   no copy of the old file is kept and there is no undo (on a cloud library
   the old file goes to the provider's trash, or its version history where it
@@ -998,14 +1310,36 @@ volume now).
 
 #### OCR engines
 
-All engines are Apache-2.0. hayai-nova and paddle-manga run on libtorch (the backend
-pack), ppocr-manga on ONNX Runtime on the CPU.
+hayai-nova and paddle-manga run on libtorch (the backend pack); the other engines run
+on ONNX Runtime on the CPU and need no backend pack.
 
 | Engine | What it is | Runs on | Use it for |
 |--------|-----------|---------|------------|
 | `hayai-nova` | [hayai-ocr v2.5 "Nova"](https://huggingface.co/JustANormalTinkerer/hayai-ocr-v2.5-nova) | card or CPU | The default. Better text than 0.5's mokuro engine, especially display lettering, sound effects and colour pages. Reads at the row's `patch_budget`. Needs a detector. |
 | `paddle-manga` | [PaddleOCR-VL 1.6 + manga LoRA](https://huggingface.co/sorryhyun/paddleocr-vl-1.6-manga-lora) | card recommended | The most accurate and the slowest; about 1.8 GB of model files in bf16/fp16, 3.6 GB in fp32, which the CPU and the default `auto-accuracy` mode run. Needs a detector. On the CPU about 40 s a page on 16 threads: there hayai-nova is the engine of choice. |
 | `ppocr-manga` | [PP-OCRv6 manga](https://huggingface.co/Kellenok/PP-OCRv6_manga) line detector + CTC recognizer, 23 MB | CPU only | Reads lines rather than bubbles, removes furigana, and reads scanned **novel** pages (as do the other engines on the `ppocr-manga` detector). Brings its own detector. |
+| `charspot-small` | [manga-ocr-charspot-small](https://huggingface.co/muscgab/manga-ocr-charspot-small), 44 MB | CPU only | Detects and classifies each character of a text block; no decoder, so it is fast on a CPU (about five times hayai-nova there), and it leaves furigana out by itself. Japanese only. Needs a detector, a line or a block one. Weights CC BY-NC-SA 4.0. |
+| `nar-small` | [manga-ocr-nar-small](https://huggingface.co/muscgab/manga-ocr-nar-small), 213 MB | CPU only | Writes a text block in one pass (at most 64 characters). Japanese only. Needs a detector, a line or a block one. Weights CC BY-NC-SA 4.0. |
+
+**Licences.** `hayai-nova`, `paddle-manga`, `ppocr-manga` and the `ppocr-manga`
+detector are Apache-2.0 and are what a default configuration uses. The other models
+are opt-in and under other terms:
+
+| Model | Weights | Cargo feature |
+|---|---|---|
+| `ctd-lines` and `animetext-blocks` detectors | GPL-3.0 | `gpl-models` |
+| `charspot-small`, `nar-small` engines | CC BY-NC-SA 4.0: non-commercial use, share alike | `nc-models` |
+
+Nothing of an opt-in model is on the machine until a generation uses it: its files are
+downloaded when the first session on it opens. The admin panel shows the licence
+beside the name. The code that runs these models is part of this project and under its
+licence; only the weights carry the terms above.
+
+Both features are on in the release builds. A build without one (`xtask dist
+--permissive-models`, or `cargo build --no-default-features --features ocr,tray`)
+does not offer, download or run that class's models: a generation that names one is
+held with the reason, on that machine. A server may still list such a generation for
+[remote processors](#remote-ocr-processors) built with the feature.
 
 Sidecars from every engine, and every non-primary layer, carry an
 `ocr_engine` block saying what produced them (engine, detector, generator
@@ -1042,14 +1376,36 @@ hayai-nova about 0.3 GB in bf16/fp16 and 0.6 GB in fp32, ppocr-manga about
 
 #### OCR detectors
 
-`hayai-nova` and `paddle-manga` only read text; a detector finds it. The one
-detector is `ppocr-manga` (Apache-2.0): rotated per-line boxes with furigana
-separated, on the CPU. The page is read first by PP-OCRv6, then the row's
-engine reads every line again and the two reads are merged line by line. It
-is also the pairing to use for **novels**.
+Every engine but `ppocr-manga` only reads text; a detector finds its lines.
+Whichever detector found them, the lines are first read by PP-OCRv6's small
+recognizer, then the row's engine reads every line again and the two reads are
+merged line by line; the same layout groups the lines into blocks and orders them.
+
+| Detector | What it is | Notes |
+|---|---|---|
+| `ppocr-manga` (default) | The PP-OCRv6 manga line detector (Apache-2.0) | Rotated per-line boxes with furigana separated, sound effects included. The pairing to use for **novels**. |
+| `ctd-lines` | The line map of [comic-text-detector](https://github.com/dmMaze/comic-text-detector) (weights GPL-3.0, 95 MB) | Tight boxes on dialogue; leaves most sound effects and furigana out, so it finds fewer lines. Looks at the page at 1024 px, so small text on large pages can be missed. Opt-in; see [Licences](#ocr-engines). |
+| `animetext-blocks` | [AnimeText YOLO12-x](https://huggingface.co/deepghs/AnimeText_yolo) (weights GPL-3.0, 237 MB) | A **block** detector: it boxes whole pieces of text (a balloon's lines together, a sound effect). Only for `charspot-small` and `nar-small`, which read a block at once; see below. The slowest of the three on a CPU (about a third of a second a page). Opt-in. |
+
+All three run on the CPU.
+
+**Lines or blocks.** With a line detector the page is read line by line: PP-OCRv6
+reads each line, the row's engine reads it again and the two reads are merged.
+`charspot-small` and `nar-small` are made to read a whole text block at once and are
+given the layout's blocks rather than single lines; their text is then shared out to
+the block's lines, and it stands as read (PP-OCRv6's read is used only where they read
+nothing). With `animetext-blocks` no lines are detected at all: the detector's boxes are
+the page's blocks, the engine reads each, and the lines are the ones the engine finds
+in it: `charspot-small` knows where every character is and builds real lines;
+`nar-small` does not, and each block becomes one line the size of the block.
 
 The 0.5 detectors `ctd` (GPL-3.0), `animetext` (GPL-3.0) and `rtdetr` were
 removed; a row naming one is switched to `ppocr-manga` when the config loads.
+`ctd-lines` and `animetext-blocks` are not the 0.5 `ctd` and `animetext` under other
+names: 0.5's `ctd` used comic-text-detector's own blocks and reading order, where
+`ctd-lines` takes only its lines; 0.5's `animetext` made one line of every block
+whatever the engine. A row that still says `ctd` or `animetext` therefore keeps reading
+with `ppocr-manga`; choosing one of the new detectors is a new choice.
 
 #### Pools: stages and devices
 
@@ -1073,7 +1429,7 @@ it is written, so editing them never stops a running job.
 
 | Key | Values | Meaning |
 |---|---|---|
-| `stage_workers` | `{stage: 1–64}` | How many workers a stage runs. For the `engine` stage on a card, a number above 1 (up to 8) runs that many threads over the one loaded model, only worth it on a card with spare compute; unset, it is 1, or 2 on a fast card in a host with 16 or more physical cores. On the CPU the engine stage stays at 1. |
+| `stage_workers` | `{stage: 1–64}` | How many workers a stage runs. For the `engine` stage on a card, a number above 1 (up to 8) runs that many threads over the one loaded model, only worth it on a card with spare compute; unset, it is 1, or 2 on a fast card in a host with 16 or more physical cores. On the CPU the engine stage of `hayai-nova` and `paddle-manga` stays at 1; that of `charspot-small` and `nar-small` is a pool of workers over one loaded model, by default sized from the physical cores (about 15 on a 24-core host for `nar-small`, SMT threads not counted), and a number here sets it; the `detect` stage keeps the width it has beside the default, so set it too to move it. |
 | `queue_capacity` | `{stage: 1–256}` | How many pages may wait in the queue a stage fills. Capacity is memory (a decoded page can be ~14 MB); the default is small on purpose. |
 | `stage_device` | `{stage: cpu \| "gpu:<n>"}` | Where a stage's model runs. Absent means auto: card 0 when there is one, else the CPU. Only stages holding a model take one. |
 
@@ -1289,7 +1645,7 @@ while that runs.
 | `processor.public_name` | unset | What queue-page visitors see; unset, they see "machine 1", "machine 2"…. At most 64 characters. |
 | `processor.max_sessions` | `1` | How many OCR pipelines this machine runs at once: one per card is the rule, like `ocr.concurrency`. |
 | `processor.storage` | `$XDG_DATA_HOME/mokuro-bunko-processor` (`~/.local/share/...`) on Linux and macOS, `%LOCALAPPDATA%\mokuro-bunko-processor` on Windows | Logs, working directories, archives too big for memory, the status file, the downloaded OCR models (`<storage>/models`, several GB), the backend pack (`<storage>/backends`) and update state. One per processor; a second processor on the same storage refuses to start. |
-| `processor.archive_memory_mb` | `2048` | RAM for the archives being read and the one on deck, shared by every session (in-memory files on Linux); an archive that does not fit goes to `storage`. `0` keeps every archive on disk. Other platforms always use `storage`. |
+| `processor.archive_memory_mb` | `2048` | RAM for the archives being read and the one on deck, shared by every session (in-memory files on Linux), and, when the library takes work [by volume](#queue-order-by-generation-or-by-volume), the copy of a volume's archive kept for its next job; an archive that does not fit goes to `storage`. `0` keeps every archive on disk. Other platforms always use `storage`. |
 | `processor.auto_update` | `false` | Follow the library: when it reports a newer version, finish the running volume, install exactly the library's release and restart (never a downgrade). See [Automatic updates](#automatic-updates). |
 | `update.manifest_url`, `update.public_key` | GitHub latest, empty | A mirror or fork's latest `release.json`, and its signing key (from this file only; logged loudly). Used by `auto_update` and by the processor's OCR backend pack downloads. |
 
@@ -1461,6 +1817,8 @@ MOKURO_REGISTRATION_MODE=invite
 MOKURO_SSL_ENABLED=true
 MOKURO_OCR_LOCAL_PROCESSING=false
 MOKURO_UPDATE_CHECK=false
+MOKURO_ANALYTICS_ENABLED=false
+MOKURO_ANALYTICS_RETENTION_IP_DAYS=14
 MOKURO_OCR_GENERATIONS='[{"name":"hayai-nova","engine":"hayai-nova","primary":true}]'
 ```
 
@@ -1484,6 +1842,8 @@ Other variables:
 | `MOKURO_HOST`, `MOKURO_PORT`, `MOKURO_STORAGE` | — | Short aliases for `server.host`, `server.port`, `storage.base_path`. |
 | `MOKURO_SERVE_READERS` | — | Short alias for `server.serve_readers`. |
 | `MOKURO_LIBRARY_BACKEND`, `MOKURO_LIBRARY_FOLDER` | — | `storage.library.backend` and `folder` (see [Library location](#library-location)). |
+| `MOKURO_LIBRARY_PATH` | — | `storage.library.path`: the library folder of `backend: folder` (see [A library folder you choose](#a-library-folder-you-choose)). |
+| `MOKURO_LIBRARY_FOLDER_ROOTS` | — | `storage.library.folder_roots`: the folders a browser on another computer may connect a library folder in, separated as in `PATH` (`:`, `;` on Windows) (see [Which folders](#which-folders)). |
 | `MOKURO_WEBDAV_URL`, `MOKURO_WEBDAV_USERNAME`, `MOKURO_WEBDAV_ALLOW_HTTP` | — | `storage.library.webdav.url`, `username`, `allow_http`. |
 | `MOKURO_WEBDAV_PASSWORD_FILE` | — | A file holding the WebDAV library's password (never set in `config.yaml`). |
 | `MOKURO_GOOGLE_PROJECT` | `release` | `storage.library.google_project`: `release` or `beta`. |

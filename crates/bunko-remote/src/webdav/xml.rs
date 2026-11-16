@@ -140,10 +140,37 @@ impl Props {
 
 /// A malformed multistatus.
 #[derive(Debug)]
-pub struct ParseError(pub String);
+pub struct ParseError {
+    pub msg: String,
+    /// The body is not one whole multistatus: it ends before the root does, or goes on
+    /// after it. A server that gives up on a listing part-way cannot take back the 207
+    /// it has sent; Go's `x/net/webdav` (rclone, and most Go servers) closes the
+    /// document and then writes the text of the 500. The entries read so far are not
+    /// the folder's contents.
+    pub cut_short: bool,
+}
+
+impl ParseError {
+    fn malformed(msg: impl Into<String>) -> ParseError {
+        ParseError {
+            msg: msg.into(),
+            cut_short: false,
+        }
+    }
+
+    fn cut_short(msg: impl Into<String>) -> ParseError {
+        ParseError {
+            msg: msg.into(),
+            cut_short: true,
+        }
+    }
+}
+
+const AFTER_ROOT: &str = "the answer goes on after the end of the multistatus";
 
 /// Read a multistatus from `src`, calling `on_entry` for each `<D:response>` as soon as
-/// it ends.
+/// it ends. The body must be the one document and nothing else (white space, comments
+/// and processing instructions aside): see [`ParseError::cut_short`].
 pub async fn parse_multistatus<R: AsyncBufRead + Unpin + Send>(
     src: R,
     on_entry: &mut (dyn FnMut(DavEntry) + Send),
@@ -157,13 +184,23 @@ pub async fn parse_multistatus<R: AsyncBufRead + Unpin + Send>(
     let mut propstat_status: Option<String> = None;
     let mut text = String::new();
     let mut saw_root = false;
+    // The root element has ended.
+    let mut closed = false;
     loop {
         buf.clear();
         let (ns, ev) = reader
             .read_resolved_event_into_async(&mut buf)
             .await
-            .map_err(|e| ParseError(e.to_string()))?;
+            .map_err(|e| ParseError::malformed(e.to_string()))?;
         match ev {
+            Event::Start(_) | Event::Empty(_) | Event::CData(_) if closed => {
+                return Err(ParseError::cut_short(AFTER_ROOT));
+            }
+            Event::Text(t) if closed => {
+                if !t.iter().all(u8::is_ascii_whitespace) {
+                    return Err(ParseError::cut_short(AFTER_ROOT));
+                }
+            }
             Event::Start(s) => {
                 let t = tag(&ns, s.local_name().as_ref());
                 text.clear();
@@ -191,9 +228,12 @@ pub async fn parse_multistatus<R: AsyncBufRead + Unpin + Send>(
                 if t == Tag::Multistatus && stack.is_empty() {
                     saw_root = true;
                 }
+                closed = stack.is_empty();
             }
             Event::Text(t) => {
-                let s = t.unescape().map_err(|e| ParseError(e.to_string()))?;
+                let s = t
+                    .unescape()
+                    .map_err(|e| ParseError::malformed(e.to_string()))?;
                 text.push_str(&s);
             }
             Event::CData(c) => {
@@ -201,8 +241,9 @@ pub async fn parse_multistatus<R: AsyncBufRead + Unpin + Send>(
             }
             Event::End(_) => {
                 let Some(t) = stack.pop() else {
-                    return Err(ParseError("unbalanced end tag".into()));
+                    return Err(ParseError::malformed("unbalanced end tag"));
                 };
+                closed = stack.is_empty();
                 let parent = stack.last().copied();
                 let value = text.trim().to_string();
                 text.clear();
@@ -283,7 +324,12 @@ pub async fn parse_multistatus<R: AsyncBufRead + Unpin + Send>(
         }
     }
     if !saw_root {
-        return Err(ParseError("not a DAV:multistatus".into()));
+        return Err(ParseError::malformed("not a DAV:multistatus"));
+    }
+    if !closed {
+        return Err(ParseError::cut_short(
+            "the answer ends before the multistatus does",
+        ));
     }
     Ok(())
 }
@@ -356,6 +402,53 @@ mod tests {
             parse_multistatus(&b"<html></html>"[..], &mut |_| n += 1)
                 .await
                 .is_err()
+        );
+    }
+
+    /// Go's `x/net/webdav` (rclone, most Go servers) answers a walk that failed
+    /// part-way with the entries so far, the closing tag, and then the text of the 500
+    /// it can no longer send.
+    #[tokio::test]
+    async fn rejects_a_multistatus_that_is_not_the_whole_body() {
+        let one = r#"<D:response><D:href>/a</D:href><D:propstat><D:prop><D:resourcetype/></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>"#;
+        let open = r#"<?xml version="1.0" encoding="UTF-8"?><D:multistatus xmlns:D="DAV:">"#;
+        let parse = |body: String| async move {
+            let mut n = 0;
+            parse_multistatus(body.as_bytes(), &mut |_| n += 1)
+                .await
+                .map(|()| n)
+                .map_err(|e| (e.cut_short, e.msg))
+        };
+        assert_eq!(parse(format!("{open}{one}</D:multistatus>")).await, Ok(1));
+        // White space, comments and processing instructions may follow the root.
+        assert_eq!(
+            parse(format!(
+                "{open}{one}</D:multistatus>\r\n <!-- end --><?x y?>\n"
+            ))
+            .await,
+            Ok(1)
+        );
+        for tail in [
+            "Internal Server Error",
+            "\nInternal Server Error\n",
+            "<![CDATA[x]]>",
+            "<D:response/>",
+            r#"<D:multistatus xmlns:D="DAV:"></D:multistatus>"#,
+        ] {
+            let r = parse(format!("{open}{one}</D:multistatus>{tail}")).await;
+            assert!(matches!(r, Err((true, _))), "{tail:?}: {r:?}");
+        }
+        // The body ended before the multistatus did.
+        for body in [
+            format!("{open}{one}"),
+            format!("{open}{one}<D:response><D:href>/b</D:href>"),
+        ] {
+            let r = parse(body.clone()).await;
+            assert!(matches!(r, Err((true, _))), "{body:?}: {r:?}");
+        }
+        assert_eq!(
+            parse(r#"<D:multistatus xmlns:D="DAV:"/>"#.to_string()).await,
+            Ok(0)
         );
     }
 }

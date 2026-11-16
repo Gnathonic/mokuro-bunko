@@ -107,6 +107,8 @@ async fn create_list_changes_round_trip() {
         FakeBackend::webdav_plain(),
         FakeBackend::onedrive_like(),
         FakeBackend::mega_like(),
+        FakeBackend::folder_like(),
+        FakeBackend::folder_like_ci(),
     ] {
         let c0 = b.start_cursor().await.unwrap();
         let root = b.create_root("mokuro-reader").await.unwrap();
@@ -253,6 +255,64 @@ async fn name_rules_per_profile() {
         upload_new(&od, &root.pid, "vol 1.CBZ", b"two").await,
         Err(BErr::NameConflict)
     ));
+}
+
+/// The local folder profiles: path ids with exact or case-folding names, creates that
+/// never replace, and a case-only rename that changes the pid.
+#[tokio::test(start_paused = true)]
+async fn folder_profiles_model_both_kinds_of_filesystem() {
+    for (b, ci) in [
+        (FakeBackend::folder_like(), false),
+        (FakeBackend::folder_like_ci(), true),
+    ] {
+        let caps = b.caps();
+        assert!(caps.path_ids && caps.cas_create && caps.push && caps.atomic_replace);
+        assert!(!caps.cas_overwrite && !caps.pinned_read && !caps.duplicate_names);
+        assert_eq!(caps.mtime_granularity_ns, 1_000_000);
+        let root = b.create_root("mokuro-reader").await.unwrap();
+        let s = b.mkdir(&root.pid, "Series", &op()).await.unwrap();
+        upload_new(&b, &s.pid, "Vol 1.cbz", b"one").await.unwrap();
+        // The same name: a lost create race.
+        assert_eq!(
+            upload_new(&b, &s.pid, "Vol 1.cbz", b"two").await,
+            Err(BErr::PreconditionFailed)
+        );
+        let variant = upload_new(&b, &s.pid, "VOL 1.cbz", b"two").await;
+        let dir_variant = b.mkdir(&root.pid, "series", &op()).await;
+        if ci {
+            assert_eq!(variant, Err(BErr::NameConflict));
+            assert_eq!(dir_variant, Err(BErr::NameConflict));
+        } else {
+            assert_eq!(variant.unwrap().pid, "mokuro-reader/Series/VOL 1.cbz");
+            b.trash("mokuro-reader/Series/VOL 1.cbz", None)
+                .await
+                .unwrap();
+            b.trash(&dir_variant.unwrap().pid, None).await.unwrap();
+        }
+        // A case-only rename moves the subtree to the new spelling.
+        let c = b.start_cursor().await.unwrap();
+        let moved = b.update(&s.pid, None, Some("series"), None).await.unwrap();
+        assert_eq!(moved.pid, "mokuro-reader/series");
+        assert_eq!(b.stat("mokuro-reader/Series").await.unwrap(), None);
+        assert!(
+            b.stat("mokuro-reader/series/Vol 1.cbz")
+                .await
+                .unwrap()
+                .is_some()
+        );
+        let (items, _) = drain(&b, c).await;
+        assert_eq!(upserted(&items), ["series", "Vol 1.cbz"]);
+        // Push: a write wakes a waiter at once.
+        let c = b.start_cursor().await.unwrap();
+        b.reader_put("mokuro-reader/series/Vol 2.cbz", b"two");
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            b.wait_change(&c, Duration::from_secs(60)),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    }
 }
 
 #[tokio::test(start_paused = true)]

@@ -4,10 +4,11 @@
 //!
 //! * **Cover thumbnails.** Every poll interval (`ocr.poll_interval`, shared with the
 //!   OCR scan) every `*.cbz` under the library that has neither `<stem>.webp` nor
-//!   `<stem>.nocover` written since the archive (a volume uploaded again under its
-//!   name is newer than what was made from the one it replaced, and a cover written
-//!   after it, a reader's own, is kept) gets a cover: the first name of the archive's plain sorted
-//!   namelist with an image suffix, `ImageOps.contain(250×350, LANCZOS)`, lossy WebP
+//!   `<stem>.nocover` gets a cover. A cover beside an archive is never remade, however
+//!   old: a client uploads a volume's cover before its archive, so a cover older than
+//!   its archive is the usual case, and a volume is replaced by deleting it (which takes
+//!   its cover and marker) and uploading it again. The cover made is the first name of
+//!   the archive's plain sorted namelist with an image suffix, `ImageOps.contain(250×350, LANCZOS)`, lossy WebP
 //!   q85 m6 (`bunko-thumb`). No image, an unreadable archive or a missing member writes
 //!   the `<stem>.nocover` marker. One cover at a time, on a blocking thread; the decode
 //!   is capped ([`MAX_DECODE_BYTES`]) so a hostile "cover" cannot take a small host's
@@ -437,7 +438,7 @@ pub fn needs_thumbnail_with(cbz: &Path, nocover: Option<&NoCoverSet>) -> bool {
         && nocover.is_none_or(|n| !n.contains(cbz))
 }
 
-/// A `<stem>.nocover` file beside the archive, written since it. In a cloud folder
+/// A `<stem>.nocover` file beside the archive. In a cloud folder
 /// such a file never comes from this build (its markers are [`NoCoverSet`] records,
 /// D14) but from a library copied in, and one a build before JPEG XL covers left for
 /// an archive holding `.jxl` images is not believed: the local library's marker is
@@ -447,23 +448,12 @@ fn marked_nocover(cbz: &Path, cloud: bool) -> bool {
     nocover_path(cbz).is_some_and(|marker| written_for(&marker, cbz)) && !(cloud && holds_jxl(cbz))
 }
 
-/// `side` (a cover or a `.nocover` marker) is there and was written for the archive as
-/// it is now.
-fn written_for(side: &Path, cbz: &Path) -> bool {
-    fs::metadata(side).is_ok_and(|m| describes(&m, cbz))
-}
-
-/// A cover or marker describes `cbz` unless it is older than the archive: a volume
-/// uploaded again under its name is newer than what was made from the one it
-/// replaced. A time either side does not know counts as current, and so does an
-/// archive dated in the future (a fast clock, a copied mtime): every cover made now
-/// would be older than it, and remade on every scan.
-fn describes(side: &bunko_store::Meta, cbz: &Path) -> bool {
-    let archive = fs::metadata(cbz).ok().and_then(|m| m.modified().ok());
-    match (side.modified().ok(), archive) {
-        (Some(side), Some(archive)) => side >= archive || archive > std::time::SystemTime::now(),
-        _ => true,
-    }
+/// `side` (a cover or a `.nocover` marker) is there for `cbz`, whatever its age. Never
+/// judged by time: a client uploads a volume's cover before its archive, so a cover
+/// older than its archive is the usual case (a reader's own, often made by hand), and
+/// a volume is replaced by deleting it, which takes its cover and marker along.
+fn written_for(side: &Path, _cbz: &Path) -> bool {
+    fs::metadata(side).is_ok()
 }
 
 /// D14: the `.nocover` markers of a cloud library, as local-only records keyed by the
@@ -651,7 +641,9 @@ pub enum Cover {
 
 /// `_extract_cover_image_data`: the first name in code-point order whose suffix is
 /// an image suffix (directories, `__MACOSX` and the embedded `<stem>.webp` included,
-/// as in 0.5.2).
+/// as in 0.5.2). Names are the zip crate's: UTF-8 when the bytes are UTF-8, CP437
+/// otherwise (0.5.2 took flag-less names as CP437 even when they were UTF-8); a
+/// name it cannot decode is not a candidate.
 ///
 /// On a cloud library the archive is read with `bunko_library`'s central-directory
 /// reader: the directory at the tail plus the one member, a few ranged reads. The
@@ -669,16 +661,17 @@ pub fn cover_image(cbz: &Path) -> Cover {
         Ok(z) => z,
         Err(e) => return Cover::None(e.to_string()),
     };
-    let mut names: Vec<String> = zip
+    let mut names: Vec<(String, usize)> = zip
         .file_names()
-        .filter(|n| COVER_EXTENSIONS.contains(&suffix_lower(n).as_str()))
-        .map(str::to_string)
+        .enumerate()
+        .filter_map(|(index, name)| Some((name.ok()?.into_owned(), index)))
+        .filter(|(n, _)| COVER_EXTENSIONS.contains(&suffix_lower(n).as_str()))
         .collect();
     names.sort();
-    let Some(first) = names.into_iter().next() else {
+    let Some((_, first)) = names.into_iter().next() else {
         return Cover::None("no image".into());
     };
-    let mut member = match zip.by_name(&first) {
+    let mut member = match zip.by_index(first) {
         Ok(m) => m,
         Err(e) => return Cover::None(e.to_string()),
     };
@@ -695,9 +688,12 @@ pub fn cover_image(cbz: &Path) -> Cover {
     }
 }
 
-/// [`cover_image`] through the central directory only: the same member (the first
-/// sorted image name; of duplicate names the last entry, as the `zip` crate keeps)
-/// and the same size cap.
+/// [`cover_image`] through the central directory only: the first sorted image name (of
+/// duplicate names the last entry, as the `zip` crate keeps) and the same size cap.
+/// Names decode as everywhere this reader is used, as CPython's `zipfile` does: a name
+/// without the UTF-8 flag is CP437 even when its bytes are UTF-8 (macOS Archive
+/// Utility's), which the `zip` crate reads as UTF-8, so the non-ASCII image names of
+/// such an archive can sort differently here.
 fn cover_image_zipdir(cbz: &Path) -> Cover {
     use bunko_library::archive::zipdir;
     let entries = match zipdir::list_entries(cbz) {
@@ -785,7 +781,8 @@ fn ensure_cover(
     if !publish_cover(cbz, &webp, busy, made)? {
         return Ok(false);
     }
-    // A marker left from the archive this one replaced.
+    // A marker the archive no longer needs: one that landed while the cover was made,
+    // or a cloud folder's marker beside JPEG XL pages, which is not believed.
     match nocover {
         Some(set) => {
             if let Err(e) = set.remove(cbz) {
@@ -868,22 +865,12 @@ fn publish_cover_with(
     if bunko_library::sidecar::sibling(cbz, ".webp").as_ref() != Some(&out) {
         return Ok(false);
     }
-    // A cover written for this archive (a client's, landed meanwhile) stays. A stale
-    // one is replaced; on a cloud library only while it is still the version judged
-    // stale, so a client's cover landing meanwhile wins there too.
+    // A cover there (a client's, landed meanwhile) stays, whatever its age.
     // Whether a cover is there is the listing's (a built name is never opened).
-    let there = if listed_exactly(&out) {
-        fs::metadata(&out)
-    } else {
-        Err(std::io::ErrorKind::NotFound.into())
-    };
-    let mode = match there {
-        Ok(meta) if describes(&meta, cbz) => return Ok(false),
-        Ok(meta) => Mode::Replace {
-            base: meta.version().cloned(),
-        },
-        Err(_) => Mode::CreateNew,
-    };
+    if listed_exactly(&out) && fs::metadata(&out).is_ok() {
+        return Ok(false);
+    }
+    let mode = Mode::CreateNew;
     let mut tmp = out.as_os_str().to_owned();
     tmp.push(".tmp");
     let tmp = PathBuf::from(tmp);
@@ -1535,35 +1522,27 @@ mod tests {
             .unwrap();
     }
 
-    /// A volume uploaded again under its name gets a new cover: the one beside it was
-    /// made from the archive it replaced.
+    /// A client uploads a volume's cover before its archive, so the cover is older than
+    /// the archive it belongs to. It is that archive's cover: never remade.
     #[test]
-    fn a_replaced_archive_gets_a_new_cover() {
+    fn a_cover_uploaded_before_its_archive_is_kept() {
         let tmp = tempfile::tempdir().unwrap();
         let lib = tmp.path().join("library");
         let series = lib.join("Series");
         std::fs::create_dir_all(&series).unwrap();
         let vol = series.join("Vol 1.cbz");
+        std::fs::write(series.join("Vol 1.webp"), b"a hand-made cover").unwrap();
         cbz(&vol, &[("p.png", &png(500, 700))]);
-        let thumbs = Thumbnails::default();
-        let stop = CancellationToken::new();
-        assert_eq!(thumbs.scan_once(&lib, &stop), 1);
-        let old = std::fs::read(cover_of(&vol)).unwrap();
-
-        cbz(&vol, &[("p.png", &png(300, 200))]);
-        set_mtime(&cover_of(&vol), mtime(&vol) - Duration::from_secs(5));
-        assert_eq!(thumbnail_candidates(&lib), std::slice::from_ref(&vol));
-        assert_eq!(thumbs.scan_once(&lib, &stop), 1);
-        let new = std::fs::read(cover_of(&vol)).unwrap();
-        assert_ne!(new, old);
-        let img = image::load_from_memory(&new).unwrap();
-        assert_eq!(img.width(), 250, "the 300x200 page of the new archive");
-        assert!(img.height() < 350);
-        assert!(!series.join("Vol 1.webp.tmp").exists());
-        assert_eq!(thumbs.scan_once(&lib, &stop), 0, "made once");
+        set_mtime(&cover_of(&vol), mtime(&vol) - Duration::from_secs(600));
+        assert!(thumbnail_candidates(&lib).is_empty());
+        assert_eq!(
+            Thumbnails::default().scan_once(&lib, &CancellationToken::new()),
+            0
+        );
+        assert_eq!(std::fs::read(cover_of(&vol)).unwrap(), b"a hand-made cover");
     }
 
-    /// A cover written after the archive (a reader's own upload) describes it: kept.
+    /// A cover written after the archive (a reader's own upload): kept.
     #[test]
     fn a_cover_newer_than_its_archive_is_kept() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1616,10 +1595,10 @@ mod tests {
         assert!(series.join("W.nocover").is_file());
     }
 
-    /// `.nocover` describes the archive it was written for: a good archive uploaded
-    /// over it gets its cover, and the marker goes.
+    /// A `.nocover` marker older than its archive still stands: the archive is not
+    /// looked at again (a volume is replaced by deleting it, which takes the marker).
     #[test]
-    fn a_nocover_marker_older_than_its_archive_is_looked_at_again() {
+    fn a_nocover_marker_older_than_its_archive_stands() {
         let tmp = tempfile::tempdir().unwrap();
         let lib = tmp.path().join("library");
         let series = lib.join("Series");
@@ -1631,15 +1610,15 @@ mod tests {
         assert_eq!(thumbs.scan_once(&lib, &stop), 0);
         assert!(marker(&vol).is_file());
 
-        cbz(&vol, &[("p.png", &png(500, 700))]);
-        set_mtime(&marker(&vol), mtime(&vol) - Duration::from_secs(5));
-        assert_eq!(thumbs.scan_once(&lib, &stop), 1);
-        assert!(cover_of(&vol).is_file());
-        assert!(!marker(&vol).exists(), "the stale marker goes");
+        set_mtime(&marker(&vol), mtime(&vol) - Duration::from_secs(600));
+        assert!(thumbnail_candidates(&lib).is_empty());
+        assert_eq!(thumbs.scan_once(&lib, &stop), 0);
+        assert!(marker(&vol).is_file());
+        assert!(!series.join("Vol 1.webp").exists());
     }
 
-    /// An archive dated in the future: a cover made now is older than it, so the age
-    /// rule would remake it on every scan. Present counts as current instead.
+    /// An archive dated in the future (a fast clock, a copied mtime): its cover, older
+    /// than it, is made once and not again on every scan.
     #[test]
     fn an_archive_dated_in_the_future_is_not_covered_again_and_again() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1659,8 +1638,8 @@ mod tests {
         assert!(thumbnail_candidates(&lib).is_empty());
     }
 
-    /// A client wrote a fresh cover after the stale one was judged: publishing never
-    /// overwrites it.
+    /// A client's cover landed after the archive was judged coverless: publishing never
+    /// overwrites it, whether it is newer or older than the archive.
     #[test]
     fn a_fresh_cover_written_meanwhile_is_not_overwritten() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1675,10 +1654,10 @@ mod tests {
         assert!(!publish_cover(&vol, &webp, &|_| false, &MadeCovers::default()).unwrap());
         assert_eq!(std::fs::read(cover_of(&vol)).unwrap(), b"a client's cover");
 
-        // Stale (older than the archive): replaced.
+        // Older than the archive (uploaded before it): still the client's, kept.
         set_mtime(&cover_of(&vol), mtime(&vol) - Duration::from_secs(5));
-        assert!(publish_cover(&vol, &webp, &|_| false, &MadeCovers::default()).unwrap());
-        assert_eq!(std::fs::read(cover_of(&vol)).unwrap(), webp);
+        assert!(!publish_cover(&vol, &webp, &|_| false, &MadeCovers::default()).unwrap());
+        assert_eq!(std::fs::read(cover_of(&vol)).unwrap(), b"a client's cover");
     }
 
     fn cbz(path: &Path, members: &[(&str, &[u8])]) {
@@ -2721,6 +2700,31 @@ mod tests {
         );
     }
 
+    /// An uploaded sidecar of 100k nested `[` holding a `NaN` (which serde refuses and
+    /// Python allows) went on to the layout parser, which recursed per level: the sweep
+    /// at every start overflowed the stack and aborted the server, until the file was
+    /// removed by hand. Now it is removed as corrupt; a moderately nested one with a
+    /// `NaN` is kept. Run on a 2 MiB stack, a tokio blocking thread's.
+    #[test]
+    fn deeply_nested_sidecars_are_removed_not_a_crash() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lib = tmp.path().join("library");
+        std::fs::create_dir_all(lib.join("S")).unwrap();
+        let nest = |depth: usize| format!("{}NaN{}", "[".repeat(depth), "]".repeat(depth));
+        std::fs::write(lib.join("S/deep.mokuro"), nest(100_000)).unwrap();
+        std::fs::write(lib.join("S/nested.mokuro"), nest(200)).unwrap();
+        let lib2 = lib.clone();
+        let removed = std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(move || remove_corrupt_sidecars(&lib2, None))
+            .unwrap()
+            .join()
+            .unwrap();
+        assert_eq!(removed, 1);
+        assert!(!lib.join("S/deep.mokuro").exists());
+        assert!(lib.join("S/nested.mokuro").is_file());
+    }
+
     /// Regression (review finding): a 1.5 MB gzip of whitespace inflated to 1.5 GiB in
     /// memory here. Inflation stops at the cap, and an over-cap sidecar is left in place
     /// (it is not provably damaged), while small damaged ones are still removed.
@@ -2742,5 +2746,86 @@ mod tests {
             SidecarCheck::TooLarge
         );
         assert_eq!(check_sidecar_capped(&plain, 4 << 20), SidecarCheck::Invalid);
+    }
+
+    /// `data` with member `from` renamed to the raw bytes `to` (same length) in its local
+    /// and central headers, and the UTF-8 flag (bit 11) set to `utf8`: the names real
+    /// archives carry that the zip writer cannot write.
+    fn renamed(mut data: Vec<u8>, from: &str, to: &[u8], utf8: bool) -> Vec<u8> {
+        assert_eq!(from.len(), to.len());
+        let (mut i, mut hits) = (0, 0);
+        while i + 46 <= data.len() {
+            let (flags, len, name) = match &data[i..i + 4] {
+                b"PK\x03\x04" => (i + 6, i + 26, i + 30),
+                b"PK\x01\x02" => (i + 8, i + 28, i + 46),
+                _ => {
+                    i += 1;
+                    continue;
+                }
+            };
+            let n = u16::from_le_bytes([data[len], data[len + 1]]) as usize;
+            if &data[name..name + n] == from.as_bytes() {
+                data[name..name + n].copy_from_slice(to);
+                let f = u16::from_le_bytes([data[flags], data[flags + 1]]);
+                let f = if utf8 { f | 0x800 } else { f & !0x800 };
+                data[flags..flags + 2].copy_from_slice(&f.to_le_bytes());
+                hits += 1;
+            }
+            i += 4;
+        }
+        assert_eq!(hits, 2, "{from}: one local and one central header");
+        data
+    }
+
+    /// Member names in every encoding real archives use, none of them a valid flagged
+    /// UTF-8 name: Shift-JIS and CP437 without the flag, UTF-8 without the flag (macOS
+    /// Archive Utility), and bytes that are not UTF-8 under the flag.
+    fn odd_names() -> [(&'static str, &'static [u8], bool); 4] {
+        [
+            ("sj.jpg", b"\x83\x41.jpg", false),
+            ("cp.jpg", b"\x80\x81.jpg", false),
+            ("mac.jpg", "\u{30a4}.jpg".as_bytes(), false),
+            ("bd.jpg", b"\xff\xfe.jpg", true),
+        ]
+    }
+
+    fn raw_named_cbz(path: &Path, members: &[(&str, &[u8], bool, &[u8])]) {
+        let plain: Vec<(&str, &[u8])> = members.iter().map(|m| (m.0, m.3)).collect();
+        cbz(path, &plain);
+        let mut bytes = std::fs::read(path).unwrap();
+        for (placeholder, raw, utf8, _) in members {
+            bytes = renamed(bytes, placeholder, raw, *utf8);
+        }
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    /// zip 9's `name()` is fallible and the cover pick passes over a name it cannot
+    /// decode; every real name encoding still decodes, so each is a cover candidate.
+    #[test]
+    fn covers_under_names_in_any_encoding() {
+        let tmp = tempfile::tempdir().unwrap();
+        for (placeholder, raw, utf8) in odd_names() {
+            let path = tmp.path().join(format!("{placeholder}.cbz"));
+            raw_named_cbz(&path, &[(placeholder, raw, utf8, b"the page")]);
+            match cover_image(&path) {
+                Cover::Image(bytes) => assert_eq!(bytes, b"the page", "{placeholder}"),
+                Cover::None(why) => panic!("{placeholder}: no cover ({why})"),
+            }
+        }
+        // UTF-8 names without the flag (macOS Archive Utility) are ordered by what they
+        // say: zip 2 read them as CP437, where "\u{30a2}" (E3 82 A2) sorts after
+        // "\u{30a4}" (E3 82 A4), and took the second page for the cover.
+        let path = tmp.path().join("mac.cbz");
+        raw_named_cbz(
+            &path,
+            &[
+                ("aaa.jpg", "\u{30a4}.jpg".as_bytes(), false, b"second"),
+                ("bbb.jpg", "\u{30a2}.jpg".as_bytes(), false, b"first"),
+            ],
+        );
+        match cover_image(&path) {
+            Cover::Image(bytes) => assert_eq!(bytes, b"first"),
+            Cover::None(why) => panic!("no cover ({why})"),
+        }
     }
 }

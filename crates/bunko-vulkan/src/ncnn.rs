@@ -108,23 +108,19 @@ impl VkBackend for Ncnn {
                 )
             }
             "hayai-nova" => {
-                if let Some(b) = req
+                // Any budget up to the graphs' (each crop runs at its own patch count).
+                let budget = req
                     .opts
                     .patch_budget
-                    .filter(|&b| b as usize != bunko_ncnn::HAYAI_BUDGET)
-                {
-                    return Err(format!(
-                        "hayai-nova's ncnn graphs read patch budget {}, not {b}",
-                        bunko_ncnn::HAYAI_BUDGET
-                    ));
-                }
+                    .map_or(bunko_ncnn::HAYAI_BUDGET, |b| b as usize);
+                bunko_vlm::hayai::check_budget(budget, bunko_ncnn::HAYAI_BUDGET)?;
                 let files = bunko_ncnn::HayaiFiles {
                     graphs: req.model_dir,
                     pos_table: path(&req.opts.pos_table, "position table")?,
                     tokenizer,
                 };
                 Rec::Hayai(
-                    bunko_ncnn::NcnnHayai::load(&files, gpu, flags(), req.info.clone())
+                    bunko_ncnn::NcnnHayai::load(&files, gpu, flags(), budget, req.info.clone())
                         .map_err(|e| e.to_string())?,
                 )
             }

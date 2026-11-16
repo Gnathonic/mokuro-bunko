@@ -8,8 +8,11 @@
 //! # included), then read the goldens again and list any difference
 //! MOKURO_VULKAN_PACK=<pack> MOKURO_VULKAN_MODELS_DIR=<dir> MOKURO_BACKENDS_DIR=<scratch> \
 //! cargo run -p bunko-engines --example vulkan_check -- \
-//!     check <engine> <golden.json> [--device gpu:N] [--runtime ncnn|webgpu]
+//!     check <engine> <golden.json> [--device gpu:N] [--runtime ncnn|webgpu] [--budget N]
 //! ```
+//!
+//! A check at another hayai-nova patch budget than the goldens' 512 (`--budget 256`)
+//! lists the crops that read differently there but does not fail on them.
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -87,7 +90,7 @@ fn main() -> Result<()> {
         }
         Some("check") => {
             let [_, engine, golden] = &args[..3] else {
-                bail!("check <engine> <golden.json> [--device gpu:N] [--runtime R]");
+                bail!("check <engine> <golden.json> [--device gpu:N] [--runtime R] [--budget N]");
             };
             let mut cfg = EngineConfig::new(models_dir(), Backend::Vulkan);
             if let Some(r) = flag("--runtime") {
@@ -95,9 +98,10 @@ fn main() -> Result<()> {
             }
             let p = EnginePipeline::new(cfg);
             let device = flag("--device").unwrap_or_else(|| "gpu:0".into());
+            let budget: u32 = flag("--budget").map_or(Ok(512), |b| b.parse())?;
             let t0 = Instant::now();
             let rec = p
-                .recognizer_for(engine, Precision::Fp32, &device, 512)
+                .recognizer_for(engine, Precision::Fp32, &device, budget)
                 .map_err(anyhow::Error::msg)?;
             let load = t0.elapsed().as_secs_f64();
             let g = Golden::load(Path::new(golden)).map_err(anyhow::Error::msg)?;
@@ -124,12 +128,12 @@ fn main() -> Result<()> {
             println!(
                 "{}",
                 serde_json::json!({
-                    "engine": engine, "device": device, "load_s": load,
+                    "engine": engine, "device": device, "budget": budget, "load_s": load,
                     "read_s": t1.elapsed().as_secs_f64(), "crops": texts.len(),
                     "exact": texts.len() - bad.len(), "diffs": bad,
                 })
             );
-            if !bad.is_empty() {
+            if !bad.is_empty() && budget == bunko_engines::vulkan::GOLDEN_BUDGET {
                 std::process::exit(1);
             }
         }

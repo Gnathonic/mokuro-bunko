@@ -34,6 +34,36 @@ pub const PACK_ENV: &str = "MOKURO_TORCH_PACK";
 /// CPU threads of a CPU recognizer (default: the session's share of the cores).
 pub const THREADS_ENV: &str = "MOKURO_TORCH_THREADS";
 
+/// What the hayai-nova of a pack built before 0.8.0 answers for a patch budget other than
+/// 512 (libtorch, then ncnn): those packs read 512 only. The texts are fixed in the
+/// released packs.
+const OLD_PACK_BUDGET_REFUSALS: &[&str] = &[
+    "hayai-nova packages are compiled for patch budget",
+    "hayai-nova's ncnn graphs read patch budget",
+];
+
+/// What the error for such a pack asks for ([`pack_budget_error`]).
+pub const PACK_UPDATE: &str = "update the OCR backend pack";
+
+/// The error to show when `err` is a pack's refusal of patch budget `budget` (a pack from
+/// before 0.8.0, which reads 512 only): the pack is to update, not the device. None for
+/// any other error.
+pub fn pack_budget_error(err: &str, budget: u32) -> Option<String> {
+    is_pack_budget_refusal(err).then(|| {
+        format!(
+            "the installed OCR backend pack reads hayai-nova at patch budget 512 only, not \
+             {budget}: {PACK_UPDATE} (`mokuro-bunko install-ocr --force`) or set the \
+             generation's patch budget to 512"
+        )
+    })
+}
+
+/// Whether `err` is the refusal of a pack from before 0.8.0 to read hayai-nova at a patch
+/// budget other than 512.
+pub fn is_pack_budget_refusal(err: &str) -> bool {
+    OLD_PACK_BUDGET_REFUSALS.iter().any(|r| err.contains(r))
+}
+
 /// Installed packs in `backends_dir`, in the order they are tried.
 pub fn discover(backends_dir: &Path) -> Vec<PathBuf> {
     let Ok(rd) = std::fs::read_dir(backends_dir) else {
@@ -466,6 +496,28 @@ pub fn recognizer_info(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The refusals of the packs before 0.8.0 (their exact texts) ask for a pack update;
+    /// anything else, the new packs' own budget check included, is left alone.
+    #[test]
+    fn an_old_packs_budget_refusal_asks_for_an_update() {
+        for old in [
+            "hayai-nova packages are compiled for patch budget 512, not 256",
+            "hayai-nova's ncnn graphs read patch budget 512, not 384",
+            "could not load hayai-nova: hayai-nova packages are compiled for patch budget 512, not 256",
+        ] {
+            let e = pack_budget_error(old, 256).unwrap_or_else(|| panic!("{old}"));
+            assert!(e.contains(PACK_UPDATE), "{e}");
+            assert!(e.contains("not 256"), "{e}");
+        }
+        for other in [
+            "hayai-nova's graphs read patch budgets 1 to 512, not 1024",
+            "download failed: sha256 x != y",
+            "",
+        ] {
+            assert_eq!(pack_budget_error(other, 256), None, "{other}");
+        }
+    }
 
     /// A pack installed while the process runs: after [`forget_failure`] the next call
     /// looks again (a different answer: this "pack" is found, then fails to open).

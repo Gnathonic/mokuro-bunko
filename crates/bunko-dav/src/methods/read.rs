@@ -18,7 +18,7 @@ use crate::propfind::{self, Mode, PropCtx};
 use crate::resource::{FileKind, Resource, Stat, content_type};
 use crate::response::{self, DavError, DavResult, Resp};
 use crate::xml::{MULTISTATUS_CLOSE, MULTISTATUS_OPEN};
-use crate::{Inner, paths};
+use crate::{DavInfo, DavTarget, Inner, Served, paths};
 use bunko_core::{Perm, Role, has_perm, reader_tree};
 
 const ALLOW_COLLECTION: &str =
@@ -313,11 +313,28 @@ pub(crate) async fn get(inner: &Arc<Inner>, req: &Req) -> DavResult<Resp> {
     let res = lookup(inner, &req.path, req)
         .await?
         .ok_or_else(|| DavError::new(StatusCode::NOT_FOUND, &req.path))?;
-    let Resource::File { phys, .. } = &res else {
+    let Resource::File { phys, kind, .. } = &res else {
         return Err(DavError::new(
             StatusCode::FORBIDDEN,
             "Directory browsing is not enabled.",
         ));
+    };
+    // What the path resolved to (a correction layer's name alone does not say whether
+    // it is the caller's overlay or a library primary), for the request accounting.
+    let info = DavInfo {
+        target: match kind {
+            FileKind::Library => DavTarget::Library,
+            FileKind::Progress => DavTarget::Progress,
+            FileKind::Personal => DavTarget::Personal,
+        },
+        rel: crate::analytics::dav_target_of(&req.path).1,
+        depth: None,
+    };
+    let annotate = |resp: &mut Resp, served: Option<Served>| {
+        resp.extensions_mut().insert(info.clone());
+        if let Some(served) = served {
+            resp.extensions_mut().insert(served);
+        }
     };
     // Open first and describe what was opened: the validators match the bytes sent even
     // if an upload renames a new file into place meanwhile.
@@ -346,6 +363,12 @@ pub(crate) async fn get(inner: &Arc<Inner>, req: &Req) -> DavResult<Resp> {
             let mut resp = response::empty(StatusCode::NOT_MODIFIED);
             response::set_header(&mut resp, "etag", &format!("\"{etag}\""));
             response::set_header(&mut resp, "last-modified", &stat.last_modified_http());
+            let served = Served {
+                size: stat.size,
+                len: 0,
+                accel: false,
+            };
+            annotate(&mut resp, Some(served));
             return Ok(resp);
         }
         return Err(e);
@@ -366,10 +389,41 @@ pub(crate) async fn get(inner: &Arc<Inner>, req: &Req) -> DavResult<Resp> {
     );
 
     if let Some(accel) = accel_path(inner, req, &res) {
+        // What nginx will send: the range it honours (an `If-Range` that no longer
+        // holds gets the whole file), else the whole file. A range past the end is
+        // answered 416 here, as without offload: nginx would send no body, and the
+        // accounting must not count one.
+        let honoured = req
+            .header("if-range")
+            .is_none_or(|cond| conditional::if_range_holds(cond, &etag, last_modified));
+        let len = match req.header("range") {
+            Some(value) if stat.size > 0 && !head && honoured => {
+                match conditional::parse_range(value, stat.size) {
+                    Ok(RangeOutcome::Partial { start, end }) => end - start + 1,
+                    Ok(RangeOutcome::Full) => stat.size,
+                    Err(e) => {
+                        let mut r =
+                            DavError::new(StatusCode::RANGE_NOT_SATISFIABLE, "").into_response();
+                        response::set_header(&mut r, "content-range", &e.context);
+                        annotate(&mut r, None);
+                        return Ok(r);
+                    }
+                }
+            }
+            _ if head => 0,
+            _ => stat.size,
+        };
         // nginx serves the bytes (and any Range); Content-Length 0 keeps the upstream
         // connection reusable.
+        let headers = resp.headers_mut();
         headers.insert(CONTENT_LENGTH, HeaderValue::from_static("0"));
         response::set_header(&mut resp, "x-accel-redirect", &accel);
+        let served = Served {
+            size: stat.size,
+            len,
+            accel: true,
+        };
+        annotate(&mut resp, Some(served));
         return Ok(resp);
     }
     headers.insert(ACCEPT_RANGES, HeaderValue::from_static("bytes"));
@@ -390,6 +444,7 @@ pub(crate) async fn get(inner: &Arc<Inner>, req: &Req) -> DavResult<Resp> {
                     let mut r =
                         DavError::new(StatusCode::RANGE_NOT_SATISFIABLE, "").into_response();
                     response::set_header(&mut r, "content-range", &e.context);
+                    annotate(&mut r, None);
                     return Ok(r);
                 }
             };
@@ -409,6 +464,14 @@ pub(crate) async fn get(inner: &Arc<Inner>, req: &Req) -> DavResult<Resp> {
     };
     resp.headers_mut()
         .insert(CONTENT_LENGTH, HeaderValue::from(len));
+    annotate(
+        &mut resp,
+        Some(Served {
+            size,
+            len: if head { 0 } else { len },
+            accel: false,
+        }),
+    );
     if head {
         return Ok(resp);
     }

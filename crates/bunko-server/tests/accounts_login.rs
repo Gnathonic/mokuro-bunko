@@ -73,7 +73,7 @@ async fn me_valid_creds_returns_identity_and_permissions() {
     assert_eq!(b["per_user_layers"], json!(["edit"]));
     // The sidecar names rule this server reads names by (informational: 2, one fold).
     assert_eq!(b["sidecar_rule"], 2);
-    // The running version, last: reading history is per account from 0.8.0 on.
+    // The running version, last: reading history is per account from 0.7.8 on.
     assert_eq!(b["version"], bunko_core::VERSION);
     assert!(
         text.ends_with(&format!(

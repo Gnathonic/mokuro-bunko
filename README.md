@@ -8,6 +8,7 @@ A self-hosted manga library server with WebDAV, built-in OCR processing, and mul
 ## What it does
 
 - Serves a shared manga library over WebDAV so Mokuro Reader can connect directly
+- Keeps the library on its own disk, in a folder you choose (the one Mokuro Reader's Local Folder uses), or in your own cloud storage (Google Drive, OneDrive, MEGA or any WebDAV server): it finds the volumes there, runs OCR and writes the results back next to them, with no server to host (see [Cloud library](#cloud-library) and [Local folder](#local-folder))
 - Tracks per-user reading progress (each user gets their own progress files transparently)
 - Compiles the reader's metadata files (`series.json`, `catalog.json`) server-side from the library itself, merging in client-submitted series facts (titles, links, tags), and recompiles within seconds of an upload
 - Runs OCR automatically on uploaded manga with [hayai-nova](https://huggingface.co/JustANormalTinkerer/hayai-ocr-v2.5-nova) by default, plus optional extra OCR layers from PaddleOCR-VL (`paddle-manga`) and PP-OCRv6 (`ppocr-manga`, which also reads scanned novels)
@@ -17,7 +18,7 @@ A self-hosted manga library server with WebDAV, built-in OCR processing, and mul
 - Checks for new releases (signed) and shows them in the admin panel; self-managed installs update in one click, Docker and package installs get a notice (see [Updates](#updates))
 - Asks search engines and crawlers to stay out (`X-Robots-Tag: noindex` on every response, deny-all `robots.txt`)
 
-See [CHANGELOG.md](CHANGELOG.md) for release history and [ROADMAP.md](ROADMAP.md) for what comes next (0.8 remote storage, 0.9 streaming, 1.0 books).
+See [CHANGELOG.md](CHANGELOG.md) for release history and [ROADMAP.md](ROADMAP.md) for what comes next (0.9 streaming, 1.0 books).
 
 ## Download
 
@@ -163,6 +164,9 @@ Copy [`config.example.yaml`](config.example.yaml) for a documented starting poin
 | `server.threads` | `0` | Async worker threads (`0` = `min(cores, 4)`) |
 | `server.cache_mb` | `32` | Memory budget of the in-memory caches |
 | `storage.base_path` | `~/.local/share/mokuro-bunko` | Library and database location |
+| `storage.library.backend` | `local` | Where the library is: `local`, `folder`, `gdrive`, `onedrive`, `mega` or `webdav` (see [Cloud library](#cloud-library), [Local folder](#local-folder)) |
+| `storage.library.path` | | `backend: folder`: the library folder, a full path (`/srv/manga`, `D:\Manga`) |
+| `storage.library.folder_roots` | `[]` | The folders a browser on another computer may connect a library folder in (config file or `MOKURO_LIBRARY_FOLDER_ROOTS` only) |
 | `registration.mode` | `self` | `disabled`, `self`, `invite`, or `approval` |
 | `ocr.backend` | `auto` | `auto`, `cuda`, `rocm`, `cpu`, or `skip` (no OCR on this machine) |
 | `ocr.generations` | one `hayai-nova` row | The OCR recipes every volume gets a layer from, in run order |
@@ -172,17 +176,78 @@ Copy [`config.example.yaml`](config.example.yaml) for a documented starting poin
 
 Most keys can also be set from the environment (`MOKURO_<SECTION>_<KEY>`, e.g. `MOKURO_OCR_BACKEND`; not `cors.allowed_origins`, the `database.*` keys, `ocr.upgrade.*` or `update.public_key`, which only the config file sets), plus the shortcuts `MOKURO_HOST`, `MOKURO_PORT`, `MOKURO_STORAGE` and `MOKURO_CONFIG`. The full reference is [docs/configuration.md](docs/configuration.md).
 
+## Cloud library
+
+New in 0.8. The library can be the `mokuro-reader` folder of a cloud account instead of a folder on Bunko's disk: **Google Drive**, **OneDrive**, **MEGA** or any **WebDAV** server. Bunko finds the volumes Mokuro Reader put there, runs OCR, and writes the OCR files, covers and the reader's metadata back next to them. Mokuro Reader keeps connecting to the cloud storage as it does today, so Bunko needs no address on the internet and does not have to run while you read. It can still serve readers itself, from the cloud library as from a local one.
+
+Choose the storage in the setup wizard or in the admin panel's Storage tab, or from a terminal:
+
+```
+mokuro-bunko library connect gdrive|onedrive|mega|webdav
+mokuro-bunko library status
+mokuro-bunko library disconnect     # deletes nothing in the cloud
+```
+
+- **Google Drive and OneDrive** sign in through the browser. On a machine without one (Docker, a NAS, SSH) the sign-in is finished from any other device.
+- **Google Drive**: Bunko signs in through Mokuro Reader's Google project and, like the reader, sees only the files made through it. The wizard asks which reader you use (release or beta).
+- **MEGA** asks for the account's email and password; the password is not kept. **WebDAV** takes the folder's URL, a user and an app password.
+- No password or token is written to `config.yaml`.
+
+Every setting is in [docs/configuration.md](docs/configuration.md#library-location).
+
+## Local folder
+
+New in 0.8. The library can also be a folder you choose, on this computer, a second disk or a mounted share: pick the same folder as Mokuro Reader's **Local Folder** (Chrome or Edge on a desktop). Bunko treats it exactly like a cloud folder: it reads and writes it in place, writes the reader's queue file and its marker there, and puts its OCR files, covers and the reader's metadata next to the volumes. The reader keeps reading the folder directly. This is not **This computer**, which keeps the library in Bunko's own `library` folder.
+
+```yaml
+storage:
+  library:
+    backend: folder
+    path: /srv/manga          # Windows: D:\Manga, or a share: \\files.example.com\manga
+```
+
+```
+mokuro-bunko library connect folder --path /srv/manga [--create]
+mokuro-bunko library disconnect     # leaves every file in the folder where it is
+```
+
+- The setup wizard and the admin panel's Storage tab take the path. **Browse…** lists folders only in a browser on the server's own machine; anywhere else, type the path as the server sees it.
+- From a browser on another computer, only a folder at or under `storage.library.folder_roots` (set in `config.yaml` or `MOKURO_LIBRARY_FOLDER_ROOTS`, none by default) can be chosen. System folders, Bunko's own folders and a folder holding them are refused for everyone ([Which folders](docs/configuration.md#which-folders)).
+- Switching to another folder (or back to This computer) is a different library: the old folder stays as it is.
+- Bunko's removals go to a hidden `.mokuro-bunko-trash` folder inside the library, kept 30 days, which the reader does not list.
+- In Docker, mount the folder and point Bunko at the mount (Bunko never changes the folder's owner, so set `PUID`/`PGID` to its owner):
+
+  ```yaml
+  volumes:
+    - mokuro-data:/data
+    - /srv/manga:/library
+  environment:
+    - PUID=1000   # the owner of /srv/manga
+    - PGID=1000
+    - MOKURO_LIBRARY_BACKEND=folder
+    - MOKURO_LIBRARY_PATH=/library
+    - MOKURO_LIBRARY_FOLDER_ROOTS=/library   # lets the wizard and Storage tab choose it
+  ```
+
+  On Docker Desktop (Mac, Windows), changes made outside the container can take up to `storage.library.poll.idle_s` (5 minutes) to show.
+
 ## OCR
 
-The recognizers (hayai-nova, paddle-manga) run on [libtorch](https://pytorch.org/) — the same torch 0.5.2 used, without Python — and the PP-OCR stages on [ONNX Runtime](https://onnxruntime.ai/) on the CPU. All models are Apache-2.0:
+The recognizers hayai-nova and paddle-manga run on [libtorch](https://pytorch.org/) — the same torch 0.5.2 used, without Python — and everything else on [ONNX Runtime](https://onnxruntime.ai/) on the CPU. The default engine, the default detector and the first three engines below are Apache-2.0:
 
 | Engine | What it is |
 |---|---|
 | `hayai-nova` (default) | [hayai-ocr v2.5 Nova](https://huggingface.co/JustANormalTinkerer/hayai-ocr-v2.5-nova): reads each text line, strong on display lettering and sound effects. |
 | `paddle-manga` | [PaddleOCR-VL 1.6](https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.6) with a [manga LoRA](https://huggingface.co/sorryhyun/paddleocr-vl-1.6-manga-lora): the most accurate and the slowest, about 2 GB of model files (3.6 GB in fp32). It runs on the CPU too, at about 40 s a page on 16 threads: there hayai-nova is the engine of choice. |
-| `ppocr-manga` | [PP-OCRv6 manga](https://huggingface.co/Kellenok/PP-OCRv6_manga) line detector and CTC recognizer on the CPU: small, reads scanned novel pages too. Its detector also feeds the other two. |
+| `ppocr-manga` | [PP-OCRv6 manga](https://huggingface.co/Kellenok/PP-OCRv6_manga) line detector and CTC recognizer on the CPU: small, reads scanned novel pages too. Its detector also feeds the other engines. |
+| `charspot-small` | [manga-ocr-charspot-small](https://huggingface.co/muscgab/manga-ocr-charspot-small): finds and classifies every character of a text block, no decoder. Small and fast on the CPU. Weights CC BY-NC-SA 4.0 (non-commercial). |
+| `nar-small` | [manga-ocr-nar-small](https://huggingface.co/muscgab/manga-ocr-nar-small): writes a text block in one pass, on the CPU. Weights CC BY-NC-SA 4.0 (non-commercial). |
 
-The 0.5 `mokuro` engine, the GPL `ctd` and `animetext` detectors and the `rtdetr` detector are gone; see the [migration guide](docs/MIGRATING-0.7.md) for what happens to old configs and existing `.mokuro` files.
+Besides the default `ppocr-manga` detector there are `ctd-lines`, the lines of [comic-text-detector](https://github.com/dmMaze/comic-text-detector), and `animetext-blocks`, [AnimeText YOLO12-x](https://huggingface.co/deepghs/AnimeText_yolo), which boxes whole text blocks for `charspot-small` and `nar-small` to read at once. The weights of both are GPL-3.0.
+
+The models that are not Apache-2.0 are opt-in: nothing of them is downloaded until a generation uses one, and the admin panel shows the licence beside the name. They are in the release builds; a build made with `xtask dist --permissive-models` (without the `gpl-models` and `nc-models` features) neither offers nor downloads them. See [OCR engines](docs/configuration.md#ocr-engines).
+
+The 0.5 `mokuro` engine and the `ctd`, `animetext` and `rtdetr` detectors of 0.5 are gone; see the [migration guide](docs/MIGRATING-0.7.md) for what happens to old configs and existing `.mokuro` files.
 
 **The OCR backend** is installed once on a full build: the server (and a processor) does it by itself, in the background while it already serves, when local OCR needs it (a new server after its first-run setup), or run `mokuro-bunko install-ocr`. It looks at the hardware and installs the matching *backend pack* into `<storage>/backends/`:
 
@@ -247,6 +312,7 @@ mokuro-bunko admin          # users and invites: add-user, delete-user, list-use
                             #   set-password, disable-user, approve-user, restore-user,
                             #   generate-invite, list-invites, delete-invite
 mokuro-bunko config         # show, set, path, init, cors-add, cors-remove
+mokuro-bunko library        # status, connect <gdrive|onedrive|mega|webdav|folder>, disconnect (a cloud or folder library)
 mokuro-bunko ssl            # enable, disable, status, generate
 mokuro-bunko tunnel         # status, cloudflare (a Cloudflare quick tunnel)
 mokuro-bunko dyndns         # setup, status, update, enable, disable
@@ -285,4 +351,4 @@ cargo clippy --workspace    # lints
 
 ## License
 
-[Mozilla Public License 2.0](LICENSE). Every program archive carries a `THIRD-PARTY-LICENSES.md` listing the licences of all bundled dependencies and native components (generated at build time; a copyleft licence with no permissive alternative fails the build); the OCR backend packs carry theirs in a `licenses/` folder. The OCR models are Apache-2.0; their sources, attributions and the datasets their model cards name are listed in [docs/rust-port/MODELS.md](docs/rust-port/MODELS.md) §2.
+[Mozilla Public License 2.0](LICENSE). Every program archive carries a `THIRD-PARTY-LICENSES.md` listing the licences of all bundled dependencies and native components (generated at build time; a copyleft licence with no permissive alternative fails the build); the OCR backend packs carry theirs in a `licenses/` folder. No model is part of a program archive: models are downloaded when they are first used. The default OCR models are Apache-2.0; the opt-in ones are GPL-3.0 (`ctd-lines`, `animetext-blocks`) and CC BY-NC-SA 4.0 (`charspot-small`, `nar-small`), and the code that runs them is this project's own. Sources, attributions and the datasets the model cards name are listed in [docs/rust-port/MODELS.md](docs/rust-port/MODELS.md) §2.
