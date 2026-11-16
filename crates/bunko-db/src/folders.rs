@@ -4,8 +4,12 @@
 //! The account whose request created a folder owns it for good; a folder that existed
 //! before the table gets the one uploader of its tracked volumes, once
 //! ([`Database::finish_series_folder_adoption`]). Records are keyed by the series-identity
-//! fold ([`fold_series_title_key`]), so `Dr Stone/`, `dr  stone/` and an NFD spelling are
-//! one folder. Owner names compare ignoring ASCII case, as account names do.
+//! key ([`fold_series_title_key`]: the filename fold, trimmed, whitespace runs collapsed),
+//! so `Dr Stone/`, `dr  stone/`, `STRASSE/` beside `Straße/` and an NFD spelling are one
+//! folder. Owner names compare ignoring ASCII case, as account names do. The key is
+//! asked again at every open ([`rekey_series_folder_owners`]): a record keyed by an
+//! older key moves to its current one, and of records that come to share a key the
+//! earliest recorded is kept, the others reported ([`Database::series_owner_merges`]).
 //!
 //! A record says nothing about whether its folder still exists: the server checks the
 //! listing before it acts on one (a folder can go without a hook: a crash, a delete in
@@ -15,6 +19,9 @@ use crate::database::Database;
 use crate::error::Result;
 use crate::uploads::fold_series_title_key;
 use rusqlite::{Connection, OptionalExtension, params};
+
+/// The audit action recording a series owner record the rekey merged into another.
+pub const SERIES_OWNER_MERGED: &str = "series_owner_merged";
 
 /// One owned folder.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,7 +76,156 @@ fn forget(conn: &Connection, key: &str) -> Result<bool> {
     )? > 0)
 }
 
+/// A series owner record the rekey at open ([`rekey_series_folder_owners`]) merged into
+/// an earlier one of the same series key: `folder_name`'s record by `owner` went, the
+/// record of `kept_folder` by `kept_owner` stayed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SeriesOwnerMerge {
+    pub folder_name: String,
+    pub owner: String,
+    pub kept_folder: String,
+    pub kept_owner: String,
+}
+
+/// Bring every `series_folder_owners` record under its current series key
+/// ([`key_of`]): a record keyed otherwise (an older key: before fold v2, `Straße/` and
+/// `STRASSE/` were two series) moves to its key, and where several records come to
+/// share one, the earliest recorded (`recorded_at`, then the oldest row) is kept and
+/// every other is dropped, each logged and written to the audit log
+/// ([`SERIES_OWNER_MERGED`], which doctor reports). Idempotent; inside the caller's
+/// write transaction. A record whose folder name keys to nothing stays as it is.
+/// Returns the merges made.
+pub(crate) fn rekey_series_folder_owners(conn: &Connection) -> Result<Vec<SeriesOwnerMerge>> {
+    type Row = (i64, String, String, String, String);
+    let rows: Vec<Row> = conn
+        .prepare(
+            "SELECT rowid, series_key, folder_name, owner_username, recorded_at \
+             FROM series_folder_owners ORDER BY recorded_at, rowid",
+        )?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut by_key: std::collections::BTreeMap<String, Vec<&Row>> = Default::default();
+    for row in &rows {
+        if let Some(key) = key_of(&row.2) {
+            by_key.entry(key).or_default().push(row);
+        }
+    }
+    let mut merges = Vec::new();
+    for (key, group) in by_key {
+        let kept = group[0];
+        if group.len() == 1 && kept.1 == key {
+            continue;
+        }
+        for row in &group {
+            conn.execute("DELETE FROM series_folder_owners WHERE rowid = ?", [row.0])?;
+        }
+        conn.execute(
+            "INSERT INTO series_folder_owners (series_key, folder_name, owner_username, \
+             recorded_at) VALUES (?, ?, ?, ?) ON CONFLICT(series_key) DO UPDATE SET \
+             folder_name = excluded.folder_name, owner_username = excluded.owner_username, \
+             recorded_at = excluded.recorded_at",
+            params![key, kept.2, kept.3, kept.4],
+        )?;
+        for row in &group[1..] {
+            let merge = SeriesOwnerMerge {
+                folder_name: row.2.clone(),
+                owner: row.3.clone(),
+                kept_folder: kept.2.clone(),
+                kept_owner: kept.3.clone(),
+            };
+            tracing::warn!(
+                "[LIBRARY] Series owner records: {:?} (owned by {}) is one series with {:?} \
+                 (owned by {}) under the one filename fold; the earlier record, {:?}'s, is kept",
+                merge.folder_name,
+                merge.owner,
+                merge.kept_folder,
+                merge.kept_owner,
+                merge.kept_folder
+            );
+            let details = crate::audit::AuditDetails::new()
+                .with("kept_folder", merge.kept_folder.as_str())
+                .with("kept_owner", merge.kept_owner.as_str());
+            conn.execute(
+                "INSERT INTO audit_logs (actor_username, action, target_type, target_path, \
+                 target_username, details) VALUES (NULL, ?, 'series_folder', ?, ?, ?)",
+                params![
+                    SERIES_OWNER_MERGED,
+                    merge.folder_name,
+                    merge.owner,
+                    details.to_json()
+                ],
+            )?;
+            merges.push(merge);
+        }
+    }
+    Ok(merges)
+}
+
+/// The merges [`rekey_series_folder_owners`] recorded in the audit log (still within
+/// its retention), oldest first.
+fn recorded_merges(conn: &Connection) -> Result<Vec<SeriesOwnerMerge>> {
+    let rows: Vec<(String, String, Option<String>)> = conn
+        .prepare(
+            "SELECT target_path, target_username, details FROM audit_logs \
+             WHERE action = ? ORDER BY id",
+        )?
+        .query_map([SERIES_OWNER_MERGED], |r| {
+            Ok((
+                r.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                r.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                r.get(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(rows
+        .into_iter()
+        .map(|(folder_name, owner, details)| {
+            let details: serde_json::Value = details
+                .as_deref()
+                .and_then(|d| serde_json::from_str(d).ok())
+                .unwrap_or_default();
+            let field = |k: &str| details[k].as_str().unwrap_or_default().to_string();
+            SeriesOwnerMerge {
+                folder_name,
+                owner,
+                kept_folder: field("kept_folder"),
+                kept_owner: field("kept_owner"),
+            }
+        })
+        .collect())
+}
+
+/// [`Database::series_owner_merges`] of the database file at `path`, opened read-only
+/// (doctor: nothing is created or migrated); empty when there is no such file.
+pub fn series_owner_merges_at(path: &std::path::Path) -> Result<Vec<SeriesOwnerMerge>> {
+    if !path.is_file() {
+        return Ok(Vec::new());
+    }
+    let conn = Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    let has_audit = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'audit_logs'",
+            [],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if !has_audit {
+        return Ok(Vec::new());
+    }
+    recorded_merges(&conn)
+}
+
 impl Database {
+    /// The series owner records the rekey at open merged into another (doctor's "Series
+    /// owner records merged by the rekey"), oldest first.
+    pub fn series_owner_merges(&self) -> Result<Vec<SeriesOwnerMerge>> {
+        self.read(recorded_merges)
+    }
+
     /// The recorded owner of the series folder `folder` (any spelling).
     pub fn series_folder_owner(&self, folder: &str) -> Result<Option<String>> {
         let Some(key) = key_of(folder) else {
@@ -252,6 +408,70 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use crate::testutil::temp_db;
+
+    /// Records keyed before fold v2 (`straße` and `strasse` were two series) are rekeyed
+    /// at the next open, in place: the earliest record of a series is kept, the other
+    /// is reported (logged, audited, `series_owner_merges`), and a later open changes
+    /// nothing.
+    #[test]
+    fn the_rekey_at_open_keeps_the_earliest_record() {
+        let (dir, db) = temp_db();
+        let path = dir.path().join("mokuro.db");
+        db.write(|conn| {
+            for (key, folder, owner, at) in [
+                ("stra\u{df}e", "Stra\u{df}e", "alice", "2026-01-02 00:00:00"),
+                ("strasse", "STRASSE", "bob", "2026-01-01 00:00:00"),
+                ("dr stone", "Dr Stone", "carol", "2026-01-03 00:00:00"),
+                ("x\u{200b}y", "X\u{200B}Y", "dave", "2026-01-04 00:00:00"),
+            ] {
+                conn.execute(
+                    "INSERT INTO series_folder_owners (series_key, folder_name, \
+                     owner_username, recorded_at) VALUES (?, ?, ?, ?)",
+                    rusqlite::params![key, folder, owner, at],
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert!(db.series_owner_merges().unwrap().is_empty());
+        drop(db);
+        let db = crate::Database::open(&path).unwrap();
+        let rows = db.list_series_folder_owners().unwrap();
+        let got: Vec<(&str, &str, &str)> = rows
+            .iter()
+            .map(|r| (r.series_key.as_str(), r.folder_name.as_str(), r.owner.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("dr stone", "Dr Stone", "carol"),
+                ("strasse", "STRASSE", "bob"),
+                ("xy", "X\u{200B}Y", "dave"),
+            ]
+        );
+        assert_eq!(
+            db.series_folder_owner("Stra\u{df}e").unwrap().as_deref(),
+            Some("bob")
+        );
+        let merged = vec![super::SeriesOwnerMerge {
+            folder_name: "Stra\u{df}e".into(),
+            owner: "alice".into(),
+            kept_folder: "STRASSE".into(),
+            kept_owner: "bob".into(),
+        }];
+        assert_eq!(db.series_owner_merges().unwrap(), merged);
+        drop(db);
+        // Read-only, as doctor reads it; and a later open merges nothing more.
+        assert_eq!(super::series_owner_merges_at(&path).unwrap(), merged);
+        let db = crate::Database::open(&path).unwrap();
+        assert_eq!(db.series_owner_merges().unwrap(), merged);
+        assert_eq!(db.list_series_folder_owners().unwrap().len(), 3);
+        assert!(
+            super::series_owner_merges_at(&dir.path().join("none.db"))
+                .unwrap()
+                .is_empty()
+        );
+    }
 
     #[test]
     fn one_record_for_every_spelling_of_a_series() {

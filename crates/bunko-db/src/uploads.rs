@@ -5,8 +5,8 @@
 //! volume respelled outside Bunko keeps its uploader); only an ARCHIVE upload creates ownership (a sidecar only stamps
 //! `last_modified_*` of an existing row); the original uploader survives re-uploads and
 //! renames; OCR layer files (`<stem>.<layer>.mokuro[.gz]`) belong to `<stem>.cbz`; series
-//! ownership compares folder names by the reader's fold (NFC, trim, collapse whitespace,
-//! lowercase — not casefold); a series is editable only by the sole owner of every tracked
+//! ownership compares folder names by the series key (the filename fold, trimmed, each
+//! whitespace run one space: [`fold_series_title_key`]); a series is editable only by the sole owner of every tracked
 //! volume, never when untracked.
 //!
 //! Choices:
@@ -20,44 +20,23 @@
 
 use crate::database::Database;
 use crate::error::Result;
-use crate::pyfmt;
 use rusqlite::{OptionalExtension, params};
 use std::collections::{BTreeMap, BTreeSet};
-use unicode_normalization::UnicodeNormalization;
-
-/// Case-insensitive (Python `lower()`) suffix test that returns the text before the
-/// suffix, slicing the ORIGINAL string by the suffix's character count as Python does.
-fn strip_suffix_ci<'a>(s: &'a str, suffix: &str) -> Option<&'a str> {
-    let n = suffix.chars().count();
-    let tail: Vec<(usize, char)> = s.char_indices().rev().take(n).collect();
-    if tail.len() != n {
-        return None;
-    }
-    for ((_, c), want) in tail.iter().zip(suffix.chars().rev()) {
-        let mut lower = c.to_lowercase();
-        if lower.next() != Some(want) || lower.next().is_some() {
-            return None;
-        }
-    }
-    Some(&s[..tail.last().map_or(s.len(), |(i, _)| *i)])
-}
 
 /// 0.5.2 `normalize_volume_key_from_library_relative`: the `.cbz` key a library-relative
 /// path belongs to (`S/V1.mokuro.gz` -> `S/V1.cbz`), or `None` for other files.
 pub fn normalize_volume_key(path: &str) -> Option<String> {
+    use bunko_core::sidecar_names::{Suffix, strip_suffix_folded, suffix_of};
     let cleaned = path.trim_matches('/');
     if cleaned.is_empty() {
         return None;
     }
-    if strip_suffix_ci(cleaned, ".cbz").is_some() {
-        return Some(cleaned.to_string());
+    // The suffix as rule 2 reads it, on the fold (`S/V1.MOKURO`, `S/V1.mo\u{212A}uro`),
+    // the raw path cut at the same dot.
+    match suffix_of(cleaned)? {
+        Suffix::Cbz => Some(cleaned.to_string()),
+        suffix => strip_suffix_folded(cleaned, suffix.as_str()).map(|stem| format!("{stem}.cbz")),
     }
-    for suffix in [".mokuro.gz", ".mokuro", ".webp", ".nocover"] {
-        if let Some(stem) = strip_suffix_ci(cleaned, suffix) {
-            return Some(format!("{stem}.cbz"));
-        }
-    }
-    None
 }
 
 /// `S/Vol 1.cbz` for the OCR layer file `S/Vol 1.hayai-nova.mokuro[.gz]`, else `None`.
@@ -75,25 +54,12 @@ pub fn layer_sidecar_volume_path(path: &str) -> Option<String> {
     Some(format!("{stem}.cbz"))
 }
 
-/// The series-identity fold (`_fold_series_title_key` = the reader's
-/// `normalize_volume_title_key`): NFC, trim, collapse whitespace runs to one space,
-/// lowercase.
+/// The series-identity key: [`bunko_core::names::series_key`], the one filename fold
+/// (fold v2), trimmed, each whitespace run one space. A function of the fold, so never
+/// finer than it: `Straße/` and `STRASSE/`, `Dr Stone/` and `dr  stone/` are one series,
+/// as Mokuro Reader's `normalizeVolumeTitleKey` keys them.
 pub fn fold_series_title_key(title: &str) -> String {
-    let normalized: String = title.nfc().collect();
-    let mut out = String::with_capacity(normalized.len());
-    let mut in_space = false;
-    for c in pyfmt::strip(&normalized).chars() {
-        if pyfmt::is_space(c) {
-            if !in_space {
-                out.push(' ');
-            }
-            in_space = true;
-        } else {
-            out.push(c);
-            in_space = false;
-        }
-    }
-    out.to_lowercase()
+    bunko_core::names::series_key(title)
 }
 
 /// [`Database::volume_uploads_by`]: matched as auth matches account names (NOCASE),
@@ -141,7 +107,8 @@ impl Database {
         let Some(key) = normalize_volume_key(library_relative_path) else {
             return Ok(());
         };
-        let is_archive = strip_suffix_ci(library_relative_path.trim_matches('/'), ".cbz").is_some();
+        let is_archive = bunko_core::sidecar_names::suffix_of(library_relative_path)
+            == Some(bunko_core::sidecar_names::Suffix::Cbz);
         self.write(|conn| {
             let own: bool = conn
                 .prepare_cached("SELECT 1 FROM volume_uploads WHERE volume_key = ?")?
@@ -570,9 +537,18 @@ mod tests {
             fold_series_title_key("Cafe\u{301}"),
             fold_series_title_key("Caf\u{e9}")
         );
-        assert_ne!(
+        // One fold: the series key is never finer than the filename fold.
+        assert_eq!(
             fold_series_title_key("Stra\u{df}e"),
             fold_series_title_key("STRASSE")
+        );
+        assert_eq!(
+            fold_series_title_key("Dr Stone"),
+            fold_series_title_key("dr  stone")
+        );
+        assert_eq!(
+            fold_series_title_key("Dr\u{200B} Stone"),
+            fold_series_title_key("DR STONE")
         );
         assert_eq!(fold_series_title_key("A\u{3000}\u{1c}B"), "a b");
     }

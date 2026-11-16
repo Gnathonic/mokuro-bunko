@@ -46,7 +46,7 @@ pub use audit::{
 };
 pub use database::{Database, DbOptions};
 pub use error::{DbError, Result};
-pub use folders::SeriesFolderOwner;
+pub use folders::{SeriesFolderOwner, SeriesOwnerMerge, series_owner_merges_at};
 pub use invites::{
     INVALID_INVITE_MESSAGE, INVITABLE_ROLES, Invite, InviteInfo, InviteStatus, parse_duration,
 };

@@ -23,8 +23,6 @@ parking_lot.workspace = true
 # `time`'s local offset is unavailable in multi-threaded programs on Unix; chrono reads
 # TZ / /etc/localtime itself.
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
-# NFC fold of series folder names (ownership), as 0.5.2's `unicodedata.normalize`.
-unicode-normalization = "0.1"
 
 [dev-dependencies]
 tempfile.workspace = true

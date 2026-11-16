@@ -84,35 +84,16 @@ fn every_series_folder(library: &Path) -> std::io::Result<Vec<String>> {
 }
 
 /// `names` in groups of one series: two names are one when they share a series key
-/// ([`fold_series_title_key`]) or fold alike by the filename fold (`Straße/` and
-/// `STRASSE/`, one folder on every host though their keys differ), and so on
-/// transitively. Each group sorted, the groups by their first name.
+/// ([`fold_series_title_key`], a function of the filename fold, so `Straße/` and
+/// `STRASSE/`, one folder on every host, are one series). Each group sorted, the groups
+/// by their first name.
 fn series_groups(names: Vec<String>) -> Vec<Vec<String>> {
-    let mut parent: Vec<usize> = (0..names.len()).collect();
-    fn root(parent: &mut [usize], mut i: usize) -> usize {
-        while parent[i] != i {
-            parent[i] = parent[parent[i]];
-            i = parent[i];
-        }
-        i
-    }
-    let mut by_key: HashMap<String, usize> = HashMap::new();
-    let mut by_fold: HashMap<String, usize> = HashMap::new();
-    for (i, name) in names.iter().enumerate() {
-        for first in [
-            *by_key.entry(fold_series_title_key(name)).or_insert(i),
-            *by_fold
-                .entry(bunko_core::names::fold_name(name))
-                .or_insert(i),
-        ] {
-            let (a, b) = (root(&mut parent, first), root(&mut parent, i));
-            parent[a.max(b)] = a.min(b);
-        }
-    }
-    let mut groups: BTreeMap<usize, Vec<String>> = BTreeMap::new();
-    for (i, name) in names.iter().enumerate() {
-        let r = root(&mut parent, i);
-        groups.entry(r).or_default().push(name.clone());
+    let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for name in names {
+        groups
+            .entry(fold_series_title_key(&name))
+            .or_default()
+            .push(name);
     }
     let mut out: Vec<Vec<String>> = groups
         .into_values()

@@ -358,6 +358,9 @@ pub(crate) fn init(conn: &Connection) -> Result<()> {
         )?;
     }
     conn.execute(VOLUME_UPLOADS_UPLOADER_NOCASE_INDEX, [])?;
+    // 8b. Every owner record under its current series key (fold v2 joins `Straße/` and
+    //     `STRASSE/`): idempotent, so asked at every open; merges are logged and audited.
+    crate::folders::rekey_series_folder_owners(conn)?;
 
     // 9. Version bookkeeping.
     let current: Option<i64> = conn
